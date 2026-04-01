@@ -69,7 +69,7 @@ die() { err "$@"; exit 1; }
 
 # ─── distro detection ───
 
-DISTRO_FAMILY=""  # fedora | debian
+PKG_BASE=""  # rpm | deb
 PKG_INSTALL=""
 
 detect_distro() {
@@ -79,18 +79,18 @@ detect_distro() {
     local id="${ID:-}" id_like="${ID_LIKE:-}"
 
     if [[ "$id" =~ ^(fedora|rhel|centos|anolis|alinux)$ ]] || [[ "$id_like" =~ (fedora|rhel) ]]; then
-        DISTRO_FAMILY="fedora"
+        PKG_BASE="rpm"
         if cmd_exists dnf; then PKG_INSTALL="dnf install -y"
         elif cmd_exists yum; then PKG_INSTALL="yum install -y"
         else die "Neither dnf nor yum found"; fi
     elif [[ "$id" =~ ^(debian|ubuntu)$ ]] || [[ "$id_like" =~ debian ]]; then
-        DISTRO_FAMILY="debian"
+        PKG_BASE="deb"
         PKG_INSTALL="apt-get install -y"
     else
         die "Unsupported distro: ${PRETTY_NAME:-$id}. Supported: Fedora/RHEL/CentOS/Anolis/Alinux, Debian/Ubuntu."
     fi
 
-    ok "Distro: ${PRETTY_NAME:-$id} (${DISTRO_FAMILY})"
+    ok "Distro: ${PRETTY_NAME:-$id} (${PKG_BASE})"
 }
 
 # ─── component helpers ───
@@ -167,7 +167,7 @@ install_build_tools() {
     local missing=()
     if ! cmd_exists make; then missing+=("make"); fi
 
-    if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+    if [[ "$PKG_BASE" == "rpm" ]]; then
         if ! cmd_exists g++; then missing+=("gcc-c++"); fi
     else
         if ! cmd_exists g++; then missing+=("g++"); fi
@@ -239,7 +239,7 @@ check_ebpf_deps() {
     if ! cmd_exists clang; then missing+=("clang"); fi
     if ! cmd_exists llvm-config && ! cmd_exists llvm-config-*; then missing+=("llvm"); fi
 
-    if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+    if [[ "$PKG_BASE" == "rpm" ]]; then
         local pkgs=("libbpf-devel" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "perl-IPC-Cmd")
         local pkg
         for pkg in "${pkgs[@]}"; do
@@ -262,7 +262,7 @@ check_ebpf_deps() {
             fi
         fi
 
-    elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
+    elif [[ "$PKG_BASE" == "deb" ]]; then
         local pkgs=("libbpf-dev" "libelf-dev" "zlib1g-dev" "libssl-dev" "perl")
         local kver
         kver=$(uname -r 2>/dev/null || echo "")
