@@ -29,7 +29,7 @@
     "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.203.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.214.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
     "@opentelemetry/instrumentation-http": "^0.203.0",
     "@opentelemetry/sdk-node": "^0.203.0",
