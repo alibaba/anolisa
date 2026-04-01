@@ -77,6 +77,6 @@ openssl = { version = "0.10", features = ["vendored"] }
 debug-assertions = false
 
 [build-dependencies]
-libbpf-cargo = "0.23.3"
+libbpf-cargo = "0.26.1"
 bindgen = "0.69.4"
 cc = "1.1.31"
