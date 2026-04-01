@@ -52,7 +52,7 @@ structopt = "0.3.26"
 # Tokenizer for text to token count conversion
 tokenizers = { version = "0.21", features = ["http"] }
 # HTTP client for downloading tokenizer files
-ureq = "2.10"
+ureq = "3.3"
 symbolic-common = "12.10.0"
 symbolic-demangle = { version = "12.10.0", default-features = false, features = [
     "rust",
