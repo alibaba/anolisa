@@ -80,7 +80,7 @@
     "@types/prompts": "^2.4.9",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
-    "jsdom": "^26.1.0",
+    "jsdom": "^29.0.1",
     "pretty-format": "^30.0.2",
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
