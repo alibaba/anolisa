@@ -62,6 +62,8 @@ describe('EditTool', () => {
       generateJson: vi.fn(),
     };
 
+    const fsService = new StandardFileSystemService();
+
     mockConfig = {
       getGeminiClient: vi.fn().mockReturnValue(geminiClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
@@ -69,7 +71,7 @@ describe('EditTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileSystemService: () => fsService,
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
       getModel: () => 'test-model',
@@ -715,8 +717,12 @@ describe('EditTool', () => {
 
     it('should return FILE_WRITE_FAILURE on write error', async () => {
       fs.writeFileSync(filePath, 'content', 'utf8');
-      // Make file readonly to trigger a write error
-      fs.chmodSync(filePath, '444');
+      // Mock writeTextFile to simulate a write error (avoids relying on chmod
+      // which may not work when running as root, e.g. in CI on Ubuntu).
+      const fsService = mockConfig.getFileSystemService();
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+      );
 
       const params: EditToolParams = {
         file_path: filePath,

@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import mock from 'mock-fs';
 import * as path from 'node:path';
+import { promises as fsPromises } from 'node:fs';
 import { WorkspaceContext } from './workspaceContext.js';
 import { readPathFromWorkspace } from './pathReader.js';
 import type { Config } from '../config/config.js';
@@ -381,6 +382,14 @@ describe('readPathFromWorkspace', () => {
         filterFiles: vi.fn((files) => files),
       } as unknown as FileDiscoveryService;
       const config = createMockConfig(CWD, [], mockFileService);
+      // Mock readFile to throw EACCES, since root users ignore file-mode
+      // restrictions and would otherwise read the file successfully.
+      const readError = Object.assign(
+        new Error('EACCES: permission denied'),
+        { code: 'EACCES' },
+      );
+      vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
+
       // processSingleFileContent catches the error and returns an error string.
       const result = await readPathFromWorkspace('unreadable.txt', config);
       const textResult = result[0] as string;
