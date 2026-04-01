@@ -45,17 +45,20 @@ Use the unified script (to be added by you):
 git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 
-# Install dependencies + build default components (shell, skills, sec)
+# Install dependencies + build + install to system (recommended)
+./scripts/build-all.sh --install-deps --install
+
+# Install dependencies + build only (without system install)
 ./scripts/build-all.sh --install-deps
 
 # Install dependencies only
 ./scripts/build-all.sh --deps-only
 
 # Build selected components only
-./scripts/build-all.sh --install-deps --component shell --component sec
+./scripts/build-all.sh --install-deps --component cosh --component sec-core
 
 # Include optional agentsight
-./scripts/build-all.sh --install-deps --component shell --component skills --component sec --component sight
+./scripts/build-all.sh --install-deps --install --component cosh --component skills --component sec-core --component sight
 ```
 
 ### Script Options
@@ -64,7 +67,8 @@ cd anolisa
 |------|-------------|
 | --install-deps | Install dependencies before build |
 | --deps-only | Install dependencies only |
-| --component <name> | Build selected component(s), repeatable: shell, skills, sec, sight. Default: shell, skills, sec |
+| --install | Install built components to system paths after building |
+| --component <name> | Build selected component(s), repeatable: cosh, skills, sec-core, sight. Default: cosh, skills, sec-core |
 | --help | Show help |
 
 ### Important Notes

@@ -45,17 +45,20 @@ anolisa/
 git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 
-# 安装依赖 + 构建默认组件（shell、skills、sec）
+# 安装依赖 + 构建 + 安装到系统（推荐）
+./scripts/build-all.sh --install-deps --install
+
+# 安装依赖 + 仅构建（不安装到系统）
 ./scripts/build-all.sh --install-deps
 
 # 仅安装依赖
 ./scripts/build-all.sh --deps-only
 
 # 仅构建指定组件
-./scripts/build-all.sh --install-deps --component shell --component sec
+./scripts/build-all.sh --install-deps --component cosh --component sec-core
 
 # 包含可选的 agentsight
-./scripts/build-all.sh --install-deps --component shell --component skills --component sec --component sight
+./scripts/build-all.sh --install-deps --install --component cosh --component skills --component sec-core --component sight
 ```
 
 ### 脚本选项
@@ -64,7 +67,8 @@ cd anolisa
 |------|------|
 | --install-deps | 构建前先安装依赖 |
 | --deps-only | 仅安装依赖，不构建 |
-| --component <名称> | 构建指定组件（可重复使用）：shell、skills、sec、sight。默认：shell、skills、sec |
+| --install | 构建完成后将组件安装到系统路径 |
+| --component <名称> | 构建指定组件（可重复使用）：cosh、skills、sec-core、sight。默认：cosh、skills、sec-core |
 | --help | 显示帮助信息 |
 
 ### 注意事项

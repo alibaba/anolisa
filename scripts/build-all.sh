@@ -37,6 +37,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 INSTALL_DEPS=false
 DEPS_ONLY=false
+DO_INSTALL=false
 COMPONENTS=()        # empty = all
 
 # ─── artifact tracking ───
@@ -431,6 +432,48 @@ do_build() {
     if want_component sight;    then build_sight;    fi
 }
 
+# ─── install functions ───
+
+install_cosh() {
+    step "Installing copilot-shell (create aliases)"
+    local dir="$PROJECT_ROOT/src/copilot-shell"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    make create-alias
+    ok "copilot-shell aliases configured"
+}
+
+install_sec_core() {
+    step "Installing agent-sec-core"
+    local dir="$PROJECT_ROOT/src/agent-sec-core"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    info "sudo make install ..."
+    sudo make install
+    ok "agent-sec-core installed to /usr/local/bin/"
+}
+
+install_sight() {
+    step "Installing agentsight"
+    local dir="$PROJECT_ROOT/src/agentsight"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    info "sudo make install ..."
+    sudo make install
+    ok "agentsight installed to /usr/local/bin/"
+}
+
+do_install() {
+    step "Installing components"
+    if want_component cosh;     then install_cosh;     fi
+    # skills are deployed during build, no separate install needed
+    if want_component sec-core; then install_sec_core; fi
+    if want_component sight;    then install_sight;    fi
+}
+
 print_artifacts() {
     step "Artifacts"
 
@@ -460,6 +503,7 @@ $(echo -e "${BOLD}Usage:${NC}")
 $(echo -e "${BOLD}Options:${NC}")
   --install-deps          Install required toolchains and libraries before building
   --deps-only             Install dependencies only, do not build
+  --install               Install built components to system paths after building
   --component <name>      Build specific component (can be repeated).
                           Valid names: cosh, skills, sec-core, sight
                           Default (no --component): cosh, skills, sec-core
@@ -468,6 +512,7 @@ $(echo -e "${BOLD}Options:${NC}")
 
 $(echo -e "${BOLD}Examples:${NC}")
   $0 --install-deps                              # Install deps + build default components
+  $0 --install-deps --install                     # Install deps + build + install to system
   $0 --deps-only                                 # Install deps only
   $0 --install-deps --component cosh             # Install deps + build copilot-shell
   $0 --component sec-core --component sight            # Build sec-core + sight (no dep install)
@@ -485,7 +530,8 @@ $(echo -e "${BOLD}What this script does:${NC}")
   2. Installs missing toolchains from upstream: nvm for Node.js, rustup for Rust, uv for Python
   3. Builds default components in order: cosh -> skills -> sec-core
      (sight is optional — add --component sight to include it)
-  4. Reports artifact locations at the end
+  4. Installs components to system paths (if --install is specified)
+  5. Reports artifact locations at the end
 
 $(echo -e "${BOLD}Note:${NC}")
   For agentsight eBPF probes, clang and libbpf headers must be installed via your
@@ -506,6 +552,10 @@ parse_args() {
             --deps-only)
                 DEPS_ONLY=true
                 INSTALL_DEPS=true
+                shift
+                ;;
+            --install)
+                DO_INSTALL=true
                 shift
                 ;;
             --component)
@@ -555,6 +605,11 @@ main() {
     if $INSTALL_DEPS || [[ ${#COMPONENTS[@]} -gt 0 ]]; then
         do_build
         print_artifacts
+    fi
+
+    # 4. Install to system paths if requested
+    if $DO_INSTALL; then
+        do_install
     fi
 
     echo ""
