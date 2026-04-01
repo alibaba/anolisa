@@ -54,7 +54,7 @@ tokenizers = { version = "0.21", features = ["http"] }
 # HTTP client for downloading tokenizer files
 ureq = "2.10"
 symbolic-common = "12.10.0"
-symbolic-demangle = { version = "12.10.0", default-features = false, features = [
+symbolic-demangle = { version = "12.17.3", default-features = false, features = [
     "rust",
     "cpp",
 ] }
