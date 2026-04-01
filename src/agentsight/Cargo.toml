@@ -46,7 +46,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 minijinja = "2.8"
 base64 = "0.22"
-sha2 = "0.10.8"
+sha2 = "0.11.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 structopt = "0.3.26"
 # Tokenizer for text to token count conversion
