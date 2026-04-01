@@ -47,7 +47,7 @@ serde_json = "1.0"
 minijinja = "2.8"
 base64 = "0.22"
 sha2 = "0.10.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 structopt = "0.3.26"
 # Tokenizer for text to token count conversion
 tokenizers = { version = "0.21", features = ["http"] }
