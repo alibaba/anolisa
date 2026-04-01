@@ -31,7 +31,7 @@
     "dist"
   ],
   "dependencies": {
-    "@google/genai": "1.30.0",
+    "@google/genai": "1.47.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@copilot-shell/core": "file:../core",
