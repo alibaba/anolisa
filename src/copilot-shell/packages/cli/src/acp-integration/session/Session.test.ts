@@ -223,7 +223,7 @@ describe('Session', () => {
         mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
         mockChat.sendMessageStream = vi
           .fn()
-          .mockResolvedValue((async function* () { })());
+          .mockResolvedValue((async function* () {})());
 
         const promptRequest: acp.PromptRequest = {
           sessionId: 'test-session-id',

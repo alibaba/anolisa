@@ -761,7 +761,7 @@ function calculateLayout(
         // advance past this space as it acted as a delimiter for word wrapping.
         if (
           logicalStartOfThisChunk + numCodePointsInChunk <
-          codePointsInLogLine.length &&
+            codePointsInLogLine.length &&
           currentPosInLogLine < codePointsInLogLine.length && // Redundant if previous is true, but safe
           codePointsInLogLine[currentPosInLogLine] === ' '
         ) {
@@ -879,19 +879,19 @@ export type TextBufferAction =
   | { type: 'insert'; payload: string }
   | { type: 'backspace' }
   | {
-    type: 'move';
-    payload: {
-      dir: Direction;
-    };
-  }
+      type: 'move';
+      payload: {
+        dir: Direction;
+      };
+    }
   | {
-    type: 'set_cursor';
-    payload: {
-      cursorRow: number;
-      cursorCol: number;
-      preferredCol: number | null;
-    };
-  }
+      type: 'set_cursor';
+      payload: {
+        cursorRow: number;
+        cursorCol: number;
+        preferredCol: number | null;
+      };
+    }
   | { type: 'delete' }
   | { type: 'delete_word_left' }
   | { type: 'delete_word_right' }
@@ -900,15 +900,15 @@ export type TextBufferAction =
   | { type: 'undo' }
   | { type: 'redo' }
   | {
-    type: 'replace_range';
-    payload: {
-      startRow: number;
-      startCol: number;
-      endRow: number;
-      endCol: number;
-      text: string;
-    };
-  }
+      type: 'replace_range';
+      payload: {
+        startRow: number;
+        startCol: number;
+        endRow: number;
+        endCol: number;
+        text: string;
+      };
+    }
   | { type: 'move_to_offset'; payload: { offset: number } }
   | { type: 'create_undo_snapshot' }
   | { type: 'set_viewport'; payload: { width: number; height: number } }
@@ -923,9 +923,9 @@ export type TextBufferAction =
   | { type: 'vim_delete_to_end_of_line' }
   | { type: 'vim_change_to_end_of_line' }
   | {
-    type: 'vim_change_movement';
-    payload: { movement: 'h' | 'j' | 'k' | 'l'; count: number };
-  }
+      type: 'vim_change_movement';
+      payload: { movement: 'h' | 'j' | 'k' | 'l'; count: number };
+    }
   // New vim actions for stateless command handling
   | { type: 'vim_move_left'; payload: { count: number } }
   | { type: 'vim_move_right'; payload: { count: number } }

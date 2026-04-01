@@ -292,9 +292,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   const availableHeight = availableTerminalHeight
     ? Math.max(
-      availableTerminalHeight - STATIC_HEIGHT - RESERVED_LINE_COUNT,
-      MIN_LINES_SHOWN + 1, // enforce minimum lines shown
-    )
+        availableTerminalHeight - STATIC_HEIGHT - RESERVED_LINE_COUNT,
+        MIN_LINES_SHOWN + 1, // enforce minimum lines shown
+      )
     : undefined;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 

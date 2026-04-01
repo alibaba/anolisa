@@ -46,9 +46,7 @@ All providers must implement:
 ## Example
 
 ```typescript
-export class NewProviderOpenAICompatibleProvider
-  implements OpenAICompatibleProvider
-{
+export class NewProviderOpenAICompatibleProvider implements OpenAICompatibleProvider {
   // Implementation...
 
   static isNewProviderProvider(

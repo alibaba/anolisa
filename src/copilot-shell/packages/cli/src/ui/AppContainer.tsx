@@ -653,10 +653,11 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager.addItem(
         {
           type: MessageType.INFO,
-          text: `Memory refreshed successfully. ${memoryContent.length > 0
-            ? `Loaded ${memoryContent.length} characters from ${fileCount} file(s).`
-            : 'No memory content found.'
-            }`,
+          text: `Memory refreshed successfully. ${
+            memoryContent.length > 0
+              ? `Loaded ${memoryContent.length} characters from ${fileCount} file(s).`
+              : 'No memory content found.'
+          }`,
         },
         Date.now(),
       );
@@ -681,7 +682,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [config, historyManager, settings.merged]);
 
-  const cancelHandlerRef = useRef<() => void>(() => { });
+  const cancelHandlerRef = useRef<() => void>(() => {});
 
   const {
     streamingState,

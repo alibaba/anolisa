@@ -38,7 +38,8 @@ export const OPENAI_PROVIDERS: OpenAIProvider[] = [
     name: 'DashScope Coding Plan',
     baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
     defaultModel: 'qwen3-coder-plus',
-    apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=coding-plan#/efm/coding-plan-detail',
+    apiKeyUrl:
+      'https://bailian.console.aliyun.com/?tab=coding-plan#/efm/coding-plan-detail',
   },
   {
     id: 'deepseek',
@@ -132,7 +133,9 @@ export function OpenAIKeyPrompt({
     defaultBaseUrl || initialProvider?.baseUrl || '',
   );
   const [model, setModel] = useState(
-    defaultModel || (initialProvider?.id !== 'custom' ? initialProvider?.defaultModel : '') || '',
+    defaultModel ||
+      (initialProvider?.id !== 'custom' ? initialProvider?.defaultModel : '') ||
+      '',
   );
   const [currentField, setCurrentField] = useState<FieldName>('provider');
   const [validationError, setValidationError] = useState<string | null>(null);

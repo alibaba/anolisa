@@ -84,8 +84,8 @@ describe('handleUpdate', () => {
   let consoleErrorSpy: MockInstance;
 
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -223,7 +223,7 @@ describe('handleUpdate', () => {
 
       expect(consoleLogSpy).toHaveBeenCalledWith(
         'Extension "extension-1" successfully updated: 1.0.0 → 2.0.0.\n' +
-        'Extension "extension-2" successfully updated: 1.0.0 → 1.5.0.',
+          'Extension "extension-2" successfully updated: 1.0.0 → 1.5.0.',
       );
     });
 

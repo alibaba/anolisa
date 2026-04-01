@@ -773,7 +773,8 @@ export default {
   'Session name set to: {{name}}': '会话名称已设为：{{name}}',
 
   // Session Picker - Rename & Preview
-  'Press Ctrl+R to rename · Ctrl+V to preview': '按 Ctrl+R 重命名 · Ctrl+V 预览',
+  'Press Ctrl+R to rename · Ctrl+V to preview':
+    '按 Ctrl+R 重命名 · Ctrl+V 预览',
   'Enter new session name:': '输入新的会话名称：',
   'Session renamed.': '会话已重命名。',
   'Failed to rename session.': '重命名会话失败。',
@@ -1268,5 +1269,4 @@ export default {
     '将导入以下来自 OpenClaw 的配置',
   'Press Y to authorize import, N to configure manually':
     '按 Y 授权导入，按 N 手动配置',
-  'Provider:': '提供商：',
 };

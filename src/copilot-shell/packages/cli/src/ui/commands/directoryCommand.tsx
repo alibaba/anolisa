@@ -108,7 +108,7 @@ export const directoryCommand: SlashCommand = {
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),
                 context.services.settings.merged.context?.importFormat ||
-                'tree', // Use setting or default to 'tree'
+                  'tree', // Use setting or default to 'tree'
               );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);

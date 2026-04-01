@@ -209,17 +209,17 @@ export interface ContentBlockStartEvent {
 
 export type ContentBlockDelta =
   | {
-    type: 'text_delta';
-    text: string;
-  }
+      type: 'text_delta';
+      text: string;
+    }
   | {
-    type: 'thinking_delta';
-    thinking: string;
-  }
+      type: 'thinking_delta';
+      thinking: string;
+    }
   | {
-    type: 'input_json_delta';
-    partial_json: string;
-  };
+      type: 'input_json_delta';
+      partial_json: string;
+    };
 
 export interface ContentBlockDeltaEvent {
   type: 'content_block_delta';
@@ -336,9 +336,9 @@ export interface CLIMcpServerConfig {
     registrationUrl?: string;
   };
   authProviderType?:
-  | 'dynamic_discovery'
-  | 'google_credentials'
-  | 'service_account_impersonation';
+    | 'dynamic_discovery'
+    | 'google_credentials'
+    | 'service_account_impersonation';
   targetAudience?: string;
   targetServiceAccount?: string;
 }
@@ -431,7 +431,7 @@ export interface ControlResponse {
 export interface ControlErrorResponse {
   subtype: 'error';
   request_id: string;
-  error: string | { message: string;[key: string]: unknown };
+  error: string | { message: string; [key: string]: unknown };
 }
 
 export interface CLIControlResponse {

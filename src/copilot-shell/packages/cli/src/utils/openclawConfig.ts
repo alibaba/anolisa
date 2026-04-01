@@ -38,27 +38,34 @@ const PROVIDER_MATCH_ORDER = [
 export function readOpenClawConfig(): OpenClawConfig | null {
   try {
     const filePath = join(homedir(), '.openclaw', 'openclaw.json');
-    const json = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
-    const providers = (json['models'] as Record<string, unknown> | undefined)?.['providers'] as
-      | Record<string, unknown>
-      | undefined;
+    const json = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    const providers = (json['models'] as Record<string, unknown> | undefined)?.[
+      'providers'
+    ] as Record<string, unknown> | undefined;
     if (!providers) return null;
 
     const candidates = Object.entries(providers)
       .map(([providerName, p]) => {
         const entry = p as Record<string, unknown> | null | undefined;
-        const models = entry?.['models'] as Array<Record<string, unknown>> | undefined;
+        const models = entry?.['models'] as
+          | Array<Record<string, unknown>>
+          | undefined;
         return {
           providerName,
-          api:     entry?.['api']     as string | undefined,
-          apiKey:  entry?.['apiKey']  as string | undefined,
+          api: entry?.['api'] as string | undefined,
+          apiKey: entry?.['apiKey'] as string | undefined,
           baseUrl: entry?.['baseUrl'] as string | undefined,
-          model:   (models?.[0]?.['id'] as string | undefined) ?? '',
+          model: (models?.[0]?.['id'] as string | undefined) ?? '',
         };
       })
       .filter(
         (c): c is typeof c & { apiKey: string; baseUrl: string } =>
-          c.api === 'openai-completions' && Boolean(c.apiKey) && Boolean(c.baseUrl),
+          c.api === 'openai-completions' &&
+          Boolean(c.apiKey) &&
+          Boolean(c.baseUrl),
       );
 
     if (candidates.length === 0) return null;
@@ -67,9 +74,16 @@ export function readOpenClawConfig(): OpenClawConfig | null {
     for (const id of PROVIDER_MATCH_ORDER) {
       const preset = OPENAI_PROVIDERS.find((p) => p.id === id);
       if (!preset) continue;
-      const found = candidates.find((c) => c.baseUrl.includes(new URL(preset.baseUrl).hostname));
+      const found = candidates.find((c) =>
+        c.baseUrl.includes(new URL(preset.baseUrl).hostname),
+      );
       if (found) {
-        return { apiKey: found.apiKey, baseUrl: found.baseUrl, model: found.model, providerName: preset.name };
+        return {
+          apiKey: found.apiKey,
+          baseUrl: found.baseUrl,
+          model: found.model,
+          providerName: preset.name,
+        };
       }
     }
 

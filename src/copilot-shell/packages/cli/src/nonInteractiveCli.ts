@@ -225,7 +225,7 @@ export async function runNonInteractive(
             query: input,
             config,
             addItem: (_item, _timestamp) => 0,
-            onDebugMessage: () => { },
+            onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
           });
@@ -317,10 +317,10 @@ export async function runNonInteractive(
             const isTaskTool = finalRequestInfo.name === 'task';
             const taskToolProgress = isTaskTool
               ? createTaskToolProgressHandler(
-                config,
-                finalRequestInfo.callId,
-                adapter,
-              )
+                  config,
+                  finalRequestInfo.callId,
+                  adapter,
+                )
               : undefined;
             const taskToolProgressHandler = taskToolProgress?.handler;
 
@@ -330,11 +330,11 @@ export async function runNonInteractive(
               abortController.signal,
               taskToolProgressHandler || toolCallUpdateCallback
                 ? {
-                  ...(taskToolProgressHandler && { taskToolProgressHandler }),
-                  ...(toolCallUpdateCallback && {
-                    onToolCallsUpdate: toolCallUpdateCallback,
-                  }),
-                }
+                    ...(taskToolProgressHandler && { taskToolProgressHandler }),
+                    ...(toolCallUpdateCallback && {
+                      onToolCallsUpdate: toolCallUpdateCallback,
+                    }),
+                  }
                 : undefined,
             );
 

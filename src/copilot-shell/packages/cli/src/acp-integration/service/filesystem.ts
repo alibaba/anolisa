@@ -17,7 +17,7 @@ export class AcpFileSystemService implements FileSystemService {
     private readonly sessionId: string,
     private readonly capabilities: acp.FileSystemCapability,
     private readonly fallback: FileSystemService,
-  ) { }
+  ) {}
 
   async readTextFile(filePath: string): Promise<string> {
     if (!this.capabilities.readTextFile) {

@@ -60,13 +60,13 @@ function areToolCallStatsEqual(a: ToolCallStats, b: ToolCallStats): boolean {
   }
   if (
     a.decisions[ToolCallDecision.ACCEPT] !==
-    b.decisions[ToolCallDecision.ACCEPT] ||
+      b.decisions[ToolCallDecision.ACCEPT] ||
     a.decisions[ToolCallDecision.REJECT] !==
-    b.decisions[ToolCallDecision.REJECT] ||
+      b.decisions[ToolCallDecision.REJECT] ||
     a.decisions[ToolCallDecision.MODIFY] !==
-    b.decisions[ToolCallDecision.MODIFY] ||
+      b.decisions[ToolCallDecision.MODIFY] ||
     a.decisions[ToolCallDecision.AUTO_ACCEPT] !==
-    b.decisions[ToolCallDecision.AUTO_ACCEPT]
+      b.decisions[ToolCallDecision.AUTO_ACCEPT]
   ) {
     return false;
   }
@@ -100,13 +100,13 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
   // Compare tool decisions
   if (
     toolsA.totalDecisions[ToolCallDecision.ACCEPT] !==
-    toolsB.totalDecisions[ToolCallDecision.ACCEPT] ||
+      toolsB.totalDecisions[ToolCallDecision.ACCEPT] ||
     toolsA.totalDecisions[ToolCallDecision.REJECT] !==
-    toolsB.totalDecisions[ToolCallDecision.REJECT] ||
+      toolsB.totalDecisions[ToolCallDecision.REJECT] ||
     toolsA.totalDecisions[ToolCallDecision.MODIFY] !==
-    toolsB.totalDecisions[ToolCallDecision.MODIFY] ||
+      toolsB.totalDecisions[ToolCallDecision.MODIFY] ||
     toolsA.totalDecisions[ToolCallDecision.AUTO_ACCEPT] !==
-    toolsB.totalDecisions[ToolCallDecision.AUTO_ACCEPT]
+      toolsB.totalDecisions[ToolCallDecision.AUTO_ACCEPT]
   ) {
     return false;
   }

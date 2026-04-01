@@ -257,7 +257,7 @@ export class MCPServerConfig {
     readonly targetServiceAccount?: string,
     // SDK MCP server type - 'sdk' indicates server runs in SDK process
     readonly type?: 'sdk',
-  ) { }
+  ) {}
 }
 
 /**
@@ -1742,8 +1742,8 @@ export class Config {
         // Log warning and skip this tool instead of crashing
         console.warn(
           `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
-          `Tools must define a static Name property to be registered. ` +
-          `Location: config.ts:registerCoreTool`,
+            `Tools must define a static Name property to be registered. ` +
+            `Location: config.ts:registerCoreTool`,
         );
         return;
       }

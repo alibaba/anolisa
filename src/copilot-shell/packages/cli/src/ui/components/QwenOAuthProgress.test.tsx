@@ -58,12 +58,12 @@ describe('QwenOAuthProgress', () => {
     props: Partial<{
       deviceAuth: DeviceAuthorizationData;
       authStatus:
-      | 'idle'
-      | 'polling'
-      | 'success'
-      | 'error'
-      | 'timeout'
-      | 'rate_limit';
+        | 'idle'
+        | 'polling'
+        | 'success'
+        | 'error'
+        | 'timeout'
+        | 'rate_limit';
       authMessage: string | null;
     }> = {},
   ) =>
@@ -398,7 +398,7 @@ describe('QwenOAuthProgress', () => {
       const mockGenerate = vi.mocked(qrcode.default.generate);
       const consoleErrorSpy = vi
         .spyOn(console, 'error')
-        .mockImplementation(() => { });
+        .mockImplementation(() => {});
 
       mockGenerate.mockImplementation(() => {
         throw new Error('QR Code generation failed');

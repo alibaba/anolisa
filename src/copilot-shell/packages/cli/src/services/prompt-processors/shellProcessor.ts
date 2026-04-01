@@ -54,7 +54,7 @@ interface ResolvedShellInjection extends Injection {
  * 4. Parsing correctly handles nested braces.
  */
 export class ShellProcessor implements IPromptProcessor {
-  constructor(private readonly commandName: string) { }
+  constructor(private readonly commandName: string) {}
 
   async process(
     prompt: PromptPipelineContent,
@@ -187,7 +187,7 @@ export class ShellProcessor implements IPromptProcessor {
         const { result } = await ShellExecutionService.execute(
           injection.resolvedCommand,
           config.getTargetDir(),
-          () => { },
+          () => {},
           new AbortController().signal,
           config.getShouldUseNodePtyShell(),
           shellExecutionConfig,

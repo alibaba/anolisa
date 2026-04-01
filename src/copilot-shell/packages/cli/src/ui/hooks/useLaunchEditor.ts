@@ -39,8 +39,8 @@ function getExecutableCommand(editorType: EditorType): string {
   if (!availableCommand) {
     throw new Error(
       `No available editor command found for ${editorType}. ` +
-      `Tried: ${commands.join(', ')}. ` +
-      `Please install one of these editors or set a different preferredEditor in settings.`,
+        `Tried: ${commands.join(', ')}. ` +
+        `Please install one of these editors or set a different preferredEditor in settings.`,
     );
   }
 

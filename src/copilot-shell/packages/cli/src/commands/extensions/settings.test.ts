@@ -92,7 +92,7 @@ describe('settings set handler', () => {
   let consoleLogSpy: MockInstance;
 
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -176,7 +176,7 @@ describe('settings list handler', () => {
   let consoleLogSpy: MockInstance;
 
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 

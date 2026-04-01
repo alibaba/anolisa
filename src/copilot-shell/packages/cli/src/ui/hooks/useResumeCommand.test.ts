@@ -42,7 +42,7 @@ vi.mock('../utils/resumeHistoryUtils.js', () => ({
 
 vi.mock('@copilot-shell/core', () => {
   class SessionService {
-    constructor(_cwd: string) { }
+    constructor(_cwd: string) {}
     async loadSession(_sessionId: string) {
       return (
         resumeMocks.getPendingLoadSession() ??

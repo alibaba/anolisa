@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PartListUnion, PartUnion } from '@google/genai';
 import type { AnyToolInvocation, Config } from '@copilot-shell/core';
-import { getErrorMessage, isNodeError, unescapePath } from '@copilot-shell/core';
+import {
+  getErrorMessage,
+  isNodeError,
+  unescapePath,
+} from '@copilot-shell/core';
 import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';

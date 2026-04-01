@@ -31,8 +31,14 @@ export function OpenClawImportPrompt({
   const handleKeypress = useCallback(
     (key: { name?: string; sequence?: string }) => {
       const seq = key.sequence?.toLowerCase();
-      if (seq === 'y') { onAccept(openclawConfig); return; }
-      if (seq === 'n' || key.name === 'escape') { onDecline(); return; }
+      if (seq === 'y') {
+        onAccept(openclawConfig);
+        return;
+      }
+      if (seq === 'n' || key.name === 'escape') {
+        onDecline();
+        return;
+      }
     },
     [openclawConfig, onAccept, onDecline],
   );
@@ -51,7 +57,9 @@ export function OpenClawImportPrompt({
         {t('OpenClaw configuration detected')}
       </Text>
       <Box marginTop={1}>
-        <Text>{t('The following configuration from OpenClaw will be imported')}:</Text>
+        <Text>
+          {t('The following configuration from OpenClaw will be imported')}:
+        </Text>
       </Box>
       <Box marginTop={1} flexDirection="column" paddingLeft={2}>
         <Box flexDirection="row">

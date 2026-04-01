@@ -71,12 +71,12 @@ export const memoryCommand: SlashCommand = {
               const messageContent =
                 memoryContent.trim().length > 0
                   ? t(
-                    'Project memory content from {{path}}:\n\n---\n{{content}}\n---',
-                    {
-                      path: projectMemoryPath,
-                      content: memoryContent,
-                    },
-                  )
+                      'Project memory content from {{path}}:\n\n---\n{{content}}\n---',
+                      {
+                        path: projectMemoryPath,
+                        content: memoryContent,
+                      },
+                    )
                   : t('Project memory is currently empty.');
 
               context.ui.addItem(
@@ -120,8 +120,8 @@ export const memoryCommand: SlashCommand = {
               const messageContent =
                 globalMemoryContent.trim().length > 0
                   ? t('Global memory content:\n\n---\n{{content}}\n---', {
-                    content: globalMemoryContent,
-                  })
+                      content: globalMemoryContent,
+                    })
                   : t('Global memory is currently empty.');
 
               context.ui.addItem(
@@ -314,7 +314,7 @@ export const memoryCommand: SlashCommand = {
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),
                 context.services.settings.merged.context?.importFormat ||
-                'tree', // Use setting or default to 'tree'
+                  'tree', // Use setting or default to 'tree'
               );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);

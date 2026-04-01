@@ -10,8 +10,10 @@ import type { WizardStepProps } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { TextInput } from '../../shared/TextInput.js';
 
-interface TextEntryStepProps
-  extends Pick<WizardStepProps, 'dispatch' | 'onNext' | 'state'> {
+interface TextEntryStepProps extends Pick<
+  WizardStepProps,
+  'dispatch' | 'onNext' | 'state'
+> {
   description: string;
   placeholder?: string;
   /**

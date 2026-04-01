@@ -62,11 +62,11 @@ cosh --auth openai
 
 Copilot Shell uses a monorepo layout with npm workspaces:
 
-| Package | Description |
-|---------|-------------|
-| `packages/cli` | Terminal UI layer — input handling, command parsing, Ink/React rendering |
-| `packages/core` | Backend core — AI model communication, prompt building, tool orchestration |
-| `packages/test-utils` | Shared test utilities |
+| Package               | Description                                                                |
+| --------------------- | -------------------------------------------------------------------------- |
+| `packages/cli`        | Terminal UI layer — input handling, command parsing, Ink/React rendering   |
+| `packages/core`       | Backend core — AI model communication, prompt building, tool orchestration |
+| `packages/test-utils` | Shared test utilities                                                      |
 
 ## Development
 

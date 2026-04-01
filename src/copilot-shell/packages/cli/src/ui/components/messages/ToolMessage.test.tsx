@@ -12,7 +12,11 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
-import type { AnsiOutput, AnsiOutputDisplay, Config } from '@copilot-shell/core';
+import type {
+  AnsiOutput,
+  AnsiOutputDisplay,
+  Config,
+} from '@copilot-shell/core';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 vi.mock('../TerminalOutput.js', () => ({

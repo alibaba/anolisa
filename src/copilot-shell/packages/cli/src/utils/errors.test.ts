@@ -6,7 +6,11 @@
 
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { Config } from '@copilot-shell/core';
-import { OutputFormat, FatalInputError, ToolErrorType } from '@copilot-shell/core';
+import {
+  OutputFormat,
+  FatalInputError,
+  ToolErrorType,
+} from '@copilot-shell/core';
 import {
   getErrorMessage,
   handleError,
@@ -72,7 +76,7 @@ describe('errors', () => {
     vi.clearAllMocks();
 
     // Mock console.error
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     // Mock process.stderr.write
     processStderrWriteSpy = vi

@@ -49,27 +49,27 @@ const renderComponent = (
 
   const mockConfig = contextValue
     ? ({
-      // --- Functions used by ModelDialog ---
-      getModel: vi.fn(() => MAINLINE_CODER),
-      setModel: vi.fn().mockResolvedValue(undefined),
-      switchModel: vi.fn().mockResolvedValue(undefined),
-      getAuthType: vi.fn(() => 'qwen-oauth'),
+        // --- Functions used by ModelDialog ---
+        getModel: vi.fn(() => MAINLINE_CODER),
+        setModel: vi.fn().mockResolvedValue(undefined),
+        switchModel: vi.fn().mockResolvedValue(undefined),
+        getAuthType: vi.fn(() => 'qwen-oauth'),
 
-      // --- Functions used by ClearcutLogger ---
-      getUsageStatisticsEnabled: vi.fn(() => true),
-      getSessionId: vi.fn(() => 'mock-session-id'),
-      getDebugMode: vi.fn(() => false),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.QWEN_OAUTH,
-        model: MAINLINE_CODER,
-      })),
-      getUseSmartEdit: vi.fn(() => false),
-      getUseModelRouter: vi.fn(() => false),
-      getProxy: vi.fn(() => undefined),
+        // --- Functions used by ClearcutLogger ---
+        getUsageStatisticsEnabled: vi.fn(() => true),
+        getSessionId: vi.fn(() => 'mock-session-id'),
+        getDebugMode: vi.fn(() => false),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.QWEN_OAUTH,
+          model: MAINLINE_CODER,
+        })),
+        getUseSmartEdit: vi.fn(() => false),
+        getUseModelRouter: vi.fn(() => false),
+        getProxy: vi.fn(() => undefined),
 
-      // --- Spread test-specific overrides ---
-      ...contextValue,
-    } as unknown as Config)
+        // --- Spread test-specific overrides ---
+        ...contextValue,
+      } as unknown as Config)
     : undefined;
 
   const renderResult = render(

@@ -127,7 +127,7 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         onComplete,
         mockConfig as unknown as Config,
         setPendingHistoryItem,
-        () => { },
+        () => {},
       ),
     );
 
@@ -246,7 +246,7 @@ describe('useReactToolScheduler', () => {
         onComplete,
         mockConfig as unknown as Config,
         setPendingHistoryItem,
-        () => { },
+        () => {},
       ),
     );
 
@@ -548,29 +548,29 @@ describe('mapToDisplay', () => {
   // This helps ensure that tool and confirmationDetails are only accessed when they are expected to exist.
   type MapToDisplayExtraProps =
     | {
-      tool?: AnyDeclarativeTool;
-      invocation?: AnyToolInvocation;
-      liveOutput?: string;
-      response?: ToolCallResponseInfo;
-      confirmationDetails?: ToolCallConfirmationDetails;
-    }
+        tool?: AnyDeclarativeTool;
+        invocation?: AnyToolInvocation;
+        liveOutput?: string;
+        response?: ToolCallResponseInfo;
+        confirmationDetails?: ToolCallConfirmationDetails;
+      }
     | {
-      tool: AnyDeclarativeTool;
-      invocation?: AnyToolInvocation;
-      response?: ToolCallResponseInfo;
-      confirmationDetails?: ToolCallConfirmationDetails;
-    }
+        tool: AnyDeclarativeTool;
+        invocation?: AnyToolInvocation;
+        response?: ToolCallResponseInfo;
+        confirmationDetails?: ToolCallConfirmationDetails;
+      }
     | {
-      response: ToolCallResponseInfo;
-      tool?: undefined;
-      confirmationDetails?: ToolCallConfirmationDetails;
-    }
+        response: ToolCallResponseInfo;
+        tool?: undefined;
+        confirmationDetails?: ToolCallConfirmationDetails;
+      }
     | {
-      confirmationDetails: ToolCallConfirmationDetails;
-      tool?: AnyDeclarativeTool;
-      invocation?: AnyToolInvocation;
-      response?: ToolCallResponseInfo;
-    };
+        confirmationDetails: ToolCallConfirmationDetails;
+        tool?: AnyDeclarativeTool;
+        invocation?: AnyToolInvocation;
+        response?: ToolCallResponseInfo;
+      };
 
   const baseInvocation = baseTool.build(baseRequest.args);
   const testCases: Array<{
@@ -582,128 +582,128 @@ describe('mapToDisplay', () => {
     expectedName?: string;
     expectedDescription?: string;
   }> = [
-      {
-        name: 'validating',
-        status: 'validating',
-        extraProps: { tool: baseTool, invocation: baseInvocation },
-        expectedStatus: ToolCallStatus.Executing,
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
+    {
+      name: 'validating',
+      status: 'validating',
+      extraProps: { tool: baseTool, invocation: baseInvocation },
+      expectedStatus: ToolCallStatus.Executing,
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'awaiting_approval',
+      status: 'awaiting_approval',
+      extraProps: {
+        tool: baseTool,
+        invocation: baseInvocation,
+        confirmationDetails: {
+          onConfirm: vi.fn(),
+          type: 'edit',
+          title: 'Test Tool Display',
+          serverName: 'testTool',
+          toolName: 'testTool',
+          toolDisplayName: 'Test Tool Display',
+          filePath: 'mock',
+          fileName: 'test.ts',
+          fileDiff: 'Test diff',
+          originalContent: 'Original content',
+          newContent: 'New content',
+        } as ToolCallConfirmationDetails,
       },
-      {
-        name: 'awaiting_approval',
-        status: 'awaiting_approval',
-        extraProps: {
-          tool: baseTool,
-          invocation: baseInvocation,
-          confirmationDetails: {
-            onConfirm: vi.fn(),
-            type: 'edit',
-            title: 'Test Tool Display',
-            serverName: 'testTool',
-            toolName: 'testTool',
-            toolDisplayName: 'Test Tool Display',
-            filePath: 'mock',
-            fileName: 'test.ts',
-            fileDiff: 'Test diff',
-            originalContent: 'Original content',
-            newContent: 'New content',
-          } as ToolCallConfirmationDetails,
+      expectedStatus: ToolCallStatus.Confirming,
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'scheduled',
+      status: 'scheduled',
+      extraProps: { tool: baseTool, invocation: baseInvocation },
+      expectedStatus: ToolCallStatus.Pending,
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'executing no live output',
+      status: 'executing',
+      extraProps: { tool: baseTool, invocation: baseInvocation },
+      expectedStatus: ToolCallStatus.Executing,
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'executing with live output',
+      status: 'executing',
+      extraProps: {
+        tool: baseTool,
+        invocation: baseInvocation,
+        liveOutput: 'Live test output',
+      },
+      expectedStatus: ToolCallStatus.Executing,
+      expectedResultDisplay: 'Live test output',
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'success',
+      status: 'success',
+      extraProps: {
+        tool: baseTool,
+        invocation: baseInvocation,
+        response: baseResponse,
+      },
+      expectedStatus: ToolCallStatus.Success,
+      expectedResultDisplay: baseResponse.resultDisplay as any,
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'error tool not found',
+      status: 'error',
+      extraProps: {
+        response: {
+          ...baseResponse,
+          error: new Error('Test error tool not found'),
+          resultDisplay: 'Error display tool not found',
         },
-        expectedStatus: ToolCallStatus.Confirming,
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
       },
-      {
-        name: 'scheduled',
-        status: 'scheduled',
-        extraProps: { tool: baseTool, invocation: baseInvocation },
-        expectedStatus: ToolCallStatus.Pending,
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
-      },
-      {
-        name: 'executing no live output',
-        status: 'executing',
-        extraProps: { tool: baseTool, invocation: baseInvocation },
-        expectedStatus: ToolCallStatus.Executing,
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
-      },
-      {
-        name: 'executing with live output',
-        status: 'executing',
-        extraProps: {
-          tool: baseTool,
-          invocation: baseInvocation,
-          liveOutput: 'Live test output',
+      expectedStatus: ToolCallStatus.Error,
+      expectedResultDisplay: 'Error display tool not found',
+      expectedName: baseRequest.name,
+      expectedDescription: JSON.stringify(baseRequest.args),
+    },
+    {
+      name: 'error tool execution failed',
+      status: 'error',
+      extraProps: {
+        tool: baseTool,
+        response: {
+          ...baseResponse,
+          error: new Error('Tool execution failed'),
+          resultDisplay: 'Execution failed display',
         },
-        expectedStatus: ToolCallStatus.Executing,
-        expectedResultDisplay: 'Live test output',
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
       },
-      {
-        name: 'success',
-        status: 'success',
-        extraProps: {
-          tool: baseTool,
-          invocation: baseInvocation,
-          response: baseResponse,
+      expectedStatus: ToolCallStatus.Error,
+      expectedResultDisplay: 'Execution failed display',
+      expectedName: baseTool.displayName, // Changed from baseTool.name
+      expectedDescription: JSON.stringify(baseRequest.args),
+    },
+    {
+      name: 'cancelled',
+      status: 'cancelled',
+      extraProps: {
+        tool: baseTool,
+        invocation: baseInvocation,
+        response: {
+          ...baseResponse,
+          resultDisplay: 'Cancelled display',
         },
-        expectedStatus: ToolCallStatus.Success,
-        expectedResultDisplay: baseResponse.resultDisplay as any,
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
       },
-      {
-        name: 'error tool not found',
-        status: 'error',
-        extraProps: {
-          response: {
-            ...baseResponse,
-            error: new Error('Test error tool not found'),
-            resultDisplay: 'Error display tool not found',
-          },
-        },
-        expectedStatus: ToolCallStatus.Error,
-        expectedResultDisplay: 'Error display tool not found',
-        expectedName: baseRequest.name,
-        expectedDescription: JSON.stringify(baseRequest.args),
-      },
-      {
-        name: 'error tool execution failed',
-        status: 'error',
-        extraProps: {
-          tool: baseTool,
-          response: {
-            ...baseResponse,
-            error: new Error('Tool execution failed'),
-            resultDisplay: 'Execution failed display',
-          },
-        },
-        expectedStatus: ToolCallStatus.Error,
-        expectedResultDisplay: 'Execution failed display',
-        expectedName: baseTool.displayName, // Changed from baseTool.name
-        expectedDescription: JSON.stringify(baseRequest.args),
-      },
-      {
-        name: 'cancelled',
-        status: 'cancelled',
-        extraProps: {
-          tool: baseTool,
-          invocation: baseInvocation,
-          response: {
-            ...baseResponse,
-            resultDisplay: 'Cancelled display',
-          },
-        },
-        expectedStatus: ToolCallStatus.Canceled,
-        expectedResultDisplay: 'Cancelled display',
-        expectedName: baseTool.displayName,
-        expectedDescription: baseInvocation.getDescription(),
-      },
-    ];
+      expectedStatus: ToolCallStatus.Canceled,
+      expectedResultDisplay: 'Cancelled display',
+      expectedName: baseTool.displayName,
+      expectedDescription: baseInvocation.getDescription(),
+    },
+  ];
 
   testCases.forEach(
     ({

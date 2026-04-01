@@ -816,7 +816,8 @@ export default {
   'Session name set to: {{name}}': 'Session name set to: {{name}}',
 
   // Session Picker - Rename & Preview
-  'Press Ctrl+R to rename · Ctrl+V to preview': 'Press Ctrl+R to rename · Ctrl+V to preview',
+  'Press Ctrl+R to rename · Ctrl+V to preview':
+    'Press Ctrl+R to rename · Ctrl+V to preview',
   'Enter new session name:': 'Enter new session name:',
   'Session renamed.': 'Session renamed.',
   'Failed to rename session.': 'Failed to rename session.',
@@ -1003,7 +1004,8 @@ export default {
     'Authenticated successfully with {{authType}} credentials.',
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}',
-  'Custom Provider Configuration Required': 'Custom Provider Configuration Required',
+  'Custom Provider Configuration Required':
+    'Custom Provider Configuration Required',
   'Please enter your OpenAI configuration. You can get an API key from':
     'Please enter your OpenAI configuration. You can get an API key from',
   'API Key:': 'API Key:',
@@ -1428,5 +1430,4 @@ export default {
     'The following configuration from OpenClaw will be imported',
   'Press Y to authorize import, N to configure manually':
     'Press Y to authorize import, N to configure manually',
-  'Provider:': 'Provider:',
 };

@@ -30,7 +30,7 @@ export const useLogger = (storage: Storage, sessionId: string) => {
       .then(() => {
         setLogger(newLogger);
       })
-      .catch(() => { });
+      .catch(() => {});
   }, [storage, sessionId]);
 
   return logger;

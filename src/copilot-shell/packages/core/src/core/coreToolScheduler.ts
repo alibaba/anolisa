@@ -1162,16 +1162,16 @@ export class CoreToolScheduler {
 
         const liveOutputCallback = scheduledCall.tool.canUpdateOutput
           ? (outputChunk: ToolResultDisplay) => {
-            if (this.outputUpdateHandler) {
-              this.outputUpdateHandler(callId, outputChunk);
+              if (this.outputUpdateHandler) {
+                this.outputUpdateHandler(callId, outputChunk);
+              }
+              this.toolCalls = this.toolCalls.map((tc) =>
+                tc.request.callId === callId && tc.status === 'executing'
+                  ? { ...tc, liveOutput: outputChunk }
+                  : tc,
+              );
+              this.notifyToolCallsUpdate();
             }
-            this.toolCalls = this.toolCalls.map((tc) =>
-              tc.request.callId === callId && tc.status === 'executing'
-                ? { ...tc, liveOutput: outputChunk }
-                : tc,
-            );
-            this.notifyToolCallsUpdate();
-          }
           : undefined;
 
         const shellExecutionConfig = this.config.getShellExecutionConfig();

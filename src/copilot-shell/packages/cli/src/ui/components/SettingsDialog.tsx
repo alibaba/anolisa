@@ -307,10 +307,10 @@ export function SettingsDialog({
     setPendingSettings((prev) =>
       parsed === undefined
         ? setPendingSettingValueAny(
-          key,
-          undefined as unknown as SettingsValue,
-          prev,
-        )
+            key,
+            undefined as unknown as SettingsValue,
+            prev,
+          )
         : setPendingSettingValueAny(key, parsed, prev),
     );
 
@@ -636,16 +636,16 @@ export function SettingsDialog({
                     ? defaultValue
                     : false
                   : typeof defaultValue === 'number' ||
-                    typeof defaultValue === 'string'
+                      typeof defaultValue === 'string'
                     ? defaultValue
                     : undefined;
               const immediateSettingsObject =
                 toSaveValue !== undefined
                   ? setPendingSettingValueAny(
-                    currentSetting.value,
-                    toSaveValue,
-                    {} as Settings,
-                  )
+                      currentSetting.value,
+                      toSaveValue,
+                      {} as Settings,
+                    )
                   : ({} as Settings);
 
               saveModifiedSettings(

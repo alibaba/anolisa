@@ -49,30 +49,30 @@ export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
  */
 export type NonInteractiveSlashCommandResult =
   | {
-    type: 'submit_prompt';
-    content: PartListUnion;
-  }
+      type: 'submit_prompt';
+      content: PartListUnion;
+    }
   | {
-    type: 'message';
-    messageType: 'info' | 'error';
-    content: string;
-  }
+      type: 'message';
+      messageType: 'info' | 'error';
+      content: string;
+    }
   | {
-    type: 'stream_messages';
-    messages: AsyncGenerator<
-      { messageType: 'info' | 'error'; content: string },
-      void,
-      unknown
-    >;
-  }
+      type: 'stream_messages';
+      messages: AsyncGenerator<
+        { messageType: 'info' | 'error'; content: string },
+        void,
+        unknown
+      >;
+    }
   | {
-    type: 'unsupported';
-    reason: string;
-    originalType: string;
-  }
+      type: 'unsupported';
+      reason: string;
+      originalType: string;
+    }
   | {
-    type: 'no_command';
-  };
+      type: 'no_command';
+    };
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.

@@ -15,7 +15,7 @@ import {
 import { extractInjections } from './injectionParser.js';
 
 export class AtFileProcessor implements IPromptProcessor {
-  constructor(private readonly commandName?: string) { }
+  constructor(private readonly commandName?: string) {}
 
   async process(
     input: PromptPipelineContent,

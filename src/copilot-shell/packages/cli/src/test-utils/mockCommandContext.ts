@@ -14,8 +14,8 @@ import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 // A utility type to make all properties of an object, and its nested objects, partial.
 type DeepPartial<T> = T extends object
   ? {
-    [P in keyof T]?: DeepPartial<T[P]>;
-  }
+      [P in keyof T]?: DeepPartial<T[P]>;
+    }
   : T;
 
 /**

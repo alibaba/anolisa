@@ -62,11 +62,11 @@ cosh --auth openai
 
 Copilot Shell 采用 npm workspaces 的 monorepo 布局：
 
-| 包 | 说明 |
-|---|------|
-| `packages/cli` | 终端 UI 层 — 输入处理、命令解析、Ink/React 渲染 |
-| `packages/core` | 后端核心 — AI 模型通信、提示词构建、工具编排 |
-| `packages/test-utils` | 共享测试工具 |
+| 包                    | 说明                                            |
+| --------------------- | ----------------------------------------------- |
+| `packages/cli`        | 终端 UI 层 — 输入处理、命令解析、Ink/React 渲染 |
+| `packages/core`       | 后端核心 — AI 模型通信、提示词构建、工具编排    |
+| `packages/test-utils` | 共享测试工具                                    |
 
 ## 开发
 

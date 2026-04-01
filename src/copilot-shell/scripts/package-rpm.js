@@ -10,7 +10,13 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  copyFileSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -33,11 +39,18 @@ let rpmVersion = version;
 
 if (!existsSync(specFile)) {
   if (!existsSync(specInFile)) {
-    console.error('Error: Neither copilot-shell.spec nor copilot-shell.spec.in found');
+    console.error(
+      'Error: Neither copilot-shell.spec nor copilot-shell.spec.in found',
+    );
     process.exit(1);
   }
-  console.log(`Generating copilot-shell.spec from template (version=${version})...`);
-  const specContent = readFileSync(specInFile, 'utf-8').replace(/@VERSION@/g, version);
+  console.log(
+    `Generating copilot-shell.spec from template (version=${version})...`,
+  );
+  const specContent = readFileSync(specInFile, 'utf-8').replace(
+    /@VERSION@/g,
+    version,
+  );
   writeFileSync(specFile, specContent, 'utf-8');
 }
 

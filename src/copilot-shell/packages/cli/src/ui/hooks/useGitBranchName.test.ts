@@ -14,10 +14,9 @@ import { isCommandAvailable, execCommand } from '@copilot-shell/core';
 
 // Mock @copilot-shell/core
 vi.mock('@copilot-shell/core', async () => {
-  const original =
-    await vi.importActual<typeof import('@copilot-shell/core')>(
-      '@copilot-shell/core',
-    );
+  const original = await vi.importActual<typeof import('@copilot-shell/core')>(
+    '@copilot-shell/core',
+  );
   return {
     ...original,
     execCommand: vi.fn(),

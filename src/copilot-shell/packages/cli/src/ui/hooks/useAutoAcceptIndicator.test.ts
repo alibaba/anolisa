@@ -98,8 +98,8 @@ describe('useAutoAcceptIndicator', () => {
         getToolRegistry: vi
           .fn()
           .mockReturnValue({ discoverTools: vi.fn() }) as Mock<
-            () => { discoverTools: Mock<() => void> }
-          >,
+          () => { discoverTools: Mock<() => void> }
+        >,
       };
       instanceSetApprovalModeMock.mockImplementation((value: ApprovalMode) => {
         instanceGetApprovalModeMock.mockReturnValue(value);

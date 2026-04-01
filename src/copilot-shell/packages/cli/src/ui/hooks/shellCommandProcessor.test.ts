@@ -714,7 +714,7 @@ describe('useShellCommandProcessor', () => {
       });
 
       // Let microtasks run
-      await act(async () => { });
+      await act(async () => {});
 
       expect(result.current.activeShellPtyId).toBeNull();
     });

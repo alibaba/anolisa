@@ -72,7 +72,7 @@ describe('handleEnable', () => {
   let consoleLogSpy: MockInstance;
 
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 

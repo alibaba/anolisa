@@ -94,7 +94,7 @@ describe('useCommandCompletion', () => {
       initialCursorOffset: cursorOffset ?? text.length,
       viewport: { width: 80, height: 20 },
       isValidPath: () => false,
-      onChange: () => { },
+      onChange: () => {},
     });
   }
 

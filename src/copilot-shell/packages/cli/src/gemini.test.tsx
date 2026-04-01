@@ -221,9 +221,8 @@ describe('gemini.tsx main function', () => {
         throw new MockProcessExitError(code);
       });
     const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
+    const { loadCliConfig, parseArguments } =
+      await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
 
     const callOrder: string[] = [];
@@ -343,21 +342,19 @@ describe('gemini.tsx main function', () => {
         throw new MockProcessExitError(code);
       });
 
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
+    const { loadCliConfig, parseArguments } =
+      await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
     const cleanupModule = await import('./utils/cleanup.js');
     const validatorModule = await import('./validateNonInterActiveAuth.js');
     const streamJsonModule = await import('./nonInteractive/session.js');
     const initializerModule = await import('./core/initializer.js');
     const startupWarningsModule = await import('./utils/startupWarnings.js');
-    const userStartupWarningsModule = await import(
-      './utils/userStartupWarnings.js'
-    );
+    const userStartupWarningsModule =
+      await import('./utils/userStartupWarnings.js');
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => { });
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -488,9 +485,8 @@ describe('gemini.tsx main function kitty protocol', () => {
     // Note: Kitty protocol detection has been disabled to avoid terminal
     // compatibility issues with login shells. This test now only verifies
     // that setRawMode is called for interactive mode.
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
+    const { loadCliConfig, parseArguments } =
+      await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
     vi.mocked(loadCliConfig).mockResolvedValue({
       isInteractive: () => true,
@@ -574,7 +570,7 @@ describe('validateDnsResolutionOrder', () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { });
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {

@@ -542,8 +542,8 @@ export class Session implements SessionContext {
           output.outcome.outcome === 'cancelled'
             ? ToolConfirmationOutcome.Cancel
             : z
-              .nativeEnum(ToolConfirmationOutcome)
-              .parse(output.outcome.optionId);
+                .nativeEnum(ToolConfirmationOutcome)
+                .parse(output.outcome.optionId);
 
         await confirmationDetails.onConfirm(outcome);
 

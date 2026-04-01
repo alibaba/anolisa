@@ -40,7 +40,7 @@ describe('textUtils', () => {
             type: 'exec',
             command: '\u001b[31mmls -l\u001b[0m',
             rootCommand: '\u001b[32msudo apt-get update\u001b[0m',
-            onConfirm: async () => { },
+            onConfirm: async () => {},
           };
 
           const sanitized = escapeAnsiCtrlCodes(details);
@@ -62,7 +62,7 @@ describe('textUtils', () => {
             filePath: '/path/to/\u001b[32mfile.txt\u001b[0m',
             fileDiff:
               'diff --git a/file.txt b/file.txt\n--- a/\u001b[33mfile.txt\u001b[0m\n+++ b/file.txt',
-            onConfirm: async () => { },
+            onConfirm: async () => {},
           } as unknown as ToolEditConfirmationDetails;
 
           const sanitized = escapeAnsiCtrlCodes(details);
@@ -86,7 +86,7 @@ describe('textUtils', () => {
             serverName: '\u001b[31mmy-server\u001b[0m',
             toolName: '\u001b[32mdeploy\u001b[0m',
             toolDisplayName: '\u001b[33mDeploy Service\u001b[0m',
-            onConfirm: async () => { },
+            onConfirm: async () => {},
           };
 
           const sanitized = escapeAnsiCtrlCodes(details);
@@ -107,7 +107,7 @@ describe('textUtils', () => {
             title: '\u001b[34mWeb Search\u001b[0m',
             prompt: '\u001b[31mSearch for cats\u001b[0m',
             urls: ['https://\u001b[32mgoogle.com\u001b[0m'],
-            onConfirm: async () => { },
+            onConfirm: async () => {},
           };
 
           const sanitized = escapeAnsiCtrlCodes(details);
@@ -130,7 +130,7 @@ describe('textUtils', () => {
           title: 'Web Search',
           prompt: 'Search for cats',
           urls: ['https://google.com'],
-          onConfirm: async () => { },
+          onConfirm: async () => {},
         };
 
         const sanitized = escapeAnsiCtrlCodes(details);

@@ -8,7 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { DeviceAuthorizationData } from '@copilot-shell/core';
 import { useQwenAuth } from './useQwenAuth.js';
-import { AuthType, qwenOAuth2Events, QwenOAuth2Event } from '@copilot-shell/core';
+import {
+  AuthType,
+  qwenOAuth2Events,
+  QwenOAuth2Event,
+} from '@copilot-shell/core';
 
 // Mock the qwenOAuth2Events
 vi.mock('@copilot-shell/core', async () => {

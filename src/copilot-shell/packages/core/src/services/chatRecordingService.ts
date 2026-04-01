@@ -50,7 +50,11 @@ export interface ChatRecord {
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   /** Optional system subtype for distinguishing system behaviors */
-  subtype?: 'chat_compression' | 'slash_command' | 'ui_telemetry' | 'session_name';
+  subtype?:
+    | 'chat_compression'
+    | 'slash_command'
+    | 'ui_telemetry'
+    | 'session_name';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */

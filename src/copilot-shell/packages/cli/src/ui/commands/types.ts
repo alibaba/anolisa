@@ -136,17 +136,17 @@ export interface OpenDialogActionReturn {
   type: 'dialog';
 
   dialog:
-  | 'help'
-  | 'auth'
-  | 'theme'
-  | 'editor'
-  | 'settings'
-  | 'model'
-  | 'subagent_create'
-  | 'subagent_list'
-  | 'permissions'
-  | 'approval-mode'
-  | 'resume';
+    | 'help'
+    | 'auth'
+    | 'theme'
+    | 'editor'
+    | 'settings'
+    | 'model'
+    | 'subagent_create'
+    | 'subagent_list'
+    | 'permissions'
+    | 'approval-mode'
+    | 'resume';
 }
 
 /**

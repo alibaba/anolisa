@@ -215,12 +215,12 @@ export const useShellCommandProcessor = (
                       tools: prevItem.tools.map((tool) =>
                         tool.callId === callId
                           ? {
-                            ...tool,
-                            resultDisplay:
-                              typeof currentDisplayOutput === 'string'
-                                ? currentDisplayOutput
-                                : { ansiOutput: currentDisplayOutput },
-                          }
+                              ...tool,
+                              resultDisplay:
+                                typeof currentDisplayOutput === 'string'
+                                  ? currentDisplayOutput
+                                  : { ansiOutput: currentDisplayOutput },
+                            }
                           : tool,
                       ),
                     };

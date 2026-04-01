@@ -65,7 +65,7 @@ export async function handleUpdate(args: UpdateArgs) {
       const updatedExtensionInfo = (await extensionManager.updateExtension(
         extension,
         updateState,
-        () => { },
+        () => {},
       ))!;
       if (
         updatedExtensionInfo.originalVersion !==
@@ -103,7 +103,7 @@ export async function handleUpdate(args: UpdateArgs) {
       );
       let updateInfos = await extensionManager.updateAllUpdatableExtensions(
         extensionState,
-        () => { },
+        () => {},
       );
       updateInfos = updateInfos.filter(
         (info) => info.originalVersion !== info.updatedVersion,

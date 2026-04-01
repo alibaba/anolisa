@@ -125,7 +125,7 @@ export async function getExtendedSystemInfo(
   // Get base URL if using OpenAI auth
   const baseUrl =
     baseInfo.selectedAuthType === AuthType.USE_OPENAI ||
-      baseInfo.selectedAuthType === AuthType.USE_ANTHROPIC
+    baseInfo.selectedAuthType === AuthType.USE_ANTHROPIC
       ? context.services.config?.getContentGeneratorConfig()?.baseUrl
       : undefined;
 

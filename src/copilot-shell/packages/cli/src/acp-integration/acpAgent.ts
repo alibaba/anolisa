@@ -63,7 +63,7 @@ class GeminiAgent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private client: acp.Client,
-  ) { }
+  ) {}
 
   async initialize(
     args: acp.InitializeRequest,

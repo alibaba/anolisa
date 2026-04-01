@@ -71,10 +71,12 @@ export function IdeIntegrationNudge({
   ];
 
   const installText = isExtensionPreInstalled
-    ? `If you select Yes, the CLI will connect to your ${ideName ?? 'editor'
-    } and have access to your open files and display diffs directly.`
-    : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${ideName ?? 'your editor'
-    }.`;
+    ? `If you select Yes, the CLI will connect to your ${
+        ideName ?? 'editor'
+      } and have access to your open files and display diffs directly.`
+    : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${
+        ideName ?? 'your editor'
+      }.`;
 
   return (
     <Box

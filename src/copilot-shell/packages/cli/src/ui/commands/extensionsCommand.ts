@@ -220,7 +220,7 @@ async function updateAction(context: CommandContext, args: string) {
         const updateInfo = await extensionManager.updateExtension(
           extension,
           context.ui.extensionsUpdateState.get(extension.name)?.status ??
-          ExtensionUpdateState.UNKNOWN,
+            ExtensionUpdateState.UNKNOWN,
           (extensionName, state) =>
             context.ui.dispatchExtensionStateUpdate({
               type: 'SET_STATE',

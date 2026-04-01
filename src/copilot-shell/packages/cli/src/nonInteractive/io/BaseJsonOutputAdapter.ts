@@ -232,7 +232,7 @@ export abstract class BaseJsonOutputAdapter {
     // If the message contains only tool_use blocks, set stop_reason to 'tool_use'
     const stopReason =
       state.blocks.length > 0 &&
-        state.blocks.every((block) => block.type === 'tool_use')
+      state.blocks.every((block) => block.type === 'tool_use')
         ? 'tool_use'
         : null;
 

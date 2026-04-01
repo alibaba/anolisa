@@ -15,7 +15,10 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@copilot-shell/core';
-import { SubAgentEventType, ToolConfirmationOutcome } from '@copilot-shell/core';
+import {
+  SubAgentEventType,
+  ToolConfirmationOutcome,
+} from '@copilot-shell/core';
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
@@ -258,8 +261,8 @@ export class SubAgentTracker {
           output.outcome.outcome === 'cancelled'
             ? ToolConfirmationOutcome.Cancel
             : z
-              .nativeEnum(ToolConfirmationOutcome)
-              .parse(output.outcome.optionId);
+                .nativeEnum(ToolConfirmationOutcome)
+                .parse(output.outcome.optionId);
 
         // Respond to subagent with the outcome
         await event.respond(outcome);

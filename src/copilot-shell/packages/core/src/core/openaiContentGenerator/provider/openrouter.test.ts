@@ -95,7 +95,7 @@ describe('OpenRouterOpenAICompatibleProvider', () => {
 
       // Should include User-Agent from parent
       expect(headers['User-Agent']).toBe(
-        `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`
+        `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`,
       );
     });
 
@@ -137,7 +137,7 @@ describe('OpenRouterOpenAICompatibleProvider', () => {
       const headers = provider.buildHeaders();
 
       expect(headers['User-Agent']).toBe(
-        `CopilotShell/unknown (${process.platform}; ${process.arch})`
+        `CopilotShell/unknown (${process.platform}; ${process.arch})`,
       );
       expect(headers['HTTP-Referer']).toBe(
         'https://github.com/alibaba/anolisa',

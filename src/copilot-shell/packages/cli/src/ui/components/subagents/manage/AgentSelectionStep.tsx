@@ -436,14 +436,14 @@ export const AgentSelectionStep = ({
         userAgents.length > 0 ||
         builtinAgents.length > 0 ||
         extensionAgents.length > 0) && (
-          <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
-              {t('Using: {{count}} agents', {
-                count: enabledAgentsCount.toString(),
-              })}
-            </Text>
-          </Box>
-        )}
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t('Using: {{count}} agents', {
+              count: enabledAgentsCount.toString(),
+            })}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

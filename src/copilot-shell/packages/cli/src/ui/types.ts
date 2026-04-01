@@ -305,67 +305,67 @@ export enum MessageType {
 // Simplified message structure for internal feedback
 export type Message =
   | {
-    type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
-    content: string; // Renamed from text for clarity in this context
-    timestamp: Date;
-  }
+      type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
+      content: string; // Renamed from text for clarity in this context
+      timestamp: Date;
+    }
   | {
-    type: MessageType.ABOUT;
-    timestamp: Date;
-    systemInfo: {
-      cliVersion: string;
-      osPlatform: string;
-      osArch: string;
-      osRelease: string;
-      nodeVersion: string;
-      npmVersion: string;
-      modelVersion: string;
-      selectedAuthType: string;
-      ideClient: string;
-      sessionId: string;
-      memoryUsage: string;
-      baseUrl?: string;
-      gitCommit?: string;
+      type: MessageType.ABOUT;
+      timestamp: Date;
+      systemInfo: {
+        cliVersion: string;
+        osPlatform: string;
+        osArch: string;
+        osRelease: string;
+        nodeVersion: string;
+        npmVersion: string;
+        modelVersion: string;
+        selectedAuthType: string;
+        ideClient: string;
+        sessionId: string;
+        memoryUsage: string;
+        baseUrl?: string;
+        gitCommit?: string;
+      };
+      content?: string; // Optional content, not really used for ABOUT
+    }
+  | {
+      type: MessageType.HELP;
+      timestamp: Date;
+      content?: string; // Optional content, not really used for HELP
+    }
+  | {
+      type: MessageType.STATS;
+      timestamp: Date;
+      duration: string;
+      content?: string;
+    }
+  | {
+      type: MessageType.MODEL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.TOOL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.QUIT;
+      timestamp: Date;
+      duration: string;
+      content?: string;
+    }
+  | {
+      type: MessageType.COMPRESSION;
+      compression: CompressionProps;
+      timestamp: Date;
+    }
+  | {
+      type: MessageType.SUMMARY;
+      summary: SummaryProps;
+      timestamp: Date;
     };
-    content?: string; // Optional content, not really used for ABOUT
-  }
-  | {
-    type: MessageType.HELP;
-    timestamp: Date;
-    content?: string; // Optional content, not really used for HELP
-  }
-  | {
-    type: MessageType.STATS;
-    timestamp: Date;
-    duration: string;
-    content?: string;
-  }
-  | {
-    type: MessageType.MODEL_STATS;
-    timestamp: Date;
-    content?: string;
-  }
-  | {
-    type: MessageType.TOOL_STATS;
-    timestamp: Date;
-    content?: string;
-  }
-  | {
-    type: MessageType.QUIT;
-    timestamp: Date;
-    duration: string;
-    content?: string;
-  }
-  | {
-    type: MessageType.COMPRESSION;
-    compression: CompressionProps;
-    timestamp: Date;
-  }
-  | {
-    type: MessageType.SUMMARY;
-    summary: SummaryProps;
-    timestamp: Date;
-  };
 
 export interface ConsoleMessageItem {
   type: 'log' | 'warn' | 'error' | 'debug' | 'info';
@@ -387,13 +387,13 @@ export interface SubmitPromptResult {
  */
 export type SlashCommandProcessorResult =
   | {
-    type: 'schedule_tool';
-    toolName: string;
-    toolArgs: Record<string, unknown>;
-  }
+      type: 'schedule_tool';
+      toolName: string;
+      toolArgs: Record<string, unknown>;
+    }
   | {
-    type: 'handled'; // Indicates the command was processed and no further action is needed.
-  }
+      type: 'handled'; // Indicates the command was processed and no further action is needed.
+    }
   | SubmitPromptResult;
 
 export interface ShellConfirmationRequest {

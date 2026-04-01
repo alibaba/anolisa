@@ -169,8 +169,8 @@ export function AgentsManagerDialog({
     // Use agent color for the Agent Viewer header
     const headerColor =
       currentStep === MANAGEMENT_STEPS.AGENT_VIEWER &&
-        selectedAgent &&
-        shouldShowColor(selectedAgent.color)
+      selectedAgent &&
+      shouldShowColor(selectedAgent.color)
         ? getColorForDisplay(selectedAgent.color)
         : undefined;
 

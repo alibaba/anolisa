@@ -57,7 +57,7 @@ describe('mcp list command', () => {
   beforeEach(() => {
     vi.resetAllMocks();
 
-    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     mockTransport = { close: vi.fn() };
     mockClient = {

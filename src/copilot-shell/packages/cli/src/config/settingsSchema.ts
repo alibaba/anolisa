@@ -1141,13 +1141,13 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: undefined as
       | {
-        provider: Array<{
-          type: 'tavily' | 'google' | 'dashscope';
-          apiKey?: string;
-          searchEngineId?: string;
-        }>;
-        default: string;
-      }
+          provider: Array<{
+            type: 'tavily' | 'google' | 'dashscope';
+            apiKey?: string;
+            searchEngineId?: string;
+          }>;
+          default: string;
+        }
       | undefined,
     description: 'Configuration for web search providers.',
     showInDialog: false,
@@ -1304,14 +1304,14 @@ export function getSettingsSchema(): SettingsSchemaType {
 
 type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
-  ? InferSettings<T[K]['properties']>
-  : T[K]['type'] extends 'enum'
-  ? T[K]['options'] extends readonly SettingEnumOption[]
-  ? T[K]['options'][number]['value']
-  : T[K]['default']
-  : T[K]['default'] extends boolean
-  ? boolean
-  : T[K]['default'];
+    ? InferSettings<T[K]['properties']>
+    : T[K]['type'] extends 'enum'
+      ? T[K]['options'] extends readonly SettingEnumOption[]
+        ? T[K]['options'][number]['value']
+        : T[K]['default']
+      : T[K]['default'] extends boolean
+        ? boolean
+        : T[K]['default'];
 };
 
 export type Settings = InferSettings<SettingsSchemaType>;

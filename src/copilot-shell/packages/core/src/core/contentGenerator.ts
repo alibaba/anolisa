@@ -298,17 +298,14 @@ export async function createContentGenerator(
   let baseGenerator: ContentGenerator;
 
   if (authType === AuthType.USE_OPENAI) {
-    const { createOpenAIContentGenerator } = await import(
-      './openaiContentGenerator/index.js'
-    );
+    const { createOpenAIContentGenerator } =
+      await import('./openaiContentGenerator/index.js');
     baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
   } else if (authType === AuthType.QWEN_OAUTH) {
-    const { getQwenOAuthClient: getQwenOauthClient } = await import(
-      '../qwen/qwenOAuth2.js'
-    );
-    const { QwenContentGenerator } = await import(
-      '../qwen/qwenContentGenerator.js'
-    );
+    const { getQwenOAuthClient: getQwenOauthClient } =
+      await import('../qwen/qwenOAuth2.js');
+    const { QwenContentGenerator } =
+      await import('../qwen/qwenContentGenerator.js');
 
     try {
       const qwenClient = await getQwenOauthClient(
@@ -326,22 +323,19 @@ export async function createContentGenerator(
       );
     }
   } else if (authType === AuthType.USE_ANTHROPIC) {
-    const { createAnthropicContentGenerator } = await import(
-      './anthropicContentGenerator/index.js'
-    );
+    const { createAnthropicContentGenerator } =
+      await import('./anthropicContentGenerator/index.js');
     baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
   } else if (
     authType === AuthType.USE_GEMINI ||
     authType === AuthType.USE_VERTEX_AI
   ) {
-    const { createGeminiContentGenerator } = await import(
-      './geminiContentGenerator/index.js'
-    );
+    const { createGeminiContentGenerator } =
+      await import('./geminiContentGenerator/index.js');
     baseGenerator = createGeminiContentGenerator(generatorConfig, config);
   } else if (authType === AuthType.USE_ALIYUN) {
-    const { createAliyunContentGenerator } = await import(
-      '../aliyun/aliyunContentGenerator.js'
-    );
+    const { createAliyunContentGenerator } =
+      await import('../aliyun/aliyunContentGenerator.js');
     baseGenerator = await createAliyunContentGenerator(generatorConfig, config);
   } else {
     throw new Error(

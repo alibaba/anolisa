@@ -64,12 +64,12 @@ export function getOpenAIAvailableModelFromEnv(): AvailableModel | null {
   const id = process.env['OPENAI_MODEL']?.trim();
   return id
     ? {
-      id,
-      label: id,
-      get description() {
-        return t('Configured via OPENAI_MODEL environment variable');
-      },
-    }
+        id,
+        label: id,
+        get description() {
+          return t('Configured via OPENAI_MODEL environment variable');
+        },
+      }
     : null;
 }
 
@@ -77,12 +77,12 @@ export function getAnthropicAvailableModelFromEnv(): AvailableModel | null {
   const id = process.env['ANTHROPIC_MODEL']?.trim();
   return id
     ? {
-      id,
-      label: id,
-      get description() {
-        return t('Configured via ANTHROPIC_MODEL environment variable');
-      },
-    }
+        id,
+        label: id,
+        get description() {
+          return t('Configured via ANTHROPIC_MODEL environment variable');
+        },
+      }
     : null;
 }
 

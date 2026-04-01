@@ -337,7 +337,7 @@ export class FileCommandLoader implements ICommandLoader {
       prompt: validDef.prompt,
       description:
         validDef.frontmatter?.description &&
-          typeof validDef.frontmatter.description === 'string'
+        typeof validDef.frontmatter.description === 'string'
           ? validDef.frontmatter.description
           : undefined,
     };

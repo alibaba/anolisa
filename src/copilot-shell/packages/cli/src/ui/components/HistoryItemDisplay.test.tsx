@@ -9,7 +9,10 @@ import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
 import { SessionStatsProvider } from '../contexts/SessionContext.js';
-import type { Config, ToolExecuteConfirmationDetails } from '@copilot-shell/core';
+import type {
+  Config,
+  ToolExecuteConfirmationDetails,
+} from '@copilot-shell/core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
@@ -179,7 +182,7 @@ describe('<HistoryItemDisplay />', () => {
             title: 'Run Shell Command',
             command: 'echo "\u001b[31mhello\u001b[0m"',
             rootCommand: 'echo',
-            onConfirm: async () => { },
+            onConfirm: async () => {},
           },
         },
       ],

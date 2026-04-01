@@ -47,7 +47,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
  * of the Gemini CLI application.
  */
 export class BuiltinCommandLoader implements ICommandLoader {
-  constructor(private config: Config | null) { }
+  constructor(private config: Config | null) {}
 
   /**
    * Gathers all raw built-in command definitions, injects dependencies where

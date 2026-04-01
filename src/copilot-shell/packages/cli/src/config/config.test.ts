@@ -161,7 +161,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -193,7 +193,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -392,7 +392,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -417,7 +417,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -442,7 +442,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -499,7 +499,7 @@ describe('parseArguments', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -903,7 +903,7 @@ describe('loadCliConfig telemetry', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
@@ -2044,47 +2044,47 @@ describe('loadCliConfig fileFiltering', () => {
     getter: (config: ServerConfig.Config) => boolean;
     value: boolean;
   }> = [
-      {
-        property: 'disableFuzzySearch',
-        getter: (c) => c.getFileFilteringDisableFuzzySearch(),
-        value: true,
-      },
-      {
-        property: 'disableFuzzySearch',
-        getter: (c) => c.getFileFilteringDisableFuzzySearch(),
-        value: false,
-      },
-      {
-        property: 'respectGitIgnore',
-        getter: (c) => c.getFileFilteringRespectGitIgnore(),
-        value: true,
-      },
-      {
-        property: 'respectGitIgnore',
-        getter: (c) => c.getFileFilteringRespectGitIgnore(),
-        value: false,
-      },
-      {
-        property: 'respectQwenIgnore',
-        getter: (c) => c.getFileFilteringRespectQwenIgnore(),
-        value: true,
-      },
-      {
-        property: 'respectQwenIgnore',
-        getter: (c) => c.getFileFilteringRespectQwenIgnore(),
-        value: false,
-      },
-      {
-        property: 'enableRecursiveFileSearch',
-        getter: (c) => c.getEnableRecursiveFileSearch(),
-        value: true,
-      },
-      {
-        property: 'enableRecursiveFileSearch',
-        getter: (c) => c.getEnableRecursiveFileSearch(),
-        value: false,
-      },
-    ];
+    {
+      property: 'disableFuzzySearch',
+      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      value: true,
+    },
+    {
+      property: 'disableFuzzySearch',
+      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      value: false,
+    },
+    {
+      property: 'respectGitIgnore',
+      getter: (c) => c.getFileFilteringRespectGitIgnore(),
+      value: true,
+    },
+    {
+      property: 'respectGitIgnore',
+      getter: (c) => c.getFileFilteringRespectGitIgnore(),
+      value: false,
+    },
+    {
+      property: 'respectQwenIgnore',
+      getter: (c) => c.getFileFilteringRespectQwenIgnore(),
+      value: true,
+    },
+    {
+      property: 'respectQwenIgnore',
+      getter: (c) => c.getFileFilteringRespectQwenIgnore(),
+      value: false,
+    },
+    {
+      property: 'enableRecursiveFileSearch',
+      getter: (c) => c.getEnableRecursiveFileSearch(),
+      value: true,
+    },
+    {
+      property: 'enableRecursiveFileSearch',
+      getter: (c) => c.getEnableRecursiveFileSearch(),
+      value: false,
+    },
+  ];
 
   it.each(testCases)(
     'should pass $property from settings to config when $value',
@@ -2140,7 +2140,7 @@ describe('Output format', () => {
     });
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
@@ -2175,7 +2175,7 @@ describe('parseArguments with positional prompt', () => {
 
     const mockConsoleError = vi
       .spyOn(console, 'error')
-      .mockImplementation(() => { });
+      .mockImplementation(() => {});
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',

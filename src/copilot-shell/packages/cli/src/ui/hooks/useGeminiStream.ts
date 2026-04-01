@@ -598,8 +598,8 @@ export const useGeminiStream = (
           const updatedTools = pendingHistoryItemRef.current.tools.map(
             (tool) =>
               tool.status === ToolCallStatus.Pending ||
-                tool.status === ToolCallStatus.Confirming ||
-                tool.status === ToolCallStatus.Executing
+              tool.status === ToolCallStatus.Confirming ||
+              tool.status === ToolCallStatus.Executing
                 ? { ...tool, status: ToolCallStatus.Canceled }
                 : tool,
           );

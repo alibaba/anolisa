@@ -111,7 +111,9 @@ function SessionListItemView({
         ) : (
           <>
             {session.name && (
-              <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
+              <Text
+                color={isSelected ? theme.text.accent : theme.text.secondary}
+              >
                 {'* '}
               </Text>
             )}
@@ -152,9 +154,7 @@ function PreviewPanel({ items, isLoading, maxWidth }: PreviewPanelProps) {
   if (items.length === 0) {
     return (
       <Box paddingLeft={4}>
-        <Text color={theme.text.secondary}>
-          {t('No messages to preview.')}
-        </Text>
+        <Text color={theme.text.secondary}>{t('No messages to preview.')}</Text>
       </Box>
     );
   }
@@ -258,8 +258,8 @@ export function SessionPicker(props: SessionPickerProps) {
               <Text color={theme.text.secondary}>
                 {picker.filterByBranch
                   ? t('No sessions found for branch "{{branch}}"', {
-                    branch: currentBranch ?? '',
-                  })
+                      branch: currentBranch ?? '',
+                    })
                   : t('No sessions found')}
               </Text>
             </Box>
@@ -275,7 +275,10 @@ export function SessionPicker(props: SessionPickerProps) {
                     session={session}
                     isSelected={actualIndex === picker.selectedIndex}
                     isFirst={visibleIndex === 0}
-                    isLast={visibleIndex === picker.visibleSessions.length - 1 && !isPreviewing}
+                    isLast={
+                      visibleIndex === picker.visibleSessions.length - 1 &&
+                      !isPreviewing
+                    }
                     showScrollUp={picker.showScrollUp}
                     showScrollDown={picker.showScrollDown}
                     maxPromptWidth={boxWidth - 6}
@@ -317,8 +320,9 @@ export function SessionPicker(props: SessionPickerProps) {
               </Text>
             )}
             <Text color={theme.text.secondary}>
-              <Text bold>Ctrl+R</Text> {t('to rename')} · <Text bold>Ctrl+V</Text>{' '}
-              {t('to preview')} · {t('↑↓ to navigate · Esc to cancel')}
+              <Text bold>Ctrl+R</Text> {t('to rename')} ·{' '}
+              <Text bold>Ctrl+V</Text> {t('to preview')} ·{' '}
+              {t('↑↓ to navigate · Esc to cancel')}
             </Text>
           </Box>
         </Box>

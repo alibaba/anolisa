@@ -57,7 +57,7 @@ export class LoadedTrustedFolders {
   constructor(
     readonly user: TrustedFoldersFile,
     readonly errors: TrustedFoldersError[],
-  ) { }
+  ) {}
 
   get rules(): TrustRule[] {
     return Object.entries(this.user.config).map(([path, trustLevel]) => ({

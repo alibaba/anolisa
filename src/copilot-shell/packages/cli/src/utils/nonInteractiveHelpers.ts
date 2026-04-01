@@ -112,7 +112,7 @@ export function extractUsageFromGeminiClient(
       !chat ||
       typeof chat !== 'object' ||
       typeof (chat as { getDebugResponses?: unknown }).getDebugResponses !==
-      'function'
+        'function'
     ) {
       return undefined;
     }
@@ -251,9 +251,9 @@ export async function buildSystemMessage(
   const mcpServers = config.getMcpServers();
   const mcpServerList = mcpServers
     ? Object.keys(mcpServers).map((name) => ({
-      name,
-      status: getMCPServerStatus(name),
-    }))
+        name,
+        status: getMCPServerStatus(name),
+      }))
     : [];
 
   // Load slash commands with filtering based on allowed built-in commands
@@ -397,9 +397,9 @@ export function createTaskToolProgressHandler(
     const toolCallToEmit: NonNullable<TaskResultDisplay['toolCalls']>[number] =
       fallbackStatus
         ? {
-          ...toolCall,
-          status: fallbackStatus,
-        }
+            ...toolCall,
+            status: fallbackStatus,
+          }
         : toolCall;
 
     if (

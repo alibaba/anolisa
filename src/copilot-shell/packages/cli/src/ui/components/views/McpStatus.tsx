@@ -189,14 +189,14 @@ export const McpStatus: React.FC<McpStatusProps> = ({
                 {serverTools.map((tool) => {
                   const schemaContent =
                     showSchema &&
-                      tool.schema &&
-                      (tool.schema.parametersJsonSchema || tool.schema.parameters)
+                    tool.schema &&
+                    (tool.schema.parametersJsonSchema || tool.schema.parameters)
                       ? JSON.stringify(
-                        tool.schema.parametersJsonSchema ??
-                        tool.schema.parameters,
-                        null,
-                        2,
-                      )
+                          tool.schema.parametersJsonSchema ??
+                            tool.schema.parameters,
+                          null,
+                          2,
+                        )
                       : null;
 
                   return (
@@ -257,8 +257,8 @@ export const McpStatus: React.FC<McpStatusProps> = ({
             {server.name}
             {server.extensionName
               ? ` ${t('(from {{extensionName}})', {
-                extensionName: server.extensionName,
-              })}`
+                  extensionName: server.extensionName,
+                })}`
               : ''}
           </Text>
           <Text> - {t('Blocked')}</Text>

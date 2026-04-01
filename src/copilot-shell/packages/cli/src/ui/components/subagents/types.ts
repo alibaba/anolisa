@@ -77,11 +77,11 @@ export type WizardAction =
   | { type: 'SET_GENERATED_SYSTEM_PROMPT'; systemPrompt: string }
   | { type: 'SET_GENERATED_DESCRIPTION'; description: string }
   | {
-    type: 'SET_GENERATED_CONTENT';
-    name: string;
-    description: string;
-    systemPrompt: string;
-  }
+      type: 'SET_GENERATED_CONTENT';
+      name: string;
+      description: string;
+      systemPrompt: string;
+    }
   | { type: 'SET_TOOLS'; tools: string[] }
   | { type: 'SET_BACKGROUND_COLOR'; color: string }
   | { type: 'SET_GENERATING'; isGenerating: boolean }
