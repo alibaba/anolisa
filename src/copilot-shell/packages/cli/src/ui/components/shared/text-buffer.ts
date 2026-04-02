@@ -1100,6 +1100,23 @@ function textBufferReducerLogic(
             } else if (newVisualRow > 0) {
               newVisualRow--;
               newVisualCol = cpLen(visualLines[newVisualRow] ?? '');
+
+              // Fix soft wrap boundary ambiguity: when both visual lines
+              // belong to the same logical line and the end-of-previous-line
+              // position equals the start-of-next-line position, the cursor
+              // would map back to the next visual line's start (stuck cursor).
+              // Adjust by moving one character back to land on the last
+              // character of the previous visual line instead.
+              if (newVisualCol > 0) {
+                const prevMap = visualToLogicalMap[newVisualRow];
+                const nextMap = visualToLogicalMap[newVisualRow + 1];
+                if (prevMap && nextMap && prevMap[0] === nextMap[0]) {
+                  const endPos = prevMap[1] + newVisualCol;
+                  if (endPos >= nextMap[1]) {
+                    newVisualCol--;
+                  }
+                }
+              }
             }
             break;
           case 'right':

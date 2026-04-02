@@ -659,6 +659,70 @@ describe('useTextBuffer', () => {
       expect(getBufferState(result).cursor).toEqual([0, 4]); // logical cursor
     });
 
+    it('move: left should wrap across hard newlines (logical lines)', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'abc\ndef',
+          viewport: { width: 80, height: 5 },
+          isValidPath: () => false,
+        }),
+      );
+      // Move cursor to beginning of second logical line
+      act(() => result.current.move('down'));
+      expect(getBufferState(result).cursor).toEqual([1, 0]);
+      expect(getBufferState(result).visualCursor).toEqual([1, 0]);
+
+      // Press left - should go to end of first logical line
+      act(() => result.current.move('left'));
+      expect(getBufferState(result).cursor).toEqual([0, 3]);
+      expect(getBufferState(result).visualCursor).toEqual([0, 3]);
+    });
+
+    it('move: left should wrap across soft-wrapped visual lines without spaces (hard break)', () => {
+      // "longxline1" with viewport width 5 produces:
+      // visual line 0: "longx" (5 chars)
+      // visual line 1: "line1" (5 chars)
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'longxline1',
+          viewport: { width: 5, height: 4 },
+          isValidPath: () => false,
+        }),
+      );
+      expect(result.current.allVisualLines).toEqual(['longx', 'line1']);
+
+      // Place cursor at beginning of visual line 1
+      act(() => result.current.move('down'));
+      expect(getBufferState(result).visualCursor).toEqual([1, 0]);
+
+      // Press left - should move to end of visual line 0 (on 'x')
+      act(() => result.current.move('left'));
+      expect(getBufferState(result).visualCursor[0]).toEqual(0);
+      expect(getBufferState(result).visualCursor[1]).toEqual(4);
+      expect(getBufferState(result).cursor).toEqual([0, 4]);
+    });
+
+    it('move: right from last char of hard-break visual line should go to next visual line', () => {
+      // After the left-movement fix, verify right still works at the boundary
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'longxline1',
+          viewport: { width: 5, height: 4 },
+          isValidPath: () => false,
+        }),
+      );
+      // Move to the last character of visual line 0 ('x' at position 4)
+      for (let i = 0; i < 4; i++) {
+        act(() => result.current.move('right'));
+      }
+      expect(getBufferState(result).visualCursor).toEqual([0, 4]);
+
+      // Press right - should go to visual line 1
+      act(() => result.current.move('right'));
+      expect(getBufferState(result).visualCursor).toEqual([1, 0]);
+      expect(getBufferState(result).cursor).toEqual([0, 5]);
+    });
+
     it('move: up/down should preserve preferred visual column', () => {
       const text = 'abcde\nxy\n12345';
       const { result } = renderHook(() =>
