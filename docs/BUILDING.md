@@ -9,7 +9,9 @@ Two paths are provided:
 1. Quick Start: run one script to check/install dependencies and build selected components.
 2. Component-by-Component: build each module manually.
 
-## Repository Layout
+---
+
+## 1. Repository Layout
 
 ```text
 anolisa/
@@ -27,7 +29,9 @@ anolisa/
 └── docs/
 ```
 
-## Environment Dependencies
+---
+
+## 2. Environment Dependencies
 
 | Component | Required Tools |
 |-----------|----------------|
@@ -37,66 +41,85 @@ anolisa/
 | agentsight *(optional)* | Rust >= 1.80, clang >= 14, libbpf headers, kernel headers (Linux only) |
 | RPM packaging | rpmbuild (Linux only) |
 
-## Quick Start
+---
 
-Use the unified script (to be added by you):
+## 3. Quick Start
+
+First, clone the repository:
 
 ```bash
 git clone https://github.com/alibaba/anolisa.git
 cd anolisa
+```
 
-# Install dependencies + build + install to system (recommended)
+Then choose one of the following operations based on your needs:
+
+a. Install dependencies + build + install to system (recommended, all-in-one)
+
+```bash
 ./scripts/build-all.sh --install-deps --install
+```
 
-# Install dependencies + build only (without system install)
+b. Install dependencies + build only (without system install)
+
+```bash
 ./scripts/build-all.sh --install-deps
+```
 
-# Install dependencies only
+c. Install dependencies only, skip build for now
+
+```bash
 ./scripts/build-all.sh --deps-only
+```
 
-# Build selected components only
+d. Install dependencies and build selected components (without agentsight)
+
+```bash
 ./scripts/build-all.sh --install-deps --component cosh --component sec-core
+```
 
-# Include optional agentsight
+e. Install dependencies and build all components (including optional agentsight)
+
+```bash
 ./scripts/build-all.sh --install-deps --install --component cosh --component skills --component sec-core --component sight
 ```
 
-### Script Options
+### 3.1 Script Options
 
 | Flag | Description |
 |------|-------------|
 | --install-deps | Install dependencies before build |
-| --deps-only | Install dependencies only |
+| --deps-only | Install dependencies only, skip build |
 | --install | Install built components to system paths after building |
-| --component <name> | Build selected component(s), repeatable: cosh, skills, sec-core, sight. Default: cosh, skills, sec-core |
+| --component \<name\> | Build selected component(s), repeatable: cosh, skills, sec-core, sight. Default: cosh, skills, sec-core |
 | --help | Show help |
 
-### Important Notes
+### 3.2 Important Notes
 
 1. Node.js and Rust should be installed from upstream installers (nvm / rustup), not pinned to distro packages.
 2. os-skills are mostly static assets and do not require compilation.
-3. AgentSight is **optional** — it provides audit and observability capabilities but is not required for core functionality. It is excluded from default builds; use `--component sight` to include it.
+3. AgentSight is an optional component that provides audit and observability capabilities but is not required for core functionality. It is excluded from default builds; use `--component sight` to include it explicitly.
 4. AgentSight system dependencies (clang/llvm/libbpf/kernel headers) should be installed through your distro package manager.
 
 ---
 
-## Component-by-Component Build
+## 4. Component-by-Component Build
 
-If you prefer to set up each toolchain and build each component manually instead of using the unified script, follow the four steps below.
+If you prefer to set up each toolchain and build each component manually instead of using the unified script, follow the steps below.
 
-### Step 1: Install Dependencies
+### 4.1 Install Dependencies
 
-#### Node.js (for copilot-shell)
+#### 4.1.1 Node.js (for copilot-shell)
 
 Required: Node.js >= 20, npm >= 10.
 
-**Alinux 4 (verified)**
+a. Alinux 4 (verified)
 
 ```bash
 sudo dnf install -y nodejs npm make gcc-c++
 ```
 
-**Other distros: nvm**
+b. Other distros: nvm
 
 ```bash
 # Skip if Node.js >= 20 is already installed
@@ -116,19 +139,20 @@ fi
 node -v   # expected: v20.x.x or higher
 npm -v    # expected: 10.x.x or higher
 ```
+
 ---
 
-#### Rust (for agent-sec-core and agentsight)
+#### 4.1.2 Rust (for agent-sec-core and agentsight)
 
 Required: agent-sec-core needs Rust == 1.93.0; agentsight needs Rust >= 1.80.
 
-**Alinux 4 (verified)**
+a. Alinux 4 (verified)
 
 ```bash
 sudo dnf install -y rust cargo gcc make
 ```
 
-**Ubuntu 24.04 (verified)**
+b. Ubuntu 24.04 (verified)
 
 ```bash
 sudo apt install -y rustc-1.91 cargo-1.91 gcc make
@@ -137,7 +161,7 @@ sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
 
 > The system `rust` package may be older than 1.93.0. If agent-sec-core build fails due to version mismatch, use rustup below instead.
 
-**Other distros: rustup**
+c. Other distros: rustup
 
 ```bash
 # Skip if Rust is already installed
@@ -157,18 +181,18 @@ cargo --version   # expected: cargo 1.80.0 or higher
 
 ---
 
-#### Python and uv (for agent-sec-core and os-skills)
+#### 4.1.3 Python and uv (for agent-sec-core and os-skills)
 
 Required: Python >= 3.12.
 
-**Alinux 4 (verified)**
+a. Alinux 4 (verified)
 
 ```bash
 pip3 install uv
 uv python install 3.12
 ```
 
-**Ubuntu 24.04 (verified)**
+b. Ubuntu 24.04 (verified)
 
 ```bash
 sudo apt install -y pipx
@@ -177,7 +201,7 @@ source "$HOME/.$(basename "$SHELL")rc"
 pipx install uv
 ```
 
-**Other distros: uv**
+c. Other distros: uv
 
 ```bash
 # Skip if uv is already installed
@@ -200,18 +224,18 @@ uv python find 3.12   # expected: path to python3.12 binary
 
 ---
 
-#### AgentSight System Dependencies (Optional, Package Manager Required)
+#### 4.1.4 AgentSight System Dependencies (Optional)
 
-AgentSight is an **optional** component that provides eBPF-based audit and observability capabilities. It is not required for core ANOLISA functionality. If you choose to build it, the following system-level dependencies are needed:
+AgentSight is an optional component that provides eBPF-based audit and observability capabilities. It is not required for core ANOLISA functionality. If you choose to build it, the following system-level dependencies are needed:
 
-**dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)**
+a. dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)
 
 ```bash
 sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
 sudo dnf install -y kernel-devel-$(uname -r)
 ```
 
-**apt (Debian / Ubuntu)**
+b. apt (Debian / Ubuntu)
 
 ```bash
 sudo apt-get update -y
@@ -220,13 +244,13 @@ sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libssl-dev p
 
 > Some distributions do not provide a separate perl-core package. That is expected.
 
-**Kernel Requirement**
+c. Kernel Requirement
 
 AgentSight requires Linux kernel >= 5.10 and BTF enabled (`CONFIG_DEBUG_INFO_BTF=y`).
 
 ---
 
-#### Version Check
+#### 4.1.5 Version Check
 
 ```bash
 node -v            # v20.x.x
@@ -240,9 +264,9 @@ clang --version    # clang version 14+
 
 ---
 
-### Step 2: Build Components
+### 4.2 Build Components
 
-#### copilot-shell
+#### 4.2.1 copilot-shell
 
 ```bash
 cd src/copilot-shell
@@ -251,29 +275,31 @@ make build
 npm run bundle
 ```
 
-Artifact:
+Artifact: `dist/cli.js`
 
-- dist/cli.js
+Run options:
 
-#### Run
+a. Run directly from the build directory
 
 ```bash
-# Run directly from the build directory
 node dist/cli.js
+```
 
-# Or add a persistent 'co' alias to your shell
+b. Add a persistent `co` alias to your shell
+
+```bash
 make create-alias
 source "$HOME/.$(basename "$SHELL")rc"
 co
 ```
 
-#### os-skills
+---
+
+#### 4.2.2 os-skills
 
 No compilation is required. Each skill is a directory containing a `SKILL.md` and optional supporting files (scripts, references, etc.). Deployment copies the entire skill directory to the target path.
 
-#### Install
-
-Skills are discovered by Copilot Shell from one of three search paths:
+Skill search paths (Copilot Shell discovers skills in the following priority order):
 
 | Scope | Path |
 |-------|------|
@@ -281,64 +307,69 @@ Skills are discovered by Copilot Shell from one of three search paths:
 | User | `~/.copilot/skills/` |
 | System | `/usr/share/anolisa/skills/` |
 
-Manual deployment (user-level):
+Install options:
+
+a. Using the build script (automatic)
 
 ```bash
-# The build script copies skills automatically:
 ./scripts/build-all.sh --component skills
+```
 
-# Or manually:
+b. Manual deployment (user-level)
+
+```bash
 mkdir -p ~/.copilot/skills
 find src/os-skills -name 'SKILL.md' -exec sh -c \
 	'cp -rp "$(dirname "$1")" ~/.copilot/skills/' _ {} \;
 ```
 
-#### Verify
+Verify:
 
 ```bash
-# Copilot Shell lists discovered skills
 co /skills
 ```
 
-#### agent-sec-core (Linux only)
+---
+
+#### 4.2.3 agent-sec-core (Linux only)
 
 ```bash
 cd src/agent-sec-core
 make build-sandbox
 ```
 
-Artifact:
+Artifact: `linux-sandbox/target/release/linux-sandbox`
 
-- linux-sandbox/target/release/linux-sandbox
-
-#### Install
+Install:
 
 ```bash
 sudo make install
 ```
 
-#### agentsight (Optional, Linux only)
+---
 
-> **Note:** AgentSight is optional. It provides eBPF-based audit and observability capabilities but is not required for core ANOLISA functionality.
+#### 4.2.4 agentsight (Optional, Linux only)
+
+> Note: AgentSight is an optional component. It provides eBPF-based audit and observability capabilities but is not required for core ANOLISA functionality.
 
 ```bash
 cd src/agentsight
 make build
 ```
 
-Artifact:
+Artifact: `target/release/agentsight`
 
-- target/release/agentsight
-
-#### Install
+Install:
 
 ```bash
 sudo make install
 ```
 
-### Step 3: Run Tests (Recommended)
+---
 
-#### Unified Entry
+### 4.3 Run Tests (Recommended)
+
+a. Unified entry
 
 ```bash
 ./tests/run-all-tests.sh
@@ -347,7 +378,7 @@ sudo make install
 ./tests/run-all-tests.sh --filter sight
 ```
 
-#### Per Component
+b. Per component
 
 ```bash
 # copilot-shell
@@ -363,9 +394,9 @@ cd src/agentsight && cargo test
 
 ---
 
-## Troubleshooting
+## 5. Troubleshooting
 
-### Node.js version mismatch
+### 5.1 Node.js version mismatch
 
 Use nvm and re-activate the expected version:
 
@@ -373,20 +404,20 @@ Use nvm and re-activate the expected version:
 source "$HOME/.$(basename "$SHELL")rc"
 ```
 
-### Rust toolchain mismatch
+### 5.2 Rust toolchain mismatch
 
 ```bash
 rustup show
 ```
 
-### AgentSight missing libbpf / headers
+### 5.3 AgentSight missing libbpf / headers
 
-Install distro packages from the AgentSight dependency section above.
+Install distro packages from section 4.1.4 above.
 
-### AgentSight runtime permission denied
+### 5.4 AgentSight runtime permission denied
 
 ```bash
 sudo ./target/release/agentsight --help
-# or
+# or grant minimum capabilities
 sudo setcap cap_bpf,cap_perfmon=ep ./target/release/agentsight
 ```
