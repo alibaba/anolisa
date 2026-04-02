@@ -87,6 +87,8 @@ make lint             # ESLint 检查
 make format           # Prettier 格式化
 ```
 
+> **注意：** `make install`（即 `npm install`）会自动初始化 husky pre-commit 钩子。每次提交时，暂存文件会自动执行 Prettier 格式化和 ESLint 检查。如需跳过，可使用 `git commit --no-verify`。
+
 ### RPM 打包
 
 ```bash

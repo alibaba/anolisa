@@ -286,6 +286,8 @@ make deps
 make build
 ```
 
+> **Note:** `make deps` runs `npm install`, which automatically sets up husky pre-commit hooks. These hooks run Prettier and ESLint on staged files before each commit. In CI environments, use `make deps-ci` instead, which skips hook installation.
+
 Artifact: `dist/cli.js`
 
 ```bash

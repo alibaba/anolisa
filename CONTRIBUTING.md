@@ -28,6 +28,8 @@ npm ci
 npm run bundle
 ```
 
+> **Note:** `npm ci` (or `npm install`) automatically runs the `prepare` script, which initializes [husky](https://typicode.github.io/husky/) pre-commit hooks. On each commit, [lint-staged](https://github.com/lint-staged/lint-staged) will run **Prettier** and **ESLint** on your staged files. If you need to bypass the hooks in an emergency, use `git commit --no-verify`.
+
 ### Package-Specific Development
 
 Each package has its own development workflow:

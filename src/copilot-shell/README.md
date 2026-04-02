@@ -87,6 +87,8 @@ make lint             # Lint with ESLint
 make format           # Format with Prettier
 ```
 
+> **Note:** `make install` (i.e. `npm install`) automatically sets up husky pre-commit hooks. Staged files will be checked with Prettier and ESLint before each commit. Use `git commit --no-verify` to bypass if needed.
+
 ### RPM Packaging
 
 ```bash
