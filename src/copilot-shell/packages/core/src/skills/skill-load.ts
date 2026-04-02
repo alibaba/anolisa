@@ -25,10 +25,15 @@ export async function loadSkillsFromDir(
       const skillDir = path.join(baseDir, entry.name);
       const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
+      const manifestExists = await fs.access(skillManifest).then(() => true).catch(() => false);
+      if (!manifestExists) {
+        // No SKILL.md here, recurse into subdirectories
+        skills.push(...(await loadSkillsFromDir(skillDir)));
+        continue;
+      }
+
       try {
         // Check if SKILL.md exists
-        await fs.access(skillManifest);
-
         const content = await fs.readFile(skillManifest, 'utf8');
         const config = parseSkillContent(content, skillManifest);
         skills.push(config);
