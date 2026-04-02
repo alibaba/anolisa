@@ -54,9 +54,11 @@ cosh    # follow the on-screen prompts
 # API Key
 cosh --auth apikey
 
-# BaiLian / Custom Provider (OpenAI Compatible)
+# Custom Provider (OpenAI Compatible)
 cosh --auth openai
 ```
+
+> ** Note: ** Supports reusing openclaw model configurations.
 
 ## Architecture
 

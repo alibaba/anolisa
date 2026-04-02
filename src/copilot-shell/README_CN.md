@@ -54,9 +54,11 @@ cosh    # 按照屏幕提示操作
 # API Key
 cosh --auth apikey
 
-# 百炼 / Custom Provider（OpenAI 兼容）
+# Custom Provider（OpenAI 兼容）
 cosh --auth openai
 ```
+
+> **注：** 支持复用openclaw的模型配置。
 
 ## 架构
 
