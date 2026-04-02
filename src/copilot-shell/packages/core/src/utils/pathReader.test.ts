@@ -384,10 +384,9 @@ describe('readPathFromWorkspace', () => {
       const config = createMockConfig(CWD, [], mockFileService);
       // Mock readFile to throw EACCES, since root users ignore file-mode
       // restrictions and would otherwise read the file successfully.
-      const readError = Object.assign(
-        new Error('EACCES: permission denied'),
-        { code: 'EACCES' },
-      );
+      const readError = Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
       vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
 
       // processSingleFileContent catches the error and returns an error string.

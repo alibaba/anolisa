@@ -245,7 +245,10 @@ async function convertGeminiOrClaudeExtension(
   pluginName?: string,
 ) {
   let newExtensionDir = extensionDir;
-  const configFilePath = path.join(extensionDir, findExtensionConfigFilename(extensionDir));
+  const configFilePath = path.join(
+    extensionDir,
+    findExtensionConfigFilename(extensionDir),
+  );
   if (!fs.existsSync(configFilePath)) {
     if (isGeminiExtensionConfig(extensionDir)) {
       newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
@@ -675,7 +678,10 @@ export class ExtensionManager {
 
   loadExtensionConfig(context: LoadExtensionContext): ExtensionConfig {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
-    const configFilePath = path.join(extensionDir, findExtensionConfigFilename(extensionDir));
+    const configFilePath = path.join(
+      extensionDir,
+      findExtensionConfigFilename(extensionDir),
+    );
     if (!fs.existsSync(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }

@@ -22,7 +22,10 @@ export class ExtensionStorage {
   }
 
   getConfigPath(): string {
-    return path.join(this.getExtensionDir(), findExtensionConfigFilename(this.getExtensionDir()));
+    return path.join(
+      this.getExtensionDir(),
+      findExtensionConfigFilename(this.getExtensionDir()),
+    );
   }
 
   getEnvFilePath(): string {

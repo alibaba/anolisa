@@ -27,11 +27,15 @@ describe('findExtensionConfigFilename', () => {
 
   it('should return cosh-extension.json when it exists', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
-    expect(findExtensionConfigFilename('/some/dir')).toBe('cosh-extension.json');
+    expect(findExtensionConfigFilename('/some/dir')).toBe(
+      'cosh-extension.json',
+    );
   });
 
   it('should fall back to qwen-extension.json when cosh-extension.json does not exist', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
-    expect(findExtensionConfigFilename('/some/dir')).toBe('qwen-extension.json');
+    expect(findExtensionConfigFilename('/some/dir')).toBe(
+      'qwen-extension.json',
+    );
   });
 });
