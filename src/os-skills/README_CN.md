@@ -77,6 +77,32 @@ Markdown 内容，包含使用说明、前置条件和示例。
 
 ## 安装
 
+### 扩展安装（推荐）
+
+一键安装全部技能：
+
+```
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
+```
+
+或按分类单独安装：
+
+```
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/ai
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/system-admin
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/devops
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/security
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/aliyun
+```
+
+或从本地路径安装：
+
+```
+/extensions install /path/to/os-skills
+```
+
+> **注意：** 扩展安装方式目前仅支持 Copilot Shell（cosh）。
+
 ### RPM 安装
 
 ```bash

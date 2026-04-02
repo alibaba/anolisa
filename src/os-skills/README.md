@@ -77,6 +77,32 @@ Markdown content with usage instructions, prerequisites, and examples.
 
 ## Installation
 
+### Extension (Recommended)
+
+Install all skills as a single extension:
+
+```
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
+```
+
+Or install a specific category only:
+
+```
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/ai
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/system-admin
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/devops
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/security
+/extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills/aliyun
+```
+
+Or install from a local path:
+
+```
+/extensions install /path/to/os-skills
+```
+
+> **Note:** Extension-based installation is currently only supported in Copilot Shell (cosh).
+
 ### RPM
 
 ```bash
