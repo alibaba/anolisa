@@ -25,7 +25,7 @@ import * as os from 'node:os';
 
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  EXTENSIONS_CONFIG_FILENAME,
+  findExtensionConfigFilename,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
 } from './variables.js';
@@ -245,16 +245,16 @@ async function convertGeminiOrClaudeExtension(
   pluginName?: string,
 ) {
   let newExtensionDir = extensionDir;
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-  } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
-    ).convertedDir;
+  const configFilePath = path.join(extensionDir, findExtensionConfigFilename(extensionDir));
+  if (!fs.existsSync(configFilePath)) {
+    if (isGeminiExtensionConfig(extensionDir)) {
+      newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
+        .convertedDir;
+    } else if (pluginName) {
+      newExtensionDir = (
+        await convertClaudePluginPackage(extensionDir, pluginName)
+      ).convertedDir;
+    }
   }
   // Claude plugin conversion not yet implemented
   return newExtensionDir;
@@ -675,7 +675,7 @@ export class ExtensionManager {
 
   loadExtensionConfig(context: LoadExtensionContext): ExtensionConfig {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
-    const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+    const configFilePath = path.join(extensionDir, findExtensionConfigFilename(extensionDir));
     if (!fs.existsSync(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
