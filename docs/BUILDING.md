@@ -19,7 +19,8 @@ anolisa/
 │   ├── agent-sec-core/      # Agent security sandbox (Rust + Python)
 │   └── agentsight/          # eBPF observability/audit agent (Rust, optional)
 ├── scripts/
-│   ├── build-all.sh         # Unified build entry (you will provide this script)
+│   ├── build-all.sh         # Unified build entry
+│   └── rpm-build.sh         # Unified RPM build script
 ├── tests/
 │   └── run-all-tests.sh     # Unified test entry
 ├── Makefile
@@ -46,6 +47,8 @@ cd anolisa
 
 Then run the build script. By default it installs dependencies, builds, and installs to the system:
 
+> **Tip:** Each option below is a standalone command — just pick the one that fits your use case. If you use the unified script, you can skip the [Component-by-Component Build](#4-component-by-component-build) section below entirely.
+
 ```bash
 # Default: install deps + build + install to system (recommended for most users)
 ./scripts/build-all.sh
@@ -58,9 +61,6 @@ Then run the build script. By default it installs dependencies, builds, and inst
 
 # Install dependencies only (useful for CI or manual builds)
 ./scripts/build-all.sh --deps-only
-```
-
-d. Install dependencies and build selected components (without agentsight)
 
 # Build and install selected components only
 ./scripts/build-all.sh --component cosh --component sec-core
@@ -68,8 +68,6 @@ d. Install dependencies and build selected components (without agentsight)
 # Include optional agentsight
 ./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
 ```
-
-> **Tip:** Each option above is a standalone command — just pick the one that fits your use case. If you use the unified script, you can skip the [Component-by-Component Build](#4-component-by-component-build) section below entirely.
 
 ### 3.1 Script Options
 
@@ -94,7 +92,7 @@ d. Install dependencies and build selected components (without agentsight)
 
 > **You can skip this section** if you already used the unified build script above. The script handles all dependency installation, building, and system installation automatically.
 
-If you prefer to set up each toolchain and build each component manually, follow the four steps below.
+If you prefer to set up each toolchain and build each component manually, follow the steps below.
 
 ### 4.1 Install Dependencies
 
@@ -290,22 +288,16 @@ make build
 
 Artifact: `dist/cli.js`
 
-Run options:
-
-**Run**
-
 ```bash
+# Run directly
 node dist/cli.js
-```
 
 # Or install to system PATH (creates cosh/co/copilot commands)
-sudo make install PREFIX=/usr/local
+sudo make install
 cosh
 ```
 
 #### b) os-skills
-
-#### 4.2.2 os-skills
 
 **Install**
 

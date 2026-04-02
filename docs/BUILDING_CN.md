@@ -21,6 +21,7 @@ anolisa/
 │   └── agentsight/          # eBPF 可观测/审计引擎（Rust，可选）
 ├── scripts/
 │   ├── build-all.sh         # 统一构建入口
+│   └── rpm-build.sh         # 统一 RPM 构建脚本
 ├── tests/
 │   └── run-all-tests.sh     # 统一测试入口
 ├── Makefile
@@ -47,6 +48,8 @@ cd anolisa
 
 克隆完成后，运行构建脚本。默认会安装依赖、构建并安装到系统：
 
+> **提示：** 以下每个方式都是独立的命令，根据自己的需求选择一个执行即可。如果使用了统一构建脚本，可以跳过下方的[分组件构建](#4-分组件构建)部分。
+
 ```bash
 # 默认：安装依赖 + 构建 + 安装到系统（推荐大多数用户使用）
 ./scripts/build-all.sh
@@ -59,9 +62,6 @@ cd anolisa
 
 # 仅安装依赖（适用于 CI 或手动构建场景）
 ./scripts/build-all.sh --deps-only
-```
-
-d. 安装依赖并构建指定组件（不含 agentsight）
 
 # 仅构建并安装指定组件
 ./scripts/build-all.sh --component cosh --component sec-core
@@ -69,8 +69,6 @@ d. 安装依赖并构建指定组件（不含 agentsight）
 # 包含可选的 agentsight
 ./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
 ```
-
-> **提示：** 以上每个方式都是独立的命令，根据自己的需求选择一个执行即可。如果使用了统一构建脚本，可以跳过下方的[分组件构建](#4-分组件构建)部分。
 
 ### 3.1 脚本选项
 
@@ -95,7 +93,7 @@ d. 安装依赖并构建指定组件（不含 agentsight）
 
 > **如果已使用上方的统一构建脚本，可以跳过本节。** 脚本会自动完成依赖安装、构建和系统安装的所有步骤。
 
-如果你希望手动设置各工具链并逐个构建组件，请按以下四个步骤操作。
+如果你希望手动设置各工具链并逐个构建组件，请按以下步骤操作。
 
 ### 4.1 安装依赖
 
@@ -291,24 +289,16 @@ make build
 
 产物：`dist/cli.js`
 
-运行方式：
-
-**运行**
-
 ```bash
+# 直接运行
 node dist/cli.js
-```
-
-b. 添加持久的 `co` 别名到 shell
 
 # 或安装到系统 PATH（创建 cosh/co/copilot 命令）
-sudo make install PREFIX=/usr/local
+sudo make install
 cosh
 ```
 
 #### b) os-skills
-
-#### 4.2.2 os-skills
 
 **安装**
 
