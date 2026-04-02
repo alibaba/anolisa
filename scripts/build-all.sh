@@ -214,11 +214,15 @@ install_node() {
     # Install nvm itself if still not available
     if ! cmd_exists nvm; then
         info "Installing nvm ..."
-        if ! timeout 60 bash -c "curl -fsSL --connect-timeout 15 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"; then
-            warn "GitHub unreachable or timed out, trying Gitee mirror ..."
-            curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
-        fi
+        curl -fsSL --connect-timeout 15 --max-time 60 \
+            https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash 2>/dev/null || true
         _source_nvm
+        if ! cmd_exists nvm; then
+            warn "GitHub unreachable or timed out, trying Gitee mirror ..."
+            curl -fsSL --connect-timeout 15 --max-time 60 \
+                https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash 2>/dev/null || true
+            _source_nvm
+        fi
     fi
     cmd_exists nvm || die "Failed to install nvm"
 
@@ -355,14 +359,25 @@ install_rust() {
     sudo $PKG_INSTALL gcc make 2>/dev/null || true
 
     # Multi-level mirror fallback: official → Aliyun internal → Aliyun public → rsproxy.cn
-    if ! curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://sh.rustup.rs | sh -s -- -y; then
-        warn "rustup.rs unreachable, trying China mirrors ..."
-        if ! curl -sSf --connect-timeout 5 http://mirrors.cloud.aliyuncs.com/repo/rust/rustup-init.sh | sh -s -- -y 2>/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://mirrors.aliyun.com/repo/rust/rustup-init.sh | sh -s -- -y \
-                || curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
-        fi
-    fi
+    curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 \
+        https://sh.rustup.rs | sh -s -- -y 2>/dev/null || true
     _source_cargo
+    if ! cmd_exists rustc; then
+        warn "rustup.rs unreachable, trying China mirrors ..."
+        curl -sSf --connect-timeout 15 --max-time 60 \
+            http://mirrors.cloud.aliyuncs.com/repo/rust/rustup-init.sh | sh -s -- -y 2>/dev/null || true
+        _source_cargo
+    fi
+    if ! cmd_exists rustc; then
+        curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 \
+            https://mirrors.aliyun.com/repo/rust/rustup-init.sh | sh -s -- -y 2>/dev/null || true
+        _source_cargo
+    fi
+    if ! cmd_exists rustc; then
+        curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 \
+            https://rsproxy.cn/rustup-init.sh | sh -s -- -y 2>/dev/null || true
+        _source_cargo
+    fi
 
     # Final check
     if _rust_ver_ok; then
@@ -394,27 +409,42 @@ _configure_npm_mirror() {
 }
 
 _configure_cargo_mirror() {
-    # Skip if user already has a custom registry configured
+    # Detect network: Aliyun internal (ECS VPC) vs public internet
+    local _aliyun_internal=false
+    if curl -sSf --connect-timeout 3 http://mirrors.cloud.aliyuncs.com/ &>/dev/null; then
+        _aliyun_internal=true
+    fi
+
+    # ── 1. Rustup toolchain distribution mirror ──
+    # Ensures rustup downloads from a reachable mirror (e.g. when
+    # rust-toolchain.toml triggers an auto-install of a pinned version).
+    if [[ -z "${RUSTUP_DIST_SERVER:-}" ]]; then
+        export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+        export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+        info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
+    fi
+
+    # ── 2. crates.io registry mirror ──
     local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
     local cargo_config="$cargo_home/config.toml"
     local cargo_config_legacy="$cargo_home/config"
+    # Skip if user already has a custom registry configured
     if [[ -f "$cargo_config" ]] && grep -q '\[source\.' "$cargo_config" 2>/dev/null; then
-        info "Existing cargo registry config found, skipping mirror setup"
+        info "Existing cargo registry config found, skipping crates.io mirror setup"
         return 0
     fi
     if [[ -f "$cargo_config_legacy" ]] && grep -q '\[source\.' "$cargo_config_legacy" 2>/dev/null; then
-        info "Existing cargo registry config found, skipping mirror setup"
+        info "Existing cargo registry config found, skipping crates.io mirror setup"
         return 0
     fi
 
-    # Detect best mirror: try Aliyun internal first (ECS VPC), then public
     local mirror_url
-    if curl -sSf --connect-timeout 3 http://mirrors.cloud.aliyuncs.com/ &>/dev/null; then
+    if $_aliyun_internal; then
         mirror_url="sparse+http://mirrors.cloud.aliyuncs.com/crates.io-index/"
-        info "Aliyun internal network detected, using internal crates.io mirror"
+        info "Using Aliyun internal crates.io mirror"
     else
         mirror_url="sparse+https://mirrors.aliyun.com/crates.io-index/"
-        info "Configuring Aliyun public crates.io mirror"
+        info "Using Aliyun public crates.io mirror"
     fi
 
     mkdir -p "$cargo_home"
@@ -464,15 +494,22 @@ install_uv() {
 
     # 3. Fallback: upstream installer (astral.sh → GitHub)
     info "Installing uv via upstream installer ..."
-    if ! curl -LsSf --connect-timeout 15 https://astral.sh/uv/install.sh | sh; then
-        warn "astral.sh unreachable, trying GitHub mirror ..."
-        curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-installer.sh | sh
-    fi
+    curl -LsSf --connect-timeout 15 --max-time 60 \
+        https://astral.sh/uv/install.sh | sh 2>/dev/null || true
     if [[ -f "$HOME/.local/bin/env" ]]; then
         # shellcheck source=/dev/null
         source "$HOME/.local/bin/env"
     fi
     export PATH="$HOME/.local/bin:$PATH"
+    if ! cmd_exists uv; then
+        warn "astral.sh unreachable, trying GitHub mirror ..."
+        curl -LsSf --connect-timeout 15 --max-time 60 \
+            https://github.com/astral-sh/uv/releases/latest/download/uv-installer.sh | sh 2>/dev/null || true
+        if [[ -f "$HOME/.local/bin/env" ]]; then
+            # shellcheck source=/dev/null
+            source "$HOME/.local/bin/env"
+        fi
+    fi
 
     # Final check
     if cmd_exists uv; then
@@ -588,14 +625,11 @@ build_cosh() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "npm install ..."
-    npm install
+    info "make deps ..."
+    make deps
 
-    info "npm run build ..."
-    npm run build
-
-    info "npm run bundle ..."
-    npm run bundle
+    info "make build ..."
+    make build
 
     if [[ -f dist/cli.js ]]; then
         ARTIFACT_NAMES+=("copilot-shell")
