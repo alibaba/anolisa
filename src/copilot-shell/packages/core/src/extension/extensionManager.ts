@@ -193,7 +193,10 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   return Object.freeze(rest);
 }
 
-function getSkillDirs(config: ExtensionConfig, extensionPath: string): string[] {
+function getSkillDirs(
+  config: ExtensionConfig,
+  extensionPath: string,
+): string[] {
   const dirs = config.skills
     ? Array.isArray(config.skills)
       ? config.skills
@@ -867,7 +870,9 @@ export class ExtensionManager {
 
         const skills = (
           await Promise.all(
-            getSkillDirs(newExtensionConfig!, localSourcePath).map(loadSkillsFromDir),
+            getSkillDirs(newExtensionConfig!, localSourcePath).map(
+              loadSkillsFromDir,
+            ),
           )
         ).flat();
         const previousSkills = previous?.skills ?? [];
