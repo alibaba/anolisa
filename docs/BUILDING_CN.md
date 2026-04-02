@@ -97,17 +97,17 @@ cd anolisa
 
 ### 4.1 安装依赖
 
-#### a) Node.js（用于 copilot-shell）
+#### 4.1.1 Node.js（用于 copilot-shell）
 
 要求：Node.js >= 20、npm >= 10。
 
-a. Alinux 4（已验证）
+- **Alinux 4（已验证）**
 
 ```bash
 sudo dnf install -y nodejs npm make gcc-c++
 ```
 
-b. 其他发行版：nvm
+- **其他发行版：nvm**
 
 ```bash
 # 如果 Node.js >= 20 已安装则跳过
@@ -133,18 +133,18 @@ npm -v    # 期望：10.x.x 或更高
 
 ---
 
-#### b) Rust（用于 agent-sec-core 和 agentsight）
+#### 4.1.2 Rust（用于 agent-sec-core 和 agentsight）
 
 要求：agent-sec-core 需要 Rust >= 1.91.0；agentsight 需要 Rust >= 1.80。
 
-**Alinux 4（已验证）** — 系统 `rust` 包版本低于 1.91.0，无法直接使用，请用下方 rustup 安装。
+- **Alinux 4（已验证）** — 系统 `rust` 包版本低于 1.91.0，无法直接使用，请用下方 rustup 安装。
 仅需通过 dnf 安装构建工具：
 
 ```bash
 sudo dnf install -y gcc make
 ```
 
-b. Ubuntu 24.04（已验证）
+- **Ubuntu 24.04（已验证）**
 
 ```bash
 sudo apt install -y rustc-1.91 cargo-1.91 gcc make
@@ -153,7 +153,7 @@ sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
 
 > 部分发行版的系统 `rust` 包版本可能低于 1.91.0。如果构建因版本不匹配而失败，请改用下方的 rustup。
 
-**其他发行版 / Alinux 4：rustup（推荐）**
+- **其他发行版 / Alinux 4：rustup（推荐）**
 
 ```bash
 # 如果 Rust 已安装则跳过
@@ -192,18 +192,18 @@ registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
 
 ---
 
-#### c) Python 和 uv（用于 agent-sec-core 和 os-skills）
+#### 4.1.3 Python 和 uv（用于 agent-sec-core 和 os-skills）
 
 要求：Python >= 3.12。
 
-a. Alinux 4（已验证）
+- **Alinux 4（已验证）**
 
 ```bash
 pip3 install uv
 uv python install 3.12
 ```
 
-b. Ubuntu 24.04（已验证）
+- **Ubuntu 24.04（已验证）**
 
 ```bash
 sudo apt install -y pipx
@@ -212,7 +212,7 @@ source "$HOME/.$(basename "$SHELL")rc"
 pipx install uv
 ```
 
-c. 其他发行版：uv
+- **其他发行版：uv**
 
 ```bash
 # 如果 uv 已安装则跳过
@@ -237,18 +237,18 @@ uv python find 3.12   # 期望：输出 python3.12 可执行文件路径
 
 ---
 
-#### d) AgentSight 系统依赖（可选，需包管理器）
+#### 4.1.4 AgentSight 系统依赖（可选，需包管理器）
 
 AgentSight 是可选组件，提供基于 eBPF 的审计和可观测性能力，不是 ANOLISA 核心功能所必需的。如果你选择构建它，需要以下系统级依赖：
 
-a. dnf（Alinux / Anolis OS / Fedora / RHEL / CentOS 等）
+- **dnf（Alinux / Anolis OS / Fedora / RHEL / CentOS 等）**
 
 ```bash
 sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
 sudo dnf install -y kernel-devel-$(uname -r)
 ```
 
-b. apt（Debian / Ubuntu）
+- **apt（Debian / Ubuntu）**
 
 ```bash
 sudo apt-get update -y
@@ -257,13 +257,13 @@ sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libssl-dev p
 
 > 部分发行版没有单独的 perl-core 包，这是正常的。
 
-c. 内核要求
+- **内核要求**
 
 AgentSight 要求 Linux 内核 >= 5.10 且启用 BTF（`CONFIG_DEBUG_INFO_BTF=y`）。
 
 ---
 
-#### e) 版本检查
+#### 4.1.5 版本检查
 
 ```bash
 node -v            # v20.x.x
@@ -279,7 +279,7 @@ clang --version    # clang version 14+
 
 ### 4.2 构建组件
 
-#### a) copilot-shell
+#### 4.2.1 copilot-shell
 
 ```bash
 cd src/copilot-shell
@@ -298,7 +298,7 @@ sudo make install
 cosh
 ```
 
-#### b) os-skills
+#### 4.2.2 os-skills
 
 **安装**
 
@@ -312,13 +312,13 @@ cosh
 
 安装方式：
 
-a. 使用构建脚本自动部署
+- **使用构建脚本自动部署**
 
 ```bash
 ./scripts/build-all.sh --component skills
 ```
 
-b. 手动部署（用户级）
+- **手动部署（用户级）**
 
 ```bash
 mkdir -p ~/.copilot/skills
@@ -332,7 +332,7 @@ find src/os-skills -name 'SKILL.md' -exec sh -c \
 co /skills
 ```
 
-#### c) agent-sec-core（仅 Linux）
+#### 4.2.3 agent-sec-core（仅 Linux）
 
 ```bash
 cd src/agent-sec-core
@@ -347,7 +347,7 @@ make build-sandbox
 sudo make install
 ```
 
-#### d) agentsight（可选，仅 Linux）
+#### 4.2.4 agentsight（可选，仅 Linux）
 
 > 注意：AgentSight 是可选组件，提供基于 eBPF 的审计和可观测性能力，不是 ANOLISA 核心功能所必需的。
 
@@ -366,7 +366,7 @@ sudo make install
 
 ### 4.3 运行测试（推荐）
 
-#### a) 统一入口
+#### 4.3.1 统一入口
 
 ```bash
 ./tests/run-all-tests.sh
@@ -375,7 +375,7 @@ sudo make install
 ./tests/run-all-tests.sh --filter sight
 ```
 
-#### b) 分组件测试
+#### 4.3.2 分组件测试
 
 ```bash
 # copilot-shell

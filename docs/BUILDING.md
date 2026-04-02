@@ -96,17 +96,17 @@ If you prefer to set up each toolchain and build each component manually, follow
 
 ### 4.1 Install Dependencies
 
-#### a) Node.js (for copilot-shell)
+#### 4.1.1 Node.js (for copilot-shell)
 
 Required: Node.js >= 20, npm >= 10.
 
-a. Alinux 4 (verified)
+- **Alinux 4 (verified)**
 
 ```bash
 sudo dnf install -y nodejs npm make gcc-c++
 ```
 
-b. Other distros: nvm
+- **Other distros: nvm**
 
 ```bash
 # Skip if Node.js >= 20 is already installed
@@ -132,18 +132,18 @@ npm -v    # expected: 10.x.x or higher
 
 ---
 
-#### b) Rust (for agent-sec-core and agentsight)
+#### 4.1.2 Rust (for agent-sec-core and agentsight)
 
 Required: agent-sec-core needs Rust >= 1.91.0; agentsight needs Rust >= 1.80.
 
-**Alinux 4 (verified)** — the system `rust` package is below 1.91.0; use rustup instead (see below).
+- **Alinux 4 (verified)** — the system `rust` package is below 1.91.0; use rustup instead (see below).
 Only install the build tools from dnf:
 
 ```bash
 sudo dnf install -y gcc make
 ```
 
-b. Ubuntu 24.04 (verified)
+- **Ubuntu 24.04 (verified)**
 
 ```bash
 sudo apt install -y rustc-1.91 cargo-1.91 gcc make
@@ -152,7 +152,7 @@ sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
 
 > The system `rust` package on some distros may be older than 1.91.0. If the build fails due to version mismatch, use rustup below.
 
-**Other distros / Alinux 4: rustup (recommended)**
+- **Other distros / Alinux 4: rustup (recommended)**
 
 ```bash
 # Skip if Rust is already installed
@@ -191,18 +191,18 @@ registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
 
 ---
 
-#### c) Python and uv (for agent-sec-core and os-skills)
+#### 4.1.3 Python and uv (for agent-sec-core and os-skills)
 
 Required: Python >= 3.12.
 
-a. Alinux 4 (verified)
+- **Alinux 4 (verified)**
 
 ```bash
 pip3 install uv
 uv python install 3.12
 ```
 
-b. Ubuntu 24.04 (verified)
+- **Ubuntu 24.04 (verified)**
 
 ```bash
 sudo apt install -y pipx
@@ -211,7 +211,7 @@ source "$HOME/.$(basename "$SHELL")rc"
 pipx install uv
 ```
 
-c. Other distros: uv
+- **Other distros: uv**
 
 ```bash
 # Skip if uv is already installed
@@ -236,18 +236,18 @@ uv python find 3.12   # expected: path to python3.12 binary
 
 ---
 
-#### d) AgentSight System Dependencies (Optional, Package Manager Required)
+#### 4.1.4 AgentSight System Dependencies (Optional, Package Manager Required)
 
 AgentSight is an optional component that provides eBPF-based audit and observability capabilities. It is not required for core ANOLISA functionality. If you choose to build it, the following system-level dependencies are needed:
 
-a. dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)
+- **dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)**
 
 ```bash
 sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
 sudo dnf install -y kernel-devel-$(uname -r)
 ```
 
-b. apt (Debian / Ubuntu)
+- **apt (Debian / Ubuntu)**
 
 ```bash
 sudo apt-get update -y
@@ -256,13 +256,13 @@ sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libssl-dev p
 
 > Some distributions do not provide a separate perl-core package. That is expected.
 
-c. Kernel Requirement
+- **Kernel Requirement**
 
 AgentSight requires Linux kernel >= 5.10 and BTF enabled (`CONFIG_DEBUG_INFO_BTF=y`).
 
 ---
 
-#### e) Version Check
+#### 4.1.5 Version Check
 
 ```bash
 node -v            # v20.x.x
@@ -278,7 +278,7 @@ clang --version    # clang version 14+
 
 ### 4.2 Build Components
 
-#### a) copilot-shell
+#### 4.2.1 copilot-shell
 
 ```bash
 cd src/copilot-shell
@@ -297,7 +297,7 @@ sudo make install
 cosh
 ```
 
-#### b) os-skills
+#### 4.2.2 os-skills
 
 **Install**
 
@@ -311,13 +311,13 @@ Skill search paths (Copilot Shell discovers skills in the following priority ord
 
 Install options:
 
-a. Using the build script (automatic)
+- **Using the build script (automatic)**
 
 ```bash
 ./scripts/build-all.sh --component skills
 ```
 
-b. Manual deployment (user-level)
+- **Manual deployment (user-level)**
 
 ```bash
 mkdir -p ~/.copilot/skills
@@ -331,7 +331,7 @@ find src/os-skills -name 'SKILL.md' -exec sh -c \
 co /skills
 ```
 
-#### c) agent-sec-core (Linux only)
+#### 4.2.3 agent-sec-core (Linux only)
 
 ```bash
 cd src/agent-sec-core
@@ -346,7 +346,7 @@ Artifact: `linux-sandbox/target/release/linux-sandbox`
 sudo make install
 ```
 
-#### d) agentsight (Optional, Linux only)
+#### 4.2.4 agentsight (Optional, Linux only)
 
 > Note: AgentSight is an optional component. It provides eBPF-based audit and observability capabilities but is not required for core ANOLISA functionality.
 
@@ -365,7 +365,7 @@ sudo make install
 
 ### 4.3 Run Tests (Recommended)
 
-#### a) Unified Entry
+#### 4.3.1 Unified Entry
 
 ```bash
 ./tests/run-all-tests.sh
@@ -374,7 +374,7 @@ sudo make install
 ./tests/run-all-tests.sh --filter sight
 ```
 
-#### b) Per Component
+#### 4.3.2 Per Component
 
 ```bash
 # copilot-shell
