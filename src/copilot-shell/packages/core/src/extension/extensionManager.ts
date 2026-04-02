@@ -193,6 +193,15 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   return Object.freeze(rest);
 }
 
+function getSkillDirs(config: ExtensionConfig, extensionPath: string): string[] {
+  const dirs = config.skills
+    ? Array.isArray(config.skills)
+      ? config.skills
+      : [config.skills]
+    : ['skills'];
+  return dirs.map((d) => path.join(extensionPath, d));
+}
+
 function getContextFileNames(config: ExtensionConfig): string[] {
   if (!config.contextFileName || config.contextFileName.length === 0) {
     return ['COPILOT.md'];
@@ -645,9 +654,11 @@ export class ExtensionManager {
         )
         .filter((contextFilePath) => fs.existsSync(contextFilePath));
 
-      extension.skills = await loadSkillsFromDir(
-        `${effectiveExtensionPath}/skills`,
-      );
+      extension.skills = (
+        await Promise.all(
+          getSkillDirs(config, effectiveExtensionPath).map(loadSkillsFromDir),
+        )
+      ).flat();
       extension.agents = await loadSubagentFromDir(
         `${effectiveExtensionPath}/agents`,
       );
@@ -854,7 +865,11 @@ export class ExtensionManager {
         );
         const previousCommands = previous?.commands ?? [];
 
-        const skills = await loadSkillsFromDir(`${localSourcePath}/skills`);
+        const skills = (
+          await Promise.all(
+            getSkillDirs(newExtensionConfig!, localSourcePath).map(loadSkillsFromDir),
+          )
+        ).flat();
         const previousSkills = previous?.skills ?? [];
 
         const subagents = await loadSubagentFromDir(
