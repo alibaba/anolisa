@@ -113,14 +113,12 @@ sudo dnf install -y nodejs npm make gcc-c++
 if command -v node &>/dev/null && node -v | grep -qE '^v(2[0-9]|[3-9][0-9])'; then
   echo "Node.js $(node -v) already installed, skipping"
 else
-  # Install nvm (fallback to Gitee mirror if GitHub is unreachable)
-  curl -fsSL --connect-timeout 15 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
-    || curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
+  # Install nvm from Gitee mirror
+  curl -fsSL --connect-timeout 15 --max-time 60 https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
   source "$HOME/.$(basename "$SHELL")rc"
 
-  # Install and activate Node.js 20+
-  # Use npmmirror.com if default download is slow
-  # export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
+  # Configure npmmirror for faster Node.js downloads
+  export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
   nvm install 20
   nvm use 20
 fi
@@ -159,11 +157,8 @@ sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
 if command -v rustc &>/dev/null && command -v cargo &>/dev/null; then
   echo "Rust $(rustc --version) already installed, skipping"
 else
-  # Install Rust (fallback: Aliyun internal → Aliyun public → rsproxy.cn)
-  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://sh.rustup.rs | sh -s -- -y \
-    || curl -sSf --connect-timeout 5 http://mirrors.cloud.aliyuncs.com/repo/rust/rustup-init.sh | sh -s -- -y \
-    || curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://mirrors.aliyun.com/repo/rust/rustup-init.sh | sh -s -- -y \
-    || curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
+  # Install Rust via rsproxy.cn (China mirror)
+  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 https://rsproxy.cn/rustup-init.sh | sh -s -- -y
   source "$HOME/.cargo/env"
 fi
 
@@ -173,6 +168,17 @@ cargo --version   # expected: cargo 1.91.0 or higher
 ```
 
 > The repository uses a pinned toolchain (`rust-toolchain.toml`) for agent-sec-core. If the system Rust version does not match, rustup will automatically download the correct version when building inside the repo.
+
+**Configure Rustup distribution mirror (recommended for China users)**
+
+If building triggers auto-download of a pinned Rust toolchain (via `rust-toolchain.toml`) and it times out, set the Rustup distribution mirror:
+
+```bash
+export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+```
+
+Add these lines to your shell rc file (`~/.bashrc` or `~/.zshrc`) to persist them. The build script (`build-all.sh`) configures this automatically.
 
 **Configure crates.io mirror (recommended for China users)**
 
@@ -186,8 +192,6 @@ replace-with = 'aliyun'
 [source.aliyun]
 registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
 ```
-
-> On Aliyun ECS (VPC), replace `mirrors.aliyun.com` with `mirrors.cloud.aliyuncs.com` for faster internal access. See [Aliyun Rustup Mirror](https://developer.aliyun.com/mirror/rustup) for details.
 
 ---
 
@@ -218,9 +222,8 @@ pipx install uv
 if command -v uv &>/dev/null; then
   echo "uv $(uv --version) already installed, skipping"
 else
-  # Install uv (fallback to GitHub mirror if astral.sh is unreachable)
-  curl -LsSf --connect-timeout 15 https://astral.sh/uv/install.sh | sh \
-    || curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-installer.sh | sh
+  # Install uv
+  curl -LsSf --connect-timeout 15 --max-time 60 https://astral.sh/uv/install.sh | sh
   source "$HOME/.$(basename "$SHELL")rc"
 fi
 
@@ -380,7 +383,7 @@ sudo make install
 
 ```bash
 # copilot-shell
-cd src/copilot-shell && npm test
+cd src/copilot-shell && make test
 
 # agent-sec-core
 cd src/agent-sec-core

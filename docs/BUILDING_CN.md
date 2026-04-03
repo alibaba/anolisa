@@ -114,14 +114,12 @@ sudo dnf install -y nodejs npm make gcc-c++
 if command -v node &>/dev/null && node -v | grep -qE '^v(2[0-9]|[3-9][0-9])'; then
   echo "Node.js $(node -v) 已安装，跳过"
 else
-  # 安装 nvm（GitHub 不可达时自动回退到 Gitee 镜像）
-  curl -fsSL --connect-timeout 15 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
-    || curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
+  # 从 Gitee 镜像安装 nvm
+  curl -fsSL --connect-timeout 15 --max-time 60 https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
   source "$HOME/.$(basename "$SHELL")rc"
 
-  # 安装并激活 Node.js 20+
-  # 如果下载较慢，可使用 npmmirror.com 镜像
-  # export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
+  # 配置 npmmirror 加速 Node.js 下载
+  export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
   nvm install 20
   nvm use 20
 fi
@@ -160,11 +158,8 @@ sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
 if command -v rustc &>/dev/null && command -v cargo &>/dev/null; then
   echo "Rust $(rustc --version) 已安装，跳过"
 else
-  # 安装 Rust（回退链：阿里云内网 → 阿里云公网 → rsproxy.cn）
-  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://sh.rustup.rs | sh -s -- -y \
-    || curl -sSf --connect-timeout 5 http://mirrors.cloud.aliyuncs.com/repo/rust/rustup-init.sh | sh -s -- -y \
-    || curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 https://mirrors.aliyun.com/repo/rust/rustup-init.sh | sh -s -- -y \
-    || curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
+  # 通过 rsproxy.cn 镜像安装 Rust
+  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 https://rsproxy.cn/rustup-init.sh | sh -s -- -y
   source "$HOME/.cargo/env"
 fi
 
@@ -174,6 +169,17 @@ cargo --version   # 期望：cargo 1.91.0 或更高
 ```
 
 > 仓库为 agent-sec-core 固定了工具链版本（`rust-toolchain.toml`）。如果系统 Rust 版本不匹配，rustup 会在仓库内构建时自动下载正确版本。
+
+**配置 Rustup 分发镜像（国内用户推荐）**
+
+如果构建时触发了固定工具链的自动下载（通过 `rust-toolchain.toml`）并且超时，请设置 Rustup 分发镜像：
+
+```bash
+export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+```
+
+将以上内容添加到 shell 配置文件（`~/.bashrc` 或 `~/.zshrc`）中以使其永久生效。构建脚本（`build-all.sh`）会自动配置此项。
 
 **配置 crates.io 镜像（国内用户推荐）**
 
@@ -187,8 +193,6 @@ replace-with = 'aliyun'
 [source.aliyun]
 registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
 ```
-
-> 在阿里云 ECS（VPC 网络）上，可将 `mirrors.aliyun.com` 替换为 `mirrors.cloud.aliyuncs.com` 以使用内网加速。详见[阿里云 Rustup 镜像](https://developer.aliyun.com/mirror/rustup)。
 
 ---
 
@@ -219,9 +223,8 @@ pipx install uv
 if command -v uv &>/dev/null; then
   echo "uv $(uv --version) 已安装，跳过"
 else
-  # 安装 uv（astral.sh 不可达时自动回退到 GitHub 镜像）
-  curl -LsSf --connect-timeout 15 https://astral.sh/uv/install.sh | sh \
-    || curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-installer.sh | sh
+  # 安装 uv
+  curl -LsSf --connect-timeout 15 --max-time 60 https://astral.sh/uv/install.sh | sh
   source "$HOME/.$(basename "$SHELL")rc"
 fi
 
@@ -381,7 +384,7 @@ sudo make install
 
 ```bash
 # copilot-shell
-cd src/copilot-shell && npm test
+cd src/copilot-shell && make test
 
 # agent-sec-core
 cd src/agent-sec-core
