@@ -12,6 +12,7 @@ import type {
 import {
   AuthEvent,
   AuthType,
+  encryptCredential,
   getErrorMessage,
   logAuth,
   saveAliyunCredentials,
@@ -146,7 +147,7 @@ export const useAuthCommand = (
             settings.setValue(
               authTypeScope,
               'security.auth.apiKey',
-              credentials.apiKey,
+              encryptCredential(credentials.apiKey),
             );
           }
           if (credentials?.baseUrl != null) {

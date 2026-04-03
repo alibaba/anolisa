@@ -29,7 +29,11 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { AuthState } from '../types.js';
-import { AuthType, loadAliyunCredentials } from '@copilot-shell/core';
+import {
+  AuthType,
+  decryptCredential,
+  loadAliyunCredentials,
+} from '@copilot-shell/core';
 import process from 'node:process';
 import { useState, useEffect } from 'react';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
@@ -103,7 +107,10 @@ export const DialogManager = ({
     const fromSettings = settings.merged.security?.auth;
     const modelSettings = settings.merged.model;
     return {
-      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
+      apiKey:
+        decryptCredential(fromSettings?.apiKey ?? '') ||
+        process.env['OPENAI_API_KEY'] ||
+        '',
       baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
       // 优先使用 openaiModel（按认证方式隔离），避免显示其他认证方式的模型名称
       model:

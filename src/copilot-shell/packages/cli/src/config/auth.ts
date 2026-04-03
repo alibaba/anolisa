@@ -85,7 +85,9 @@ function hasApiKeyForAuth(
     }
   }
 
-  // Also check settings.security.auth.apiKey as fallback (only for default env key)
+  // Also check settings.security.auth.apiKey as fallback (only for default env key).
+  // Note: encrypted values (prefixed with "enc:") are truthy, which correctly
+  // indicates that the key exists (stored encrypted in settings.json).
   if (settings.security?.auth?.apiKey) {
     return {
       hasKey: true,

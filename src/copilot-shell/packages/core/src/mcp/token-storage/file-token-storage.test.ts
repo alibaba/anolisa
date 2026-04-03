@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { FileTokenStorage } from './file-token-storage.js';
 import type { OAuthCredentials } from './types.js';
 
@@ -30,6 +31,31 @@ vi.mock('node:os', () => ({
   userInfo: vi.fn(() => ({ username: 'test-user' })),
 }));
 
+/**
+ * Helper: encrypt data with a known key (matching what getOrCreateSalt produces)
+ * for feeding into mock readFile results.
+ */
+function encryptWithKey(text: string, key: Buffer): string {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag();
+  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
+}
+
+function decryptWithKey(encryptedData: string, key: Buffer): string {
+  const parts = encryptedData.split(':');
+  const iv = Buffer.from(parts[0], 'hex');
+  const authTag = Buffer.from(parts[1], 'hex');
+  const encrypted = parts[2];
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(authTag);
+  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+
 describe('FileTokenStorage', () => {
   let storage: FileTokenStorage;
   const mockFs = fs as unknown as {
@@ -38,6 +64,22 @@ describe('FileTokenStorage', () => {
     unlink: ReturnType<typeof vi.fn>;
     mkdir: ReturnType<typeof vi.fn>;
   };
+
+  // A fixed 32-byte salt for deterministic test encryption
+  const testSalt = crypto.randomBytes(32);
+  const testKey = crypto.scryptSync('qwen-code-oauth', testSalt, 32);
+
+  const saltPath = path.join(
+    '/home/test',
+    '.copilot-shell',
+    '.encryption-salt',
+  );
+  const tokenPath = path.join(
+    '/home/test',
+    '.copilot-shell',
+    'mcp-oauth-tokens-v2.json',
+  );
+
   const existingCredentials: OAuthCredentials = {
     serverName: 'existing-server',
     token: {
@@ -47,8 +89,40 @@ describe('FileTokenStorage', () => {
     updatedAt: Date.now() - 10000,
   };
 
+  /**
+   * Configure mock readFile to return the test salt for the salt path
+   * and a given value for the token file path.
+   */
+  function setupReadFileMock(
+    tokenFileResult?: string | Error | { code: string },
+  ) {
+    mockFs.readFile.mockImplementation((filePath: string) => {
+      if (filePath === saltPath) {
+        return Promise.resolve(testSalt);
+      }
+      if (filePath === tokenPath) {
+        if (tokenFileResult instanceof Error) {
+          return Promise.reject(tokenFileResult);
+        }
+        if (
+          tokenFileResult &&
+          typeof tokenFileResult === 'object' &&
+          'code' in tokenFileResult
+        ) {
+          return Promise.reject(tokenFileResult);
+        }
+        if (tokenFileResult !== undefined) {
+          return Promise.resolve(tokenFileResult);
+        }
+      }
+      return Promise.reject({ code: 'ENOENT' });
+    });
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue(undefined);
     storage = new FileTokenStorage('test-storage');
   });
 
@@ -57,8 +131,8 @@ describe('FileTokenStorage', () => {
   });
 
   describe('getCredentials', () => {
-    it('should throw error when file does not exist', async () => {
-      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    it('should throw error when token file does not exist', async () => {
+      setupReadFileMock({ code: 'ENOENT' });
 
       await expect(storage.getCredentials('test-server')).rejects.toThrow(
         'Token file does not exist',
@@ -76,10 +150,11 @@ describe('FileTokenStorage', () => {
         updatedAt: Date.now(),
       };
 
-      const encryptedData = storage['encrypt'](
+      const encryptedData = encryptWithKey(
         JSON.stringify({ 'test-server': credentials }),
+        testKey,
       );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      setupReadFileMock(encryptedData);
 
       const result = await storage.getCredentials('test-server');
       expect(result).toBeNull();
@@ -96,17 +171,18 @@ describe('FileTokenStorage', () => {
         updatedAt: Date.now(),
       };
 
-      const encryptedData = storage['encrypt'](
+      const encryptedData = encryptWithKey(
         JSON.stringify({ 'test-server': credentials }),
+        testKey,
       );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      setupReadFileMock(encryptedData);
 
       const result = await storage.getCredentials('test-server');
       expect(result).toEqual(credentials);
     });
 
     it('should throw error for corrupted files', async () => {
-      mockFs.readFile.mockResolvedValue('corrupted-data');
+      setupReadFileMock('corrupted-data');
 
       await expect(storage.getCredentials('test-server')).rejects.toThrow(
         'Token file corrupted',
@@ -116,12 +192,8 @@ describe('FileTokenStorage', () => {
 
   describe('setCredentials', () => {
     it('should save credentials with encryption', async () => {
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'existing-server': existingCredentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
-      mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      // Token file doesn't exist yet — setCredentials should start fresh
+      setupReadFileMock({ code: 'ENOENT' });
 
       const credentials: OAuthCredentials = {
         serverName: 'test-server',
@@ -134,23 +206,21 @@ describe('FileTokenStorage', () => {
 
       await storage.setCredentials(credentials);
 
-      expect(mockFs.mkdir).toHaveBeenCalledWith(
-        path.join('/home/test', '.copilot-shell'),
-        { recursive: true, mode: 0o700 },
+      // Find the writeFile call for the token file (not the salt file)
+      const tokenWriteCall = mockFs.writeFile.mock.calls.find(
+        (call: unknown[]) => call[0] === tokenPath,
       );
-      expect(mockFs.writeFile).toHaveBeenCalled();
-
-      const writeCall = mockFs.writeFile.mock.calls[0];
-      expect(writeCall[1]).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-      expect(writeCall[2]).toEqual({ mode: 0o600 });
+      expect(tokenWriteCall).toBeDefined();
+      expect(tokenWriteCall![1]).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+      expect(tokenWriteCall![2]).toEqual({ mode: 0o600 });
     });
 
     it('should update existing credentials', async () => {
-      const encryptedData = storage['encrypt'](
+      const encryptedData = encryptWithKey(
         JSON.stringify({ 'existing-server': existingCredentials }),
+        testKey,
       );
-      mockFs.readFile.mockResolvedValue(encryptedData);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      setupReadFileMock(encryptedData);
 
       const newCredentials: OAuthCredentials = {
         serverName: 'test-server',
@@ -163,9 +233,11 @@ describe('FileTokenStorage', () => {
 
       await storage.setCredentials(newCredentials);
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
-      const writeCall = mockFs.writeFile.mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1]);
+      const tokenWriteCall = mockFs.writeFile.mock.calls.find(
+        (call: unknown[]) => call[0] === tokenPath,
+      );
+      expect(tokenWriteCall).toBeDefined();
+      const decrypted = decryptWithKey(tokenWriteCall![1] as string, testKey);
       const saved = JSON.parse(decrypted);
 
       expect(saved['existing-server']).toEqual(existingCredentials);
@@ -174,8 +246,8 @@ describe('FileTokenStorage', () => {
   });
 
   describe('deleteCredentials', () => {
-    it('should throw when credentials do not exist', async () => {
-      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    it('should throw when token file does not exist', async () => {
+      setupReadFileMock({ code: 'ENOENT' });
 
       await expect(storage.deleteCredentials('test-server')).rejects.toThrow(
         'Token file does not exist',
@@ -192,17 +264,16 @@ describe('FileTokenStorage', () => {
         updatedAt: Date.now(),
       };
 
-      const encryptedData = storage['encrypt'](
+      const encryptedData = encryptWithKey(
         JSON.stringify({ 'test-server': credentials }),
+        testKey,
       );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      setupReadFileMock(encryptedData);
       mockFs.unlink.mockResolvedValue(undefined);
 
       await storage.deleteCredentials('test-server');
 
-      expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.copilot-shell', 'mcp-oauth-tokens-v2.json'),
-      );
+      expect(mockFs.unlink).toHaveBeenCalledWith(tokenPath);
     });
 
     it('should update file when other credentials remain', async () => {
@@ -224,19 +295,21 @@ describe('FileTokenStorage', () => {
         updatedAt: Date.now(),
       };
 
-      const encryptedData = storage['encrypt'](
+      const encryptedData = encryptWithKey(
         JSON.stringify({ server1: credentials1, server2: credentials2 }),
+        testKey,
       );
-      mockFs.readFile.mockResolvedValue(encryptedData);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      setupReadFileMock(encryptedData);
 
       await storage.deleteCredentials('server1');
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      const tokenWriteCall = mockFs.writeFile.mock.calls.find(
+        (call: unknown[]) => call[0] === tokenPath,
+      );
+      expect(tokenWriteCall).toBeDefined();
       expect(mockFs.unlink).not.toHaveBeenCalled();
 
-      const writeCall = mockFs.writeFile.mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1]);
+      const decrypted = decryptWithKey(tokenWriteCall![1] as string, testKey);
       const saved = JSON.parse(decrypted);
 
       expect(saved['server1']).toBeUndefined();
@@ -245,8 +318,8 @@ describe('FileTokenStorage', () => {
   });
 
   describe('listServers', () => {
-    it('should throw error when file does not exist', async () => {
-      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    it('should throw error when token file does not exist', async () => {
+      setupReadFileMock({ code: 'ENOENT' });
 
       await expect(storage.listServers()).rejects.toThrow(
         'Token file does not exist',
@@ -267,8 +340,11 @@ describe('FileTokenStorage', () => {
         },
       };
 
-      const encryptedData = storage['encrypt'](JSON.stringify(credentials));
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      const encryptedData = encryptWithKey(
+        JSON.stringify(credentials),
+        testKey,
+      );
+      setupReadFileMock(encryptedData);
 
       const result = await storage.listServers();
       expect(result).toEqual(['server1', 'server2']);
@@ -281,9 +357,7 @@ describe('FileTokenStorage', () => {
 
       await storage.clearAll();
 
-      expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.copilot-shell', 'mcp-oauth-tokens-v2.json'),
-      );
+      expect(mockFs.unlink).toHaveBeenCalledWith(tokenPath);
     });
 
     it('should not throw when file does not exist', async () => {
@@ -293,31 +367,75 @@ describe('FileTokenStorage', () => {
     });
   });
 
-  describe('encryption', () => {
-    it('should encrypt and decrypt data correctly', () => {
-      const original = 'test-data-123';
-      const encrypted = storage['encrypt'](original);
-      const decrypted = storage['decrypt'](encrypted);
+  describe('legacy migration', () => {
+    it('should decrypt with legacy key when new key fails', async () => {
+      // Encrypt with the legacy hostname-based key
+      const legacySalt = 'test-host-test-user-qwen-code';
+      const legacyKey = crypto.scryptSync('qwen-code-oauth', legacySalt, 32);
 
-      expect(decrypted).toBe(original);
-      expect(encrypted).not.toBe(original);
-      expect(encrypted).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-    });
+      const credentials: OAuthCredentials = {
+        serverName: 'legacy-server',
+        token: {
+          accessToken: 'legacy-token',
+          tokenType: 'Bearer',
+          expiresAt: Date.now() + 3600000,
+        },
+        updatedAt: Date.now(),
+      };
 
-    it('should produce different encrypted output each time', () => {
-      const original = 'test-data';
-      const encrypted1 = storage['encrypt'](original);
-      const encrypted2 = storage['encrypt'](original);
-
-      expect(encrypted1).not.toBe(encrypted2);
-      expect(storage['decrypt'](encrypted1)).toBe(original);
-      expect(storage['decrypt'](encrypted2)).toBe(original);
-    });
-
-    it('should throw on invalid encrypted data format', () => {
-      expect(() => storage['decrypt']('invalid-data')).toThrow(
-        'Invalid encrypted data format',
+      const legacyEncrypted = encryptWithKey(
+        JSON.stringify({ 'legacy-server': credentials }),
+        legacyKey,
       );
+
+      // Salt file returns our test salt (which won't match the legacy encryption)
+      // Token file returns legacy-encrypted data
+      mockFs.readFile.mockImplementation((filePath: string) => {
+        if (filePath === saltPath) {
+          return Promise.resolve(testSalt);
+        }
+        if (filePath === tokenPath) {
+          return Promise.resolve(legacyEncrypted);
+        }
+        return Promise.reject({ code: 'ENOENT' });
+      });
+
+      const result = await storage.getCredentials('legacy-server');
+      expect(result).toEqual(credentials);
+
+      // Should have re-encrypted and saved with the new key
+      const tokenWriteCall = mockFs.writeFile.mock.calls.find(
+        (call: unknown[]) => call[0] === tokenPath,
+      );
+      expect(tokenWriteCall).toBeDefined();
+    });
+  });
+
+  describe('getOrCreateSalt', () => {
+    it('should create a new salt when salt file does not exist', async () => {
+      mockFs.readFile.mockImplementation((filePath: string) => {
+        if (filePath === saltPath) {
+          return Promise.reject({ code: 'ENOENT' });
+        }
+        return Promise.reject({ code: 'ENOENT' });
+      });
+
+      // Trigger salt creation via setCredentials (which handles missing token file)
+      const credentials: OAuthCredentials = {
+        serverName: 'test-server',
+        token: { accessToken: 'token', tokenType: 'Bearer' },
+        updatedAt: Date.now(),
+      };
+      await storage.setCredentials(credentials);
+
+      // Salt file should have been written
+      const saltWriteCall = mockFs.writeFile.mock.calls.find(
+        (call: unknown[]) => call[0] === saltPath,
+      );
+      expect(saltWriteCall).toBeDefined();
+      expect(saltWriteCall![1]).toBeInstanceOf(Buffer);
+      expect((saltWriteCall![1] as Buffer).length).toBe(32);
+      expect(saltWriteCall![2]).toEqual({ mode: 0o600 });
     });
   });
 });

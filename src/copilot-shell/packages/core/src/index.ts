@@ -86,6 +86,13 @@ export * from './utils/yaml-parser.js';
 // Config resolution utilities
 export * from './utils/configResolver.js';
 
+// Credential encryption (AES-256-GCM)
+export {
+  encryptCredential,
+  decryptCredential,
+  isEncryptedCredential,
+} from './utils/credential-encryptor.js';
+
 // Export services
 export * from './services/fileDiscoveryService.js';
 export * from './services/gitService.js';

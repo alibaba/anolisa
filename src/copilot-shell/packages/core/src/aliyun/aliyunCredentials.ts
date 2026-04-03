@@ -7,6 +7,10 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { promises as fs } from 'node:fs';
+import {
+  encryptCredential,
+  decryptCredential,
+} from '../utils/credential-encryptor.js';
 
 const QWEN_DIR = '.copilot-shell';
 const ALIYUN_CREDS_FILENAME = 'aliyun_creds.json';
@@ -32,7 +36,7 @@ export function getAliyunCredsPath(): string {
 }
 
 /**
- * Save Aliyun credentials to disk
+ * Save Aliyun credentials to disk (encrypted).
  */
 export async function saveAliyunCredentials(
   credentials: AliyunCredentials,
@@ -40,8 +44,8 @@ export async function saveAliyunCredentials(
   const filePath = getAliyunCredsPath();
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const credString = JSON.stringify(credentials, null, 2);
-    await fs.writeFile(filePath, credString, { mode: 0o600 });
+    const encrypted = encryptCredential(JSON.stringify(credentials));
+    await fs.writeFile(filePath, encrypted, { mode: 0o600 });
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorCode =
@@ -62,13 +66,21 @@ export async function saveAliyunCredentials(
 }
 
 /**
- * Load Aliyun credentials from disk
+ * Load Aliyun credentials from disk.
+ * Handles both encrypted (enc: prefix) and plaintext JSON (backward compat).
  */
 export async function loadAliyunCredentials(): Promise<AliyunCredentials | null> {
   const filePath = getAliyunCredsPath();
   try {
     const content = await fs.readFile(filePath, 'utf-8');
-    const credentials = JSON.parse(content) as AliyunCredentials;
+    const decrypted = decryptCredential(content);
+    if (decrypted === undefined) {
+      // Decryption failed (e.g. salt changed) — treat as corrupted
+      console.warn('Failed to decrypt Aliyun credentials file');
+      return null;
+    }
+
+    const credentials = JSON.parse(decrypted) as AliyunCredentials;
 
     // Validate credentials structure
     if (!credentials.accessKeyId || !credentials.accessKeySecret) {
