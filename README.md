@@ -29,6 +29,10 @@ sudo yum install copilot-shell agent-sec-core agentsight anolisa-skills
 cosh
 ```
 
+## Quick Start
+
+Get up and running with Copilot Shell quickly — see our [Quick Start Guide](docs/copilot-shell/users/quickstart.md).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
