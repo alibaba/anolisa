@@ -1,10 +1,17 @@
 ###############################################################################
-# Issue Automation — Parse Issue Form and apply component label
+# Issue Automation — Triage, assign and notify on issue open
 #
-# Triggered when a new issue is opened.
-# Reads the "Component" dropdown from the Issue Form body and maps it to a
-# component:xxx label. The label addition then triggers issue-triage.yml,
-# which handles assignee routing and notifications.
+# Triggered only when a new issue is opened. Resolves the component via:
+#   1. Existing component:xxx label (set via API or Issue Form options)
+#   2. Issue Form "Component" dropdown field in the body
+#   3. Title keyword fallback (cosh / agentsight / agent-sec / os-skills)
+#   4. Default maintainer if none of the above matches
+#
+# Actions taken (all in one pass, no chained label events):
+#   - Apply component label (if not already present)
+#   - Assign responsible maintainer(s)
+#   - Post a triage comment
+#   - Send DingTalk notification (skipped if secrets not configured)
 ###############################################################################
 
 name: 🤖 Issue Automation
@@ -15,37 +22,29 @@ on:
 
 permissions:
   issues: write
+  contents: read
 
 jobs:
-  auto-label:
-    name: 🏷️ Auto Label
+  triage:
+    name: 🏷️ Auto Triage
     runs-on: ubuntu-22.04
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
 
     steps:
       # -----------------------------------------------------------------------
-      # Parse Issue Form body → map Component dropdown value to a label
+      # Parse component, apply label, assign maintainers, comment
       # -----------------------------------------------------------------------
-      - name: 🔍 Parse component and apply label
+      - name: 🔍 Resolve component, assign and comment
+        id: triage
         uses: actions/github-script@v7
         with:
           script: |
-            const body = context.payload.issue.body || '';
+            const body  = context.payload.issue.body  || '';
+            const title = context.payload.issue.title || '';
 
-            // Skip if a component label is already present (e.g. applied via API or Issue Form)
-            const existingLabels = context.payload.issue.labels.map(l => l.name);
-            const alreadyLabeled = existingLabels.some(l => l.startsWith('component:'));
-            if (alreadyLabeled) {
-              console.log(`Issue already has a component label: ${existingLabels.filter(l => l.startsWith('component:')).join(', ')} — skipping.`);
-              return;
-            }
-
-            // Issue Form renders dropdown fields as: "### FieldName\n\nValue"
-            const componentMatch = body.match(/###\s*Component\s*\n\n(.+)/i);
-            const component = componentMatch ? componentMatch[1].trim() : '';
-
-            console.log(`Parsed component: "${component}"`);
-
-            // Map dropdown display value → label name
+            // Map Issue Form dropdown values → label names
             const labelMap = {
               'copilot-shell (cosh)': 'component:cosh',
               'agent-sec-core':       'component:sec-core',
@@ -53,17 +52,127 @@ jobs:
               'agentsight':           'component:sight',
             };
 
-            const label = labelMap[component];
-            if (!label) {
-              console.log('No matching component label found — skipping.');
-              return;
+            // 1. Existing label (e.g. applied via API before the workflow ran)
+            const existingLabels = context.payload.issue.labels.map(l => l.name);
+            let componentLabel = existingLabels.find(l => l.startsWith('component:'));
+
+            // 2. Issue Form "Component" dropdown
+            if (!componentLabel) {
+              const match = body.match(/###\s*Component\s*\n\n(.+)/i);
+              const value = match ? match[1].trim() : '';
+              componentLabel = labelMap[value];
+              if (componentLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: [componentLabel],
+                });
+              }
             }
 
-            console.log(`Applying label: ${label}`);
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: [label],
+            // 3. Title keyword fallback
+            if (!componentLabel) {
+              const t = title.toLowerCase();
+              if      (t.includes('cosh') || t.includes('copilot-shell'))  componentLabel = 'component:cosh';
+              else if (t.includes('agentsight'))                            componentLabel = 'component:sight';
+              else if (t.includes('agent-sec') || t.includes('sec-core'))  componentLabel = 'component:sec-core';
+              else if (t.includes('os-skill'))                              componentLabel = 'component:skill';
+
+              if (componentLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: [componentLabel],
+                });
+              }
+            }
+
+            // 4. Resolve maintainers from maintainers.json (fallback to default)
+            const { data } = await github.rest.repos.getContent({
+              owner: context.repo.owner, repo: context.repo.repo,
+              path: '.github/maintainers.json',
             });
-            // Label addition will trigger issue-triage.yml for assign + notify
+            const config = JSON.parse(Buffer.from(data.content, 'base64').toString());
+
+            const scope = componentLabel
+              ? config.scopes.find(s => s.label === componentLabel)
+              : null;
+            const entries    = scope ? scope.maintainers : config.default.maintainers;
+            const maintainers = entries.map(e => e.github);
+
+            // 5. Assign
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              assignees: maintainers,
+            });
+
+            // 6. Comment
+            const scopeName    = componentLabel ? componentLabel.replace('component:', '') : 'default';
+            const mentionList  = maintainers.map(m => `@${m}`).join(' ');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                `## 🔀 Issue Triage`,
+                ``,
+                `This issue has been automatically assigned to **${mentionList}** ` +
+                `as the maintainer(s) of \`${scopeName}\`.`,
+                ``,
+                `> Maintainers, please review and triage this issue. ` +
+                `Set a priority label and update the status as needed. Thanks! 🙏`,
+              ].join('\n'),
+            });
+
+            core.setOutput('maintainers',     maintainers.join(','));
+            core.setOutput('component_label', componentLabel || 'unknown');
+
+      # -----------------------------------------------------------------------
+      # DingTalk notification (skipped if secrets not configured)
+      # -----------------------------------------------------------------------
+      - name: 📣 Send DingTalk notification
+        if: steps.triage.outputs.maintainers != '' && env.DINGTALK_WEBHOOK != ''
+        env:
+          ISSUE_NUMBER:    ${{ github.event.issue.number }}
+          ISSUE_TITLE:     ${{ github.event.issue.title }}
+          ISSUE_URL:       ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR:    ${{ github.event.issue.user.login }}
+          MAINTAINERS:     ${{ steps.triage.outputs.maintainers }}
+          COMPONENT_LABEL: ${{ steps.triage.outputs.component_label }}
+        run: |
+          python3 << 'PYEOF'
+          import hmac, hashlib, base64, urllib.parse, time, os, subprocess, json
+
+          ts     = str(round(time.time() * 1000))
+          secret = os.environ.get('DINGTALK_SECRET', '')
+          sig    = hmac.new(secret.encode(), (ts + '\n' + secret).encode(), hashlib.sha256).digest()
+          sign   = urllib.parse.quote_plus(base64.b64encode(sig).decode())
+
+          issue_number = os.environ.get('ISSUE_NUMBER', '')
+          issue_title  = os.environ.get('ISSUE_TITLE', '')
+          issue_url    = os.environ.get('ISSUE_URL', '')
+          issue_author = os.environ.get('ISSUE_AUTHOR', '')
+          maintainers  = os.environ.get('MAINTAINERS', '')
+          component    = os.environ.get('COMPONENT_LABEL', '')
+          webhook      = os.environ.get('DINGTALK_WEBHOOK', '')
+
+          text = (
+            f"## 🔔 ANOLISA New Issue\n\n"
+            f"**Issue**: [#{issue_number} {issue_title}]({issue_url})\n\n"
+            f"**Component**: `{component}`\n\n"
+            f"**Author**: {issue_author}\n\n"
+            f"**Assigned to**: {maintainers}\n\n"
+            f"> 🤖 ANOLISA Issue Bot"
+          )
+
+          payload = json.dumps({
+            "msgtype": "markdown",
+            "markdown": {"title": f"New Issue #{issue_number}", "text": text}
+          })
+
+          url = f"{webhook}&timestamp={ts}&sign={sign}"
+          subprocess.run(
+            ["curl", "-s", "-X", "POST", url, "-H", "Content-Type: application/json", "-d", payload],
+            check=True
+          )
+          PYEOF
