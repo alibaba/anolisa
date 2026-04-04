@@ -34,13 +34,13 @@ const SOURCE_STYLES: Record<string, { dot: string; badge: string; border: string
     dot: 'bg-purple-500',
     badge: 'bg-purple-100 text-purple-700',
     border: 'border-l-purple-400',
-    label: '\u7cfb\u7edf',
+    label: '系统',
   },
   user: {
     dot: 'bg-blue-500',
     badge: 'bg-blue-100 text-blue-700',
     border: 'border-l-blue-400',
-    label: '\u7528\u6237',
+    label: '用户',
   },
   agent: {
     dot: 'bg-green-500',
@@ -108,7 +108,7 @@ const ExpandableText: React.FC<{ text: string; className?: string }> = ({ text, 
           onClick={() => setExpanded(!expanded)}
           className="mt-1 text-xs text-blue-600 hover:text-blue-800"
         >
-          {expanded ? '\u2190 \u6536\u8d77' : '\u5c55\u5f00\u5168\u90e8 \u2192'}
+          {expanded ? '← 收起' : '展开全部 →'}
         </button>
       )}
     </div>
@@ -166,7 +166,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
           {step.message ? (
             <ExpandableText text={step.message} className="text-gray-700 bg-gray-50" />
           ) : (
-            <span className="text-xs text-gray-400 italic">\u65e0\u6d88\u606f\u5185\u5bb9</span>
+            <span className="text-xs text-gray-400 italic">无消息内容</span>
           )}
 
           {/* Agent-only sections */}
@@ -175,8 +175,8 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {/* Reasoning */}
               {hasReasoning && (
                 <Collapsible
-                  icon="\ud83d\udcad"
-                  title="\u63a8\u7406\u8fc7\u7a0b"
+                  icon="💭"
+                  title="推理过程"
                   isOpen={isOpen('reasoning')}
                   onToggle={() => toggle('reasoning')}
                 >
@@ -189,8 +189,8 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {/* Tool Calls */}
               {hasToolCalls && (
                 <Collapsible
-                  icon="\ud83d\udd27"
-                  title="\u5de5\u5177\u8c03\u7528"
+                  icon="🔧"
+                  title="工具调用"
                   count={step.tool_calls!.length}
                   isOpen={isOpen('toolcalls')}
                   onToggle={() => toggle('toolcalls')}
@@ -206,8 +206,8 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {/* Observation */}
               {hasObservation && (
                 <Collapsible
-                  icon="\ud83d\udccb"
-                  title="\u89c2\u5bdf\u7ed3\u679c"
+                  icon="📋"
+                  title="观察结果"
                   count={step.observation!.results.length}
                   isOpen={isOpen('observation')}
                   onToggle={() => toggle('observation')}
@@ -225,7 +225,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                             <ExpandableText text={r.content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
                           </div>
                         ) : (
-                          <div className="px-3 py-2 text-xs text-gray-400 italic">\u65e0\u8f93\u51fa\u5185\u5bb9</div>
+                          <div className="px-3 py-2 text-xs text-gray-400 italic">无输出内容</div>
                         )}
                       </div>
                     ))}
@@ -238,17 +238,17 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-100">
                   {step.metrics!.prompt_tokens != null && (
                     <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
-                      \u8f93\u5165: {fmtTokens(step.metrics!.prompt_tokens!)}
+                      输入: {fmtTokens(step.metrics!.prompt_tokens!)}
                     </span>
                   )}
                   {step.metrics!.completion_tokens != null && (
                     <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs">
-                      \u8f93\u51fa: {fmtTokens(step.metrics!.completion_tokens!)}
+                      输出: {fmtTokens(step.metrics!.completion_tokens!)}
                     </span>
                   )}
                   {step.metrics!.cached_tokens != null && step.metrics!.cached_tokens! > 0 && (
                     <span className="px-2 py-1 bg-yellow-50 text-yellow-700 rounded text-xs">
-                      \u7f13\u5b58: {fmtTokens(step.metrics!.cached_tokens!)}
+                      缓存: {fmtTokens(step.metrics!.cached_tokens!)}
                     </span>
                   )}
                 </div>
@@ -282,7 +282,7 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall }> = ({ tc }) => {
             onClick={() => setShowArgs(!showArgs)}
             className="ml-auto text-xs text-blue-600 hover:text-blue-800"
           >
-            {showArgs ? '\u6536\u8d77\u53c2\u6570' : '\u5c55\u5f00\u53c2\u6570'}
+            {showArgs ? '收起参数' : '展开参数'}
           </button>
         )}
       </div>
@@ -303,13 +303,13 @@ const AgentInfoCard: React.FC<{ doc: AtifDocument }> = ({ doc }) => {
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 lg:col-span-2">
-      <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent \u4fe1\u606f</h3>
+      <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent 信息</h3>
       <div className="space-y-2 text-sm">
         {[
-          { label: '\u540d\u79f0', value: agent.name },
-          { label: '\u7248\u672c', value: agent.version },
-          { label: '\u6a21\u578b', value: agent.model_name ?? '\u2014' },
-          { label: '\u5de5\u5177\u5b9a\u4e49', value: `${toolCount} \u4e2a` },
+          { label: '名称', value: agent.name },
+          { label: '版本', value: agent.version },
+          { label: '模型', value: agent.model_name ?? '—' },
+          { label: '工具定义', value: `${toolCount} 个` },
         ].map(({ label, value }) => (
           <div key={label} className="flex items-center justify-between">
             <span className="text-gray-500">{label}</span>
@@ -379,7 +379,7 @@ export const AtifViewerPage: React.FC = () => {
         : await fetchAtifBySession(i.trim());
       setDoc(data);
     } catch (e: any) {
-      setError(e.message ?? '\u52a0\u8f7d\u5931\u8d25');
+      setError(e.message ?? '加载失败');
     } finally {
       setLoading(false);
     }
@@ -406,14 +406,14 @@ export const AtifViewerPage: React.FC = () => {
       try {
         const parsed = JSON.parse(ev.target?.result as string);
         if (!parsed.schema_version || !String(parsed.schema_version).startsWith('ATIF')) {
-          setError('JSON \u89e3\u6790\u5931\u8d25\uff1a\u7f3a\u5c11 schema_version \u5b57\u6bb5\u6216\u975e ATIF \u683c\u5f0f');
+          setError('JSON 解析失败：缺少 schema_version 字段或非 ATIF 格式');
           return;
         }
         setDoc(parsed as AtifDocument);
         setError(null);
         setQueryId(parsed.session_id ?? '');
       } catch {
-        setError('JSON \u89e3\u6790\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u6587\u4ef6\u683c\u5f0f');
+        setError('JSON 解析失败，请检查文件格式');
       }
     };
     reader.readAsText(file);
@@ -457,7 +457,7 @@ export const AtifViewerPage: React.FC = () => {
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-screen-xl mx-auto flex items-center gap-4">
           <div className="flex-1 min-w-0">
-            <h1 className="text-lg font-bold text-gray-900">ATIF \u8f68\u8ff9\u67e5\u770b\u5668</h1>
+            <h1 className="text-lg font-bold text-gray-900">ATIF 轨迹查看器</h1>
             {doc && (
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
@@ -470,7 +470,7 @@ export const AtifViewerPage: React.FC = () => {
           {doc && (
             <button onClick={handleDownload}
               className="flex-shrink-0 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm transition-colors">
-              \u2b07\ufe0f \u4e0b\u8f7d JSON
+              ⬇️ 下载 JSON
             </button>
           )}
         </div>
@@ -491,7 +491,7 @@ export const AtifViewerPage: React.FC = () => {
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                \u6309 {t === 'trace' ? 'Trace' : 'Session'}
+                按 {t === 'trace' ? 'Trace' : 'Session'}
               </button>
             ))}
           </div>
@@ -503,7 +503,7 @@ export const AtifViewerPage: React.FC = () => {
               value={queryId}
               onChange={e => setQueryId(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleLoad(); }}
-              placeholder={queryType === 'trace' ? '\u8f93\u5165 Trace ID...' : '\u8f93\u5165 Session ID...'}
+              placeholder={queryType === 'trace' ? '输入 Trace ID...' : '输入 Session ID...'}
               className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
             />
           </div>
@@ -514,7 +514,7 @@ export const AtifViewerPage: React.FC = () => {
             disabled={loading || !queryId.trim()}
             className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? '\u52a0\u8f7d\u4e2d...' : '\u52a0\u8f7d'}
+            {loading ? '加载中...' : '加载'}
           </button>
 
           {/* File import */}
@@ -529,14 +529,14 @@ export const AtifViewerPage: React.FC = () => {
             onClick={() => fileInputRef.current?.click()}
             className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-lg transition-colors"
           >
-            \ud83d\udcc1 \u5bfc\u5165 JSON
+            📁 导入 JSON
           </button>
         </div>
 
         {/* Error */}
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-600 text-sm">
-            \u26a0\ufe0f {error}
+            ⚠️ {error}
           </div>
         )}
 
@@ -545,7 +545,7 @@ export const AtifViewerPage: React.FC = () => {
           <div className="flex items-center justify-center py-16">
             <div className="text-center">
               <div className="animate-spin text-4xl mb-4">\u23f3</div>
-              <p className="text-gray-600">\u52a0\u8f7d\u4e2d...</p>
+              <p className="text-gray-600">加载中...</p>
             </div>
           </div>
         )}
@@ -554,9 +554,9 @@ export const AtifViewerPage: React.FC = () => {
         {!loading && !doc && !error && (
           <div className="flex items-center justify-center py-24">
             <div className="text-center">
-              <div className="text-5xl mb-4">\ud83d\udd0d</div>
-              <p className="text-gray-500">\u8bf7\u8f93\u5165 Trace \u6216 Session ID\uff0c\u7136\u540e\u70b9\u51fb\u300c\u52a0\u8f7d\u300d</p>
-              <p className="text-gray-400 text-sm mt-1">\u6216\u5bfc\u5165\u672c\u5730 ATIF JSON \u6587\u4ef6</p>
+              <div className="text-5xl mb-4">🔍</div>
+              <p className="text-gray-500">请输入 Trace 或 Session ID，然后点击「加载」</p>
+              <p className="text-gray-400 text-sm mt-1">或导入本地 ATIF JSON 文件</p>
             </div>
           </div>
         )}
@@ -570,18 +570,18 @@ export const AtifViewerPage: React.FC = () => {
               {computedMetrics && (
                 <>
                   <MetricCard
-                    label="\u603b\u6b65\u9aa4\u6570"
+                    label="总步骤数"
                     value={String(computedMetrics.steps)}
                     color="text-indigo-600"
                   />
                   <MetricCard
-                    label="\u603b\u8f93\u5165 Token"
+                    label="总输入 Token"
                     value={fmtTokens(computedMetrics.prompt)}
                     color="text-blue-600"
-                    sub={computedMetrics.cached > 0 ? `\u5176\u4e2d\u7f13\u5b58: ${fmtTokens(computedMetrics.cached)}` : undefined}
+                    sub={computedMetrics.cached > 0 ? `其中缓存: ${fmtTokens(computedMetrics.cached)}` : undefined}
                   />
                   <MetricCard
-                    label="\u603b\u8f93\u51fa Token"
+                    label="总输出 Token"
                     value={fmtTokens(computedMetrics.completion)}
                     color="text-green-600"
                   />
@@ -592,16 +592,16 @@ export const AtifViewerPage: React.FC = () => {
             {/* Step Timeline */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
-                \u4ea4\u4e92\u8f68\u8ff9
+                交互轨迹
                 <span className="ml-2 text-sm font-normal text-gray-400">
-                  \u5171 {doc.steps.length} \u6b65
+                  共 {doc.steps.length} 步
                 </span>
               </h2>
 
               {doc.steps.length === 0 ? (
                 <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
                   <div className="text-4xl mb-2">\ud83d\udced</div>
-                  <p className="text-gray-400">\u8be5\u8f68\u8ff9\u6682\u65e0\u6b65\u9aa4\u6570\u636e</p>
+                  <p className="text-gray-400">该轨迹暂无步骤数据</p>
                 </div>
               ) : (
                 <div className="relative pl-4">
