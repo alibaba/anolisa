@@ -1,6 +1,6 @@
 name: Feature Request
 description: Suggest an idea for this project
-title: "feat(<scope>): "
+title: "feat: "
 labels: ["enhancement"]
 body:
   - type: markdown
@@ -8,7 +8,7 @@ body:
       value: |
         > [!IMPORTANT]
         > Thanks for suggesting a new feature!
-        > Please make sure the scope is one of: `cosh`, `agent-sec-core`, `os-skills`, `agentsight`.
+        > Select the affected component below — the title will be prefixed automatically.
   - type: dropdown
     id: component
     attributes:

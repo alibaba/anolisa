@@ -127,6 +127,18 @@ jobs:
             core.setOutput('maintainers',     maintainers.join(','));
             core.setOutput('component_label', componentLabel || 'unknown');
 
+            // 7. Auto-prefix title with [<scope>] if not already prefixed
+            const scopeShort = componentLabel
+              ? componentLabel.replace('component:', '')
+              : null;
+            if (scopeShort && !title.startsWith('[')) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number,
+                title: `[${scopeShort}] ${title}`,
+              });
+            }
+
       # -----------------------------------------------------------------------
       # DingTalk notification (skipped if secrets not configured)
       # -----------------------------------------------------------------------

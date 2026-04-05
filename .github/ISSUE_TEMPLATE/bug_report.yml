@@ -1,13 +1,13 @@
 name: Bug Report
 description: Report a bug to help us improve
-title: "bug(<scope>): "
+title: "bug: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for taking the time to fill out this bug report!
-        Please make sure the scope is one of: `cosh`, `agent-sec-core`, `os-skills`, `agentsight`.
+        Select the affected component below — the title will be prefixed automatically.
   - type: dropdown
     id: component
     attributes:
