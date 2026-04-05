@@ -1,0 +1,68 @@
+# PR Opened Notification
+# =======================
+# Sends a DingTalk notification when a pull request is opened against main.
+# Requires secrets: DINGTALK_WEBHOOK, DINGTALK_SECRET
+
+name: PR Opened Notification
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: DingTalk Notification
+    runs-on: ubuntu-22.04
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+
+    steps:
+      - name: 📣 Send DingTalk message
+        if: env.DINGTALK_WEBHOOK != ''
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          PR_URL:    ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BODY:   ${{ github.event.pull_request.body }}
+        run: |
+          python3 << 'PYEOF'
+          import hmac, hashlib, base64, urllib.parse, time, os, subprocess, json
+
+          ts     = str(round(time.time() * 1000))
+          secret = os.environ.get('DINGTALK_SECRET', '')
+          sig    = hmac.new(secret.encode(), (ts + '\n' + secret).encode(), hashlib.sha256).digest()
+          sign   = urllib.parse.quote_plus(base64.b64encode(sig).decode())
+
+          pr_number = os.environ.get('PR_NUMBER', '')
+          pr_title  = os.environ.get('PR_TITLE', '')
+          pr_url    = os.environ.get('PR_URL', '')
+          pr_author = os.environ.get('PR_AUTHOR', '')
+          pr_branch = os.environ.get('PR_BRANCH', '')
+          webhook   = os.environ.get('DINGTALK_WEBHOOK', '')
+
+          text = (
+            f"## 🔁 ANOLISA New PR\n\n"
+            f"**PR**: [#{pr_number} {pr_title}]({pr_url})\n\n"
+            f"**Branch**: `{pr_branch}` → `main`\n\n"
+            f"**Author**: {pr_author}\n\n"
+            f"> 🤖 ANOLISA CI Bot"
+          )
+
+          payload = json.dumps({
+            "msgtype": "markdown",
+            "markdown": {"title": f"New PR #{pr_number}", "text": text}
+          })
+
+          url = f"{webhook}&timestamp={ts}&sign={sign}"
+          subprocess.run(
+            ["curl", "-s", "-X", "POST", url, "-H", "Content-Type: application/json", "-d", payload],
+            check=True
+          )
+          PYEOF
