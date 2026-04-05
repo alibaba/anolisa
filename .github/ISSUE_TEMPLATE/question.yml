@@ -14,11 +14,11 @@ body:
       label: Component
       description: Which component does your question relate to?
       options:
-        - copilot-shell (cosh)
-        - agent-sec-core
-        - os-skills
-        - agentsight
-        - General / Multiple
+        - cosh
+        - sec-core
+        - skill
+        - sight
+        - other
   - type: textarea
     id: question
     attributes:

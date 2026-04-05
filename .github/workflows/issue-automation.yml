@@ -46,10 +46,10 @@ jobs:
 
             // Map Issue Form dropdown values → label names
             const labelMap = {
-              'copilot-shell (cosh)': 'component:cosh',
-              'agent-sec-core':       'component:sec-core',
-              'os-skills':            'component:skill',
-              'agentsight':           'component:sight',
+              'cosh':     'component:cosh',
+              'sec-core': 'component:sec-core',
+              'skill':    'component:skill',
+              'sight':    'component:sight',
             };
 
             // 1. Existing label (e.g. applied via API before the workflow ran)

@@ -15,11 +15,11 @@ body:
       label: Component
       description: Which component does this feature relate to?
       options:
-        - copilot-shell (cosh)
-        - agent-sec-core
-        - os-skills
-        - agentsight
-        - Other / Multiple
+        - cosh
+        - sec-core
+        - skill
+        - sight
+        - other
     validations:
       required: true
   - type: textarea
