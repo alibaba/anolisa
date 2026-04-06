@@ -1,7 +1,7 @@
 //! API request handlers
 
-use actix_web::{get, web, HttpResponse, Responder};
-use serde::Deserialize;
+use actix_web::{get, post, web, HttpResponse, Responder};
+use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use crate::storage::sqlite::{AuditStore, TokenStore, GenAISqliteStore};
@@ -308,3 +308,107 @@ pub async fn export_atif_session(
             .json(serde_json::json!({"error": e.to_string()})),
     }
 }
+
+// ─── ATIF trajectory evaluation endpoint ────────────────────────────────────
+
+/// Request body for trajectory evaluation
+#[derive(Debug, Deserialize)]
+pub struct EvalAtifRequest {
+    /// The full ATIF document to evaluate
+    pub atif_document: crate::atif::AtifDocument,
+    /// LLM model to use (e.g., "openai:gpt-4o-mini"). Defaults to "openai:gpt-4o-mini"
+    pub model: Option<String>,
+    /// User's LLM API key (not stored, used only for this request)
+    pub api_key: String,
+}
+
+/// Score information in the response
+#[derive(Debug, Serialize)]
+pub struct EvalScoreInfo {
+    pub is_pass: bool,
+    pub raw_value: f64,
+}
+
+/// Response body for trajectory evaluation
+#[derive(Debug, Serialize)]
+pub struct EvalAtifResponse {
+    pub key: String,
+    pub score: EvalScoreInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    pub steps_evaluated: usize,
+    pub model_used: String,
+}
+
+/// POST /api/eval/atif
+///
+/// Evaluates an ATIF trajectory using LLM-as-Judge.
+/// The API key is passed in the request body and is only used for this single request.
+#[post("/api/eval/atif")]
+pub async fn evaluate_atif(
+    body: web::Json<EvalAtifRequest>,
+) -> impl Responder {
+    let req = body.into_inner();
+
+    // Validate inputs
+    if req.api_key.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "api_key is required"}));
+    }
+    if req.atif_document.steps.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "ATIF document has no steps"}));
+    }
+
+    let model = req.model.unwrap_or_else(|| "openai:gpt-4o-mini".to_string());
+
+    // Convert ATIF → ChatMessage sequence
+    let messages = crate::agentevals::atif_to_chat_messages(&req.atif_document);
+    let steps_evaluated = messages.len();
+
+    if messages.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "ATIF document produced no evaluable messages"}));
+    }
+
+    // Build genai Client with the user-provided API key
+    let api_key = req.api_key;
+    let client = genai_crate::Client::builder()
+        .with_auth_resolver_fn(move |_model_iden| {
+            Ok(Some(genai_crate::resolver::AuthData::from_single(api_key.clone())))
+        })
+        .build();
+
+    // Run evaluation
+    let judge = crate::agentevals::TrajectoryLlmJudge::new()
+        .with_client(client)
+        .with_model(&model);
+
+    match judge.evaluate(&messages).await {
+        Ok(result) => {
+            let score_info = EvalScoreInfo {
+                is_pass: result.score.as_bool(),
+                raw_value: result.score.as_f64(),
+            };
+            HttpResponse::Ok().json(EvalAtifResponse {
+                key: result.key,
+                score: score_info,
+                comment: result.comment,
+                steps_evaluated,
+                model_used: model,
+            })
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Provide user-friendly error messages for common failures
+            if msg.contains("401") || msg.to_lowercase().contains("unauthorized") || msg.to_lowercase().contains("invalid") {
+                HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": format!("API key validation failed: {}", msg)}))
+            } else {
+                HttpResponse::BadGateway()
+                    .json(serde_json::json!({"error": format!("LLM evaluation failed: {}", msg)}))
+            }
+        }
+    }
+}
+

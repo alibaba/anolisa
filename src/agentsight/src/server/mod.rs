@@ -100,7 +100,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
-            .allowed_methods(vec!["GET", "OPTIONS"])
+            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
             .allowed_headers(vec!["Content-Type"])
             .max_age(3600);
 
@@ -117,6 +117,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .service(handlers::get_timeseries)
             .service(handlers::export_atif_trace)
             .service(handlers::export_atif_session)
+            .service(handlers::evaluate_atif)
             // Frontend static files (catch-all, must be last)
             .service(serve_frontend)
     })
@@ -124,3 +125,4 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
     .run()
     .await
 }
+

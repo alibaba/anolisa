@@ -79,6 +79,19 @@ async function apiFetch<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function apiPost<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`API ${url} -> ${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -168,7 +181,7 @@ export async function fetchTimeseries(
 
 // ─── ATIF export APIs ────────────────────────────────────────────────────────
 
-import type { AtifDocument } from '../types';
+import type { AtifDocument, EvalAtifResponse } from '../types';
 
 /**
  * Export a single trace as an ATIF v1.6 trajectory document.
@@ -187,3 +200,22 @@ export async function fetchAtifBySession(sessionId: string): Promise<AtifDocumen
     `${API_BASE}/api/export/atif/session/${encodeURIComponent(sessionId)}`
   );
 }
+
+// ─── ATIF evaluation API ─────────────────────────────────────────────────────
+
+/**
+ * Evaluate an ATIF trajectory using LLM-as-Judge.
+ * API key is sent in the request body and is not stored on the server.
+ */
+export async function evaluateAtifTrajectory(
+  doc: AtifDocument,
+  model: string,
+  apiKey: string,
+): Promise<EvalAtifResponse> {
+  return apiPost<EvalAtifResponse>(`${API_BASE}/api/eval/atif`, {
+    atif_document: doc,
+    model,
+    api_key: apiKey,
+  });
+}
+

@@ -40,6 +40,8 @@ pub mod tokenizer;
 pub mod genai;
 pub mod atif;
 #[cfg(feature = "server")]
+pub mod agentevals;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod token_breakdown;
 mod unified;
@@ -95,4 +97,5 @@ pub use genai::{
     MessagePart, InputMessage, OutputMessage, ToolUse, AgentInteraction, StreamChunk, ToolDefinition,
     GenAIStore, GenAIStoreStats, SlsUploader, GenAIExporter,
 };
+
 

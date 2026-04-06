@@ -225,3 +225,19 @@ export interface AtifDocument {
   final_metrics?: AtifFinalMetrics;
   extra?: any;
 }
+
+// ==================== ATIF Evaluation Types ====================
+
+export interface EvalScoreInfo {
+  is_pass: boolean;
+  raw_value: number;
+}
+
+export interface EvalAtifResponse {
+  key: string;
+  score: EvalScoreInfo;
+  comment?: string;
+  steps_evaluated: number;
+  model_used: string;
+}
+

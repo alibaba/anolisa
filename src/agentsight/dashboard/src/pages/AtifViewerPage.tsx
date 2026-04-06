@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
+  EvalAtifResponse,
 } from '../types';
-import { fetchAtifByTrace, fetchAtifBySession } from '../utils/apiClient';
+import { fetchAtifByTrace, fetchAtifBySession, evaluateAtifTrajectory } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -331,6 +332,73 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
   </div>
 );
 
+// ─── Evaluation Model Options ─────────────────────────────────────────────────
+
+const MODEL_OPTIONS = [
+  { value: 'openai:gpt-4o-mini', label: 'GPT-4o Mini' },
+  { value: 'openai:gpt-4o', label: 'GPT-4o' },
+  { value: 'anthropic:claude-3-5-sonnet-latest', label: 'Claude 3.5 Sonnet' },
+  { value: 'anthropic:claude-3-haiku-20240307', label: 'Claude 3 Haiku' },
+];
+
+const STORAGE_KEY_API_KEY = 'agentsight_eval_api_key';
+const STORAGE_KEY_MODEL = 'agentsight_eval_model';
+
+// ─── EvalResultCard ───────────────────────────────────────────────────────────
+
+const EvalResultCard: React.FC<{ result: EvalAtifResponse }> = ({ result }) => {
+  const [showReasoning, setShowReasoning] = useState(false);
+  const isPass = result.score.is_pass;
+
+  return (
+    <div className={`bg-white rounded-xl shadow-sm border-2 ${isPass ? 'border-green-300' : 'border-red-300'} p-5`}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-900">轨迹评估结果</h3>
+        <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-mono">
+          {result.model_used}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-4 mb-3">
+        <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
+          isPass ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+        }`}>
+          <span className="text-2xl">{isPass ? '\u2705' : '\u274c'}</span>
+          <div>
+            <div className="text-lg font-bold">{isPass ? '通过' : '未通过'}</div>
+            <div className="text-xs opacity-70">
+              得分: {result.score.raw_value.toFixed(2)}
+            </div>
+          </div>
+        </div>
+        <div className="text-sm text-gray-500">
+          评估了 {result.steps_evaluated} 条消息
+        </div>
+      </div>
+
+      {result.comment && (
+        <div>
+          <button
+            onClick={() => setShowReasoning(!showReasoning)}
+            className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100 rounded-lg text-left text-sm transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <span>💭</span>
+              <span className="font-medium text-gray-700">评估推理</span>
+            </span>
+            <span className="text-gray-400 text-xs">{showReasoning ? '\u25b2' : '\u25bc'}</span>
+          </button>
+          {showReasoning && (
+            <div className="mt-2">
+              <ExpandableText text={result.comment} className="text-gray-700 bg-gray-50 text-xs" />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const AtifViewerPage: React.FC = () => {
@@ -351,6 +419,15 @@ export const AtifViewerPage: React.FC = () => {
   // UI state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Evaluation state
+  const [showEvalPanel, setShowEvalPanel] = useState(false);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEY_API_KEY) || '');
+  const [evalModel, setEvalModel] = useState(() => localStorage.getItem(STORAGE_KEY_MODEL) || 'openai:gpt-4o-mini');
+  const [customModel, setCustomModel] = useState('');
+  const [evalLoading, setEvalLoading] = useState(false);
+  const [evalResult, setEvalResult] = useState<EvalAtifResponse | null>(null);
+  const [evalError, setEvalError] = useState<string | null>(null);
 
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
@@ -432,6 +509,35 @@ export const AtifViewerPage: React.FC = () => {
     URL.revokeObjectURL(url);
   }, [doc]);
 
+  // Evaluate trajectory
+  const handleEvaluate = useCallback(async () => {
+    if (!doc || !apiKey.trim()) return;
+    const model = evalModel === '__custom__' ? customModel.trim() : evalModel;
+    if (!model) return;
+
+    // Persist settings to localStorage
+    localStorage.setItem(STORAGE_KEY_API_KEY, apiKey);
+    localStorage.setItem(STORAGE_KEY_MODEL, evalModel);
+
+    setEvalLoading(true);
+    setEvalError(null);
+    setEvalResult(null);
+
+    try {
+      const result = await evaluateAtifTrajectory(doc, model, apiKey.trim());
+      setEvalResult(result);
+    } catch (e: any) {
+      setEvalError(e.message ?? '评估失败');
+    } finally {
+      setEvalLoading(false);
+    }
+  }, [doc, apiKey, evalModel, customModel]);
+
+  const handleClearApiKey = useCallback(() => {
+    setApiKey('');
+    localStorage.removeItem(STORAGE_KEY_API_KEY);
+  }, []);
+
   // Compute metrics (fallback when final_metrics is partial)
   const computedMetrics = doc ? (() => {
     const fm = doc.final_metrics;
@@ -468,10 +574,22 @@ export const AtifViewerPage: React.FC = () => {
             )}
           </div>
           {doc && (
-            <button onClick={handleDownload}
-              className="flex-shrink-0 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm transition-colors">
-              ⬇️ 下载 JSON
-            </button>
+            <>
+              <button
+                onClick={() => setShowEvalPanel(!showEvalPanel)}
+                className={`flex-shrink-0 px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                  showEvalPanel
+                    ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                    : 'bg-indigo-100 hover:bg-indigo-200 text-indigo-700'
+                }`}
+              >
+                🔬 分析轨迹
+              </button>
+              <button onClick={handleDownload}
+                className="flex-shrink-0 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm transition-colors">
+                ⬇️ 下载 JSON
+              </button>
+            </>
           )}
         </div>
       </header>
@@ -589,6 +707,84 @@ export const AtifViewerPage: React.FC = () => {
               )}
             </div>
 
+            {/* Evaluation Panel */}
+            {showEvalPanel && (
+              <div className="bg-white rounded-xl shadow-sm border border-indigo-200 p-5 space-y-4">
+                <h3 className="text-sm font-semibold text-gray-900">轨迹评估设置</h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* API Key */}
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">API Key</label>
+                    <div className="flex gap-1">
+                      <input
+                        type="password"
+                        value={apiKey}
+                        onChange={e => setApiKey(e.target.value)}
+                        placeholder="输入 API Key..."
+                        className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      />
+                      {apiKey && (
+                        <button
+                          onClick={handleClearApiKey}
+                          className="px-2 py-1.5 text-xs text-red-500 hover:text-red-700"
+                          title="清除密钥"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">密钥仅用于本次评估，不会存储在服务端</p>
+                  </div>
+
+                  {/* Model */}
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">评估模型</label>
+                    <select
+                      value={evalModel}
+                      onChange={e => setEvalModel(e.target.value)}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                    >
+                      {MODEL_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                      <option value="__custom__">自定义...</option>
+                    </select>
+                    {evalModel === '__custom__' && (
+                      <input
+                        type="text"
+                        value={customModel}
+                        onChange={e => setCustomModel(e.target.value)}
+                        placeholder="provider:model-name"
+                        className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      />
+                    )}
+                  </div>
+
+                  {/* Action */}
+                  <div className="flex items-end">
+                    <button
+                      onClick={handleEvaluate}
+                      disabled={evalLoading || !apiKey.trim() || (evalModel === '__custom__' && !customModel.trim())}
+                      className="w-full px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {evalLoading ? '正在评估... (可能需要 10-30 秒)' : '开始评估'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Eval Error */}
+                {evalError && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-600 text-sm">
+                    ⚠️ {evalError}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Evaluation Result */}
+            {evalResult && <EvalResultCard result={evalResult} />}
+
             {/* Step Timeline */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
@@ -625,3 +821,4 @@ export const AtifViewerPage: React.FC = () => {
     </>
   );
 };
+

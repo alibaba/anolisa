@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["server"]
-server = ["dep:actix-web", "dep:actix-cors", "dep:include_dir"]
+server = ["dep:actix-web", "dep:actix-cors", "dep:include_dir", "dep:genai_crate"]
 
 [lib]
 name = "agentsight"
@@ -67,7 +67,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
 # llm = { version = "1.2", features = ["openai"] }
 thiserror = "1.0.63"
 typed-arena = "2.0.2"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 uname = "0.1.1"
 aliyun-log-rust-sdk = "0.1"
 aliyun-log-sdk-protobuf = "0.1"
@@ -78,6 +78,8 @@ actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }
 # Embed frontend static files into the binary (optional, enabled by "server" feature)
 include_dir = { version = "0.7", optional = true }
+# LLM evaluation via genai (renamed to avoid clash with internal pub mod genai)
+genai_crate = { package = "genai", version = "0.5.3", optional = true }
 hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40dbb5dc9f1617df1aaef628d49e951f" }
 
 # [profile.release]
@@ -90,3 +92,4 @@ debug-assertions = false
 libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
 cc = "1.1.31"
+
