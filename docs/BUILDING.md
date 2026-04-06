@@ -246,7 +246,7 @@ AgentSight is an optional component that provides eBPF-based audit and observabi
 - **dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)**
 
 ```bash
-sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
+sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd perl-FindBin
 sudo dnf install -y kernel-devel-$(uname -r)
 ```
 
