@@ -247,7 +247,7 @@ AgentSight 是可选组件，提供基于 eBPF 的审计和可观测性能力，
 - **dnf（Alinux / Anolis OS / Fedora / RHEL / CentOS 等）**
 
 ```bash
-sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
+sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd perl-FindBin
 sudo dnf install -y kernel-devel-$(uname -r)
 ```
 
