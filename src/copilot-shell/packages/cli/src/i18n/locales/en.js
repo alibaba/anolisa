@@ -1453,4 +1453,20 @@ export default {
     'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.',
   'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
     'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.',
+  // Agent Key sharing flow
+  '{{agentName}} configuration detected':
+    '{{agentName}} configuration detected',
+  'The following configuration from {{agentName}} will be imported':
+    'The following configuration from {{agentName}} will be imported',
+  'Press Enter or wait 2s to complete authentication':
+    'Press Enter or wait 2s to complete authentication',
+  'Agent Key Sharing': 'Agent Key Sharing',
+  "Share an installed Agent's API Key with cosh for auto-configuration?":
+    "Share an installed Agent's API Key with cosh for auto-configuration?",
+  'No, configure manually': 'No, configure manually',
+  'No API Key found for {{agentName}}.': 'No API Key found for {{agentName}}.',
+  'Returning to agent selection...': 'Returning to agent selection...',
+  'Press Enter or wait 2s to continue': 'Press Enter or wait 2s to continue',
+  '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
+    '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel',
 };

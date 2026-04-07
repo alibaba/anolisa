@@ -1288,4 +1288,19 @@ export default {
     '使用 /bash 可随时切换到交互式 Bash Shell。输入 "exit" 或按 Ctrl+D 可返回 Copilot Shell。',
   'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
     '使用 /dir cd <路径> 可直接切换当前工作目录，无需离开 Copilot Shell。',
+  // Agent Key 共享流程
+  '{{agentName}} configuration detected': '检测到 {{agentName}} 配置',
+  'The following configuration from {{agentName}} will be imported':
+    '将导入以下来自 {{agentName}} 的配置',
+  'Press Enter or wait 2s to complete authentication':
+    '按 Enter 或等待 2s 完成认证',
+  'Agent Key Sharing': 'Agent Key 共享',
+  "Share an installed Agent's API Key with cosh for auto-configuration?":
+    '是否将已安装 Agent 的 API Key 共享给 cosh 进行自动配置？',
+  'No, configure manually': '不需要，手动配置',
+  'No API Key found for {{agentName}}.': '未检测到 {{agentName}} 的 API Key。',
+  'Returning to agent selection...': '正在返回 Agent 选择页面……',
+  'Press Enter or wait 2s to continue': '按 Enter 或等待 2 秒继续',
+  '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
+    '↑↓ 或 j/k 导航 · 1/2/3 选择 · Enter 确认 · Esc 取消',
 };

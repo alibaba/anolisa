@@ -18,6 +18,12 @@ import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
+import { CustomAgentKeyImportPrompt } from './CustomAgentKeyImportPrompt.js';
+import {
+  CustomAgentKeySharePrompt,
+  type AgentChoice,
+} from './CustomAgentKeySharePrompt.js';
+import { CustomAgentKeyDetectFailedPrompt } from './CustomAgentKeyDetectFailedPrompt.js';
 import { AliyunKeyPrompt } from './AliyunKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
@@ -35,7 +41,7 @@ import {
   loadAliyunCredentials,
 } from '@copilot-shell/core';
 import process from 'node:process';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
@@ -43,6 +49,13 @@ import { ModelSwitchDialog } from './ModelSwitchDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import {
+  readOpenClawConfig,
+  readQwenCodeConfig,
+  hasOpenClawConfigDir,
+  hasQwenCodeConfigDir,
+  type AgentKeyConfig,
+} from '../../utils/customAgentKeyConfig.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -120,6 +133,63 @@ export const DialogManager = ({
         '',
     };
   };
+
+  /**
+   * Agent Key 共享流程状态机（当前认证流程内有效）:
+   *   'idle'        - 流程一：尚未展示 Agent 选择列表
+   *   'openclaw'    - 流程二：正在处理 OpenClaw Key 探测
+   *   'qwencode'    - 流程二：正在处理 Qwen Code Key 探测
+   *   'done'        - 用户选择不需要，进入手动配置
+   */
+  const [agentShareState, setAgentShareState] = useState<
+    'idle' | 'openclaw' | 'qwencode' | 'done'
+  >('idle');
+
+  // 记录探测失败的 Agent，返回流程一时过滤掉
+  const [failedAgents, setFailedAgents] = useState<
+    Set<'openclaw' | 'qwencode'>
+  >(new Set());
+
+  // 认证流程结束后重置状态
+  useEffect(() => {
+    if (!uiState.isAuthenticating) {
+      setAgentShareState('idle');
+      setFailedAgents(new Set());
+    }
+  }, [uiState.isAuthenticating]);
+
+  // 当 idle 状态下所有 Agent 均已失败，自动跳转到手动配置（避免在渲染期间 setState）
+  useEffect(() => {
+    if (
+      agentShareState === 'idle' &&
+      failedAgents.has('openclaw') &&
+      failedAgents.has('qwencode')
+    ) {
+      setAgentShareState('done');
+    }
+  }, [agentShareState, failedAgents]);
+
+  // 在顶层缓存文件探测结果（只在对应状态激活时读取文件，避免每次重渲染触发 IO）
+  const openclawConfig = useMemo(
+    () => (agentShareState === 'openclaw' ? readOpenClawConfig() : null),
+    [agentShareState],
+  );
+  const qwenCodeConfig = useMemo(
+    () => (agentShareState === 'qwencode' ? readQwenCodeConfig() : null),
+    [agentShareState],
+  );
+
+  // 静默检测配置目录是否存在，决定是否展示流程一（只检查目录，不读取 Key）
+  // 仅在进入 USE_OPENAI 认证流程时执行一次
+  const hasAnyAgentConfigDir = useMemo(
+    () =>
+      uiState.isAuthenticating &&
+      uiState.pendingAuthType === AuthType.USE_OPENAI
+        ? hasOpenClawConfigDir() || hasQwenCodeConfigDir()
+        : false,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [uiState.isAuthenticating, uiState.pendingAuthType],
+  );
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -324,6 +394,80 @@ export const DialogManager = ({
   if (uiState.isAuthenticating) {
     if (uiState.pendingAuthType === AuthType.USE_OPENAI) {
       const defaults = getDefaultOpenAIConfig();
+
+      // 已有 apiKey 则跳过 Agent 共享流程直接展示输入页
+      // 无 apiKey 且检测到任一 Agent 配置目录存在，才进入流程一
+      if (!defaults.apiKey && hasAnyAgentConfigDir) {
+        // 流程一：展示 Agent 选择列表
+        if (agentShareState === 'idle') {
+          // 计算剩余可用选项（排除已失败的 Agent）
+          const availableAgents = (['openclaw', 'qwencode'] as const).filter(
+            (a) => !failedAgents.has(a),
+          );
+          // 两个都失败了：use Effect 会处理并跳转到 done，此处暂返回 null 等待下一次渲染
+          if (availableAgents.length === 0) {
+            return null;
+          }
+          return (
+            <CustomAgentKeySharePrompt
+              excludedChoices={[...failedAgents]}
+              onSelect={(choice: AgentChoice) => {
+                if (choice === 'none') {
+                  setAgentShareState('done');
+                } else {
+                  setAgentShareState(choice);
+                }
+              }}
+              onCancel={() => {
+                uiActions.cancelAuthentication();
+                uiActions.setAuthState(AuthState.Updating);
+              }}
+            />
+          );
+        }
+
+        // 流程二：根据选中的 Agent 探测 Key，成功则自动导入，失败则返回流程一（agentDetectMap 查表）
+        const agentDetectMap: Record<
+          'openclaw' | 'qwencode',
+          { name: string; config: AgentKeyConfig | null }
+        > = {
+          openclaw: { name: 'OpenClaw', config: openclawConfig },
+          qwencode: { name: 'Qwen Code', config: qwenCodeConfig },
+        };
+        const detecting =
+          agentDetectMap[agentShareState as 'openclaw' | 'qwencode'];
+        if (detecting) {
+          if (detecting.config) {
+            return (
+              <CustomAgentKeyImportPrompt
+                agentKeyConfig={detecting.config}
+                agentName={detecting.name}
+                onAccept={(cfg) => {
+                  uiActions.handleAuthSelect(AuthType.USE_OPENAI, {
+                    apiKey: cfg.apiKey,
+                    baseUrl: cfg.baseUrl,
+                    model: cfg.model,
+                  });
+                }}
+              />
+            );
+          }
+          return (
+            <CustomAgentKeyDetectFailedPrompt
+              agentName={detecting.name}
+              onContinue={() => {
+                const agent = agentShareState as 'openclaw' | 'qwencode';
+                const nextFailed = new Set(failedAgents).add(agent);
+                setFailedAgents(nextFailed);
+                // 还有其他可用 Agent 则返回流程一，否则 useEffect 会自动跳到 done
+                setAgentShareState('idle');
+              }}
+            />
+          );
+        }
+      }
+
+      // agentShareState === 'done'，或已有 apiKey：展示 OpenAI Key 输入页
       return (
         <OpenAIKeyPrompt
           onSubmit={(apiKey, baseUrl, model) => {
