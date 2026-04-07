@@ -47,7 +47,7 @@ Each component has its own build workflow:
 
 - **os-skills**: `cd src/os-skills` — skill definitions are static assets, no compilation needed
 
-- **agent-sec-core** (Linux only): `cd src/agent-sec-core && make build-sandbox`
+- **agent-sec-core** (Linux only): `cd src/agent-sec-core && make build-all`
 
 - **agentsight** (Linux only, optional): `cd src/agentsight && make build`
 

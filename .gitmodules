@@ -1,0 +1,3 @@
+[submodule "src/agent-sec-core/third_party/loongshield"]
+	path = src/agent-sec-core/third_party/loongshield
+	url = https://github.com/openanolis/loongshield.git

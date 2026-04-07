@@ -340,16 +340,30 @@ co /skills
 
 ```bash
 cd src/agent-sec-core
-make build-sandbox
+make build-all
 ```
 
-Artifact: `linux-sandbox/target/release/linux-sandbox`
+If you cloned without `--recursive`, initialize the bundled source once from the repository root:
+
+```bash
+git submodule update --init --recursive src/agent-sec-core/third_party/loongshield
+```
+
+This always builds `linux-sandbox` and tries to build the bundled `loongshield` submodule at `third_party/loongshield`.
+If the current host does not satisfy `loongshield`'s own `make env-check`, the `loongshield` build is skipped and `agent-sec-core` still builds successfully.
+
+Artifacts:
+- `linux-sandbox/target/release/linux-sandbox`
+- `third_party/loongshield/build/src/daemon/loongshield` when the host supports building loongshield
 
 **Install**
 
 ```bash
-sudo make install-sandbox
+sudo make install
 ```
+
+This always installs `linux-sandbox`, `sign-skill.sh`, and the agent-sec-core skill files.
+`loongshield` is installed only when the current host supports building it.
 
 #### 4.2.4 agentsight (Optional, Linux only)
 

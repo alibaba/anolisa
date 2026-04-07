@@ -341,16 +341,30 @@ co /skills
 
 ```bash
 cd src/agent-sec-core
-make build-sandbox
+make build-all
 ```
 
-产物：`linux-sandbox/target/release/linux-sandbox`
+如果你克隆仓库时没有使用 `--recursive`，请先执行一次：
+
+```bash
+git submodule update --init --recursive src/agent-sec-core/third_party/loongshield
+```
+
+这会始终构建 `linux-sandbox`，并尝试构建内置在 `third_party/loongshield` 的 `loongshield` 子模块。
+如果当前宿主机不满足 `loongshield` 自身的 `make env-check`，则会跳过 `loongshield` 构建，但 `agent-sec-core` 仍然可以构建成功。
+
+产物：
+- `linux-sandbox/target/release/linux-sandbox`
+- `third_party/loongshield/build/src/daemon/loongshield`，仅在宿主机支持构建 loongshield 时生成
 
 **安装**
 
 ```bash
-sudo make install-sandbox
+sudo make install
 ```
+
+这会始终安装 `linux-sandbox`、`sign-skill.sh` 和 agent-sec-core 的 skill 文件。
+只有当前宿主机支持构建 loongshield 时，才会顺带安装 `loongshield`。
 
 #### 4.2.4 agentsight（可选，仅 Linux）
 

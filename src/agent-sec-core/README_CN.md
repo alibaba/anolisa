@@ -168,13 +168,26 @@ sudo loongshield seharden --scan --config agentos_baseline
 python3 skill/scripts/asset-verify/verifier.py
 ```
 
-### 从源码构建沙箱
+### 从源码构建
+
+如果你克隆仓库时没有使用 `--recursive`，请先执行一次：
 
 ```bash
-make build-sandbox
+git submodule update --init --recursive src/agent-sec-core/third_party/loongshield
 ```
 
-二进制文件输出到 `linux-sandbox/target/release/linux-sandbox`。
+然后执行：
+
+```bash
+make build-all
+```
+
+这会始终构建 `linux-sandbox`，并尝试构建内置在 `third_party/loongshield` 的 `loongshield` 子模块。
+如果宿主机不满足 `loongshield` 自身的 `make env-check`，则会跳过 `loongshield` 构建，但 `agent-sec-core` 仍然可以构建成功。
+
+产物：
+- `linux-sandbox/target/release/linux-sandbox`
+- `third_party/loongshield/build/src/daemon/loongshield`，仅在宿主机支持构建 loongshield 时生成
 
 ### RPM 安装
 
@@ -227,14 +240,20 @@ sign-skill.sh <技能目录>
 ## 开发
 
 ```bash
-# 构建沙箱
-make build-sandbox
+# 构建 sandbox，并尝试构建内置 loongshield 依赖
+make build-all
+
+# 仅尝试构建内置 loongshield 依赖
+make loongshield
 
 # 运行 Rust 测试
 cd linux-sandbox && cargo test
 
 # 运行端到端测试（需先安装沙箱）
 python3 tests/e2e/linux-sandbox/e2e_test.py
+
+# 安装完整本地运行时
+sudo make install
 
 # 格式化 Python 代码
 make python-code-pretty

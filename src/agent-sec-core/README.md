@@ -168,13 +168,26 @@ sudo loongshield seharden --scan --config agentos_baseline
 python3 skill/scripts/asset-verify/verifier.py
 ```
 
-### Build Sandbox from Source
+### Build from Source
+
+Initialize the bundled source once if you cloned without `--recursive`:
 
 ```bash
-make build-sandbox
+git submodule update --init --recursive src/agent-sec-core/third_party/loongshield
 ```
 
-The binary is output to `linux-sandbox/target/release/linux-sandbox`.
+Then build:
+
+```bash
+make build-all
+```
+
+This always builds `linux-sandbox` and tries to build the bundled `loongshield` submodule at `third_party/loongshield`.
+If the host does not satisfy `loongshield`'s own `make env-check`, the `loongshield` build is skipped and `agent-sec-core` still builds successfully.
+
+Artifacts:
+- `linux-sandbox/target/release/linux-sandbox`
+- `third_party/loongshield/build/src/daemon/loongshield` when the host supports building loongshield
 
 ### Install via RPM
 
@@ -227,14 +240,20 @@ sign-skill.sh <skill-directory>
 ## Development
 
 ```bash
-# Build sandbox
-make build-sandbox
+# Build sandbox and try the bundled loongshield dependency
+make build-all
+
+# Try only the bundled loongshield dependency
+make loongshield
 
 # Run Rust tests
 cd linux-sandbox && cargo test
 
 # Run e2e tests (requires sandbox installed)
 python3 tests/e2e/linux-sandbox/e2e_test.py
+
+# Install the full local runtime
+sudo make install
 
 # Format Python code
 make python-code-pretty

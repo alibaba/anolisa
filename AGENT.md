@@ -39,7 +39,7 @@ make test
 
 # agent-sec-core (Linux only, per-component)
 cd src/agent-sec-core
-make build-sandbox
+make build-all
 pytest tests/integration-test/ tests/unit-test/ -v
 
 # agentsight (Linux only, optional, per-component)

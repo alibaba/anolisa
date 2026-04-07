@@ -13,7 +13,7 @@
 # Components (build order):
 #   cosh     copilot-shell      (Node.js / TypeScript)
 #   skills   os-skills          (Markdown skill definitions, no compilation)
-#   sec-core agent-sec-core     (Rust sandbox, Linux only)
+#   sec-core agent-sec-core     (Rust sandbox + bundled loongshield, Linux only)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -666,19 +666,34 @@ build_skills() {
 }
 
 build_sec_core() {
-    step "Building agent-sec-core (linux-sandbox)"
+    step "Building agent-sec-core (linux-sandbox + bundled loongshield when supported)"
     local dir="$PROJECT_ROOT/src/agent-sec-core"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    if [[ ! -f "$dir/third_party/loongshield/Makefile" ]]; then
+        info "Initializing bundled loongshield submodule ..."
+        git -C "$PROJECT_ROOT" submodule update --init --recursive -- src/agent-sec-core/third_party/loongshield || warn "Unable to initialize loongshield submodule; sec-core will continue without it"
+    fi
+
     cd "$dir"
 
-    info "cargo build --release (linux-sandbox) ..."
-    if [[ -f Makefile ]] && grep -q 'build-sandbox' Makefile; then
+    info "make build-all ..."
+    if [[ -f Makefile ]] && grep -q 'build-all' Makefile; then
+        make build-all
+    elif [[ -f Makefile ]] && grep -q 'build-sandbox' Makefile; then
         make build-sandbox
     else
         cd linux-sandbox && cargo build --release && cd ..
     fi
 
+    local loongshield_bin="third_party/loongshield/build/src/daemon/loongshield"
     local bin="linux-sandbox/target/release/linux-sandbox"
+    if [[ -f "$loongshield_bin" ]]; then
+        ok "loongshield built successfully"
+    else
+        info "loongshield build skipped on this host or submodule unavailable"
+    fi
+
     if [[ -f "$bin" ]]; then
         ARTIFACT_NAMES+=("agent-sec-core")
         ARTIFACT_PATHS+=("src/agent-sec-core/$bin")
@@ -739,9 +754,9 @@ install_sec_core() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "sudo make install-sandbox ..."
-    sudo make install-sandbox
-    ok "agent-sec-core (linux-sandbox) installed to /usr/local/bin/"
+    info "sudo make install ..."
+    sudo make install
+    ok "agent-sec-core installed; loongshield is installed when the host supports building it"
 }
 
 install_sight() {
@@ -811,7 +826,7 @@ $(echo -e "${BOLD}Examples:${NC}")
 $(echo -e "${BOLD}Components:${NC}")
   cosh     copilot-shell      Node.js / TypeScript AI terminal assistant       [default]
   skills   os-skills          Markdown skill definitions (deploy only)          [default]
-  sec-core agent-sec-core     Rust secure sandbox (Linux only)                  [default]
+  sec-core agent-sec-core     Rust sandbox + bundled loongshield hardening core (Linux only) [default]
   sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
 
 $(echo -e "${BOLD}What this script does:${NC}")
