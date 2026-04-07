@@ -19,7 +19,7 @@ export interface FeatureTip {
   priority?: number;
 }
 
-const FEATURE_TIPS: readonly FeatureTip[] = [
+export const FEATURE_TIPS: readonly FeatureTip[] = [
   {
     id: 'bash-interactive-shell',
     emoji: '\uD83D\uDC1A',
