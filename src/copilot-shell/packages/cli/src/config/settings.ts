@@ -88,6 +88,7 @@ const MIGRATION_MAP: Record<string, string> = {
   hideWindowTitle: 'ui.hideWindowTitle',
   showStatusInTitle: 'ui.showStatusInTitle',
   hideTips: 'ui.hideTips',
+  hideFeatureTipBanner: 'ui.hideFeatureTipBanner',
   showLineNumbers: 'ui.showLineNumbers',
   showCitations: 'ui.showCitations',
   ideMode: 'ide.enabled',

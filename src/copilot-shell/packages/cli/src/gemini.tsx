@@ -54,6 +54,10 @@ import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import { initializeI18n, t, type SupportedLanguage } from './i18n/index.js';
+import {
+  getAndMarkUnshownFeatureTips,
+  type FeatureTip,
+} from './utils/featureTips.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -133,6 +137,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  featureTips: FeatureTip[] = [],
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -157,6 +162,7 @@ export async function startInteractiveUI(
                 config={config}
                 settings={settings}
                 startupWarnings={startupWarnings}
+                featureTips={featureTips}
                 version={version}
                 initializationResult={initializationResult}
               />
@@ -507,12 +513,23 @@ export async function main() {
         process.stdin.pause();
       }
 
+      // Load one-time feature tips for first-time users
+      let featureTips: FeatureTip[] = [];
+      if (!settings.merged.ui?.hideFeatureTipBanner) {
+        try {
+          featureTips = await getAndMarkUnshownFeatureTips();
+        } catch {
+          // Non-critical — skip if loading fails
+        }
+      }
+
       await startInteractiveUI(
         config,
         settings,
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        featureTips,
       );
       return;
     }

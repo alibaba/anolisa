@@ -89,6 +89,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { FeatureTip } from '../utils/featureTips.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -127,6 +128,7 @@ interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings?: string[];
+  featureTips?: FeatureTip[];
   version: string;
   initializationResult: InitializationResult;
 }
@@ -1675,6 +1677,7 @@ export const AppContainer = (props: AppContainerProps) => {
               version: props.version,
               startupWarnings,
               dismissWarning,
+              featureTips: props.featureTips || [],
             }}
           >
             <ShellFocusContext.Provider value={isFocused}>

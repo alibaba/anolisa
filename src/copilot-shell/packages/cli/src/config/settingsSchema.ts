@@ -326,6 +326,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      hideFeatureTipBanner: {
+        type: 'boolean',
+        label: 'Hide Feature Tip Banner',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide the one-time feature tip banner shown on first launch',
+        showInDialog: true,
+      },
       showLineNumbers: {
         type: 'boolean',
         label: 'Show Line Numbers in Code',

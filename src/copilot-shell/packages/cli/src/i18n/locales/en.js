@@ -309,6 +309,9 @@ export default {
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
+  'Hide Feature Tip Banner': 'Hide Feature Tip Banner',
+  'Hide the one-time feature tip banner shown on first launch':
+    'Hide the one-time feature tip banner shown on first launch',
   'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
@@ -1446,4 +1449,8 @@ export default {
   'Press Ctrl+C to exit, then type exit to return to the original session.':
     'Press Ctrl+C to exit, then type exit to return to the original session.',
   'Press Enter to start a new session.': 'Press Enter to start a new session.',
+  'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.':
+    'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.',
+  'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
+    'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.',
 };
