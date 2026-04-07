@@ -32,7 +32,7 @@ tools/sign-skill.sh --init
 tools/sign-skill.sh --batch --force
 
 # 3. 验证
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 `--init` 会自动生成专用签名密钥（`ANOLISA Local Deploy Key`），并将公钥导出到
@@ -82,7 +82,7 @@ tools/sign-skill.sh --export-key /custom/path/to/trusted-keys/
 
 ```bash
 gpg --armor --export me@example.com \
-    > skill/scripts/asset-verify/trusted-keys/me-example-com.asc
+    > ~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/me-example-com.asc
 ```
 
 ### 3. 签名 Skill
@@ -112,7 +112,7 @@ tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 
 ### 4. 配置校验器
 
-使用 `--batch` 时，脚本会自动将 skill 目录注册到 `config.conf` 中。如果手动配置，请确保 skill 目录已配置在 `skill/scripts/asset-verify/config.conf` 中：
+使用 `--batch` 时，脚本会自动将 skill 目录注册到 `config.conf` 中。如果手动配置，请确保 skill 目录已配置在已部署的 `config.conf` 中（如 `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf`）：
 
 ```ini
 skills_dir = [
@@ -124,10 +124,10 @@ skills_dir = [
 
 ```bash
 # 验证所有已配置目录
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 
 # 验证单个 skill
-python3 skill/scripts/asset-verify/verifier.py --skill /usr/share/anolisa/skills/my-skill
+agent-sec-cli verify --skill /usr/share/anolisa/skills/my-skill
 ```
 
 成功时的预期输出：
@@ -154,7 +154,7 @@ VERIFICATION PASSED
 3. 确保 skill 根目录已配置在 `config.conf` 中（见上方第 4 步）。
 4. 验证：
    ```bash
-   python3 skill/scripts/asset-verify/verifier.py --skill /usr/share/anolisa/skills/my-custom-skill
+   agent-sec-cli verify --skill /usr/share/anolisa/skills/my-custom-skill
    ```
 
 ## CI/CD 签名
@@ -185,7 +185,7 @@ tools/sign-skill.sh --batch --force
 然后验证：
 
 ```bash
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 ## 校验错误码

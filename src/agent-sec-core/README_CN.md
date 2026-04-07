@@ -112,18 +112,17 @@ agent-sec-core/
 │   ├── src/                   # Rust 源码（cli, policy, seccomp, proxy, …）
 │   ├── tests/                 # Rust 集成测试 + Python e2e
 │   └── docs/                  # dev-guide, user-guide
+├── agent-sec-cli/             # 统一 CLI + 安全中间层（Python）
+│   ├── src/agent_sec_cli/     # 主 Python 包
+│   │   ├── cli.py             # CLI 入口点（Typer）
+│   │   ├── asset_verify/      # Skill 签名 + 哈希校验
+│   │   ├── sandbox/           # 沙箱策略生成
+│   │   ├── security_events/   # JSONL 事件日志
+│   │   └── security_middleware/ # 中间层 + 后端实现
+│   ├── dev-tools/             # 后端扩展开发指南
+│   └── pyproject.toml         # 构建配置
 ├── skill/
 │   ├── SKILL.md               # 可执行安全协议（检查工作流 + 安全决策）
-│   ├── scripts/
-│   │   ├── sandbox/
-│   │   │   ├── sandbox_policy.py     # 沙箱策略生成器
-│   │   │   ├── classify_command.py   # 命令分类器
-│   │   │   └── rules.py              # 分类规则定义
-│   │   └── asset-verify/
-│   │       ├── verifier.py         # Skill 签名 + 哈希校验
-│   │       ├── errors.py           # 错误码定义
-│   │       ├── config.conf         # skills 目录配置
-│   │       └── trusted-keys/       # 受信公钥目录
 │   └── references/
 │       ├── agent-sec-seharden.md       # Phase 1 子 skill（loongshield 安全加固）
 │       ├── agent-sec-sandbox.md        # 沙箱策略配置指南
@@ -165,15 +164,15 @@ sudo loongshield seharden --reinforce --config agentos_baseline
 
 # ===== Phase 2: 关键资产保护 =====
 # 校验全部 skill 完整性
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 
 # 校验单个 skill（可选）
-python3 skill/scripts/asset-verify/verifier.py --skill /path/to/skill_name
+agent-sec-cli verify --skill /path/to/skill_name
 
 # ===== Phase 3: 最终安全确认 =====
 # 复检确认合规
 sudo loongshield seharden --scan --config agentos_baseline
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 ### 从源码构建沙箱
@@ -195,7 +194,7 @@ sudo yum install agent-sec-core
 对命令进行安全分类，生成 `linux-sandbox` 执行策略：
 
 ```bash
-python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
+python3 agent-sec-cli/src/agent_sec_cli/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 ```
 
 输出示例：
@@ -212,7 +211,7 @@ python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 
 ### 校验流程
 
-1. 加载受信公钥（`skill/scripts/asset-verify/trusted-keys/*.asc`）
+1. 加载受信公钥（`agent-sec-cli/asset-verify/trusted-keys/*.asc`）
 2. 验证 Skill 目录中 `.skill-meta/Manifest.json` 的 GPG 签名（`.skill-meta/.skill.sig`）
 3. 校验 Manifest 中所有文件的 SHA-256 哈希
 
@@ -238,22 +237,17 @@ tools/sign-skill.sh --init
 tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 
 # 3. 验证
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_CN.md)**。
 
 ## 审计日志
 
-所有安全事件记录至 `/var/log/agent-sec/violations.log`：
+所有安全事件以 JSONL 格式记录至 `/var/log/agent-sec/security-events.jsonl`（回退路径：`~/.agent-sec-core/security-events.jsonl`）：
 
-```
-[TIMESTAMP] [RISK_LEVEL] [CATEGORY]
-skill: <skill_name>
-action: <requested_action>
-target: <target_resource>
-decision: ALLOWED | BLOCKED | PENDING_CONFIRM
-reason: <reason>
+```json
+{"event_id": "uuid", "event_type": "harden", "category": "hardening", "timestamp": "ISO-8601", "trace_id": "uuid", "pid": 1234, "uid": 0, "details": {"request": {...}, "result": {...}}}
 ```
 
 ## 开发

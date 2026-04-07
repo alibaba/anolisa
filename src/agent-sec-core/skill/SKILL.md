@@ -71,7 +71,6 @@ description: Agent 安全协议。每次 Agent 执行时强制执行安全检查
 ---
 
 ## 3. 安全检查工作流
-
 前提条件：Linux 系统（Alinux / Anolis 系优先），root 或 sudo 权限。
 
 ### 强制首步
@@ -94,7 +93,7 @@ Decision:             [LOCKED]
 
 子 skill: [references/agent-sec-seharden.md](references/agent-sec-seharden.md)
 前置条件: `loongshield` 在 PATH 中
-执行命令: 加载子 skill，传入 `$ARGUMENTS` = `scan`，执行 `loongshield seharden --scan --config agentos_baseline`
+执行命令: 加载子 skill，传入 `$ARGUMENTS` = `scan`，执行 `agent-sec-cli harden --mode scan`
 
 **判定条件：**
 
@@ -134,14 +133,14 @@ NOT_RUN 或最终 FAIL 时停止，不继续后续 Phase，不进入 Decision。
 ### Phase 2: 资产完整性校验
 
 子 skill: [references/agent-sec-skill-verify.md](references/agent-sec-skill-verify.md)
-前置条件: `gpg`/`gnupg2` 已安装，`scripts/asset-verify/verifier.py` 存在
-执行命令: `python3 scripts/asset-verify/verifier.py`
+前置条件: `gpg`/`gnupg2` 已安装，`agent-sec-cli` 已安装
+执行命令: `agent-sec-cli verify`
 
 **判定条件：**
 
 - **PASS**: 输出包含 `VERIFICATION PASSED`
 - **FAIL**: 输出包含 `VERIFICATION FAILED`
-- **NOT_RUN**: `verifier.py` 不存在或 `gpg` 未安装
+- **NOT_RUN**: `agent-sec-cli` 未安装或 `gpg` 未安装
 
 **PASS 时输出：**
 
@@ -177,8 +176,8 @@ FAIL 或 NOT_RUN 时停止，不继续后续 Phase，不进入 Decision。
 执行命令: 重新执行 Phase 1 scan 和 Phase 2 verify 作为复检
 
 ```bash
-sudo loongshield seharden --scan --config agentos_baseline
-python3 scripts/asset-verify/verifier.py
+sudo agent-sec-cli harden --mode scan
+agent-sec-cli verify
 ```
 
 **判定条件：**

@@ -61,7 +61,7 @@ install -p -m 0755 linux-sandbox/target/release/linux-sandbox %{buildroot}/usr/l
 install -p -m 0755 tools/sign-skill.sh %{buildroot}/usr/local/bin/
 
 # Install scripts
-cp -rp skill/scripts/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/
+cp -rp agent-sec-cli/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/
 
 # Install references files
 cp -rp skill/references/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/references/

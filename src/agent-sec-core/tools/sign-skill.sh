@@ -412,7 +412,7 @@ GPGEOF
     echo "     $0 --batch <skills_dir> --force"
     echo ""
     echo "  2. Verify signatures:"
-    echo "     python3 <path-to>/asset-verify/verifier.py"
+    echo "     agent-sec-cli verify"
     echo ""
 }
 

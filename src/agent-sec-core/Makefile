@@ -35,7 +35,7 @@ install: ## Install linux-sandbox binary, sign-skill.sh and skill files
 	install -p -m 0755 tools/sign-skill.sh $(DESTDIR)$(PREFIX)/bin/
 	install -d -m 0755 $(DESTDIR)$(SKILL_DIR)/scripts
 	install -d -m 0755 $(DESTDIR)$(SKILL_DIR)/references
-	cp -rp skill/scripts/* $(DESTDIR)$(SKILL_DIR)/scripts/
+	cp -rp agent-sec-cli/* $(DESTDIR)$(SKILL_DIR)/scripts/
 	cp -rp skill/references/* $(DESTDIR)$(SKILL_DIR)/references/
 	cp skill/SKILL.md $(DESTDIR)$(SKILL_DIR)/
 	find $(DESTDIR)$(SKILL_DIR) -type f -name '*.sh' -exec chmod 0755 {} +

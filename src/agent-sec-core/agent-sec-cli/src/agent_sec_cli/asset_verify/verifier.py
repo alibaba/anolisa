@@ -15,7 +15,7 @@ try:
 except ImportError:
     pgpy = None
 
-from errors import (
+from .errors import (
     ErrConfigMissing,
     ErrHashMismatch,
     ErrManifestMissing,

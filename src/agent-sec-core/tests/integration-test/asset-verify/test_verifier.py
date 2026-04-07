@@ -9,9 +9,9 @@ import sys
 import tempfile
 import unittest
 
-# Add asset-verify to path (updated for new location: tests/integration-test/asset-verify -> skill/scripts/asset-verify)
+# Add asset-verify to path (updated for new location: tests/integration-test/asset-verify -> agent-sec-cli/asset-verify)
 sys.path.insert(
-    0, os.path.join(os.path.dirname(__file__), "../../../skill/scripts/asset-verify")
+    0, os.path.join(os.path.dirname(__file__), "../../../agent-sec-cli/asset-verify")
 )
 
 from errors import (

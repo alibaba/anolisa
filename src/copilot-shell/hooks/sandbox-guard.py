@@ -11,11 +11,49 @@ stdin: PreToolUse JSON (tool_name, tool_input, cwd, ...)
 stdout: HookOutput JSON (decision, systemMessage, hookSpecificOutput)
 """
 
+import os
 import sys
 import json
 import re
 import os
 import base64
+import subprocess
+import shutil
+
+
+def _log_sandbox_event(action: str = "log-sandbox", **kwargs) -> None:
+    """Log security event via agent-sec-cli CLI (subprocess call).
+    
+    Falls back silently if agent-sec-cli is not installed.
+    
+    Args:
+        action: CLI subcommand name (default: 'log_sandbox')
+        **kwargs: Action-specific parameters
+    """
+    try:
+        # Check if agent-sec-cli is available
+        if shutil.which("agent-sec-cli") is None:
+            return
+        
+        # Build command: agent-sec-cli <action> [args...]
+        cmd = ["agent-sec-cli", action]
+        
+        # Convert kwargs to CLI arguments
+        for key, value in kwargs.items():
+            if value is not None:
+                cmd.append(f"--{key.replace('_', '-')}")
+                cmd.append(str(value))
+        
+        # Execute asynchronously to avoid blocking the hook
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        # Silently ignore any errors - logging must not affect hook behavior
+        pass
+
 
 LINUX_SANDBOX = "/usr/local/bin/linux-sandbox"
 
@@ -241,6 +279,14 @@ def main():
                 "执行完毕后可用 `/hooks enable sandbox-guard` 恢复。"
             ),
         }
+        # --- middleware prehook logging (additive) ---
+        _log_sandbox_event(
+            decision="block",
+            command=command,
+            reasons=", ".join(block_reasons),
+            cwd=cwd,
+        )
+
         print(json.dumps(result, ensure_ascii=False))
         return
 
@@ -309,6 +355,15 @@ def main():
         ),
         "hookSpecificOutput": {"tool_input": {"command": sandbox_cmd}},
     }
+
+    # --- middleware prehook logging (additive) ---
+    _log_sandbox_event(
+        decision="sandbox",
+        command=command,
+        reasons=", ".join(all_reasons),
+        network_policy=network_policy,
+        cwd=cwd,
+    )
 
     print(json.dumps(result, ensure_ascii=False))
 

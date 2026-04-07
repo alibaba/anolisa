@@ -112,18 +112,17 @@ agent-sec-core/
 │   ├── src/                   # Rust source (cli, policy, seccomp, proxy, …)
 │   ├── tests/                 # Rust integration tests + Python e2e
 │   └── docs/                  # dev-guide, user-guide
+├── agent-sec-cli/             # Unified CLI + security middleware (Python)
+│   ├── src/agent_sec_cli/     # Main Python package
+│   │   ├── cli.py             # CLI entry point (Typer)
+│   │   ├── asset_verify/      # Skill signature + hash verification
+│   │   ├── sandbox/           # Sandbox policy generation
+│   │   ├── security_events/   # JSONL event logging
+│   │   └── security_middleware/ # Middleware layer + backends
+│   ├── dev-tools/             # Developer guides for extending backends
+│   └── pyproject.toml         # Build configuration
 ├── skill/
 │   ├── SKILL.md               # Executable security protocol (check workflow + decision)
-│   ├── scripts/
-│   │   ├── sandbox/
-│   │   │   ├── sandbox_policy.py     # Sandbox policy generator
-│   │   │   ├── classify_command.py   # Command classifier
-│   │   │   └── rules.py              # Classification rules
-│   │   └── asset-verify/
-│   │       ├── verifier.py         # Skill signature + hash verification
-│   │       ├── errors.py           # Error code definitions
-│   │       ├── config.conf         # Skills directory config
-│   │       └── trusted-keys/       # Trusted public key directory
 │   └── references/
 │       ├── agent-sec-seharden.md       # Phase 1 sub-skill (loongshield hardening)
 │       ├── agent-sec-sandbox.md        # Sandbox policy configuration guide
@@ -165,15 +164,15 @@ sudo loongshield seharden --reinforce --config agentos_baseline
 
 # ===== Phase 2: Asset Protection =====
 # Verify all skills
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 
 # Verify a single skill (optional)
-python3 skill/scripts/asset-verify/verifier.py --skill /path/to/skill_name
+agent-sec-cli verify --skill /path/to/skill_name
 
 # ===== Phase 3: Final Confirmation =====
 # Re-scan to confirm compliance
 sudo loongshield seharden --scan --config agentos_baseline
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 ### Build Sandbox from Source
@@ -195,7 +194,7 @@ sudo yum install agent-sec-core
 Classify a command and generate a `linux-sandbox` execution policy:
 
 ```bash
-python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
+python3 agent-sec-cli/src/agent_sec_cli/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 ```
 
 Output example:
@@ -212,7 +211,7 @@ Output example:
 
 ### Verification Flow
 
-1. Load trusted public keys from `skill/scripts/asset-verify/trusted-keys/*.asc`
+1. Load trusted public keys from `agent-sec-cli/asset-verify/trusted-keys/*.asc`
 2. Verify the GPG signature (`.skill-meta/.skill.sig`) of `.skill-meta/Manifest.json` in each skill directory
 3. Validate SHA-256 hashes of all files listed in the Manifest
 
@@ -238,22 +237,17 @@ tools/sign-skill.sh --init
 tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 
 # 3. Verify
-python3 skill/scripts/asset-verify/verifier.py
+agent-sec-cli verify
 ```
 
 For the complete guide (manual key management, custom skills, CI/CD, troubleshooting), see **[Skill Signing Guide](tools/SIGNING_GUIDE.md)**.
 
 ## Audit Log
 
-All security events are logged to `/var/log/agent-sec/violations.log`:
+All security events are logged as JSONL to `/var/log/agent-sec/security-events.jsonl` (falls back to `~/.agent-sec-core/security-events.jsonl`):
 
-```
-[TIMESTAMP] [RISK_LEVEL] [CATEGORY]
-skill: <skill_name>
-action: <requested_action>
-target: <target_resource>
-decision: ALLOWED | BLOCKED | PENDING_CONFIRM
-reason: <reason>
+```json
+{"event_id": "uuid", "event_type": "harden", "category": "hardening", "timestamp": "ISO-8601", "trace_id": "uuid", "pid": 1234, "uid": 0, "details": {"request": {...}, "result": {...}}}
 ```
 
 ## Development

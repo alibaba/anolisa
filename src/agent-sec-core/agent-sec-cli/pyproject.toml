@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-sec-cli"
+version = "0.0.1"
+description = "Agent Security Core CLI - System hardening, sandbox isolation, and asset integrity verification for AI Agents"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.7"
+authors = [
+    {name = "YiZheng Yang", email = "YiZheng.Yang@linux.alibaba.com"},
+]
+maintainers = [
+    {name = "ANOLISA Team", email = "anolisa@lists.openanolis.cn"},
+]
+keywords = ["security", "agent", "hardening", "sandbox", "integrity", "verification"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+    "gnupg>=2.0",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+pgpy = ["pgpy>=0.5"]
+dev = [
+    "black",
+    "isort",
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+agent-sec-cli = "agent_sec_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/alibaba/anolisa"
+Documentation = "https://github.com/alibaba/anolisa/tree/main/src/agent-sec-core"
+Repository = "https://github.com/alibaba/anolisa.git"
+Issues = "https://github.com/alibaba/anolisa/issues"
+Changelog = "https://github.com/alibaba/anolisa/blob/main/src/agent-sec-core/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_sec_cli*"]
+
+[tool.setuptools.package-data]
+agent_sec_cli = [
+    "asset_verify/config.conf",
+    "asset_verify/trusted-keys/*.asc",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py36"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -1,7 +1,7 @@
 ---
 name: agentos-baseline
 phase: 1
-description: Use the only supported Phase 1 flow: `loongshield seharden --config agentos_baseline`.
+description: Use the only supported Phase 1 flow: `agent-sec-cli harden --mode scan`.
 ---
 
 # Phase 1: SEHarden
@@ -34,11 +34,12 @@ If `$ARGUMENTS` is anything else, stop and tell the user:
 
 ## Exact Commands
 
-- `scan`: `loongshield seharden --scan --config agentos_baseline`
-- `dry-run`: `loongshield seharden --reinforce --dry-run --config agentos_baseline`
-- `reinforce`: `loongshield seharden --reinforce --config agentos_baseline`
+- `scan`: `agent-sec-cli harden --mode scan`
+- `dry-run`: `agent-sec-cli harden --mode dry-run`
+- `reinforce`: `agent-sec-cli harden --mode reinforce`
 
 Always keep `--config agentos_baseline` explicit.
+The `--config agentos_baseline` profile is the built-in default in `agent-sec-cli`.
 
 ## Execution Rules
 
