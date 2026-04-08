@@ -182,9 +182,11 @@ export function OpenAIKeyPrompt({
   // Detect initial provider & subProvider indices from defaultBaseUrl
   const detectInitialIndices = (): [number, number] => {
     if (!defaultBaseUrl) return [0, 0];
-    // Search top-level providers first
+    // Top-level providers with subProviders are category entries only — never match them.
+    // First search leaf providers (no subProviders, e.g. DeepSeek / Kimi).
     const topIdx = OPENAI_PROVIDERS.findIndex(
-      (p) => p.id !== 'custom' && p.baseUrl === defaultBaseUrl,
+      (p) =>
+        p.id !== 'custom' && !p.subProviders && p.baseUrl === defaultBaseUrl,
     );
     if (topIdx >= 0) return [topIdx, 0];
     // Search subProviders
@@ -235,9 +237,10 @@ export function OpenAIKeyPrompt({
     // Atomic update: both providerIndex and subProviderIndex in one setState call
     setIndices([newIndex, 0]);
     applyProvider(newIndex, 0);
-    // Restore defaultApiKey if navigating back to the original provider, otherwise clear
-    const [initP, initS] = initialIndices;
-    setApiKey(newIndex === initP && initS === 0 ? defaultApiKey || '' : '');
+    // Restore defaultApiKey if navigating back to the original top-level provider
+    // (regardless of which sub-provider was originally selected), otherwise clear.
+    const [initP] = initialIndices;
+    setApiKey(newIndex === initP ? defaultApiKey || '' : '');
   };
 
   const handleSubProviderChange = (newIndex: number) => {

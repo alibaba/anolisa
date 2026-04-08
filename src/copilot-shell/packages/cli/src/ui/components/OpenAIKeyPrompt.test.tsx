@@ -135,6 +135,71 @@ describe('OpenAIKeyPrompt', () => {
     expect(output).toContain('● DashScope ›');
   });
 
+  it('should show API Key when DashScope Coding Plan China is configured with existing key', () => {
+    // China (Aliyun) 子 provider 与顶层 Coding Plan 曾共享相同的 baseUrl，
+    // 顶层不参与匹配后，正确命中 subProvider sIdx=0，有 apiKey 则字段显示。
+    const { lastFrame } = render(
+      <OpenAIKeyPrompt
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        defaultBaseUrl="https://coding.dashscope.aliyuncs.com/v1"
+        defaultApiKey="sk-existing-key"
+      />,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('● DashScope Coding Plan ›');
+    expect(output).toContain('API Key:');
+    expect(output).toContain('Base URL:');
+    expect(output).toContain('Model:');
+  });
+
+  it('should hide API Key when DashScope Coding Plan China is configured without defaultApiKey', () => {
+    // 有 subProviders 且 apiKey 为空时，provider 阶段隐藏字段（与 DashScope 普通版行为一致）
+    const { lastFrame } = render(
+      <OpenAIKeyPrompt
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        defaultBaseUrl="https://coding.dashscope.aliyuncs.com/v1"
+      />,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('● DashScope Coding Plan ›');
+    expect(output).not.toContain('API Key:');
+  });
+
+  it('should select DashScope Coding Plan International subProvider correctly', () => {
+    const { lastFrame } = render(
+      <OpenAIKeyPrompt
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        defaultBaseUrl="https://coding-intl.dashscope.aliyuncs.com/v1"
+        defaultApiKey="sk-intl-key"
+      />,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('● DashScope Coding Plan ›');
+    expect(output).toContain('API Key:');
+  });
+
+  it('should show API Key on init when configured with International subProvider (initS=1)', () => {
+    // 修复点：handleProviderChange 原先检查 initS===0，导致 initS=1（International）
+    // 的用户切回 Coding Plan 时 apiKey 被清空、字段隐藏。
+    // 初始渲染时 initS=1 且 apiKey 有值，字段应正常显示。
+    const { lastFrame } = render(
+      <OpenAIKeyPrompt
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        defaultBaseUrl="https://coding-intl.dashscope.aliyuncs.com/v1"
+        defaultApiKey="sk-intl-key"
+      />,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('● DashScope Coding Plan ›');
+    expect(output).toContain('API Key:');
+    expect(output).toContain('Base URL:');
+    expect(output).toContain('Model:');
+  });
+
   // ─── defaultApiKey 掩码显示 ─────────────────────────────────────────────────
 
   it('should mask defaultApiKey in display', () => {
