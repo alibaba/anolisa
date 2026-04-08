@@ -528,4 +528,233 @@ Skill 3 content`);
       expect(errors.size).toBeGreaterThan(0);
     });
   });
+
+  describe('custom skill paths', () => {
+    it('refreshCache should include custom level in cache', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([]);
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      await manager.refreshCache();
+
+      // Access internal cache via listSkills with level filter
+      const customSkills = await manager.listSkills({ level: 'custom' });
+      expect(customSkills).toEqual([]);
+    });
+
+    it('listSkills should prioritize project over custom', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/custom/skills',
+      ]);
+
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          { name: 'skill1', isDirectory: () => true, isFile: () => false },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>) // project
+        .mockResolvedValueOnce([
+          { name: 'skill1', isDirectory: () => true, isFile: () => false },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>) // custom
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        ) // user
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        ) // system
+        .mockResolvedValue(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: skill1
+description: First skill
+---
+Skill 1 content`);
+
+      const skills = await manager.listSkills({ force: true });
+      const skill1 = skills.find((s) => s.name === 'skill1');
+      expect(skill1).toBeDefined();
+      expect(skill1!.level).toBe('project');
+    });
+
+    it('listSkills should prioritize custom over user', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/custom/skills',
+      ]);
+
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        ) // project
+        .mockResolvedValueOnce([
+          { name: 'skill1', isDirectory: () => true, isFile: () => false },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>) // custom
+        .mockResolvedValueOnce([
+          { name: 'skill1', isDirectory: () => true, isFile: () => false },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>) // user
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        ) // system
+        .mockResolvedValue(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: skill1
+description: First skill
+---
+Skill 1 content`);
+
+      const skills = await manager.listSkills({ force: true });
+      const skill1 = skills.find((s) => s.name === 'skill1');
+      expect(skill1).toBeDefined();
+      expect(skill1!.level).toBe('custom');
+    });
+
+    it('loadSkill should find custom skill before user skill', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/custom/skills',
+      ]);
+
+      vi.mocked(fs.readdir)
+        .mockRejectedValueOnce(new Error('No project dir')) // project
+        .mockResolvedValueOnce([
+          { name: 'test-skill', isDirectory: () => true, isFile: () => false },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>) // custom
+        .mockResolvedValue(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: test-skill
+description: A test skill
+---
+Content`);
+
+      const skill = await manager.loadSkill('test-skill');
+      expect(skill).toBeDefined();
+      expect(skill!.level).toBe('custom');
+    });
+
+    it('should handle empty custom paths gracefully', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([]);
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      const skills = await manager.listSkills({
+        level: 'custom',
+        force: true,
+      });
+      expect(skills).toEqual([]);
+    });
+
+    it('should handle non-existent custom directories', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/nonexistent/dir',
+      ]);
+      vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
+
+      const skills = await manager.listSkills({
+        level: 'custom',
+        force: true,
+      });
+      expect(skills).toEqual([]);
+    });
+
+    it('should load skills from multiple custom directories', async () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/custom/dir1',
+        '/custom/dir2',
+      ]);
+
+      let callCount = 0;
+      vi.mocked(fs.readdir).mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          // project - empty
+          return [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+        }
+        if (callCount === 2) {
+          // custom dir1
+          return [
+            {
+              name: 'skill-a',
+              isDirectory: () => true,
+              isFile: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+        }
+        if (callCount === 3) {
+          // custom dir2
+          return [
+            {
+              name: 'skill-b',
+              isDirectory: () => true,
+              isFile: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+        }
+        // user, system
+        return [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
+      mockParseYaml.mockImplementation((yamlString: string) => {
+        if (yamlString.includes('name: skill-a')) {
+          return { name: 'skill-a', description: 'Skill A' };
+        }
+        if (yamlString.includes('name: skill-b')) {
+          return { name: 'skill-b', description: 'Skill B' };
+        }
+        return { name: 'unknown', description: 'Unknown' };
+      });
+
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes('skill-a')) {
+          return Promise.resolve(`---
+name: skill-a
+description: Skill A
+---
+Skill A content`);
+        }
+        if (pathStr.includes('skill-b')) {
+          return Promise.resolve(`---
+name: skill-b
+description: Skill B
+---
+Skill B content`);
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+
+      const skills = await manager.listSkills({ force: true });
+      const customSkills = skills.filter((s) => s.level === 'custom');
+      expect(customSkills).toHaveLength(2);
+      expect(customSkills.map((s) => s.name).sort()).toEqual([
+        'skill-a',
+        'skill-b',
+      ]);
+    });
+
+    it('getSkillsBaseDir should return first custom dir for custom level', () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([
+        '/custom/dir1',
+        '/custom/dir2',
+      ]);
+      const baseDir = manager.getSkillsBaseDir('custom');
+      expect(baseDir).toBe('/custom/dir1');
+    });
+
+    it('getSkillsBaseDir should return empty string when no custom paths', () => {
+      vi.spyOn(mockConfig, 'getResolvedCustomSkillPaths').mockReturnValue([]);
+      const baseDir = manager.getSkillsBaseDir('custom');
+      expect(baseDir).toBe('');
+    });
+  });
 });

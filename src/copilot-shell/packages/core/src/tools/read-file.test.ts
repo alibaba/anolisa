@@ -47,6 +47,7 @@ describe('ReadFileTool', () => {
         getGlobalRemoteSkillsDir: () =>
           path.join(os.homedir(), '.copilot-shell', 'remote-skills'),
       },
+      getResolvedCustomSkillPaths: () => [],
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
     } as unknown as Config;
@@ -81,6 +82,43 @@ describe('ReadFileTool', () => {
     it('should throw error if path is outside root', () => {
       const params: ReadFileToolParams = {
         file_path: '/outside/root.txt',
+      };
+      expect(() => tool.build(params)).toThrow(
+        /File path must be within one of the workspace directories/,
+      );
+    });
+
+    it('should allow access to files in custom skill directories', () => {
+      const customSkillDir = '/custom/skills';
+      const customConfig = {
+        getFileService: () => new FileDiscoveryService(tempRootDir),
+        getFileSystemService: () => new StandardFileSystemService(),
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+        storage: {
+          getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+          getUserSkillsDir: () =>
+            path.join(os.homedir(), '.copilot-shell', 'skills'),
+          getRemoteSkillsDir: () =>
+            path.join(tempRootDir, '.copilot-shell', 'remote-skills'),
+          getGlobalRemoteSkillsDir: () =>
+            path.join(os.homedir(), '.copilot-shell', 'remote-skills'),
+        },
+        getResolvedCustomSkillPaths: () => [customSkillDir],
+        getTruncateToolOutputThreshold: () => 2500,
+        getTruncateToolOutputLines: () => 500,
+      } as unknown as Config;
+      const customTool = new ReadFileTool(customConfig);
+      const params: ReadFileToolParams = {
+        file_path: path.join(customSkillDir, 'my-skill', 'SKILL.md'),
+      };
+      const result = customTool.build(params);
+      expect(typeof result).not.toBe('string');
+    });
+
+    it('should reject files outside custom skill dirs and workspace', () => {
+      const params: ReadFileToolParams = {
+        file_path: '/not-custom/skills/file.txt',
       };
       expect(() => tool.build(params)).toThrow(
         /File path must be within one of the workspace directories/,

@@ -1215,6 +1215,27 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Skills',
+    requiresRestart: true,
+    default: {},
+    description: 'Configuration for skill discovery and custom skill paths.',
+    showInDialog: false,
+    properties: {
+      customPaths: {
+        type: 'array',
+        label: 'Custom Skill Paths',
+        category: 'Skills',
+        requiresRestart: true,
+        default: [] as string[],
+        description:
+          'Additional directories to scan for skills. Supports ~ (home directory), $VAR and ${VAR} environment variable expansion. Each path should point to a directory containing skill subdirectories with SKILL.md files.',
+        showInDialog: false,
+      },
+    },
+  },
 
   hooksConfig: {
     type: 'object',

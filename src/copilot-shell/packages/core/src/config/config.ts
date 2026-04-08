@@ -382,6 +382,8 @@ export interface ConfigParameters {
     /** Base URL of the remote Skill-OS API. When set, remote skills will be enabled. */
     baseUrl?: string;
   };
+  /** User-defined custom skill directory paths (supports ~, $VAR, ${VAR} expansion) */
+  customSkillPaths?: string[];
 }
 
 function normalizeConfigOutputFormat(
@@ -524,6 +526,7 @@ export class Config {
   private readonly skillOSConfig?: {
     baseUrl?: string;
   };
+  private readonly customSkillPaths: string[];
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -643,6 +646,7 @@ export class Config {
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.skillOSConfig = params.skillOS;
+    this.customSkillPaths = params.customSkillPaths ?? [];
     this.enableHooks = params.enableHooks ?? false;
     this.hooks = params.hooks;
     this.hooksConfig = params.hooksConfig;
@@ -1829,6 +1833,20 @@ export class Config {
   // ============================================================================
   // Skill-OS Configuration
   // ============================================================================
+
+  /**
+   * 获取用户自定义技能路径（原始值，未展开）。
+   */
+  getCustomSkillPaths(): string[] {
+    return this.customSkillPaths;
+  }
+
+  /**
+   * 获取用户自定义技能路径（已展开 ~, $VAR, ${VAR} 并解析为绝对路径）。
+   */
+  getResolvedCustomSkillPaths(): string[] {
+    return this.storage.resolveCustomSkillPaths(this.customSkillPaths);
+  }
 
   /**
    * 获取 Skill-OS URL.

@@ -311,5 +311,13 @@ describe('SettingsSchema', () => {
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
     });
+
+    it('should have skills.customPaths setting', () => {
+      const schema = getSettingsSchema();
+      expect(schema.skills).toBeDefined();
+      expect(schema.skills.properties?.customPaths).toBeDefined();
+      expect(schema.skills.properties?.customPaths.type).toBe('array');
+      expect(schema.skills.properties?.customPaths.default).toEqual([]);
+    });
   });
 });

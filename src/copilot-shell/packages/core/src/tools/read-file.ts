@@ -203,13 +203,18 @@ export class ReadFileTool extends BaseDeclarativeTool<
       Storage.getSystemSkillsDir(),
       resolvedFilePath,
     );
+    // Check custom skill paths whitelist
+    const isWithinCustomSkills = this.config
+      .getResolvedCustomSkillPaths()
+      .some((dir) => isSubpath(dir, resolvedFilePath));
 
     if (
       !workspaceContext.isPathWithinWorkspace(filePath) &&
       !isWithinTempDir &&
       !isWithinUserSkills &&
       !isWithinRemoteSkills &&
-      !isWithinSystemSkills
+      !isWithinSystemSkills &&
+      !isWithinCustomSkills
     ) {
       const directories = workspaceContext.getDirectories();
       return `File path must be within one of the workspace directories: ${directories.join(

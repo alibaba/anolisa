@@ -632,8 +632,12 @@ export class ShellTool extends BaseDeclarativeTool<
         userSkillsDir,
         resolvedDirectoryPath,
       );
-      if (isWithinUserSkills) {
-        return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
+      // Also block custom skill directories
+      const isWithinCustomSkills = this.config
+        .getResolvedCustomSkillPaths()
+        .some((dir) => isSubpath(dir, resolvedDirectoryPath));
+      if (isWithinUserSkills || isWithinCustomSkills) {
+        return `Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
       const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
