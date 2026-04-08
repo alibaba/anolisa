@@ -1,0 +1,109 @@
+name: Package Archive
+description: >
+  Build a source archive for the given component and version.
+  Optionally signs the archive (os-skills only) and uploads it as a GitHub Actions artifact.
+
+inputs:
+  component:
+    description: 'Component name (e.g. copilot-shell, os-skills)'
+    required: true
+  version:
+    description: 'Version string without v prefix (e.g. 2.1.0)'
+    required: true
+  artifact-suffix:
+    description: 'Suffix appended to both the tar.gz filename and artifact name (e.g. ".preview"). Leave empty for official builds.'
+    required: false
+    default: ''
+  retention-days:
+    description: 'Number of days to retain the uploaded artifact'
+    required: false
+    default: '14'
+
+runs:
+  using: composite
+  steps:
+    # -----------------------------------------------------------------
+    # Step 1: Create source archive
+    # -----------------------------------------------------------------
+    - name: Create source archive
+      shell: bash
+      run: |
+        COMPONENT="${{ inputs.component }}"
+        VERSION="${{ inputs.version }}"
+        SUFFIX="${{ inputs.artifact-suffix }}"
+        ARCHIVE_NAME="${COMPONENT}-${VERSION}"
+        ARCHIVE_FILE="${ARCHIVE_NAME}${SUFFIX}.tar.gz"
+
+        case "$COMPONENT" in
+          copilot-shell)  SRC_DIR="src/copilot-shell" ;;
+          agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
+          agentsight)     SRC_DIR="src/agentsight" ;;
+          os-skills)      SRC_DIR="src/os-skills" ;;
+          *)
+            echo "ERROR: Unknown component: $COMPONENT"
+            exit 1
+            ;;
+        esac
+
+        mkdir -p /tmp/build/${ARCHIVE_NAME}
+        cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+
+        mkdir -p /tmp/archives
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
+
+        echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+        echo "ARCHIVE_FILE=${ARCHIVE_FILE}" >> $GITHUB_ENV
+
+        echo "### Package Result" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | \`${COMPONENT}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Archive | \`${ARCHIVE_FILE}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Size | $(du -sh /tmp/archives/${ARCHIVE_FILE} | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Contents preview (first 50 entries):**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        tar -tzf /tmp/archives/${ARCHIVE_FILE} | head -50 >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+    # -----------------------------------------------------------------
+    # Step 2: Sign archive (os-skills only)
+    #
+    # Signing is automatically applied when component == os-skills.
+    # No external sign parameter needed; the action decides internally.
+    #
+    # TODO: Replace this placeholder with the actual signing script once
+    # the signing infrastructure is ready.
+    #
+    # Expected behavior when implemented:
+    #   - Call the signing script with the archive path
+    #   - The script generates a .sig file alongside the archive
+    #   - Re-pack the archive to include the .sig file
+    #
+    # Example (NOT active):
+    #   bash scripts/sign-skill.sh /tmp/archives/${ARCHIVE_FILE}
+    #   tar -czf /tmp/archives/${ARCHIVE_FILE} \
+    #     -C /tmp/build ${ARCHIVE_NAME} \
+    #     -C /tmp/archives ${ARCHIVE_NAME}.sig
+    # -----------------------------------------------------------------
+    - name: Sign archive (placeholder)
+      if: inputs.component == 'os-skills'
+      shell: bash
+      run: |
+        echo "⚠️  Signing is not yet implemented."
+        echo "    This step is a placeholder for the future signing pipeline."
+        echo "    Archive will be uploaded WITHOUT a signature."
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Signing | ⚠️ Not implemented (placeholder) |" >> $GITHUB_STEP_SUMMARY
+
+    # -----------------------------------------------------------------
+    # Step 3: Upload artifact
+    # -----------------------------------------------------------------
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.component }}-${{ inputs.version }}${{ inputs.artifact-suffix }}
+        path: /tmp/archives/${{ env.ARCHIVE_FILE }}
+        retention-days: ${{ inputs.retention-days }}
