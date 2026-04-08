@@ -1,0 +1,113 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - 'cosh/v*'
+      - 'sec-core/v*'
+      - 'sight/v*'
+      - 'skill/v*'
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to package (preview only, NOT used by release-publish)'
+        required: true
+        type: choice
+        options:
+          - copilot-shell
+          - agent-sec-core
+          - agentsight
+          - os-skills
+      version:
+        description: 'Version (e.g. 2.1.0, without v prefix)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================================
+  # Step 1: Parse tag → only runs on push tag
+  # =========================================================================
+  parse-tag:
+    name: Parse Tag
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    outputs:
+      component: ${{ steps.parse.outputs.component }}
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          SCOPE="${TAG%%/v*}"
+          VERSION="${TAG#*/v}"
+
+          case "$SCOPE" in
+            cosh)     COMPONENT="copilot-shell" ;;
+            sec-core) COMPONENT="agent-sec-core" ;;
+            sight)    COMPONENT="agentsight" ;;
+            skill)    COMPONENT="os-skills" ;;
+            *)
+              echo "Unknown scope: $SCOPE"
+              exit 1
+              ;;
+          esac
+
+          echo "component=$COMPONENT" >> $GITHUB_OUTPUT
+          echo "version=$VERSION"     >> $GITHUB_OUTPUT
+
+          echo "### Parsed Tag" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`$TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # Step 2: Package (official) → triggered by push tag
+  # Produces: {component}-{version}.tar.gz, retained 28 days
+  # This is the ONLY artifact accepted by release-publish.yaml
+  # =========================================================================
+  package-official:
+    name: Packaging (official)
+    needs: parse-tag
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Package archive
+        uses: ./.github/actions/package-archive
+        with:
+          component: ${{ needs.parse-tag.outputs.component }}
+          version: ${{ needs.parse-tag.outputs.version }}
+          artifact-suffix: ''
+          retention-days: 28
+          skill-sign-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+
+  # =========================================================================
+  # Step 2: Package (preview) → triggered by workflow_dispatch
+  # Produces: {component}-{version}.preview.tar.gz, retained 3 days
+  # For debugging and content verification ONLY.
+  # NOT used by release-publish.yaml (which only accepts official artifacts).
+  # =========================================================================
+  package-preview:
+    name: Packaging (preview)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package archive
+        uses: ./.github/actions/package-archive
+        with:
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          artifact-suffix: '.preview'
+          retention-days: 14
+          skill-sign-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}

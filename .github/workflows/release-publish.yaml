@@ -1,0 +1,187 @@
+name: Release Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to publish'
+        required: true
+        type: choice
+        options:
+          - copilot-shell
+          - agent-sec-core
+          - agentsight
+          - os-skills
+      version:
+        description: 'Version (e.g. 2.1.0, without v prefix)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run: preview release info without creating GitHub Release'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  # =========================================================================
+  # Step 1: Publish → downloads official artifact from release-package.yaml (push tag)
+  # Prerequisite: release-package.yaml must have run on the corresponding tag,
+  # and the official artifact must not have expired (28-day retention window).
+  #
+  # dry_run=true  → preview release info + tar -t contents, no Release created
+  # dry_run=false → create GitHub Release and upload artifact to Release Assets
+  # =========================================================================
+  publish:
+    name: >-
+      ${{ inputs.dry_run == true && 'Dry Run' || 'Publish' }}
+      ${{ inputs.component }}-${{ inputs.version }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find package run-id
+        id: find-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_NAME="${{ inputs.component }}-${{ inputs.version }}"
+
+          RUN_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/release-package.yaml/runs?status=success&per_page=50" \
+            --jq '.workflow_runs[].id' | while read rid; do
+              EXISTS=$(gh api \
+                "repos/${{ github.repository }}/actions/runs/${rid}/artifacts" \
+                --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id" 2>/dev/null)
+              if [ -n "$EXISTS" ]; then
+                echo "$rid"
+                break
+              fi
+            done)
+
+          if [ -z "$RUN_ID" ]; then
+            echo "ERROR: No successful run found in release-package.yaml with artifact: ${ARTIFACT_NAME}"
+            echo "Possible causes:"
+            echo "  1. release-package.yaml has not run for this tag yet."
+            echo "  2. The artifact has expired (28-day retention window)."
+            echo "  3. The component/version inputs do not match the tag used."
+            exit 1
+          fi
+
+          echo "Found run-id: $RUN_ID"
+          echo "run-id=$RUN_ID" >> $GITHUB_OUTPUT
+
+          echo "### Package Run" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | \`${ARTIFACT_NAME}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Run | [#${RUN_ID}](https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}) |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Download official artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.component }}-${{ inputs.version }}
+          path: /tmp/archives
+          run-id: ${{ steps.find-run.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preview release info (dry_run)
+        if: inputs.dry_run == true
+        run: |
+          COMPONENT="${{ inputs.component }}"
+          VERSION="${{ inputs.version }}"
+          ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
+
+          case "$COMPONENT" in
+            copilot-shell)  TAG="cosh/v${VERSION}";     PREFIX="cosh/v" ;;
+            agent-sec-core) TAG="sec-core/v${VERSION}";  PREFIX="sec-core/v" ;;
+            agentsight)     TAG="sight/v${VERSION}";     PREFIX="sight/v" ;;
+            os-skills)      TAG="skill/v${VERSION}";     PREFIX="skill/v" ;;
+          esac
+
+          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
+          else
+            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+          fi
+
+          echo "=========================================="
+          echo " DRY RUN - Release Preview"
+          echo "=========================================="
+          echo "  Component : ${COMPONENT}"
+          echo "  Version   : ${VERSION}"
+          echo "  Tag       : ${TAG}"
+          echo "  Prev Tag  : ${PREV_TAG:-'(none, first release)'}"
+          echo "  Compare   : ${COMPARE_URL}"
+          echo "  Archive   : $(ls -lh ${ARCHIVE} | awk '{print $5, $9}')"
+          echo ""
+          echo "--- Archive contents (tar -t) ---"
+          tar -tzf "${ARCHIVE}"
+          echo "=========================================="
+          echo " No GitHub Release was created (dry_run)"
+          echo "=========================================="
+
+          echo "### Dry Run Preview" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | \`${COMPONENT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Previous Tag | \`${PREV_TAG:-'(none, first release)'}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Archive | \`${COMPONENT}-${VERSION}.tar.gz\` ($(du -sh ${ARCHIVE} | cut -f1)) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Changelog | [Compare](${COMPARE_URL}) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Archive contents (tar -t):**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          tar -tzf "${ARCHIVE}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **No GitHub Release was created** (dry_run=true). Re-run with \`dry_run=false\` to publish." >> $GITHUB_STEP_SUMMARY
+
+      - name: Create GitHub Release
+        if: inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMPONENT="${{ inputs.component }}"
+          VERSION="${{ inputs.version }}"
+          ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
+
+          case "$COMPONENT" in
+            copilot-shell)  TAG="cosh/v${VERSION}";     PREFIX="cosh/v" ;;
+            agent-sec-core) TAG="sec-core/v${VERSION}";  PREFIX="sec-core/v" ;;
+            agentsight)     TAG="sight/v${VERSION}";     PREFIX="sight/v" ;;
+            os-skills)      TAG="skill/v${VERSION}";     PREFIX="skill/v" ;;
+          esac
+
+          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
+          else
+            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+          fi
+
+          NOTES="## ${COMPONENT} v${VERSION}\n\n<!-- Add release notes here -->\n\n## What's Changed\n\n<!-- List the key changes in this release -->\n\n**Full Changelog**: ${COMPARE_URL}"
+
+          gh release create "$TAG" \
+            --title "${COMPONENT} v${VERSION}" \
+            --notes "$(printf '%b' "${NOTES}")" \
+            --target "$(git rev-list -n 1 $TAG)" \
+            "$ARCHIVE"
+
+          RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
+
+          echo "### Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | \`${COMPONENT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | [View Release](${RELEASE_URL}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Changelog | [Compare](${COMPARE_URL}) |" >> $GITHUB_STEP_SUMMARY
