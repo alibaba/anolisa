@@ -187,7 +187,6 @@ export const DialogManager = ({
       uiState.pendingAuthType === AuthType.USE_OPENAI
         ? hasOpenClawConfigDir() || hasQwenCodeConfigDir()
         : false,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [uiState.isAuthenticating, uiState.pendingAuthType],
   );
 
