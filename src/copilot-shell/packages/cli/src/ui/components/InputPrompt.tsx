@@ -17,6 +17,7 @@ import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import { useShellCompletion } from '../hooks/useShellCompletion.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
@@ -129,6 +130,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   }, [dirs.length, dirsChanged]);
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
+  const [shellCompletionTriggered, setShellCompletionTriggered] =
+    useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
   const [cursorPosition, setCursorPosition] = useState<[number, number]>([
     0, 0,
@@ -147,6 +150,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     reverseSearchActive,
     config,
     // Suppress completion when history navigation just occurred
+    !justNavigatedHistory,
+  );
+
+  const shellCompletion = useShellCompletion(
+    buffer,
+    config.getTargetDir(),
+    shellModeActive && shellCompletionTriggered,
     !justNavigatedHistory,
   );
 
@@ -422,6 +432,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         if (shellModeActive) {
           setShellModeActive(false);
+          setShellCompletionTriggered(false);
+          resetEscapeState();
+          return;
+        }
+
+        if (shellCompletion.showSuggestions) {
+          shellCompletion.resetCompletionState();
+          setShellCompletionTriggered(false);
+          setExpandedSuggestionIndex(-1);
           resetEscapeState();
           return;
         }
@@ -539,6 +558,58 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
         handleSubmitAndClear(buffer.text);
         return;
+      }
+
+      // Shell mode Tab-completion handling.
+      // IMPORTANT: Enter key is NEVER intercepted here – it always falls through
+      // to the SUBMIT handler so the command is always executable.
+      if (shellModeActive && !reverseSearchActive) {
+        // Tab is the sole trigger / acceptor for shell completions.
+        // Exception: if the regular completion (e.g. @ AT-mode) is already
+        // showing suggestions, let Tab fall through to the regular handler
+        // below so that AT-completion still works inside shell mode.
+        if (key.name === 'tab' && !completion.showSuggestions) {
+          if (
+            shellCompletion.showSuggestions &&
+            shellCompletion.suggestions.length > 0
+          ) {
+            const targetIndex =
+              shellCompletion.activeSuggestionIndex === -1
+                ? 0
+                : shellCompletion.activeSuggestionIndex;
+            shellCompletion.handleAutocomplete(targetIndex);
+            setExpandedSuggestionIndex(-1);
+            // Keep completion open for directory paths so the user can
+            // continue navigating deeper into the file tree.
+            const completedValue =
+              shellCompletion.suggestions[targetIndex]?.value ?? '';
+            if (!completedValue.endsWith('/')) {
+              setShellCompletionTriggered(false);
+            }
+          } else {
+            // First Tab press – trigger shell completion.
+            setShellCompletionTriggered(true);
+          }
+          return; // Tab consumed by shell completion.
+        }
+
+        // Arrow-key navigation inside the suggestion list.
+        if (shellCompletion.showSuggestions) {
+          if (keyMatchers[Command.NAVIGATION_UP](key)) {
+            shellCompletion.navigateUp();
+            setExpandedSuggestionIndex(-1);
+            return;
+          }
+          if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
+            shellCompletion.navigateDown();
+            setExpandedSuggestionIndex(-1);
+            return;
+          }
+          // Any non-navigation key closes the suggestion list so the
+          // user can type freely again – Enter falls through to SUBMIT.
+          setShellCompletionTriggered(false);
+        }
+        // All other keys (including Enter) fall through to their normal handlers.
       }
 
       if (completion.showSuggestions) {
@@ -696,6 +767,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       focus,
       buffer,
       completion,
+      shellCompletion,
+      setShellCompletionTriggered,
       shellModeActive,
       setShellModeActive,
       onClearScreen,
@@ -732,6 +805,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const getActiveCompletion = () => {
     if (commandSearchActive) return commandSearchCompletion;
     if (reverseSearchActive) return reverseSearchCompletion;
+    if (shellModeActive && shellCompletionTriggered) return shellCompletion;
     return completion;
   };
 
@@ -945,9 +1019,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             mode={
               buffer.text.startsWith('/') &&
               !reverseSearchActive &&
-              !commandSearchActive
+              !commandSearchActive &&
+              !shellModeActive
                 ? 'slash'
-                : 'reverse'
+                : shellModeActive && shellCompletionTriggered
+                  ? 'shell'
+                  : 'reverse'
             }
             expandedIndex={expandedSuggestionIndex}
           />
