@@ -213,7 +213,7 @@ Output example:
 ### Verification Flow
 
 1. Load trusted public keys from `skill/scripts/asset-verify/trusted-keys/*.asc`
-2. Verify the GPG signature (`.skill.sig`) of `Manifest.json` in each skill directory
+2. Verify the GPG signature (`.skill-meta/.skill.sig`) of `.skill-meta/Manifest.json` in each skill directory
 3. Validate SHA-256 hashes of all files listed in the Manifest
 
 ### Error Codes
@@ -221,16 +221,27 @@ Output example:
 | Code | Meaning |
 |------|---------|
 | 0 | Passed |
-| 10 | Missing `.skill.sig` |
-| 11 | Missing `Manifest.json` |
+| 10 | Missing `.skill-meta/.skill.sig` |
+| 11 | Missing `.skill-meta/Manifest.json` |
 | 12 | Invalid signature |
 | 13 | Hash mismatch |
 
-### Sign a Skill
+### Sign Skills (Self-Deployment Quick Start)
+
+When deploying from source, skills are unsigned by default. Sign them so Phase 2 passes:
 
 ```bash
-sign-skill.sh <skill-directory>
+# 1. One-time: generate GPG key + export public key
+tools/sign-skill.sh --init
+
+# 2. Batch-sign all skills
+tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# 3. Verify
+python3 skill/scripts/asset-verify/verifier.py
 ```
+
+For the complete guide (manual key management, custom skills, CI/CD, troubleshooting), see **[Skill Signing Guide](tools/SIGNING_GUIDE.md)**.
 
 ## Audit Log
 

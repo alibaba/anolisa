@@ -11,7 +11,7 @@ class ErrSigMissing(SkillVerifyError):
     code = 10
 
     def __init__(self, skill_name):
-        super().__init__(f"ERR_SIG_MISSING: Missing .skill.sig in '{skill_name}'")
+        super().__init__(f"ERR_SIG_MISSING: Missing .skill-meta/.skill.sig in '{skill_name}'")
 
 
 class ErrManifestMissing(SkillVerifyError):
@@ -19,7 +19,7 @@ class ErrManifestMissing(SkillVerifyError):
 
     def __init__(self, skill_name):
         super().__init__(
-            f"ERR_MANIFEST_MISSING: Missing Manifest.json in '{skill_name}'"
+            f"ERR_MANIFEST_MISSING: Missing .skill-meta/Manifest.json in '{skill_name}'"
         )
 
 

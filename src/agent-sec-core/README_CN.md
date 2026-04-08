@@ -213,7 +213,7 @@ python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 ### 校验流程
 
 1. 加载受信公钥（`skill/scripts/asset-verify/trusted-keys/*.asc`）
-2. 验证 Skill 目录中 `Manifest.json` 的 GPG 签名（`.skill.sig`）
+2. 验证 Skill 目录中 `.skill-meta/Manifest.json` 的 GPG 签名（`.skill-meta/.skill.sig`）
 3. 校验 Manifest 中所有文件的 SHA-256 哈希
 
 ### 错误码
@@ -221,16 +221,27 @@ python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 | 码 | 含义 |
 |----|------|
 | 0 | 通过 |
-| 10 | 缺失 `.skill.sig` |
-| 11 | 缺失 `Manifest.json` |
+| 10 | 缺失 `.skill-meta/.skill.sig` |
+| 11 | 缺失 `.skill-meta/Manifest.json` |
 | 12 | 签名无效 |
 | 13 | 哈希不匹配 |
 
-### 签名技能
+### Skill 签名（自行部署快速开始）
+
+通过源码部署时，skill 默认未签名。签名后 Phase 2 才能通过：
 
 ```bash
-sign-skill.sh <技能目录>
+# 1. 一次性初始化：生成 GPG 密钥 + 导出公钥
+tools/sign-skill.sh --init
+
+# 2. 批量签名所有 skill
+tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# 3. 验证
+python3 skill/scripts/asset-verify/verifier.py
 ```
+
+完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_CN.md)**。
 
 ## 审计日志
 
