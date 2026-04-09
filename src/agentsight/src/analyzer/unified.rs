@@ -542,6 +542,10 @@ impl Analyzer {
         // NOTE: tool_calls and reasoning_content extraction from SSE events
         // is handled in genai::builder via direct SSE response body parsing.
 
+        if record.total_tokens() ==0 {
+            return None;
+        }
+
         Some(record)
     }
 
