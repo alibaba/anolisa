@@ -18,8 +18,12 @@ inputs:
     description: 'Number of days to retain the uploaded artifact'
     required: false
     default: '14'
-  skill-sign-key:
+  skill-sign-private-key:
     description: 'ASCII-armored GPG private key for signing (skills only). Pass secrets.SKILL_SIGN_PRIVATE_KEY from the caller workflow.'
+    required: false
+    default: ''
+  skill-sign-public-key:
+    description: 'ASCII-armored GPG public key for signature verification (skills only). Pass vars.SKILL_SIGN_PUBLIC_KEY from the caller workflow.'
     required: false
     default: ''
 
@@ -31,6 +35,8 @@ runs:
     # -----------------------------------------------------------------
     - name: Create source archive
       shell: bash
+      env:
+        GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
       run: |
         COMPONENT="${{ inputs.component }}"
         VERSION="${{ inputs.version }}"
@@ -61,6 +67,15 @@ runs:
             skill_dir=$(dirname "$skillmd")
             cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
           done
+        elif [ "$COMPONENT" = "agent-sec-core" ]; then
+          cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
+          # Replace example keys in trusted-keys with the real GPG public key
+          # so the packaged archive ships the production key.
+          if [ -n "$GPG_PUBLIC_KEY" ]; then
+            TRUSTED_KEYS_DIR="/tmp/build/${ARCHIVE_NAME}/skill/scripts/asset-verify/trusted-keys"
+            rm -f "${TRUSTED_KEYS_DIR}"/*.asc
+            echo "$GPG_PUBLIC_KEY" > "${TRUSTED_KEYS_DIR}/agent-sec.asc"
+          fi
         else
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
         fi
@@ -79,10 +94,10 @@ runs:
     # No external sign parameter needed; the action decides internally.
     # -----------------------------------------------------------------
     - name: Sign archive (os-skills)
-      if: inputs.component == 'os-skills'
+      if: inputs.component == 'os-skills' && inputs.skill-sign-private-key != ''
       shell: bash
       env:
-        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-key }}
+        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-private-key }}
       run: |
         bash src/agent-sec-core/tools/sign-skill.sh --batch /tmp/build/${ARCHIVE_NAME}/skills
 
@@ -92,18 +107,19 @@ runs:
     # -----------------------------------------------------------------
     # Step 3: Sign archive (agent-sec-core only)
     #
-    # Signing is automatically applied when component == agent-sec-core.
+    # Signing is automatically applied when component == agent-sec-core
     # No external sign parameter needed; the action decides internally.
-    #
-    # TODO: Replace this placeholder with the actual signing script once
-    # the signing infrastructure is ready.
     # -----------------------------------------------------------------
     - name: Sign archive (agent-sec-core)
-      if: inputs.component == 'agent-sec-core'
+      if: inputs.component == 'agent-sec-core' && inputs.skill-sign-private-key != ''
       shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-private-key }}
       run: |
-        echo "⚠️  Signing is not yet implemented for agent-sec-core."
-        echo "    This step is a placeholder for the future signing pipeline."
+        bash src/agent-sec-core/tools/sign-skill.sh --skill-name agent-sec-core /tmp/build/${ARCHIVE_NAME}/skill
+
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
 
     # -----------------------------------------------------------------
     # Step 4: Summarize
@@ -111,8 +127,7 @@ runs:
     - name: Summarize
       shell: bash
       run: |
-        # TODO: Add 'agent-sec-core' here once its signing is implemented.
-        SIGNED=$([[ "${{ inputs.component }}" == "os-skills" ]] && echo "true" || echo "false")
+        SIGNED=$([[ "${{ inputs.component }}" =~ ^(os-skills|agent-sec-core)$ ]] && echo "true" || echo "false")
 
         echo "### Package Result" >> $GITHUB_STEP_SUMMARY
         echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY

@@ -88,7 +88,8 @@ jobs:
           version: ${{ needs.parse-tag.outputs.version }}
           artifact-suffix: ''
           retention-days: 28
-          skill-sign-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
 
   # =========================================================================
   # Step 2: Package (preview) → triggered by workflow_dispatch
@@ -110,4 +111,5 @@ jobs:
           version: ${{ inputs.version }}
           artifact-suffix: '.preview'
           retention-days: 14
-          skill-sign-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
