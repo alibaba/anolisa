@@ -15,9 +15,15 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   DefaultHookOutput,
   PreToolUseHookOutput,
+  PostToolUseHookOutput,
   PostToolUseFailureHookOutput,
   HookEventName,
   HookConfig,
+  McpToolContext,
+  NotificationType,
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
 } from './types.js';
 import { createHookOutput, HooksConfigSource } from './types.js';
 
@@ -142,6 +148,70 @@ export class HookSystem {
           'PostToolUseFailure',
           result.finalOutput,
         ) as PostToolUseFailureHookOutput)
+      : undefined;
+  }
+
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    mcpContext?: McpToolContext,
+    originalRequestName?: string,
+  ): Promise<PostToolUseHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolUseEvent(
+      toolName,
+      toolInput,
+      toolResponse,
+      mcpContext,
+      originalRequestName,
+    );
+    return result.finalOutput
+      ? (createHookOutput(
+          'PostToolUse',
+          result.finalOutput,
+        ) as PostToolUseHookOutput)
+      : undefined;
+  }
+
+  async fireNotificationEvent(
+    type: NotificationType,
+    message: string,
+    details: Record<string, unknown>,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireNotificationEvent(
+      type,
+      message,
+      details,
+    );
+    return result.finalOutput
+      ? createHookOutput('Notification', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionStartEvent(source);
+    return result.finalOutput
+      ? createHookOutput('SessionStart', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionEndEvent(reason);
+    return result.finalOutput
+      ? createHookOutput('SessionEnd', result.finalOutput)
+      : undefined;
+  }
+
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePreCompactEvent(trigger);
+    return result.finalOutput
+      ? createHookOutput('PreCompact', result.finalOutput)
       : undefined;
   }
 

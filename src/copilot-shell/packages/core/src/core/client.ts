@@ -79,6 +79,11 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
+} from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 
@@ -114,8 +119,14 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       this.chat = await this.startChat(resumedHistory);
+
+      // Fire SessionStart hook (resume)
+      await this.fireSessionStartHook(SessionStartSource.Resume);
     } else {
       this.chat = await this.startChat();
+
+      // Fire SessionStart hook (startup)
+      await this.fireSessionStartHook(SessionStartSource.Startup);
     }
   }
 
@@ -162,7 +173,13 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    // Fire SessionEnd hook before clearing
+    await this.fireSessionEndHook(SessionEndReason.Clear);
+
     this.chat = await this.startChat();
+
+    // Fire SessionStart hook after clear
+    await this.fireSessionStartHook(SessionStartSource.Clear);
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -212,6 +229,50 @@ export class GeminiClient {
         'startChat',
       );
       throw new Error(`Failed to initialize chat: ${getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Fire SessionStart hook (advisory only - does not block startup)
+   */
+  private async fireSessionStartHook(
+    source: SessionStartSource,
+  ): Promise<void> {
+    if (!this.config.getEnableHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem) return;
+    try {
+      await hookSystem.fireSessionStartEvent(source);
+    } catch {
+      // Advisory: do not block startup on hook failure
+    }
+  }
+
+  /**
+   * Fire SessionEnd hook (best effort - does not block exit)
+   */
+  private async fireSessionEndHook(reason: SessionEndReason): Promise<void> {
+    if (!this.config.getEnableHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem) return;
+    try {
+      await hookSystem.fireSessionEndEvent(reason);
+    } catch {
+      // Best effort: do not block exit on hook failure
+    }
+  }
+
+  /**
+   * Fire PreCompact hook (advisory only - does not block compression)
+   */
+  private async firePreCompactHook(trigger: PreCompactTrigger): Promise<void> {
+    if (!this.config.getEnableHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem) return;
+    try {
+      await hookSystem.firePreCompactEvent(trigger);
+    } catch {
+      // Advisory: do not block compression on hook failure
     }
   }
 
@@ -747,6 +808,11 @@ export class GeminiClient {
     prompt_id: string,
     force: boolean = false,
   ): Promise<ChatCompressionInfo> {
+    // Fire PreCompact hook before compression
+    await this.firePreCompactHook(
+      force ? PreCompactTrigger.Manual : PreCompactTrigger.Auto,
+    );
+
     const compressionService = new ChatCompressionService();
 
     const { newHistory, info } = await compressionService.compress(

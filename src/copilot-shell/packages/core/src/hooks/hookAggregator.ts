@@ -8,6 +8,7 @@ import {
   HookEventName,
   DefaultHookOutput,
   PreToolUseHookOutput,
+  PostToolUseHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
 } from './types.js';
@@ -336,6 +337,8 @@ export class HookAggregator {
     switch (eventName) {
       case HookEventName.PreToolUse:
         return new PreToolUseHookOutput(output);
+      case HookEventName.PostToolUse:
+        return new PostToolUseHookOutput(output);
       case HookEventName.Stop:
         return new StopHookOutput(output);
       case HookEventName.PermissionRequest:

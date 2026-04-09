@@ -129,6 +129,8 @@ export function createHookOutput(
       return new StopHookOutput(data);
     case HookEventName.PermissionRequest:
       return new PermissionRequestHookOutput(data);
+    case HookEventName.PostToolUse:
+      return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
     default:
@@ -461,6 +463,35 @@ export interface PostToolUseFailureOutput extends HookOutput {
     /** If present, the hook requests a sandbox bypass approval dialog */
     sandbox_bypass_request?: SandboxBypassApprovalRequest;
   };
+}
+
+/**
+ * Specific hook output class for PostToolUse events.
+ * Supports result auditing, context injection, hiding output, and tail tool calls.
+ */
+export class PostToolUseHookOutput extends DefaultHookOutput {
+  /**
+   * Get a tail tool call request if provided by hook.
+   * The result of this tail call will replace the original tool's response.
+   */
+  getTailToolCallRequest():
+    | { name: string; args: Record<string, unknown> }
+    | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'tailToolCallRequest' in this.hookSpecificOutput
+    ) {
+      const request = this.hookSpecificOutput['tailToolCallRequest'];
+      if (
+        typeof request === 'object' &&
+        request !== null &&
+        !Array.isArray(request)
+      ) {
+        return request as { name: string; args: Record<string, unknown> };
+      }
+    }
+    return undefined;
+  }
 }
 
 /**

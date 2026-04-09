@@ -1321,6 +1321,71 @@ export class CoreToolScheduler {
               outputFile,
               contentLength,
             };
+
+            // Fire PostToolUse hook after successful tool execution
+            if (this.config.getEnableHooks()) {
+              const hookSystem = this.config.getHookSystem();
+              if (hookSystem) {
+                try {
+                  const postToolOutput = await hookSystem.firePostToolUseEvent(
+                    toolName,
+                    scheduledCall.request.args,
+                    {
+                      llmContent: typeof content === 'string' ? content : '',
+                      returnDisplay:
+                        typeof toolResult.returnDisplay === 'string'
+                          ? toolResult.returnDisplay
+                          : undefined,
+                    },
+                  );
+
+                  if (postToolOutput) {
+                    // If hook denies, replace tool result with reason
+                    if (postToolOutput.isBlockingDecision()) {
+                      const reason = postToolOutput.getEffectiveReason();
+                      const blockedResponse = convertToFunctionResponse(
+                        toolName,
+                        callId,
+                        reason,
+                      );
+                      successResponse.responseParts = blockedResponse;
+                    }
+
+                    // Append additional context to tool result
+                    const additionalContext =
+                      postToolOutput.getAdditionalContext();
+                    if (
+                      additionalContext &&
+                      !postToolOutput.isBlockingDecision()
+                    ) {
+                      const augmented = convertToFunctionResponse(
+                        toolName,
+                        callId,
+                        (typeof content === 'string' ? content : '') +
+                          '\n' +
+                          additionalContext,
+                      );
+                      successResponse.responseParts = augmented;
+                    }
+
+                    // Handle continue=false
+                    if (postToolOutput.shouldStopExecution()) {
+                      this.setStatusInternal(
+                        callId,
+                        'success',
+                        successResponse,
+                      );
+                      continue;
+                    }
+                  }
+                } catch (hookError) {
+                  console.error(
+                    `PostToolUse hook error for ${toolName}: ${hookError}`,
+                  );
+                }
+              }
+            }
+
             this.setStatusInternal(callId, 'success', successResponse);
           } else {
             // It is a failure

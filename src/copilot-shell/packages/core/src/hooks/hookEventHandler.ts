@@ -17,6 +17,18 @@ import type {
   StopInput,
   PreToolUseInput,
   PostToolUseFailureInput,
+  PostToolUseInput,
+  NotificationInput,
+  SessionStartInput,
+  SessionEndInput,
+  PreCompactInput,
+  McpToolContext,
+} from './types.js';
+import type {
+  NotificationType,
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -113,6 +125,104 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.PostToolUseFailure, input);
+  }
+
+  /**
+   * Fire a PostToolUse event
+   * Called after a tool executes successfully, for result auditing, context injection,
+   * or hiding sensitive output from the agent
+   */
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    mcpContext?: McpToolContext,
+    originalRequestName?: string,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseInput = {
+      ...this.createBaseInput(HookEventName.PostToolUse),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_response: toolResponse,
+      ...(mcpContext && { mcp_context: mcpContext }),
+      ...(originalRequestName && {
+        original_request_name: originalRequestName,
+      }),
+    };
+
+    const context: HookEventContext = { toolName };
+    return this.executeHooks(HookEventName.PostToolUse, input, context);
+  }
+
+  /**
+   * Fire a Notification event
+   * Fires when the CLI emits a system alert (e.g., Tool Permissions).
+   * Observability only - cannot block alerts or grant permissions automatically.
+   */
+  async fireNotificationEvent(
+    type: NotificationType,
+    message: string,
+    details: Record<string, unknown>,
+  ): Promise<AggregatedHookResult> {
+    const input: NotificationInput = {
+      ...this.createBaseInput(HookEventName.Notification),
+      notification_type: type,
+      message,
+      details,
+    };
+
+    return this.executeHooks(HookEventName.Notification, input);
+  }
+
+  /**
+   * Fire a SessionStart event
+   * Fires on application startup, resuming a session, or after a /clear command.
+   * Advisory only - continue and decision fields are ignored.
+   */
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionStartInput = {
+      ...this.createBaseInput(HookEventName.SessionStart),
+      source,
+    };
+
+    const context: HookEventContext = { trigger: source };
+    return this.executeHooks(HookEventName.SessionStart, input, context);
+  }
+
+  /**
+   * Fire a SessionEnd event
+   * Fires when the CLI exits or a session is cleared.
+   * Best effort - the CLI will not wait for this hook to complete.
+   */
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionEndInput = {
+      ...this.createBaseInput(HookEventName.SessionEnd),
+      reason,
+    };
+
+    const context: HookEventContext = { trigger: reason };
+    return this.executeHooks(HookEventName.SessionEnd, input, context);
+  }
+
+  /**
+   * Fire a PreCompact event
+   * Fires before the CLI summarizes history to save tokens.
+   * Advisory only - cannot block or modify the compression process.
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+  ): Promise<AggregatedHookResult> {
+    const input: PreCompactInput = {
+      ...this.createBaseInput(HookEventName.PreCompact),
+      trigger,
+    };
+
+    const context: HookEventContext = { trigger };
+    return this.executeHooks(HookEventName.PreCompact, input, context);
   }
 
   /**
