@@ -31,18 +31,14 @@ runs:
   using: composite
   steps:
     # -----------------------------------------------------------------
-    # Step 1: Create source archive
+    # Step 1: Resolve source directory
     # -----------------------------------------------------------------
-    - name: Create source archive
+    - name: Resolve source directory
       shell: bash
-      env:
-        GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
       run: |
         COMPONENT="${{ inputs.component }}"
         VERSION="${{ inputs.version }}"
         SUFFIX="${{ inputs.artifact-suffix }}"
-        ARCHIVE_NAME="${COMPONENT}-${VERSION}"
-        ARCHIVE_FILE="${ARCHIVE_NAME}${SUFFIX}.tar.gz"
 
         case "$COMPONENT" in
           copilot-shell)  SRC_DIR="src/copilot-shell" ;;
@@ -55,8 +51,61 @@ runs:
             ;;
         esac
 
+        echo "SRC_DIR=${SRC_DIR}" >> $GITHUB_ENV
+        echo "ARCHIVE_NAME=${COMPONENT}-${VERSION}" >> $GITHUB_ENV
+        echo "ARCHIVE_FILE=${COMPONENT}-${VERSION}${SUFFIX}.tar.gz" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 2: Resolve LICENSE
+    #
+    # Detect the symlink here and record the resolved real path
+    # so Step 3 can substitute it during archive creation without
+    # modifying the source tree.
+    # -----------------------------------------------------------------
+    - name: Resolve LICENSE
+      shell: bash
+      run: |
+        LICENSE_RESOLVED=false
+        LICENSE_REAL_PATH=""
+        LICENSE_BUILD_TARGET=""
+
+        for src_license in "${SRC_DIR}/LICENSE" "${SRC_DIR}/license" \
+                           "${SRC_DIR}/LICENSE.txt" "${SRC_DIR}/license.txt"; do
+          # Use -L to detect symlinks; git on Linux restores path-reference LICENSE
+          # files as symlinks rather than plain text files.
+          if [ -L "${src_license}" ]; then
+            ref_path="$(realpath "${src_license}")"
+            if [ -f "${ref_path}" ]; then
+              LICENSE_RESOLVED=true
+              LICENSE_REAL_PATH="${ref_path}"
+              LICENSE_BUILD_TARGET="$(basename "${src_license}")"
+              echo "Detected LICENSE symlink: ${src_license} -> ${ref_path}"
+              break
+            else
+              echo "ERROR: LICENSE symlink target not found at ${ref_path}"
+              exit 1
+            fi
+          fi
+        done
+
+        echo "LICENSE_RESOLVED=${LICENSE_RESOLVED}" >> $GITHUB_ENV
+        echo "LICENSE_REAL_PATH=${LICENSE_REAL_PATH}" >> $GITHUB_ENV
+        echo "LICENSE_BUILD_TARGET=${LICENSE_BUILD_TARGET}" >> $GITHUB_ENV
+
+    # -----------------------------------------------------------------
+    # Step 3: Create source archive
+    #
+    # If Step 2 detected a LICENSE path reference, the resolved real
+    # file is copied into the build tree before packaging so the archive
+    # ships the actual license text. The source tree is never modified.
+    # -----------------------------------------------------------------
+    - name: Create source archive
+      shell: bash
+      env:
+        GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
+      run: |
         mkdir -p /tmp/build/${ARCHIVE_NAME}
-        if [ "$COMPONENT" = "os-skills" ]; then
+        if [ "${{ inputs.component }}" = "os-skills" ]; then
           # Copy top-level files (LICENSE, README, etc.) into archive root.
           find "${SRC_DIR}" -maxdepth 1 -not -type d -exec cp -p {} /tmp/build/${ARCHIVE_NAME}/ \;
 
@@ -67,7 +116,7 @@ runs:
             skill_dir=$(dirname "$skillmd")
             cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
           done
-        elif [ "$COMPONENT" = "agent-sec-core" ]; then
+        elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
           # Replace example keys in trusted-keys with the real GPG public key
           # so the packaged archive ships the production key.
@@ -80,15 +129,20 @@ runs:
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
         fi
 
+        # Substitute resolved LICENSE into the build tree without touching the source.
+        # Remove the dangling symlink first (cp -r preserves symlinks, which become
+        # dangling in /tmp/build since the symlink target no longer exists there).
+        if [ "${LICENSE_RESOLVED}" = "true" ]; then
+          rm -f "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
+          cp -p "${LICENSE_REAL_PATH}" "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
+        fi
+
         mkdir -p /tmp/archives
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
           -C /tmp/build "${ARCHIVE_NAME}"
 
-        echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
-        echo "ARCHIVE_FILE=${ARCHIVE_FILE}" >> $GITHUB_ENV
-
     # -----------------------------------------------------------------
-    # Step 2: Sign archive (os-skills only)
+    # Step 4: Sign archive (os-skills only)
     #
     # Signing is automatically applied when component == os-skills.
     # No external sign parameter needed; the action decides internally.
@@ -104,10 +158,12 @@ runs:
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
           -C /tmp/build "${ARCHIVE_NAME}"
 
+        echo "ARCHIVE_SIGNED=true" >> $GITHUB_ENV
+
     # -----------------------------------------------------------------
-    # Step 3: Sign archive (agent-sec-core only)
+    # Step 5: Sign archive (agent-sec-core only)
     #
-    # Signing is automatically applied when component == agent-sec-core
+    # Signing is automatically applied when component == agent-sec-core.
     # No external sign parameter needed; the action decides internally.
     # -----------------------------------------------------------------
     - name: Sign archive (agent-sec-core)
@@ -121,14 +177,14 @@ runs:
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
           -C /tmp/build "${ARCHIVE_NAME}"
 
+        echo "ARCHIVE_SIGNED=true" >> $GITHUB_ENV
+
     # -----------------------------------------------------------------
-    # Step 4: Summarize
+    # Step 6: Summarize
     # -----------------------------------------------------------------
     - name: Summarize
       shell: bash
       run: |
-        SIGNED=$([[ "${{ inputs.component }}" =~ ^(os-skills|agent-sec-core)$ ]] && echo "true" || echo "false")
-
         echo "### Package Result" >> $GITHUB_STEP_SUMMARY
         echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -136,8 +192,11 @@ runs:
         echo "| Version | \`${{ inputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| Archive | \`${ARCHIVE_FILE}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| Size | $(du -sh /tmp/archives/${ARCHIVE_FILE} | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-        if [ "$SIGNED" = "true" ]; then
+        if [ "${ARCHIVE_SIGNED:-false}" = "true" ]; then
           echo "| Signing | ✅ Signed |" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ "${LICENSE_RESOLVED}" = "true" ]; then
+          echo "| LICENSE | ✅ Resolved |" >> $GITHUB_STEP_SUMMARY
         fi
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Contents:**" >> $GITHUB_STEP_SUMMARY
@@ -146,7 +205,7 @@ runs:
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
     # -----------------------------------------------------------------
-    # Step 5: Upload artifact
+    # Step 7: Upload artifact
     # -----------------------------------------------------------------
     - name: Upload artifact
       uses: actions/upload-artifact@v4

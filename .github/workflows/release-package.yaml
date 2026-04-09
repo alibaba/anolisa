@@ -93,7 +93,7 @@ jobs:
 
   # =========================================================================
   # Step 2: Package (preview) → triggered by workflow_dispatch
-  # Produces: {component}-{version}.preview.tar.gz, retained 3 days
+  # Produces: {component}-{version}.preview.tar.gz, retained 14 days
   # For debugging and content verification ONLY.
   # NOT used by release-publish.yaml (which only accepts official artifacts).
   # =========================================================================
