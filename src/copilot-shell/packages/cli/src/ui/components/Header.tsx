@@ -50,7 +50,7 @@ function formatAuthType(authType?: AuthType): string {
     case AuthType.USE_ANTHROPIC:
       return 'Anthropic';
     case AuthType.USE_ALIYUN:
-      return 'Aliyun AK SK';
+      return 'Aliyun Authentication';
     default:
       return titleizeAuthType(String(authType));
   }

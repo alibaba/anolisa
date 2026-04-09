@@ -13,12 +13,12 @@ import {
   type AuthType,
   type EditorType,
   type ApprovalMode,
+  type AliyunCredentialsExtended,
 } from '@copilot-shell/core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthState } from '../types.js';
 import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 import { type OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
-import { type AliyunCredentials } from '../components/AliyunKeyPrompt.js';
 
 export interface UIActions {
   openThemeDialog: () => void;
@@ -34,7 +34,7 @@ export interface UIActions {
   ) => void;
   handleAuthSelect: (
     authType: AuthType | undefined,
-    credentials?: OpenAICredentials | AliyunCredentials,
+    credentials?: OpenAICredentials | AliyunCredentialsExtended,
   ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string) => void;

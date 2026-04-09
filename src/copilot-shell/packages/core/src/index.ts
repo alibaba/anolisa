@@ -49,6 +49,18 @@ export * from './qwen/qwenOAuth2.js';
 
 // Aliyun provider
 export * from './aliyun/aliyunCredentials.js';
+export {
+  ECS_RAM_ROLE_NAME,
+  type STSCredentials,
+  AliyunAuthMethod,
+  getECSInstanceId,
+  generateConsoleUrl,
+  pollForECSRamRoleAuthorization,
+  getECSRamRoleCredentials,
+  getValidSTSCredentials,
+  isSTSCredentialsExpired,
+  isRunningOnECS,
+} from './aliyun/aliyunAuthService.js';
 
 // Export utilities
 export {

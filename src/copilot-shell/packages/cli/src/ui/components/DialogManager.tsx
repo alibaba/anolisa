@@ -24,7 +24,7 @@ import {
   type AgentChoice,
 } from './CustomAgentKeySharePrompt.js';
 import { CustomAgentKeyDetectFailedPrompt } from './CustomAgentKeyDetectFailedPrompt.js';
-import { AliyunKeyPrompt } from './AliyunKeyPrompt.js';
+import { AliyunAuthPrompt } from './AliyunAuthPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
@@ -38,7 +38,10 @@ import { AuthState } from '../types.js';
 import {
   AuthType,
   decryptCredential,
-  loadAliyunCredentials,
+  type AliyunAuthMethod,
+  type STSCredentials,
+  type AliyunCredentials,
+  ALIYUN_DEFAULT_MODEL,
 } from '@copilot-shell/core';
 import process from 'node:process';
 import { useState, useEffect, useMemo } from 'react';
@@ -60,47 +63,6 @@ import {
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
   terminalWidth: number;
-}
-
-// Wrapper component for AliyunKeyPrompt to handle async credential loading
-function AliyunKeyPromptWrapper({
-  onSubmit,
-  onCancel,
-  defaultModel,
-}: {
-  onSubmit: (
-    accessKeyId: string,
-    accessKeySecret: string,
-    model: string,
-  ) => void;
-  onCancel: () => void;
-  defaultModel?: string;
-}) {
-  const [savedCredentials, setSavedCredentials] = useState<{
-    accessKeyId?: string;
-    accessKeySecret?: string;
-  }>({});
-
-  useEffect(() => {
-    loadAliyunCredentials().then((creds) => {
-      if (creds) {
-        setSavedCredentials({
-          accessKeyId: creds.accessKeyId,
-          accessKeySecret: creds.accessKeySecret,
-        });
-      }
-    });
-  }, []);
-
-  return (
-    <AliyunKeyPrompt
-      onSubmit={onSubmit}
-      onCancel={onCancel}
-      defaultAccessKeyId={savedCredentials.accessKeyId}
-      defaultAccessKeySecret={savedCredentials.accessKeySecret}
-      defaultModel={defaultModel}
-    />
-  );
 }
 
 // Props for DialogManager
@@ -506,27 +468,59 @@ export const DialogManager = ({
       );
     }
 
-    if (uiState.pendingAuthType === AuthType.USE_ALIYUN) {
+    // 阿里云认证：使用稳定的 key 避免重新挂载
+    // 即使 pendingAuthType 变为 undefined，只要 isAuthenticating 为 true 就保持渲染
+    const isAliyunAuth =
+      uiState.pendingAuthType === AuthType.USE_ALIYUN ||
+      (uiState.isAuthenticating && !uiState.pendingAuthType);
+
+    const handleAliyunAuthSubmit = (
+      method: AliyunAuthMethod,
+      credentials: STSCredentials | AliyunCredentials,
+      model: string,
+    ) => {
+      // 区分 STS 凭证和 AK/SK 凭证
+      if ('securityToken' in credentials) {
+        // STS 凭证（ECS RAM Role）
+        uiActions.handleAuthSelect(AuthType.USE_ALIYUN, {
+          accessKeyId: credentials.accessKeyId,
+          accessKeySecret: credentials.accessKeySecret,
+          securityToken: credentials.securityToken,
+          expiration: credentials.expiration,
+          method: method as string,
+          model,
+        });
+      } else {
+        // AK/SK 凭证
+        uiActions.handleAuthSelect(AuthType.USE_ALIYUN, {
+          accessKeyId: credentials.accessKeyId,
+          accessKeySecret: credentials.accessKeySecret,
+          method: method as string,
+          model,
+        });
+      }
+    };
+
+    if (isAliyunAuth) {
       return (
-        <AliyunKeyPromptWrapper
-          onSubmit={(accessKeyId, accessKeySecret, model) => {
-            uiActions.handleAuthSelect(AuthType.USE_ALIYUN, {
-              accessKeyId,
-              accessKeySecret,
-              model,
-            });
-          }}
+        <AliyunAuthPrompt
+          key="aliyun-auth"
+          isAuthenticating={uiState.isAuthenticating}
+          onSubmit={handleAliyunAuthSubmit}
           onCancel={() => {
             uiActions.cancelAuthentication();
             uiActions.setAuthState(AuthState.Updating);
           }}
           defaultModel={
-            settings.merged.security?.auth?.aliyunModel ||
-            settings.merged.model?.name
+            settings.merged.security?.auth?.aliyunModel || ALIYUN_DEFAULT_MODEL
           }
         />
       );
     }
+
+    // isAuthenticating 为 true 但 pendingAuthType 不匹配任何已知类型
+    // 返回 null 避免渲染其他内容导致闪烁
+    return null;
   }
   if (uiState.isPermissionsDialogOpen) {
     return (

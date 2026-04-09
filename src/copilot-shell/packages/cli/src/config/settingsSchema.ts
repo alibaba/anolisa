@@ -1076,8 +1076,7 @@ const SETTINGS_SCHEMA = {
             category: 'Security',
             requiresRestart: true,
             default: undefined as string | undefined,
-            description:
-              'Last used model name for Aliyun AK/SK authentication.',
+            description: 'Last used model name for Aliyun authentication.',
             showInDialog: false,
           },
         },

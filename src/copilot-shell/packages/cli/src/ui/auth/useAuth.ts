@@ -8,6 +8,7 @@ import type {
   Config,
   ContentGeneratorConfig,
   ModelProvidersConfig,
+  AliyunCredentialsExtended,
 } from '@copilot-shell/core';
 import {
   AuthEvent,
@@ -21,7 +22,6 @@ import { useCallback, useEffect, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
-import type { AliyunCredentials } from '../components/AliyunKeyPrompt.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
@@ -225,7 +225,7 @@ export const useAuthCommand = (
   const handleAuthSelect = useCallback(
     async (
       authType: AuthType | undefined,
-      credentials?: OpenAICredentials | AliyunCredentials,
+      credentials?: OpenAICredentials | AliyunCredentialsExtended,
     ) => {
       if (!authType) {
         setIsAuthDialogOpen(false);
@@ -286,10 +286,20 @@ export const useAuthCommand = (
             }
 
             // Save credentials to ~/.copilot-shell/aliyun_creds.json
-            await saveAliyunCredentials({
-              accessKeyId: credentials.accessKeyId.trim(),
-              accessKeySecret: credentials.accessKeySecret.trim(),
-            });
+            // 支持 STS 凭证（ECS RAM Role）和普通 AK/SK 凭证
+            if (credentials.securityToken && credentials.expiration) {
+              await saveAliyunCredentials({
+                accessKeyId: credentials.accessKeyId.trim(),
+                accessKeySecret: credentials.accessKeySecret.trim(),
+                securityToken: credentials.securityToken,
+                expiration: credentials.expiration,
+              });
+            } else {
+              await saveAliyunCredentials({
+                accessKeyId: credentials.accessKeyId.trim(),
+                accessKeySecret: credentials.accessKeySecret.trim(),
+              });
+            }
 
             // Mark this as manual credentials so syncAfterAuthRefresh preserves the model
             // This is crucial for Aliyun auth to work properly

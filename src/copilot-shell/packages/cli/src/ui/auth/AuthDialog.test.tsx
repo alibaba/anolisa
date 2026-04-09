@@ -362,8 +362,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Qwen OAuth (first option)
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      // 默认选中阿里云认证（第一个选项）
+      expect(lastFrame()).toContain('● 1. Aliyun Authentication');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -404,9 +404,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Qwen OAuth option
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      // auth dialog 不再显示 QWEN_DEFAULT_AUTH_TYPE 错误，
+      // 回退到默认的阿里云认证选项
+      expect(lastFrame()).toContain('● 1. Aliyun Authentication');
     });
   });
 
@@ -454,7 +454,7 @@ describe('AuthDialog', () => {
 
     // Wait for the dialog to fully render and keypress handler to be registered
     await waitFor(() => {
-      expect(lastFrame()).toContain('\u25cf 1. Qwen OAuth');
+      expect(lastFrame()).toContain('\u25cf 1. Aliyun Authentication');
     });
     await wait(); // extra tick: ensure keypress handler re-registered
 

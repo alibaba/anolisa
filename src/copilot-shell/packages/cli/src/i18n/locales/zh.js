@@ -991,17 +991,27 @@ export default {
   'Custom Provider': '自定义提供商',
   'Custom (enter Base URL manually)': '自定义（手动填写 Base URL）',
   'Model:': '模型：',
-  'Aliyun AK/SK Configuration': '阿里云 AK/SK 配置',
+  'Aliyun Authentication': '阿里云认证',
   'Please enter your Aliyun Access Key credentials. You can get them from':
     '请输入您的阿里云 Access Key 凭证。您可以从以下地址获取：',
   'Access Key ID:': 'Access Key ID：',
   'Access Key Secret:': 'Access Key Secret：',
+  'Detecting environment...': '正在检测环境...',
+  'Please click or copy the URL below to your browser to complete authentication:':
+    '请点击或复制下方链接到浏览器，按照引导完成认证：',
+  'ECS Instance ID:': 'ECS 实例 ID：',
+  'Preparing authentication...': '准备认证中...',
+  'Authentication failed': '认证失败',
+  'Press Enter to go back · Esc to cancel': '按 Enter 返回 · Esc 取消',
+  'Timeout waiting for RAM role authorization': '等待 RAM 角色授权超时',
+  'Failed to get STS credentials': '获取 STS 凭证失败',
 
   // ============================================================================
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
   '(Press Esc to close)': '（按 Esc 关闭）',
+  '(Press Esc to cancel)': '（按 Esc 取消）',
   'Current (effective) configuration': '当前（实际生效）配置',
   AuthType: '认证方式',
   'API Key': 'API 密钥',

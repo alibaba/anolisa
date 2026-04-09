@@ -23,21 +23,24 @@ import type {
 import type { Config } from '../config/config.js';
 import {
   loadAliyunCredentials,
-  type AliyunCredentials,
+  saveAliyunCredentials,
+  type AliyunCredentialsWithSTS,
+  type AliyunSTSCredentials,
 } from './aliyunCredentials.js';
+import { getValidSTSCredentials } from './aliyunAuthService.js';
 import * as SysomModule from '@alicloud/sysom20231230';
 import { GenerateCopilotResponseRequest } from '@alicloud/sysom20231230';
 import { $OpenApiUtil } from '@alicloud/openapi-core';
 import * as $Util from '@alicloud/tea-util';
 
-// Get the actual Client class from the module (handles CJS/ESM interop)
-// When ESM imports CJS with default export, it may be nested in .default.default
+// 获取实际的 Client 类（处理 CJS/ESM 互操）
+// ESM 导入 CJS 默认导出时，可能嵌套在 .default.default 中
 function getSysomClientClass(): new (
   config: $OpenApiUtil.Config,
 ) => SysomClientInstance {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mod = SysomModule as any;
-  // Check for double-nested default (ESM importing CJS)
+  // 检查双层嵌套默认导出（ESM 导入 CJS）
   if (
     mod.default &&
     typeof mod.default === 'object' &&
@@ -45,18 +48,18 @@ function getSysomClientClass(): new (
   ) {
     return mod.default.default;
   }
-  // Check for single default
+  // 检查单层默认导出
   if (typeof mod.default === 'function') {
     return mod.default;
   }
-  // Fallback to module itself
+  // 回退到模块自身
   return mod;
 }
 
-// Aliyun SysOM API endpoint
+// 阿里云 SysOM API 端点
 const ALIYUN_SYSOM_ENDPOINT = 'sysom.cn-hangzhou.aliyuncs.com';
 
-// Default model
+// 默认模型
 const DEFAULT_MODEL = 'qwen3-coder-plus';
 
 /**
@@ -189,39 +192,116 @@ function contentsToArray(
   return [];
 }
 
-// Type for the Sysom client instance - using any due to SDK type export issues
+// Sysom client 实例类型（因 SDK 类型导出问题使用 any）
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SysomClientInstance = any;
 
 /**
  * Aliyun Content Generator that uses @alicloud/sysom20231230 SDK
+ * 支持 STS 凭证自动刷新和请求重试
  */
 export class AliyunContentGenerator implements ContentGenerator {
   private client: SysomClientInstance;
   private runtime: $Util.RuntimeOptions;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  private credentials: AliyunCredentialsWithSTS;
+  private isSTS: boolean;
 
   constructor(
-    credentials: AliyunCredentials,
+    credentials: AliyunCredentialsWithSTS,
     contentGeneratorConfig: ContentGeneratorConfig,
     _cliConfig: Config,
   ) {
     this.contentGeneratorConfig = contentGeneratorConfig;
+    this.credentials = credentials;
+    this.isSTS = 'securityToken' in credentials && !!credentials.securityToken;
 
-    // Initialize Aliyun client using OpenAPI Config
-    const config = new $OpenApiUtil.Config({
-      accessKeyId: credentials.accessKeyId,
-      accessKeySecret: credentials.accessKeySecret,
-    });
-    config.endpoint = ALIYUN_SYSOM_ENDPOINT;
+    // 初始化 client
+    this.client = this.createClient(credentials);
 
-    const SysomClient = getSysomClientClass();
-    this.client = new SysomClient(config);
-
-    // Setup runtime options
+    // 设置运行时选项
     this.runtime = new $Util.RuntimeOptions({});
     this.runtime.readTimeout = 180000;
     this.runtime.connectTimeout = 180000;
+  }
+
+  /**
+   * 创建阿里云 client
+   */
+  private createClient(
+    credentials: AliyunCredentialsWithSTS,
+  ): SysomClientInstance {
+    const configOptions: {
+      accessKeyId: string;
+      accessKeySecret: string;
+      securityToken?: string;
+    } = {
+      accessKeyId: credentials.accessKeyId,
+      accessKeySecret: credentials.accessKeySecret,
+    };
+
+    // STS 凭证需要传入 securityToken
+    if (this.isSTS) {
+      configOptions.securityToken = (
+        credentials as AliyunSTSCredentials
+      ).securityToken;
+    }
+
+    const config = new $OpenApiUtil.Config(configOptions);
+    config.endpoint = ALIYUN_SYSOM_ENDPOINT;
+
+    const SysomClient = getSysomClientClass();
+    return new SysomClient(config);
+  }
+
+  /**
+   * 刷新 STS 凭证并重新创建 client
+   */
+  private async refreshSTSCredentials(): Promise<boolean> {
+    if (!this.isSTS) {
+      return false; // 不是 STS 凭证，无法刷新
+    }
+
+    try {
+      const refreshedCredentials = await getValidSTSCredentials();
+      if (refreshedCredentials) {
+        // 更新内存中的凭证
+        this.credentials = refreshedCredentials;
+        // 重新创建 client
+        this.client = this.createClient(this.credentials);
+        // 将新凭证写回磁盘，避免重启后拿到过期的旧凭证
+        await saveAliyunCredentials(
+          refreshedCredentials as AliyunSTSCredentials,
+        ).catch(() => {
+          // 写回失败不影响当前会话
+        });
+        return true;
+      }
+    } catch {
+      // 刷新失败
+    }
+    return false;
+  }
+
+  /**
+   * 检查错误是否是 STS 凭证无效/过期导致的
+   * 直接判断 SDK 抛出的 AlibabaCloudError.code，而非匹配错误消息关键词
+   */
+  private isSTSError(error: unknown): boolean {
+    if (!this.isSTS) return false;
+    if (!(error instanceof Error)) return false;
+    // AlibabaCloudError 继承自 Error，并携带结构化的 code 字段
+    const code = (error as Error & { code?: string }).code;
+    if (!code) return false;
+    // 阿里云 STS 相关错误码（匹配父级及其子类型，如 InvalidSecurityToken.Malformed）：
+    //   InvalidSecurityToken  - SecurityToken 无效（含子类型：.Malformed/.Expired 等）
+    //   SecurityTokenExpired  - SecurityToken 已过期（部分 API 返回此码）
+    //   InvalidAccessKeyId    - 临时 AK 已随凭证过期而失效
+    return (
+      code.includes('InvalidSecurityToken') ||
+      code.includes('SecurityTokenExpired') ||
+      code.includes('InvalidAccessKeyId')
+    );
   }
 
   /**
@@ -500,9 +580,150 @@ export class AliyunContentGenerator implements ContentGenerator {
         ],
       } as GenerateContentResponse;
     } catch (error) {
+      // 检查是否是 STS 过期错误，如果是则尝试刷新并重试
+      if (this.isSTSError(error)) {
+        const refreshed = await this.refreshSTSCredentials();
+        if (refreshed) {
+          // 重试请求
+          try {
+            const response =
+              await this.client.generateCopilotResponseWithOptions(
+                aliyunRequest,
+                headers,
+                this.runtime,
+              );
+
+            if (response.body?.data) {
+              const responseData = JSON.parse(
+                response.body.data,
+              ) as AliyunResponseData;
+              return this.convertFromAliyunFormat(responseData);
+            }
+
+            return {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Empty response from Aliyun API' }],
+                    role: 'model',
+                  },
+                  finishReason: FinishReason.STOP,
+                },
+              ],
+            } as GenerateContentResponse;
+          } catch (retryError) {
+            const errorMessage =
+              retryError instanceof Error
+                ? retryError.message
+                : String(retryError);
+            throw new Error(`Aliyun API error (after retry): ${errorMessage}`);
+          }
+        }
+      }
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       throw new Error(`Aliyun API error: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * 处理一个 SSE 流，生成 GenerateContentResponse 事件
+   * 每次调用都使用独立的内部状态（lastContent/lastToolUse/hasYieldedFinishReason）
+   */
+  private async *processSSEStream(
+    sseStream: AsyncIterable<{ event?: { data?: string } }>,
+  ): AsyncGenerator<GenerateContentResponse> {
+    let hasYieldedFinishReason = false;
+    let lastContent = '';
+    const yieldedToolCalls = new Set<string>();
+    let lastToolUse: AliyunToolUseItem[] = [];
+
+    for await (const resp of sseStream) {
+      const eventData = resp.event?.data;
+      if (!eventData) continue;
+
+      try {
+        const streamData = JSON.parse(eventData) as AliyunNonStreamResponseData;
+        const choice = streamData.choices?.[0];
+        if (!choice?.message) continue;
+
+        const parts: Array<{
+          text?: string;
+          functionCall?: { name: string; args: Record<string, unknown> };
+        }> = [];
+
+        // API 返回累积内容，计算增量
+        const fullContent = choice.message.content || '';
+        if (fullContent.length > lastContent.length) {
+          const deltaContent = fullContent.slice(lastContent.length);
+          if (deltaContent) {
+            parts.push({ text: deltaContent });
+          }
+          lastContent = fullContent;
+        }
+
+        if (choice.message.tool_use && Array.isArray(choice.message.tool_use)) {
+          lastToolUse = choice.message.tool_use;
+        }
+
+        if (parts.length > 0) {
+          yield {
+            candidates: [
+              {
+                content: { parts, role: 'model' },
+                finishReason: undefined,
+              },
+            ],
+          } as GenerateContentResponse;
+        }
+      } catch {
+        // 跳过无法解析的 chunk
+      }
+    }
+
+    // 流结束后，处理 tool calls
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolParts: Array<{ functionCall: any }> = [];
+    for (const toolCall of lastToolUse) {
+      if (yieldedToolCalls.has(toolCall.id)) continue;
+      try {
+        const args = JSON.parse(toolCall.function.arguments || '{}');
+        toolParts.push({
+          functionCall: {
+            id: toolCall.id,
+            name: toolCall.function.name,
+            args,
+          },
+        });
+        yieldedToolCalls.add(toolCall.id);
+      } catch {
+        // 跳过无效的 tool call 参数
+      }
+    }
+
+    if (toolParts.length > 0) {
+      const functionCallsArray = toolParts.map((p) => p.functionCall);
+      yield {
+        candidates: [
+          {
+            content: { parts: toolParts, role: 'model' },
+            finishReason: undefined,
+          },
+        ],
+        functionCalls: functionCallsArray,
+      } as GenerateContentResponse;
+    }
+
+    if (!hasYieldedFinishReason) {
+      hasYieldedFinishReason = true;
+      yield {
+        candidates: [
+          {
+            content: { parts: [] as Part[], role: 'model' },
+            finishReason: FinishReason.STOP,
+          },
+        ],
+      } as GenerateContentResponse;
     }
   }
 
@@ -517,9 +738,6 @@ export class AliyunContentGenerator implements ContentGenerator {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
     };
-
-    const client = this.client;
-    const runtime = this.runtime;
 
     // Build request for low-level SSE API call
     // We bypass generateCopilotStreamResponseWithSSE because SDK's $dara.cast
@@ -540,130 +758,48 @@ export class AliyunContentGenerator implements ContentGenerator {
       bodyType: 'json',
     });
 
-    async function* streamGenerator(): AsyncGenerator<GenerateContentResponse> {
-      let hasYieldedFinishReason = false;
-      let lastContent = ''; // Track accumulated content to compute delta
-      // Track tool calls: id -> last arguments length (to detect when complete)
-      const yieldedToolCalls = new Set<string>();
-      let lastToolUse: AliyunToolUseItem[] = [];
-
+    // 使用管道函数保持 this 绑定
+    const streamGenerator = async function* (
+      this: AliyunContentGenerator,
+    ): AsyncGenerator<GenerateContentResponse> {
       try {
-        // Use callSSEApi directly to get raw SSE events
-        const sseStream = await client.callSSEApi(params, req, runtime);
-
-        for await (const resp of sseStream) {
-          // resp.event contains the raw SSE event data
-          const eventData = resp.event?.data;
-          if (!eventData) continue;
-
-          try {
-            // Parse the SSE event data
-            // Format: {"choices": [{"message": {"content": "累积内容", "tool_use": [...]}}]}
-            const streamData = JSON.parse(
-              eventData,
-            ) as AliyunNonStreamResponseData;
-            const choice = streamData.choices?.[0];
-            if (!choice?.message) continue;
-
-            const parts: Array<{
-              text?: string;
-              functionCall?: {
-                name: string;
-                args: Record<string, unknown>;
-              };
-            }> = [];
-
-            // API returns accumulated content, compute delta
-            const fullContent = choice.message.content || '';
-            if (fullContent.length > lastContent.length) {
-              const deltaContent = fullContent.slice(lastContent.length);
-              if (deltaContent) {
-                parts.push({ text: deltaContent });
-              }
-              lastContent = fullContent;
-            }
-
-            // Store latest tool_use for final processing
-            if (
-              choice.message.tool_use &&
-              Array.isArray(choice.message.tool_use)
-            ) {
-              lastToolUse = choice.message.tool_use;
-            }
-
-            // Yield text parts immediately
-            if (parts.length > 0) {
-              yield {
-                candidates: [
-                  {
-                    content: { parts, role: 'model' },
-                    finishReason: undefined,
-                  },
-                ],
-              } as GenerateContentResponse;
-            }
-          } catch {
-            // Skip chunks that can't be parsed
-          }
-        }
-
-        // Stream ended, process tool calls from the final state
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolParts: Array<{ functionCall: any }> = [];
-
-        for (const toolCall of lastToolUse) {
-          if (yieldedToolCalls.has(toolCall.id)) continue;
-          try {
-            const args = JSON.parse(toolCall.function.arguments || '{}');
-            toolParts.push({
-              functionCall: {
-                id: toolCall.id,
-                name: toolCall.function.name,
-                args,
-              },
-            });
-            yieldedToolCalls.add(toolCall.id);
-          } catch {
-            // Skip invalid tool call arguments
-          }
-        }
-
-        // Yield tool calls if any
-        if (toolParts.length > 0) {
-          // Extract functionCall objects for the functionCalls property
-          const functionCallsArray = toolParts.map((p) => p.functionCall);
-          yield {
-            candidates: [
-              {
-                content: { parts: toolParts, role: 'model' },
-                finishReason: undefined,
-              },
-            ],
-            // Add functionCalls property directly since we're not using the real GenerateContentResponse class
-            functionCalls: functionCallsArray,
-          } as GenerateContentResponse;
-        }
-
-        // Yield final chunk with finishReason
-        if (!hasYieldedFinishReason) {
-          hasYieldedFinishReason = true;
-          yield {
-            candidates: [
-              {
-                content: { parts: [] as Part[], role: 'model' },
-                finishReason: FinishReason.STOP,
-              },
-            ],
-          } as GenerateContentResponse;
-        }
+        const sseStream = await this.client.callSSEApi(
+          params,
+          req,
+          this.runtime,
+        );
+        yield* this.processSSEStream(sseStream);
       } catch (error) {
+        // 尝试 STS 刷新并重试（每次重试都使用第二次独立的状态）
+        if (this.isSTSError(error)) {
+          const refreshed = await this.refreshSTSCredentials();
+          if (refreshed) {
+            try {
+              const retryStream = await this.client.callSSEApi(
+                params,
+                req,
+                this.runtime,
+              );
+              yield* this.processSSEStream(retryStream);
+              return;
+            } catch (retryError) {
+              const errorMessage =
+                retryError instanceof Error
+                  ? retryError.message
+                  : String(retryError);
+              throw new Error(
+                `Aliyun streaming API error (after retry): ${errorMessage}`,
+              );
+            }
+          }
+        }
         const errorMessage =
           error instanceof Error ? error.message : String(error);
         throw new Error(`Aliyun streaming API error: ${errorMessage}`);
       }
-    }
+    };
 
-    return streamGenerator();
+    return streamGenerator.call(this);
   }
 
   async countTokens(
@@ -689,7 +825,7 @@ export class AliyunContentGenerator implements ContentGenerator {
 }
 
 /**
- * Create an Aliyun Content Generator
+ * 创建阿里云 Content Generator，支持 STS 凭证自动刷新
  */
 export async function createAliyunContentGenerator(
   contentGeneratorConfig: ContentGeneratorConfig,

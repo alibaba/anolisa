@@ -1047,17 +1047,29 @@ export default {
   'Custom Provider': 'Custom Provider',
   'Custom (enter Base URL manually)': 'Custom (enter Base URL manually)',
   'Model:': 'Model:',
-  'Aliyun AK/SK Configuration': 'Aliyun AK/SK Configuration',
+  'Aliyun Authentication': 'Aliyun Authentication',
   'Please enter your Aliyun Access Key credentials. You can get them from':
     'Please enter your Aliyun Access Key credentials. You can get them from',
   'Access Key ID:': 'Access Key ID:',
   'Access Key Secret:': 'Access Key Secret:',
+  'Detecting environment...': 'Detecting environment...',
+  'Please click or copy the URL below to your browser to complete authentication:':
+    'Please click or copy the URL below to your browser to complete authentication:',
+  'ECS Instance ID:': 'ECS Instance ID:',
+  'Preparing authentication...': 'Preparing authentication...',
+  'Authentication failed': 'Authentication failed',
+  'Press Enter to go back · Esc to cancel':
+    'Press Enter to go back · Esc to cancel',
+  'Timeout waiting for RAM role authorization':
+    'Timeout waiting for RAM role authorization',
+  'Failed to get STS credentials': 'Failed to get STS credentials',
 
   // ============================================================================
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Select Model',
   '(Press Esc to close)': '(Press Esc to close)',
+  '(Press Esc to cancel)': '(Press Esc to cancel)',
   'Current (effective) configuration': 'Current (effective) configuration',
   AuthType: 'AuthType',
   'API Key': 'API Key',

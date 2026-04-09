@@ -21,7 +21,24 @@ const ALIYUN_CREDS_FILENAME = 'aliyun_creds.json';
 export const ALIYUN_DEFAULT_MODEL = 'qwen3-coder-plus';
 
 /**
- * Aliyun AK/SK credentials interface
+ * 阿里云凭证类型分层说明
+ *
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │ AliyunCredentials          基础层：仅 AK/SK，最小凭证集    │
+ * │   └─ AliyunSTSCredentials  扩展层：追加 STS Token + 过期时间│
+ * │   └─ AliyunCredentialsExtended  UI 传递层：携带 model/method│
+ * │                                 用于 onSubmit → handleAuth  │
+ * │ AliyunCredentialsWithSTS   联合类型：存储/SDK 入参使用      │
+ * └─────────────────────────────────────────────────────────────┘
+ *
+ * 使用边界：
+ *   - core 层内部（SDK 调用、磁盘存储）→ AliyunCredentials / AliyunSTSCredentials / AliyunCredentialsWithSTS
+ *   - UI → core 回调传参             → AliyunCredentialsExtended
+ *   - 运行时 STS 刷新                → AliyunSTSCredentials（来自 ECS RAM Role API）
+ */
+
+/**
+ * 阿里云 AK/SK 凭证接口
  */
 export interface AliyunCredentials {
   accessKeyId: string;
@@ -29,17 +46,42 @@ export interface AliyunCredentials {
 }
 
 /**
- * Get the path to the Aliyun credentials file
+ * 阿里云 STS 凭证接口（ECS RAM Role 使用）
+ */
+export interface AliyunSTSCredentials extends AliyunCredentials {
+  securityToken: string;
+  expiration: string;
+}
+
+/**
+ * AK/SK 凭证与 STS 凭证的联合类型
+ */
+export type AliyunCredentialsWithSTS = AliyunCredentials | AliyunSTSCredentials;
+
+/**
+ * 认证流程参数传递类型：在 AliyunCredentials 基础上携带可选 STS 字段、
+ * 模型配置和认证方式，用于 UI 层 onSubmit 回调到 handleAuthSelect 的数据传递
+ */
+export interface AliyunCredentialsExtended extends AliyunCredentials {
+  securityToken?: string;
+  expiration?: string;
+  model?: string;
+  method?: string;
+}
+
+/**
+ * 获取阿里云凭证文件路径
  */
 export function getAliyunCredsPath(): string {
   return path.join(os.homedir(), QWEN_DIR, ALIYUN_CREDS_FILENAME);
 }
 
 /**
- * Save Aliyun credentials to disk (encrypted).
+ * 将阿里云凭证加密保存到磁盘。
+ * 同时支持 AK/SK 凭证和 STS 凭证。
  */
 export async function saveAliyunCredentials(
-  credentials: AliyunCredentials,
+  credentials: AliyunCredentialsWithSTS,
 ): Promise<void> {
   const filePath = getAliyunCredsPath();
   try {
@@ -66,10 +108,11 @@ export async function saveAliyunCredentials(
 }
 
 /**
- * Load Aliyun credentials from disk.
- * Handles both encrypted (enc: prefix) and plaintext JSON (backward compat).
+ * 从磁盘加载阿里云凭证。
+ * 支持加密格式（enc: 前缀）和明文 JSON（向前兼容）。
+ * 若存在 STS 凭证则返回 STS 类型，否则返回普通 AK/SK 类型。
  */
-export async function loadAliyunCredentials(): Promise<AliyunCredentials | null> {
+export async function loadAliyunCredentials(): Promise<AliyunCredentialsWithSTS | null> {
   const filePath = getAliyunCredsPath();
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -80,7 +123,7 @@ export async function loadAliyunCredentials(): Promise<AliyunCredentials | null>
       return null;
     }
 
-    const credentials = JSON.parse(decrypted) as AliyunCredentials;
+    const credentials = JSON.parse(decrypted) as AliyunCredentialsWithSTS;
 
     // Validate credentials structure
     if (!credentials.accessKeyId || !credentials.accessKeySecret) {
@@ -100,7 +143,7 @@ export async function loadAliyunCredentials(): Promise<AliyunCredentials | null>
 }
 
 /**
- * Clear Aliyun credentials from disk
+ * 删除磁盘上的阿里云凭证文件
  */
 export async function clearAliyunCredentials(): Promise<void> {
   const filePath = getAliyunCredsPath();
@@ -117,7 +160,7 @@ export async function clearAliyunCredentials(): Promise<void> {
 }
 
 /**
- * Check if Aliyun credentials exist
+ * 检查阿里云凭证是否已保存
  */
 export async function hasAliyunCredentials(): Promise<boolean> {
   const credentials = await loadAliyunCredentials();

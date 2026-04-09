@@ -39,9 +39,9 @@ export function AuthDialog(): React.JSX.Element {
 
   const items = [
     {
-      key: AuthType.QWEN_OAUTH,
-      label: t('Qwen OAuth'),
-      value: AuthType.QWEN_OAUTH,
+      key: AuthType.USE_ALIYUN,
+      label: t('Aliyun Authentication'),
+      value: AuthType.USE_ALIYUN,
     },
     {
       key: AuthType.USE_OPENAI,
@@ -49,9 +49,9 @@ export function AuthDialog(): React.JSX.Element {
       value: AuthType.USE_OPENAI,
     },
     {
-      key: AuthType.USE_ALIYUN,
-      label: t('Aliyun AK/SK'),
-      value: AuthType.USE_ALIYUN,
+      key: AuthType.QWEN_OAUTH,
+      label: t('Qwen OAuth'),
+      value: AuthType.QWEN_OAUTH,
     },
   ];
 
@@ -77,8 +77,8 @@ export function AuthDialog(): React.JSX.Element {
         return item.value === defaultAuthType;
       }
 
-      // Priority 4: default to QWEN_OAUTH
-      return item.value === AuthType.QWEN_OAUTH;
+      // Priority 4: 默认选中阿里云认证
+      return item.value === AuthType.USE_ALIYUN;
     }),
   );
 
