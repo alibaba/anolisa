@@ -92,18 +92,26 @@ function EcsAuthStaticDisplay({
 
 /**
  * 动态状态行：轮询状态展示（无动画，避免 state 变化导致镇屏闪烁）
+ * 样式对齐 QwenOAuthProgress 的 StatusDisplay
  */
 function EcsPollingStatus({ step }: { step: string }): React.JSX.Element {
   return (
-    <Box flexDirection="column">
+    <Box
+      borderStyle="round"
+      borderColor={Colors.AccentBlue}
+      flexDirection="column"
+      padding={1}
+      width="100%"
+    >
       <Box marginTop={1}>
-        <Text color={Colors.Gray}>
+        <Text>
+          {'\u280b'}{' '}
           {step === 'polling_role'
-            ? t('Waiting for authorization...')
+            ? t('Waiting for authorization')
             : t('Preparing authentication...')}
         </Text>
       </Box>
-      <Box>
+      <Box marginTop={1} justifyContent="space-between">
         <Text color={Colors.Gray}>{t('(Press Esc to cancel)')}</Text>
       </Box>
     </Box>
