@@ -970,6 +970,8 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Get started',
+  'Qwen OAuth': 'Qwen OAuth',
+  'Free · Up to 1,000 requests per day': 'Free · Up to 1,000 requests per day',
   'How would you like to authenticate for this project?':
     'How would you like to authenticate for this project?',
   'OpenAI API key is required to use OpenAI authentication.':
@@ -1045,9 +1047,12 @@ export default {
   '↑↓ select provider · Enter/Tab navigate fields · Esc cancel':
     '↑↓ select provider · Enter/Tab navigate fields · Esc cancel',
   'Custom Provider': 'Custom Provider',
+  'Paid · Use your own API key · Cost depends on provider':
+    'Paid · Use your own API key · Cost depends on provider',
   'Custom (enter Base URL manually)': 'Custom (enter Base URL manually)',
   'Model:': 'Model:',
   'Aliyun Authentication': 'Aliyun Authentication',
+  'Free with limited quota': 'Free with limited quota',
   'Please enter your Aliyun Access Key credentials. You can get them from':
     'Please enter your Aliyun Access Key credentials. You can get them from',
   'Access Key ID:': 'Access Key ID:',

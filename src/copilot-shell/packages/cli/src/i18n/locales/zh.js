@@ -921,6 +921,8 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': '开始使用',
+  'Qwen OAuth': 'Qwen OAuth',
+  'Free · Up to 1,000 requests per day': '免费 · 每天最多 1,000 次请求',
   'How would you like to authenticate for this project?':
     '您希望如何为此项目进行身份验证？',
   'OpenAI API key is required to use OpenAI authentication.':
@@ -930,7 +932,6 @@ export default {
   '(Use Enter to Set Auth)': '（使用 Enter 设置认证）',
   'Terms of Services and Privacy Notice for Copilot Shell':
     'Copilot Shell 的服务条款和隐私声明',
-  'Qwen OAuth': 'Qwen OAuth (免费)',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}': '登录失败。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -989,9 +990,12 @@ export default {
   '↑↓ select provider · Enter/Tab navigate fields · Esc cancel':
     '↑↓ 选择提供商 · Enter/Tab 切换字段 · Esc 取消',
   'Custom Provider': '自定义提供商',
+  'Paid · Use your own API key · Cost depends on provider':
+    '付费 · 使用自己的 API 密钥 · 费用取决于提供商',
   'Custom (enter Base URL manually)': '自定义（手动填写 Base URL）',
   'Model:': '模型：',
   'Aliyun Authentication': '阿里云认证',
+  'Free with limited quota': '限免体验',
   'Please enter your Aliyun Access Key credentials. You can get them from':
     '请输入您的阿里云 Access Key 凭证。您可以从以下地址获取：',
   'Access Key ID:': 'Access Key ID：',

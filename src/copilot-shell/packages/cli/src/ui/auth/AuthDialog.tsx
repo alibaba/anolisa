@@ -11,7 +11,7 @@ import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
-import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
+import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -41,16 +41,22 @@ export function AuthDialog(): React.JSX.Element {
     {
       key: AuthType.USE_ALIYUN,
       label: t('Aliyun Authentication'),
+      title: t('Aliyun Authentication'),
+      description: t('Free with limited quota'),
       value: AuthType.USE_ALIYUN,
     },
     {
       key: AuthType.USE_OPENAI,
       label: t('Custom Provider'),
+      title: t('Custom Provider'),
+      description: t('Paid · Use your own API key · Cost depends on provider'),
       value: AuthType.USE_OPENAI,
     },
     {
       key: AuthType.QWEN_OAUTH,
       label: t('Qwen OAuth'),
+      title: t('Qwen OAuth'),
+      description: t('Free · Up to 1,000 requests per day'),
       value: AuthType.QWEN_OAUTH,
     },
   ];
@@ -138,7 +144,7 @@ export function AuthDialog(): React.JSX.Element {
         <Text>{t('How would you like to authenticate for this project?')}</Text>
       </Box>
       <Box marginTop={1}>
-        <RadioButtonSelect
+        <DescriptiveRadioButtonSelect
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
