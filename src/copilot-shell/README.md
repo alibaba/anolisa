@@ -13,7 +13,7 @@ An AI-powered terminal assistant for code understanding, task automation, and sy
 - **Skill System** — Local + remote skill discovery with priority-based fallback (Project > User > Extension > Remote).
 - **Hooks System** — PreToolUse events for intercepting tool calls before execution.
 - **Git Workflow Automation** — Automate commits, branch creation, conflict resolution, and release notes.
-- **Multi-Provider Support** — Qwen OAuth, Custom Provider (DashScope, DeepSeek, Kimi, GLM, MiniMax, or any OpenAI-compatible endpoint), Aliyun AK/SK.
+- **Multi-Provider Support** — Aliyun Authentication (ECS RAM Role web auth or AK/SK), Qwen OAuth, Custom Provider (DashScope, DeepSeek, Kimi, GLM, MiniMax, or any OpenAI-compatible endpoint).
 - **PTY Mode** — Full pseudo-terminal support including `sudo` commands.
 - **Extensible** — Extend capabilities via MCP servers and custom skills.
 
@@ -48,14 +48,10 @@ copilot
 ### Authenticate
 
 ```bash
-# Qwen OAuth (free tier: 2,000 requests/day)
+# Aliyun Authentication (default)
+# - On ECS: auto-detects environment, opens browser or shows QR code for web auth
+# - Elsewhere: enter AK/SK directly
 cosh    # follow the on-screen prompts
-
-# API Key
-cosh --auth apikey
-
-# Custom Provider (OpenAI Compatible)
-cosh --auth openai
 ```
 
 > ** Note: ** Supports reusing openclaw model configurations.

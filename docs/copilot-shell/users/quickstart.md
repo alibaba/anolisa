@@ -49,9 +49,9 @@ Use the `/auth` command inside the session to choose your provider:
 
 | Provider | Description |
 |----------|-------------|
+| Aliyun Authentication | Default. On ECS: auto-detects and launches web auth (browser link + QR code). No ECS: enter AK/SK directly. |
 | Qwen OAuth | Free tier with 1,000 requests/day — follow on-screen prompts |
 | Custom Provider | Any OpenAI-compatible endpoint — DashScope, DashScope Coding Plan, DeepSeek, Kimi, GLM, MiniMax, or your own |
-| Aliyun AK/SK    | Free, Using Aliyun AK/SK for Authentication  |
 
 > [!tip]
 >
