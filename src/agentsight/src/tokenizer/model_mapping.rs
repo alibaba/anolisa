@@ -316,8 +316,8 @@ mod tests {
     
     #[test]
     fn test_unknown_model() {
-        // Unknown model - should return original name
-        assert_eq!(map_to_hf_model_id("some-unknown-model"), "some-unknown-model");
+        // Unknown model - should return default fallback
+        assert_eq!(map_to_hf_model_id("some-unknown-model"), "Qwen/Qwen3.5-397B-A17B");
     }
     
     #[test]

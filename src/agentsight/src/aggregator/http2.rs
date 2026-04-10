@@ -794,8 +794,8 @@ mod tests {
 
     #[test]
     fn test_stream_direction_from_rw() {
-        assert_eq!(StreamDirection::from_rw(0), StreamDirection::Request);
-        assert_eq!(StreamDirection::from_rw(1), StreamDirection::Response);
+        assert_eq!(StreamDirection::from_rw(1), StreamDirection::Request);
+        assert_eq!(StreamDirection::from_rw(0), StreamDirection::Response);
     }
 
     #[test]
@@ -803,8 +803,8 @@ mod tests {
         let mut aggregator = Http2StreamAggregator::new();
         let _conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x1000 };
 
-        // Create request HEADERS frame (rw=0, write) with END_STREAM (no body)
-        let req_event = create_test_event(1234, 0x1000, 0, 1000);
+        // Create request HEADERS frame (rw=1, write) with END_STREAM (no body)
+        let req_event = create_test_event(1234, 0x1000, 1, 1000);
         let req_headers = create_test_frame(
             1, // stream_id
             1, // HEADERS
@@ -818,8 +818,8 @@ mod tests {
         assert!(completed.is_empty()); // Request complete but waiting for response
         assert_eq!(aggregator.active_stream_count(), 1);
 
-        // Create response HEADERS frame (rw=1, read)
-        let resp_event = create_test_event(1234, 0x1000, 1, 2000);
+        // Create response HEADERS frame (rw=0, read)
+        let resp_event = create_test_event(1234, 0x1000, 0, 2000);
         let resp_headers = create_test_frame(
             1, // stream_id
             1, // HEADERS
@@ -843,8 +843,8 @@ mod tests {
     fn test_aggregator_with_data_frames() {
         let mut aggregator = Http2StreamAggregator::new();
 
-        // Request HEADERS (no END_STREAM, expecting body)
-        let req_event = create_test_event(1234, 0x1000, 0, 1000);
+        // Request HEADERS (no END_STREAM, expecting body) - rw=1 for request
+        let req_event = create_test_event(1234, 0x1000, 1, 1000);
         let req_headers = create_test_frame(1, 1, 0x04, vec![], req_event.clone());
 
         // Request DATA with END_STREAM
@@ -854,8 +854,8 @@ mod tests {
         let completed = aggregator.process_frames(vec![req_headers, req_data]);
         assert!(completed.is_empty()); // Still waiting for response
 
-        // Response HEADERS with END_STREAM (no body)
-        let resp_event = create_test_event(1234, 0x1000, 1, 2000);
+        // Response HEADERS with END_STREAM (no body) - rw=0 for response
+        let resp_event = create_test_event(1234, 0x1000, 0, 2000);
         let resp_headers = create_test_frame(1, 1, 0x05, b":status: 200".to_vec(), resp_event);
 
         let completed = aggregator.process_frames(vec![resp_headers]);
