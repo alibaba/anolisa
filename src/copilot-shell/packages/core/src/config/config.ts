@@ -98,6 +98,7 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { setDebugLogSession } from '../utils/debugLogger.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -704,6 +705,9 @@ export class Config {
     }
     this.initialized = true;
 
+    // Activate debug log session so all debugLogger.*() calls write to file
+    setDebugLogSession({ getSessionId: () => this.sessionId });
+
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     if (this.getCheckpointingEnabled()) {
@@ -912,6 +916,8 @@ export class Config {
    * Releases resources owned by the config instance.
    */
   async shutdown(): Promise<void> {
+    // Fire SessionEnd hook before releasing resources
+    await this.geminiClient?.shutdown();
     this.skillManager?.stopWatching();
   }
 
@@ -929,6 +935,8 @@ export class Config {
       : undefined;
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
+      // Update debug log latest symlink to point to the new session
+      setDebugLogSession({ getSessionId: () => this.sessionId });
     }
     return this.sessionId;
   }

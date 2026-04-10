@@ -118,6 +118,8 @@ describe('GeminiChat', () => {
         getTool: vi.fn(),
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     // Disable 429 simulation for tests

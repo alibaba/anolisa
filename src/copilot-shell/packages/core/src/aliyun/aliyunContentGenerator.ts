@@ -334,9 +334,28 @@ export class AliyunContentGenerator implements ContentGenerator {
     }
 
     // Convert tools (from config)
+    // Respect functionCallingConfig mode and allowedFunctionNames (BeforeToolSelection hook support)
+    const rawConfig = request.config as Record<string, unknown> | undefined;
+    const functionCallingConfig = rawConfig?.['functionCallingConfig'] as
+      | Record<string, unknown>
+      | undefined;
+    const callingMode = functionCallingConfig?.['mode'] as string | undefined;
+    const allowedFunctionNames = functionCallingConfig?.[
+      'allowedFunctionNames'
+    ] as string[] | undefined;
+    // If mode=NONE, the tool-building block below is skipped entirely.
+    // Otherwise, build allowedSet from allowedFunctionNames for name-based filtering.
+    const allowedSet =
+      callingMode === 'NONE'
+        ? null
+        : allowedFunctionNames && allowedFunctionNames.length > 0
+          ? new Set(allowedFunctionNames)
+          : null; // null = no name filter (pass all tools)
+
     let tools: AliyunTool[] | undefined;
     const requestTools = request.config?.tools;
     if (
+      callingMode !== 'NONE' &&
       requestTools &&
       Array.isArray(requestTools) &&
       requestTools.length > 0
@@ -359,6 +378,8 @@ export class AliyunContentGenerator implements ContentGenerator {
           ).functionDeclarations;
           if (funcDecls) {
             for (const func of funcDecls) {
+              // Skip functions not in the allowed list (if restriction is active)
+              if (allowedSet && !allowedSet.has(func.name)) continue;
               // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
               let parameters: Record<string, unknown> | undefined;
 

@@ -917,6 +917,10 @@ export const useGeminiStream = (
               userMessageTimestamp,
             );
             break;
+          case ServerGeminiEventType.AfterModelHookStop:
+            // AfterModel hook requested stop — agent loop is ended by client.ts.
+            // No UI action needed here; just acknowledge the event.
+            break;
           default: {
             // enforces exhaustive switch-case
             const unreachable: never = event;

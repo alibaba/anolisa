@@ -15,6 +15,9 @@ import type {
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const hookDebugLogger = createDebugLogger('HOOK_DEBUG');
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
@@ -102,6 +105,9 @@ export class GeminiClient {
    */
   private hasFailedCompressionAttempt = false;
 
+  /** Guard to prevent SessionEnd from being fired more than once. */
+  private hasShutdown = false;
+
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
   }
@@ -170,6 +176,17 @@ export class GeminiClient {
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
+  }
+
+  /**
+   * Gracefully shut down the client, firing SessionEnd hook.
+   * Called on normal exit (/quit, Ctrl+C).
+   * Idempotent: subsequent calls are no-ops.
+   */
+  async shutdown(): Promise<void> {
+    if (this.hasShutdown) return;
+    this.hasShutdown = true;
+    await this.fireSessionEndHook(SessionEndReason.PromptInputExit);
   }
 
   async resetChat(): Promise<void> {
@@ -242,8 +259,12 @@ export class GeminiClient {
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
     try {
-      await hookSystem.fireSessionStartEvent(source);
-    } catch {
+      const result = await hookSystem.fireSessionStartEvent(source);
+      hookDebugLogger.info(
+        `[Hook Debug] SessionStart: completed, hasOutput=${!!result}`,
+      );
+    } catch (e) {
+      hookDebugLogger.error(`[Hook Debug] SessionStart: hook threw error=${e}`);
       // Advisory: do not block startup on hook failure
     }
   }
@@ -256,8 +277,12 @@ export class GeminiClient {
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
     try {
-      await hookSystem.fireSessionEndEvent(reason);
-    } catch {
+      const result = await hookSystem.fireSessionEndEvent(reason);
+      hookDebugLogger.info(
+        `[Hook Debug] SessionEnd: completed, hasOutput=${!!result}`,
+      );
+    } catch (e) {
+      hookDebugLogger.error(`[Hook Debug] SessionEnd: hook threw error=${e}`);
       // Best effort: do not block exit on hook failure
     }
   }
@@ -650,6 +675,10 @@ export class GeminiClient {
       }
       yield event;
       if (event.type === GeminiEventType.Error) {
+        return turn;
+      }
+      // AfterModel hook requested stop: end agent loop cleanly (no error shown).
+      if (event.type === GeminiEventType.AfterModelHookStop) {
         return turn;
       }
     }

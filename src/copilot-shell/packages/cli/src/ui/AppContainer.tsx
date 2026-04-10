@@ -554,6 +554,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         setTimeout(async () => {
+          await config.shutdown();
           await runExitCleanup();
           process.exit(0);
         }, 100);
@@ -566,6 +567,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
     }),
     [
+      config,
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,

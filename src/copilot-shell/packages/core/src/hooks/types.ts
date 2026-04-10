@@ -39,6 +39,12 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // BeforeModel - Before sending a request to the LLM
+  BeforeModel = 'BeforeModel',
+  // AfterModel - After receiving a response from the LLM
+  AfterModel = 'AfterModel',
+  // BeforeToolSelection - Before selecting tools for the LLM request
+  BeforeToolSelection = 'BeforeToolSelection',
 }
 
 /**
@@ -133,6 +139,12 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.BeforeModel:
+      return new BeforeModelHookOutput(data);
+    case HookEventName.AfterModel:
+      return new AfterModelHookOutput(data);
+    case HookEventName.BeforeToolSelection:
+      return new BeforeToolSelectionHookOutput(data);
     default:
       return new DefaultHookOutput(data);
   }
@@ -723,6 +735,151 @@ export interface SubagentStopOutput extends HookOutput {
     hookEventName: 'SubagentStop';
     additionalContext?: string;
   };
+}
+
+// ===== LLM Hook Types (Phase 2) =====
+
+/**
+ * Decoupled LLM request format - stable across CLI versions.
+ * Used by BeforeModel and BeforeToolSelection hooks.
+ */
+export type {
+  LLMRequest,
+  LLMResponse,
+  HookToolConfig,
+} from './hookTranslator.js';
+
+/**
+ * BeforeModel hook input - uses decoupled LLM types
+ */
+export interface BeforeModelInput extends HookInput {
+  llm_request: import('./hookTranslator.js').LLMRequest;
+}
+
+/**
+ * BeforeModel hook output
+ */
+export interface BeforeModelOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'BeforeModel';
+    llm_request?: Partial<import('./hookTranslator.js').LLMRequest>;
+    llm_response?: import('./hookTranslator.js').LLMResponse;
+  };
+}
+
+/**
+ * AfterModel hook input - uses decoupled LLM types
+ */
+export interface AfterModelInput extends HookInput {
+  llm_request: import('./hookTranslator.js').LLMRequest;
+  llm_response: import('./hookTranslator.js').LLMResponse;
+}
+
+/**
+ * AfterModel hook output
+ */
+export interface AfterModelOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'AfterModel';
+    llm_response?: Partial<import('./hookTranslator.js').LLMResponse>;
+  };
+}
+
+/**
+ * BeforeToolSelection hook input - uses decoupled LLM types
+ */
+export interface BeforeToolSelectionInput extends HookInput {
+  llm_request: import('./hookTranslator.js').LLMRequest;
+}
+
+/**
+ * BeforeToolSelection hook output
+ */
+export interface BeforeToolSelectionOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'BeforeToolSelection';
+    toolConfig?: import('./hookTranslator.js').HookToolConfig;
+  };
+}
+
+/**
+ * Specific hook output class for BeforeModel events.
+ * Supports request modification and synthetic response generation.
+ */
+export class BeforeModelHookOutput extends DefaultHookOutput {
+  /**
+   * Get synthetic LLM response if provided by hook.
+   * When present, the actual LLM call should be skipped.
+   */
+  getSyntheticResponse():
+    | import('./hookTranslator.js').LLMResponse
+    | undefined {
+    if (this.hookSpecificOutput && 'llm_response' in this.hookSpecificOutput) {
+      const hookResponse = this.hookSpecificOutput['llm_response'];
+      if (hookResponse && typeof hookResponse === 'object') {
+        return hookResponse as import('./hookTranslator.js').LLMResponse;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get LLM request modifications if provided by hook.
+   * Returns a partial LLMRequest that should be merged with the original.
+   */
+  getLLMRequestModifications():
+    | Partial<import('./hookTranslator.js').LLMRequest>
+    | undefined {
+    if (this.hookSpecificOutput && 'llm_request' in this.hookSpecificOutput) {
+      const hookRequest = this.hookSpecificOutput['llm_request'];
+      if (hookRequest && typeof hookRequest === 'object') {
+        return hookRequest as Partial<import('./hookTranslator.js').LLMRequest>;
+      }
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Specific hook output class for AfterModel events.
+ * Supports response modification and observation.
+ */
+export class AfterModelHookOutput extends DefaultHookOutput {
+  /**
+   * Get modified LLM response if provided by hook.
+   */
+  getModifiedResponse(): import('./hookTranslator.js').LLMResponse | undefined {
+    if (this.hookSpecificOutput && 'llm_response' in this.hookSpecificOutput) {
+      const hookResponse = this.hookSpecificOutput['llm_response'];
+      if (
+        hookResponse &&
+        typeof hookResponse === 'object' &&
+        'candidates' in (hookResponse as Record<string, unknown>)
+      ) {
+        return hookResponse as import('./hookTranslator.js').LLMResponse;
+      }
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Specific hook output class for BeforeToolSelection events.
+ * Supports tool configuration modification (mode, allowed function names).
+ */
+export class BeforeToolSelectionHookOutput extends DefaultHookOutput {
+  /**
+   * Get tool configuration modifications if provided by hook.
+   */
+  getToolConfig(): import('./hookTranslator.js').HookToolConfig | undefined {
+    if (this.hookSpecificOutput && 'toolConfig' in this.hookSpecificOutput) {
+      const toolConfig = this.hookSpecificOutput['toolConfig'];
+      if (toolConfig && typeof toolConfig === 'object') {
+        return toolConfig as import('./hookTranslator.js').HookToolConfig;
+      }
+    }
+    return undefined;
+  }
 }
 
 /**
