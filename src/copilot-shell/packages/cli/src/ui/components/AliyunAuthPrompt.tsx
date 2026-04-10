@@ -90,6 +90,26 @@ function EcsAuthStaticDisplay({
   );
 }
 
+/**
+ * 动态状态行：轮询状态展示（无动画，避免 state 变化导致镇屏闪烁）
+ */
+function EcsPollingStatus({ step }: { step: string }): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      <Box marginTop={1}>
+        <Text color={Colors.Gray}>
+          {step === 'polling_role'
+            ? t('Waiting for authorization...')
+            : t('Preparing authentication...')}
+        </Text>
+      </Box>
+      <Box>
+        <Text color={Colors.Gray}>{t('(Press Esc to cancel)')}</Text>
+      </Box>
+    </Box>
+  );
+}
+
 interface AliyunAuthPromptProps {
   isAuthenticating: boolean;
   onSubmit: (
@@ -134,21 +154,17 @@ export function AliyunAuthPrompt({
   });
 
   // 加载动画的点数状态 (0-3)
-  const [loadingDots, setLoadingDots] = useState(3);
+  // const [loadingDots, setLoadingDots] = useState(3);
 
   // 二维码数据
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
 
-  // 加载动画效果
-  useEffect(() => {
-    if (state.step !== 'polling_role') {
-      return undefined;
-    }
-    const interval = setInterval(() => {
-      setLoadingDots((prev) => (prev + 1) % 4);
-    }, 500);
-    return () => clearInterval(interval);
-  }, [state.step]);
+  // 加载动画效果（已移至独立的 EcsPollingStatus 子组件，避免更新泥染父组件）
+  // useEffect(() => {
+  //   if (state.step !== 'polling_role') { return undefined; }
+  //   const interval = setInterval(() => { setLoadingDots((prev) => (prev + 1) % 4); }, 500);
+  //   return () => clearInterval(interval);
+  // }, [state.step]);
 
   // 生成二维码
   useEffect(() => {
@@ -392,7 +408,6 @@ export function AliyunAuthPrompt({
     { isActive: true },
   );
 
-  // 记忆化静态区域（URL + 二维码），只在数据变化时重新渲染，避免 loadingDots 更新导致闪烁
   const ecsStaticDisplay = useMemo(
     () => (
       <EcsAuthStaticDisplay
@@ -428,19 +443,10 @@ export function AliyunAuthPrompt({
   if (state.step === 'web_auth' || state.step === 'polling_role') {
     return (
       <Box flexDirection="column" width="100%">
-        {/* 静态区域：URL + 二维码，记忆化避免闪烁 */}
+        {/* 静态区域：URL + 二维码，useMemo 记忆化避免重新渲染 */}
         {ecsStaticDisplay}
-        {/* 动态状态行：轮询动画独立更新 */}
-        <Box marginTop={1}>
-          <Text color={Colors.Gray}>
-            {state.step === 'polling_role'
-              ? t('Waiting for authorization') + '.'.repeat(loadingDots)
-              : t('Preparing authentication...')}
-          </Text>
-        </Box>
-        <Box>
-          <Text color={Colors.Gray}>{t('(Press Esc to cancel)')}</Text>
-        </Box>
+        {/* 动态状态行：独立子组件，更新不影响静态区域 */}
+        <EcsPollingStatus step={state.step} />
       </Box>
     );
   }
