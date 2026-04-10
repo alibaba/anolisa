@@ -135,7 +135,7 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Packages (top-level only):**" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        tar -tzf /tmp/archives/${VENDOR_FILE} | sed 's|^\./||' | grep -oE '^[^/]+/vendor/[^/]+/' | sort -u >> $GITHUB_STEP_SUMMARY
+        tar -tzf /tmp/archives/${VENDOR_FILE} | sed 's|^\./||' | grep -oE '(^[^/]+/)?vendor/[^/]+/' | sort -u >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
     # -----------------------------------------------------------------
