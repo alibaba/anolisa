@@ -247,7 +247,7 @@ export function AliyunAuthPrompt({
 
       if (instanceId) {
         // 在 ECS 上，直接进入网页认证流程并立即开始轮询
-        const url = generateConsoleUrl(instanceId, false); // 使用联调版
+        const url = generateConsoleUrl(instanceId, true); // 使用正式版
         setState((prev) => ({
           ...prev,
           step: 'polling_role',

@@ -18,7 +18,7 @@ const ALINUX_CONSOLE_URL_TEMPLATE =
 
 // 生产版管控链接模板（后续可切换）
 const ALINUX_CONSOLE_URL_TEMPLATE_PROD =
-  'https://alinux.console.aliyun.com/guide/cosh?source=cosh&instance={instanceId}';
+  'https://alinux.console.aliyun.com/guide/cosh?instance={instanceId}';
 
 // RAM Role 名称
 export const ECS_RAM_ROLE_NAME = 'AliyunECSInstanceForSysomRole';
