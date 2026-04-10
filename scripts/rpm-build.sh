@@ -46,14 +46,8 @@ install_package() {
         dnf install -y "$pkg"
     elif command -v yum &>/dev/null; then
         yum install -y "$pkg"
-    elif command -v apt-get &>/dev/null; then
-        apt-get install -y "$pkg"
-    elif command -v zypper &>/dev/null; then
-        zypper install -y "$pkg"
-    elif command -v pacman &>/dev/null; then
-        pacman -S --noconfirm "$pkg"
     else
-        err "No supported package manager found (dnf/yum/apt-get/zypper/pacman)"
+        err "No supported package manager found (dnf/yum)"
         return 1
     fi
 }
