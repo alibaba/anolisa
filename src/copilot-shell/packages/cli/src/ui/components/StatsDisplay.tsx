@@ -257,8 +257,8 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
               </Text>
             </StatRow>
           )}
-        {(metrics.sandbox.totalRuns > 0 ||
-          metrics.sandbox.totalBlocked > 0) && (
+        {(metrics.sandbox?.totalRuns > 0 ||
+          metrics.sandbox?.totalBlocked > 0) && (
           <>
             <StatRow title={t('Sandbox Runs:')}>
               <Text color={theme.text.primary}>
