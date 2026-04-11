@@ -7,9 +7,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { QWEN_DIR } from '../config/storage.js';
 
 const OLD_CONFIG_DIR = '.copilot';
-const NEW_CONFIG_DIR = '.copilot-shell';
 
 /**
  * Migrates the cosh configuration directory from ~/.copilot to ~/.copilot-shell
@@ -28,7 +28,7 @@ export async function migrateConfigDirIfNeeded(): Promise<string | null> {
   }
 
   const oldDir = path.join(homeDir, OLD_CONFIG_DIR);
-  const newDir = path.join(homeDir, NEW_CONFIG_DIR);
+  const newDir = path.join(homeDir, QWEN_DIR);
 
   const oldExists = fs.existsSync(oldDir);
   const newExists = fs.existsSync(newDir);
@@ -41,12 +41,12 @@ export async function migrateConfigDirIfNeeded(): Promise<string | null> {
   try {
     fs.cpSync(oldDir, newDir, { recursive: true });
     return (
-      `Config directory migrated from ~/${OLD_CONFIG_DIR} to ~/${NEW_CONFIG_DIR}. ` +
+      `Config directory migrated from ~/${OLD_CONFIG_DIR} to ~/${QWEN_DIR}. ` +
       `You may remove ~/${OLD_CONFIG_DIR} after confirming everything works.`
     );
   } catch (err) {
     return (
-      `Warning: Failed to migrate config from ~/${OLD_CONFIG_DIR} to ~/${NEW_CONFIG_DIR} ` +
+      `Warning: Failed to migrate config from ~/${OLD_CONFIG_DIR} to ~/${QWEN_DIR} ` +
       `(${err instanceof Error ? err.message : String(err)}). ` +
       `Falling back to ~/${OLD_CONFIG_DIR}.`
     );

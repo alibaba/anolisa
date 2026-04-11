@@ -20,7 +20,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { Storage } from '../config/storage.js';
 
 const ENCRYPTED_PREFIX = 'enc:';
 const CREDENTIAL_PASSWORD = 'copilot-credential-encrypt';
@@ -29,11 +29,11 @@ const SALT_LENGTH = 32;
 let cachedKey: Buffer | null = null;
 
 /**
- * Read or create the persisted random salt at ~/.copilot/.encryption-salt.
+ * Read or create the persisted random salt at ~/.copilot-shell/.encryption-salt.
  * The salt is 32 raw bytes stored with mode 0o600.
  */
 function getOrCreateSalt(): Buffer {
-  const configDir = path.join(os.homedir(), '.copilot');
+  const configDir = Storage.getGlobalQwenDir();
   const saltPath = path.join(configDir, '.encryption-salt');
 
   try {

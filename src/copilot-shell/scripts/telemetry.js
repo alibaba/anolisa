@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const projectRoot = join(import.meta.dirname, '..');
 
+// NOTE: This value must stay in sync with QWEN_DIR in packages/core/src/config/storage.ts
 const SETTINGS_DIRECTORY_NAME = '.copilot-shell';
 const USER_SETTINGS_DIR = join(
   process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',

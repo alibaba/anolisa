@@ -66,7 +66,7 @@ describe('credential-encryptor', () => {
     it('should read existing salt file', () => {
       encryptCredential('test');
       expect(mockReadFileSync).toHaveBeenCalledWith(
-        '/home/test/.copilot/.encryption-salt',
+        '/home/test/.copilot-shell/.encryption-salt',
       );
     });
 
@@ -93,12 +93,12 @@ describe('credential-encryptor', () => {
       const mod = await import('./credential-encryptor.js');
       mod.encryptCredential('test');
 
-      expect(mockMkdirSync).toHaveBeenCalledWith('/home/test/.copilot', {
+      expect(mockMkdirSync).toHaveBeenCalledWith('/home/test/.copilot-shell', {
         recursive: true,
         mode: 0o700,
       });
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        '/home/test/.copilot/.encryption-salt',
+        '/home/test/.copilot-shell/.encryption-salt',
         expect.any(Buffer),
         { mode: 0o600 },
       );

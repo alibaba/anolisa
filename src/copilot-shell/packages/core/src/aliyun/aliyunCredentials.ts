@@ -5,14 +5,13 @@
  */
 
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { promises as fs } from 'node:fs';
 import {
   encryptCredential,
   decryptCredential,
 } from '../utils/credential-encryptor.js';
+import { Storage } from '../config/storage.js';
 
-const QWEN_DIR = '.copilot-shell';
 const ALIYUN_CREDS_FILENAME = 'aliyun_creds.json';
 
 /**
@@ -73,7 +72,7 @@ export interface AliyunCredentialsExtended extends AliyunCredentials {
  * 获取阿里云凭证文件路径
  */
 export function getAliyunCredsPath(): string {
-  return path.join(os.homedir(), QWEN_DIR, ALIYUN_CREDS_FILENAME);
+  return path.join(Storage.getGlobalQwenDir(), ALIYUN_CREDS_FILENAME);
 }
 
 /**
