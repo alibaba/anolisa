@@ -14,6 +14,7 @@ import { MessageType } from '../types.js';
 import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
 import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
 import { t } from '../../i18n/index.js';
+import { shouldLaunchBrowser } from '@copilot-shell/core';
 
 export const bugCommand: SlashCommand = {
   name: 'bug',
@@ -51,18 +52,38 @@ export const bugCommand: SlashCommand = {
       Date.now(),
     );
 
-    try {
-      await open(bugReportUrl);
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: `Could not open URL in browser: ${errorMessage}`,
-        },
-        Date.now(),
-      );
+    if (shouldLaunchBrowser()) {
+      try {
+        const childProcess = await open(bugReportUrl);
+        // IMPORTANT: Attach an error handler to the returned child process.
+        // Without this, if `open` fails to spawn a process (e.g., `xdg-open` is not found
+        // in a headless server/Docker environment), it will emit an unhandled 'error' event,
+        // causing the entire Node.js process to crash.
+        if (childProcess) {
+          childProcess.on('error', (_err) => {
+            context.ui.addItem(
+              {
+                type: MessageType.ERROR,
+                text: t(
+                  'Could not open URL in browser. Please visit: {{url}}',
+                  { url: bugReportUrl },
+                ),
+              },
+              Date.now(),
+            );
+          });
+        }
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: `Could not open URL in browser: ${errorMessage}`,
+          },
+          Date.now(),
+        );
+      }
     }
   },
 };

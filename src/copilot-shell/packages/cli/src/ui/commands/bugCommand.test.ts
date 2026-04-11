@@ -15,6 +15,13 @@ import * as systemInfoUtils from '../../utils/systemInfo.js';
 // Mock dependencies
 vi.mock('open');
 vi.mock('../../utils/systemInfo.js');
+vi.mock('@copilot-shell/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@copilot-shell/core')>();
+  return {
+    ...actual,
+    shouldLaunchBrowser: vi.fn().mockReturnValue(true),
+  };
+});
 
 describe('bugCommand', () => {
   beforeEach(() => {
