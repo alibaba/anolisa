@@ -12,8 +12,27 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput, PreToolUseHookOutput } from './types.js';
-import { createHookOutput } from './types.js';
+import type {
+  DefaultHookOutput,
+  PreToolUseHookOutput,
+  PostToolUseHookOutput,
+  PostToolUseFailureHookOutput,
+  BeforeModelHookOutput,
+  AfterModelHookOutput,
+  BeforeToolSelectionHookOutput,
+  HookEventName,
+  HookConfig,
+  McpToolContext,
+  NotificationType,
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
+} from './types.js';
+import { createHookOutput, HooksConfigSource } from './types.js';
+import type {
+  GenerateContentParameters,
+  GenerateContentResponse,
+} from '@google/genai';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -92,16 +111,23 @@ export class HookSystem {
     toolName: string,
     toolInput: Record<string, unknown>,
   ): Promise<PreToolUseHookOutput | undefined> {
+    debugLogger.info(
+      `[Hook Debug] hookSystem.firePreToolUseEvent: entering facade, tool=${toolName}`,
+    );
     const result = await this.hookEventHandler.firePreToolUseEvent(
       toolName,
       toolInput,
     );
-    return result.finalOutput
+    const output = result.finalOutput
       ? (createHookOutput(
           'PreToolUse',
           result.finalOutput,
         ) as PreToolUseHookOutput)
       : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.firePreToolUseEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
   }
 
   async fireStopEvent(
@@ -115,5 +141,186 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('Stop', result.finalOutput)
       : undefined;
+  }
+
+  async firePostToolUseFailureEvent(
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    error: string,
+    errorType?: string,
+  ): Promise<PostToolUseFailureHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolUseFailureEvent(
+      toolUseId,
+      toolName,
+      toolInput,
+      error,
+      errorType,
+    );
+    return result.finalOutput
+      ? (createHookOutput(
+          'PostToolUseFailure',
+          result.finalOutput,
+        ) as PostToolUseFailureHookOutput)
+      : undefined;
+  }
+
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    mcpContext?: McpToolContext,
+    originalRequestName?: string,
+  ): Promise<PostToolUseHookOutput | undefined> {
+    debugLogger.info(
+      `[Hook Debug] hookSystem.firePostToolUseEvent: entering facade, tool=${toolName}`,
+    );
+    const result = await this.hookEventHandler.firePostToolUseEvent(
+      toolName,
+      toolInput,
+      toolResponse,
+      mcpContext,
+      originalRequestName,
+    );
+    const output = result.finalOutput
+      ? (createHookOutput(
+          'PostToolUse',
+          result.finalOutput,
+        ) as PostToolUseHookOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.firePostToolUseEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  async fireNotificationEvent(
+    type: NotificationType,
+    message: string,
+    details: Record<string, unknown>,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireNotificationEvent(
+      type,
+      message,
+      details,
+    );
+    return result.finalOutput
+      ? createHookOutput('Notification', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+  ): Promise<DefaultHookOutput | undefined> {
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireSessionStartEvent: entering facade, source=${source}`,
+    );
+    const result = await this.hookEventHandler.fireSessionStartEvent(source);
+    const output = result.finalOutput
+      ? createHookOutput('SessionStart', result.finalOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireSessionStartEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<DefaultHookOutput | undefined> {
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireSessionEndEvent: entering facade, reason=${reason}`,
+    );
+    const result = await this.hookEventHandler.fireSessionEndEvent(reason);
+    const output = result.finalOutput
+      ? createHookOutput('SessionEnd', result.finalOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireSessionEndEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePreCompactEvent(trigger);
+    return result.finalOutput
+      ? createHookOutput('PreCompact', result.finalOutput)
+      : undefined;
+  }
+
+  async fireBeforeModelEvent(
+    llmRequest: GenerateContentParameters,
+  ): Promise<BeforeModelHookOutput | undefined> {
+    debugLogger.info(
+      '[Hook Debug] hookSystem.fireBeforeModelEvent: entering facade',
+    );
+    const result = await this.hookEventHandler.fireBeforeModelEvent(llmRequest);
+    const output = result.finalOutput
+      ? (createHookOutput(
+          'BeforeModel',
+          result.finalOutput,
+        ) as BeforeModelHookOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireBeforeModelEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  async fireAfterModelEvent(
+    llmRequest: GenerateContentParameters,
+    llmResponse: GenerateContentResponse,
+  ): Promise<AfterModelHookOutput | undefined> {
+    debugLogger.info(
+      '[Hook Debug] hookSystem.fireAfterModelEvent: entering facade',
+    );
+    const result = await this.hookEventHandler.fireAfterModelEvent(
+      llmRequest,
+      llmResponse,
+    );
+    const output = result.finalOutput
+      ? (createHookOutput(
+          'AfterModel',
+          result.finalOutput,
+        ) as AfterModelHookOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireAfterModelEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  async fireBeforeToolSelectionEvent(
+    llmRequest: GenerateContentParameters,
+  ): Promise<BeforeToolSelectionHookOutput | undefined> {
+    debugLogger.info(
+      '[Hook Debug] hookSystem.fireBeforeToolSelectionEvent: entering facade',
+    );
+    const result =
+      await this.hookEventHandler.fireBeforeToolSelectionEvent(llmRequest);
+    const output = result.finalOutput
+      ? (createHookOutput(
+          'BeforeToolSelection',
+          result.finalOutput,
+        ) as BeforeToolSelectionHookOutput)
+      : undefined;
+    debugLogger.info(
+      `[Hook Debug] hookSystem.fireBeforeToolSelectionEvent: facade returning, hasOutput=${!!output}`,
+    );
+    return output;
+  }
+
+  /**
+   * Dynamically register a hook for the current session.
+   * Used by /hooks install to activate hooks immediately without restart.
+   */
+  registerHook(
+    eventName: HookEventName,
+    hookConfig: HookConfig,
+    source: HooksConfigSource = HooksConfigSource.User,
+  ): void {
+    this.hookRegistry.registerHook(eventName, hookConfig, source);
   }
 }

@@ -23,6 +23,7 @@
 use crate::aggregator::AggregatedResult;
 use crate::parser::sse::ParsedSseEvent;
 use crate::tokenizer::LlmTokenizer;
+use crate::tokenizer::get_global_tokenizer;
 use crate::analyzer::token::extract_response_content;
 
 use super::{AuditAnalyzer, TokenParser, MessageParser, AuditRecord, TokenRecord, TokenUsage, ParsedApiMessage, AnalysisResult, PromptTokenCount, HttpRecord};
@@ -428,7 +429,7 @@ impl Analyzer {
         }
 
         // 2. Token analysis - extract from SSE events
-        let token_result = match result {
+        let mut token_result = match result {
             AggregatedResult::SseComplete(pair) => {
                 let pid = pair.request.source_event.pid;
                 let comm = pair.request.source_event.comm_str();
@@ -441,10 +442,7 @@ impl Analyzer {
             }
             _ => None,
         };
-        if let Some(record) = token_result {
-            results.push(AnalysisResult::Token(record));
-        }
-
+        
         // 5. Token consumption analysis - breakdown by message role
         // This runs for any HTTP request with messages (not just SSE responses)
         // if let Some(breakdown) = self.analyze_token_consumption(result) {
@@ -466,10 +464,44 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
+            if token_result.is_none() && http_record.is_sse {
+                if let Some(body) = &http_record.response_body {
+                    if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
+                        if let Some(last) = x.last() {
+                            let parser = TokenParser::new();
+                            if let Some(usage) = parser.parse_json(last) {
+                                let record = TokenRecord::new(
+                                    http_record.pid,
+                                    http_record.comm.clone(),
+                                    usage.provider.to_string(),
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                )
+                                .with_model(usage.model.clone().unwrap_or_default())
+                                .with_cache_tokens(
+                                    usage.cache_creation_input_tokens.unwrap_or(0),
+                                    usage.cache_read_input_tokens.unwrap_or(0),
+                                );
+
+                                token_result = Some(record);
+                            }
+                        }
+                    }
+                }
+            }
             results.push(AnalysisResult::Http(http_record));
+
         }
 
-        
+
+        if let Some(record) = token_result {
+            results.push(AnalysisResult::Token(record));
+        } else {
+            // Fallback: manually compute tokens using get_global_tokenizer
+            if let Some(record) = self.compute_tokens_manually(result) {
+                results.push(AnalysisResult::Token(record));
+            }
+        }
 
         results
     }
@@ -495,7 +527,10 @@ impl Analyzer {
                 let req_body = request.json_body();
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
-            AggregatedResult::ResponseOnly { .. } | AggregatedResult::ProcessComplete(_) => None,
+            AggregatedResult::ResponseOnly { .. } 
+            | AggregatedResult::ProcessComplete(_) 
+            | AggregatedResult::Http2Frames { .. }
+            | AggregatedResult::Http2StreamComplete(_) => None,
         }
     }
 
@@ -538,6 +573,166 @@ impl Analyzer {
 
         // NOTE: tool_calls and reasoning_content extraction from SSE events
         // is handled in genai::builder via direct SSE response body parsing.
+
+        if record.total_tokens() ==0 {
+            return None;
+        }
+
+        Some(record)
+    }
+
+    /// Manually compute token counts using get_global_tokenizer
+    ///
+    /// This method is called when token extraction from SSE events fails.
+    /// It uses the global tokenizer to compute input and output tokens
+    /// from the request messages and response content.
+    fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
+        // Extract context from the aggregated result (only SseComplete has request info)
+        let (pid, comm, request_json, sse_events, path) = match result {
+            AggregatedResult::SseComplete(pair) => (
+                pair.request.source_event.pid,
+                pair.request.source_event.comm_str(),
+                pair.request.json_body(),
+                &pair.response.sse_events,
+                pair.request.path.as_str(),
+            ),
+            // ResponseOnly doesn't have request info, cannot compute tokens
+            _ => return None,
+        };
+
+        // Get request JSON
+        let request_json_ref = request_json.as_ref()?;
+
+        // Extract model name
+        let model = request_json_ref.get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+
+        // Try to get tokenizer for the model
+        let tokenizer = match get_global_tokenizer(model) {
+            Ok(t) => t,
+            Err(e) => {
+                log::debug!("Failed to get tokenizer for model '{}': {}", model, e);
+                return None;
+            }
+        };
+
+        // Extract provider from path
+        let provider = if path.contains("anthropic") {
+            "anthropic"
+        } else {
+            "openai"
+        };
+
+        // Count input tokens from request messages using chat template
+        let input_tokens = if let Some(messages) = request_json_ref.get("messages").and_then(|m| m.as_array()) {
+            if messages.is_empty() {
+                0
+            } else {
+                // Clone messages for in-place modification of tool_calls.arguments
+                let mut msgs = messages.clone();
+                
+                // Process tool_calls arguments: parse JSON string to object in place
+                for msg in msgs.iter_mut() {
+                    if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                        for tool_call in tool_calls.iter_mut() {
+                            if let Some(func) = tool_call.get_mut("function") {
+                                if let Some(args) = func.get("arguments") {
+                                    if let Some(args_str) = args.as_str() {
+                                        // Try to parse arguments string as JSON object
+                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
+                                            func["arguments"] = parsed;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Extract tools JSON array for passing to template
+                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref.get("tools")
+                    .and_then(|t| t.as_array())
+                    .map(|arr| arr.to_vec());
+                let tools_slice = tools_json.as_deref();
+                
+                // Apply chat template with tools to get the actual prompt sent to LLM
+                match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
+                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
+                    Err(e) => {
+                        log::warn!("Failed to apply chat template: {}, falling back to raw count", e);
+                        // Fallback: count raw message content
+                        let mut total = 0u64;
+                        for msg in &msgs {
+                            if let Ok(msg_str) = serde_json::to_string(msg) {
+                                total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
+                            }
+                        }
+                        total
+                    }
+                }
+            }
+        } else {
+            0
+        };
+
+        // Count output tokens from SSE events content
+        let output_tokens = {
+            let mut all_content = String::new();
+            let mut all_reasoning = String::new();
+            let mut all_tool_calls = Vec::new();
+
+            for event in sse_events {
+                if let Some(chunk) = event.json_body() {
+                    if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(&chunk)) {
+                        if !content.is_empty() {
+                            all_content.push_str(&content);
+                        }
+                        if let Some(r) = reasoning {
+                            if !r.is_empty() {
+                                all_reasoning.push_str(&r);
+                            }
+                        }
+                        for tc in tool_calls {
+                            if !tc.is_empty() {
+                                all_tool_calls.push(tc);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut total = 0u64;
+
+            // Count reasoning tokens
+            if !all_reasoning.is_empty() {
+                let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                total += tokenizer.count(&reasoning_with_tags).unwrap_or(0) as u64;
+            }
+
+            // Count text tokens
+            if !all_content.is_empty() {
+                total += tokenizer.count(&all_content).unwrap_or(0) as u64;
+            }
+
+            // Count tool call tokens
+            if !all_tool_calls.is_empty() {
+                let aggregated_tool_calls = all_tool_calls.join("");
+                total += tokenizer.count(&aggregated_tool_calls).unwrap_or(0) as u64;
+            }
+
+            total
+        };
+
+        // Create TokenRecord
+        let record = TokenRecord::new(
+            pid,
+            comm.to_string(),
+            provider.to_string(),
+            input_tokens,
+            output_tokens,
+        )
+        .with_model(model.to_string());
 
         Some(record)
     }
@@ -643,6 +838,39 @@ impl Analyzer {
                     duration_ns: 0,
                     is_sse: false,
                     sse_event_count: 0,
+                })
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let request_body = stream.request_body_str();
+
+                // Try SSE parsing first, fallback to regular text if it fails
+                // This is more robust than checking content-type header (which may fail due to HPACK)
+                let (response_body, sse_event_count) = if let Some(sse_json) = stream.response_sse_json_array() {
+                    // Successfully parsed as SSE
+                    let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
+                    (Some(serde_json::to_string(&sse_json).unwrap_or_default()), event_count)
+                } else {
+                    // Not SSE, try regular JSON or raw text
+                    let body = stream.response_json_body()
+                        .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                        .or_else(|| stream.response_body_str());
+                    (body, 0)
+                };
+
+                Some(HttpRecord {
+                    timestamp_ns: stream.start_timestamp_ns,
+                    pid: stream.pid(),
+                    comm: stream.comm(),
+                    method: stream.method(),
+                    path: stream.path(),
+                    status_code: stream.status_code(),
+                    request_headers: stream.request_headers_json(),
+                    request_body,
+                    response_headers: stream.response_headers_json(),
+                    response_body,
+                    duration_ns: stream.end_timestamp_ns.saturating_sub(stream.start_timestamp_ns),
+                    is_sse: sse_event_count > 0,
+                    sse_event_count,
                 })
             }
             // ProcessComplete and ResponseOnly don't have request info, skip

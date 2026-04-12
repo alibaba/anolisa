@@ -1193,6 +1193,10 @@ describe('BaseJsonOutputAdapter', () => {
           totalLinesAdded: 10,
           totalLinesRemoved: 5,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
       const options: ResultOptions = {
         isError: false,

@@ -13,23 +13,61 @@ import type { OAuthCredentials } from './types.js';
 
 export class FileTokenStorage extends BaseTokenStorage {
   private readonly tokenFilePath: string;
-  private readonly encryptionKey: Buffer;
+  private readonly configDir: string;
+  private encryptionKey: Buffer | null = null;
 
   constructor(serviceName: string) {
     super(serviceName);
-    const configDir = path.join(os.homedir(), '.copilot-shell');
-    this.tokenFilePath = path.join(configDir, 'mcp-oauth-tokens-v2.json');
-    this.encryptionKey = this.deriveEncryptionKey();
+    this.configDir = path.join(os.homedir(), '.copilot-shell');
+    this.tokenFilePath = path.join(this.configDir, 'mcp-oauth-tokens-v2.json');
   }
 
-  private deriveEncryptionKey(): Buffer {
+  /**
+   * Get or create a persisted random salt file. This replaces the previous
+   * hostname-dependent salt, which broke decryption when the hostname changed.
+   */
+  private async getOrCreateSalt(): Promise<Buffer> {
+    const saltPath = path.join(this.configDir, '.encryption-salt');
+    try {
+      const existing = await fs.readFile(saltPath);
+      if (existing.length === 32) {
+        return existing;
+      }
+    } catch (error: unknown) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== 'ENOENT') {
+        // Unexpected error — log but continue to create a new salt
+        console.warn('Failed to read encryption salt file:', error);
+      }
+    }
+    // Generate and persist a new random salt
+    const salt = crypto.randomBytes(32);
+    await fs.mkdir(this.configDir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(saltPath, salt, { mode: 0o600 });
+    return salt;
+  }
+
+  private async ensureEncryptionKey(): Promise<Buffer> {
+    if (this.encryptionKey) {
+      return this.encryptionKey;
+    }
+    const salt = await this.getOrCreateSalt();
+    this.encryptionKey = crypto.scryptSync('qwen-code-oauth', salt, 32);
+    return this.encryptionKey;
+  }
+
+  /**
+   * Legacy key derivation for migration — tries to decrypt with the old
+   * hostname-based salt so existing tokens can be read after upgrade.
+   */
+  private deriveLegacyEncryptionKey(): Buffer {
     const salt = `${os.hostname()}-${os.userInfo().username}-qwen-code`;
     return crypto.scryptSync('qwen-code-oauth', salt, 32);
   }
 
-  private encrypt(text: string): string {
+  private encryptWithKey(text: string, key: Buffer): string {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-gcm', this.encryptionKey, iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
 
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
@@ -39,7 +77,7 @@ export class FileTokenStorage extends BaseTokenStorage {
     return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
   }
 
-  private decrypt(encryptedData: string): string {
+  private decryptWithKey(encryptedData: string, key: Buffer): string {
     const parts = encryptedData.split(':');
     if (parts.length !== 3) {
       throw new Error('Invalid encrypted data format');
@@ -49,11 +87,7 @@ export class FileTokenStorage extends BaseTokenStorage {
     const authTag = Buffer.from(parts[1], 'hex');
     const encrypted = parts[2];
 
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      this.encryptionKey,
-      iv,
-    );
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(authTag);
 
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
@@ -68,25 +102,42 @@ export class FileTokenStorage extends BaseTokenStorage {
   }
 
   private async loadTokens(): Promise<Map<string, OAuthCredentials>> {
+    let data: string;
     try {
-      const data = await fs.readFile(this.tokenFilePath, 'utf-8');
-      const decrypted = this.decrypt(data);
-      const tokens = JSON.parse(decrypted) as Record<string, OAuthCredentials>;
-      return new Map(Object.entries(tokens));
+      data = await fs.readFile(this.tokenFilePath, 'utf-8');
     } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException & { message?: string };
+      const err = error as NodeJS.ErrnoException;
       if (err.code === 'ENOENT') {
         throw new Error('Token file does not exist');
       }
-      if (
-        err.message?.includes('Invalid encrypted data format') ||
-        err.message?.includes(
-          'Unsupported state or unable to authenticate data',
-        )
-      ) {
-        throw new Error('Token file corrupted');
-      }
       throw error;
+    }
+
+    const key = await this.ensureEncryptionKey();
+
+    // Try decryption with the new persisted salt key
+    try {
+      const decrypted = this.decryptWithKey(data, key);
+      const tokens = JSON.parse(decrypted) as Record<string, OAuthCredentials>;
+      return new Map(Object.entries(tokens));
+    } catch {
+      // New key failed — try legacy hostname-based key for migration
+    }
+
+    try {
+      const legacyKey = this.deriveLegacyEncryptionKey();
+      const decrypted = this.decryptWithKey(data, legacyKey);
+      const tokens = JSON.parse(decrypted) as Record<string, OAuthCredentials>;
+      // Migration: re-encrypt with the new key and save
+      const reEncrypted = this.encryptWithKey(
+        JSON.stringify(tokens, null, 2),
+        key,
+      );
+      await fs.writeFile(this.tokenFilePath, reEncrypted, { mode: 0o600 });
+      return new Map(Object.entries(tokens));
+    } catch {
+      // Both keys failed — token file is corrupted / from a different host
+      throw new Error('Token file corrupted');
     }
   }
 
@@ -95,9 +146,10 @@ export class FileTokenStorage extends BaseTokenStorage {
   ): Promise<void> {
     await this.ensureDirectoryExists();
 
+    const key = await this.ensureEncryptionKey();
     const data = Object.fromEntries(tokens);
     const json = JSON.stringify(data, null, 2);
-    const encrypted = this.encrypt(json);
+    const encrypted = this.encryptWithKey(json, key);
 
     await fs.writeFile(this.tokenFilePath, encrypted, { mode: 0o600 });
   }
@@ -120,7 +172,13 @@ export class FileTokenStorage extends BaseTokenStorage {
   async setCredentials(credentials: OAuthCredentials): Promise<void> {
     this.validateCredentials(credentials);
 
-    const tokens = await this.loadTokens();
+    let tokens: Map<string, OAuthCredentials>;
+    try {
+      tokens = await this.loadTokens();
+    } catch {
+      // File doesn't exist or is corrupted — start fresh
+      tokens = new Map();
+    }
     const updatedCredentials: OAuthCredentials = {
       ...credentials,
       updatedAt: Date.now(),

@@ -36,10 +36,11 @@ function findSourceFiles(dir, allFiles = []) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    // Simple check to avoid recursing into node_modules or build dir itself
+    // Skip node_modules, build output, and auto-generated files
     if (
       entry.isDirectory() &&
       entry.name !== 'node_modules' &&
+      entry.name !== 'generated' &&
       fullPath !== buildDir
     ) {
       findSourceFiles(fullPath, allFiles);

@@ -85,6 +85,30 @@ Then run the build script. By default it installs dependencies, builds, and inst
 2. os-skills are mostly static assets and do not require compilation.
 3. AgentSight is an optional component that provides audit and observability capabilities but is not required for core functionality. It is excluded from default builds; use `--component sight` to include it explicitly.
 4. AgentSight system dependencies (clang/llvm/libbpf/kernel headers) should be installed through your distro package manager.
+5. **Sandbox policy hooks are not enabled automatically.** After installation, run `/hooks install` inside Copilot Shell once to activate the built-in sandbox-guard hooks. See [3.3 Post-Installation: Enable Sandbox Hooks](#33-post-installation-enable-sandbox-hooks) below.
+
+### 3.3 Post-Installation: Enable Sandbox Hooks
+
+The build script installs the components but does not automatically activate the sandbox policy hooks. To prevent unauthorized file system access or dangerous command execution, run the following inside Copilot Shell after installation:
+
+```bash
+cosh
+```
+
+Then inside the session:
+
+```
+/hooks install
+```
+
+This command:
+- Copies the bundled `sandbox-guard.py` and `sandbox-failure-handler.py` scripts to `~/.copilot-shell/hooks/`
+- Registers them as `PreToolUse` and `PostToolUseFailure` hooks in your user settings (`~/.copilot-shell/settings.json`)
+- Activates the hooks immediately in the current session
+
+You only need to run this once — the configuration persists across sessions.
+
+> **Note:** The sandbox hooks require `agent-sec-core` (linux-sandbox) to be installed at `/usr/local/bin/linux-sandbox`. When a dangerous command is detected, `sandbox-guard.py` wraps it inside the `linux-sandbox` binary for execution. If `agent-sec-core` is not built and installed, the hook will be registered but sandboxed execution of dangerous commands will fail. Make sure `agent-sec-core` is built (it is included in the default `build-all.sh` run) before relying on sandbox enforcement.
 
 ---
 

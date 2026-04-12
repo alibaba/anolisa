@@ -9,13 +9,13 @@ description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审
 
 | 命令 | 说明 |
 |------|------|
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --period today` | 今天消耗 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --period yesterday` | 昨天消耗 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --hours 3` | 最近 3 小时 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --period today --compare` | 今天 vs 昨天对比 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --period today --breakdown` | 按任务分解 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --detail` | 按角色/类型明细 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight token --detail --records` | 含每条请求记录 |
+| `/usr/local/bin/agentsight token --period today` | 今天消耗 |
+| `/usr/local/bin/agentsight token --period yesterday` | 昨天消耗 |
+| `/usr/local/bin/agentsight token --hours 3` | 最近 3 小时 |
+| `/usr/local/bin/agentsight token --period today --compare` | 今天 vs 昨天对比 |
+| `/usr/local/bin/agentsight token --period today --breakdown` | 按任务分解 |
+| `/usr/local/bin/agentsight token --detail` | 按角色/类型明细 |
+| `/usr/local/bin/agentsight token --detail --records` | 含每条请求记录 |
 
 ## 返回示例
 
@@ -36,14 +36,14 @@ description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审
 
 | 命令 | 说明 |
 |------|------|
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit` | 最近 24 小时事件 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --last 48` | 最近 48 小时 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --pid 12345` | 指定进程 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --type llm` | 仅 LLM 调用 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --type process` | 仅进程行为 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --summary` | 汇总统计 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --summary --last 72` | 最近 72 小时汇总 |
-| `/usr/local/sysak/.sysak_components/tools/agentsight audit --json` | JSON 格式 |
+| `/usr/local/bin/agentsight audit` | 最近 24 小时事件 |
+| `/usr/local/bin/agentsight audit --last 48` | 最近 48 小时 |
+| `/usr/local/bin/agentsight audit --pid 12345` | 指定进程 |
+| `/usr/local/bin/agentsight audit --type llm` | 仅 LLM 调用 |
+| `/usr/local/bin/agentsight audit --type process` | 仅进程行为 |
+| `/usr/local/bin/agentsight audit --summary` | 汇总统计 |
+| `/usr/local/bin/agentsight audit --summary --last 72` | 最近 72 小时汇总 |
+| `/usr/local/bin/agentsight audit --json` | JSON 格式 |
 
 ## 返回示例
 

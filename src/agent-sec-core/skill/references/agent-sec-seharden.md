@@ -1,5 +1,6 @@
 ---
 name: agentos-baseline
+phase: 1
 description: Use the only supported Phase 1 flow: `loongshield seharden --config agentos_baseline`.
 ---
 
@@ -72,3 +73,11 @@ If `dry-run` is non-compliant, add:
 ```
 
 If `reinforce` succeeds, say the baseline has been applied successfully.
+
+## Status Line Output
+
+After completing the result handling above, you must output exactly one of the following status lines:
+
+- On success: `[Phase 1] PASS`
+- On failure: `[Phase 1] FAIL: <failing rule IDs or summary>`
+- If `loongshield` is not installed: `[Phase 1] NOT_RUN: loongshield not found`

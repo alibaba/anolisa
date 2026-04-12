@@ -89,6 +89,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { FeatureTip } from '../utils/featureTips.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -127,6 +128,7 @@ interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings?: string[];
+  featureTips?: FeatureTip[];
   version: string;
   initializationResult: InitializationResult;
 }
@@ -552,6 +554,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         setTimeout(async () => {
+          await config.shutdown();
           await runExitCleanup();
           process.exit(0);
         }, 100);
@@ -564,6 +567,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
     }),
     [
+      config,
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
@@ -703,6 +707,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    sandboxBypassRequest,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -1354,6 +1359,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
+    !!sandboxBypassRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isModelDialogOpen ||
@@ -1418,6 +1424,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
+      sandboxBypassRequest,
       geminiMdFileCount,
       streamingState,
       initError,
@@ -1511,6 +1518,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
+      sandboxBypassRequest,
       geminiMdFileCount,
       streamingState,
       initError,
@@ -1675,6 +1683,7 @@ export const AppContainer = (props: AppContainerProps) => {
               version: props.version,
               startupWarnings,
               dismissWarning,
+              featureTips: props.featureTips || [],
             }}
           >
             <ShellFocusContext.Provider value={isFocused}>

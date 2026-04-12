@@ -12,7 +12,7 @@ import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { bashCommand } from '../ui/commands/bashCommand.js';
-// import { bugCommand } from '../ui/commands/bugCommand.js';
+import { bugCommand } from '../ui/commands/bugCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
@@ -63,7 +63,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       approvalModeCommand,
       authCommand,
       bashCommand,
-      // bugCommand,
+      bugCommand,
       clearCommand,
       compressCommand,
       copyCommand,

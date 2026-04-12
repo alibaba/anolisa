@@ -23,10 +23,12 @@ const projectHash = crypto
   .update(projectRoot)
   .digest('hex');
 
+// NOTE: This value must stay in sync with QWEN_DIR in packages/core/src/config/storage.ts
+const QWEN_DIR_NAME = '.copilot-shell';
 // User-level .copilot-shell directory in home
-const USER_GEMINI_DIR = path.join(os.homedir(), '.copilot-shell');
+const USER_GEMINI_DIR = path.join(os.homedir(), QWEN_DIR_NAME);
 // Project-level .copilot-shell directory in the workspace
-const WORKSPACE_GEMINI_DIR = path.join(projectRoot, '.copilot-shell');
+const WORKSPACE_GEMINI_DIR = path.join(projectRoot, QWEN_DIR_NAME);
 
 // Telemetry artifacts are stored in a hashed directory under the user's ~/.copilot-shell/tmp
 export const OTEL_DIR = path.join(USER_GEMINI_DIR, 'tmp', projectHash, 'otel');

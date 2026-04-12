@@ -21,8 +21,12 @@
 ```
 ┌─────────────────────────────────────────────┐
 │              Agent Application              │
-├─────────────────────────────────────────────┤
-│         安全决策流程（风险分级与处置）          │
+├──────────────────┬──────────────────────────┤
+│ 安全检查工作流     │  沙箱策略                 │
+│ (SKILL.md)       │  (agent-sec-sandbox,      │
+│                  │   独立管理)               │
+├──────────────────┴──────────────────────────┤
+│  4. 安全决策流程（风险分级与处置）          │
 ├─────────────────────────────────────────────┤
 │  Phase 3: 最终安全确认                       │
 ├─────────────────────────────────────────────┤
@@ -34,15 +38,19 @@
 └─────────────────────────────────────────────┘
 ```
 
+安全检查工作流（Phase 1-3 + 安全决策）定义在 `skill/SKILL.md` 中。沙箱策略由 `skill/references/agent-sec-sandbox.md` 独立管理。
+
 ## 安全检查工作流
 
-每次 Agent 执行时，必须先按顺序完成以下安全检查（Phase 1-3），全部通过后才允许进入安全决策流程：
+每次 Agent 执行时，必须先按顺序完成以下安全检查（Phase 1-3），**全部通过后才允许进入安全决策流程**。完整可执行协议详见 `skill/SKILL.md`。
 
-| 阶段 | 说明 | 入口 |
-|------|------|------|
-| **Phase 1** | 系统安全加固 — 执行 `loongshield seharden --config agentos_baseline` 完成基线扫描和加固 | `skill/references/agent-sec-seharden.md` |
-| **Phase 2** | 关键资产保护 — GPG 签名校验系统级 skill（Manifest + 文件哈希），确保 skill 完整性 | `skill/references/agent-sec-skill-verify.md` |
-| **Phase 3** | 最终安全确认 — 汇总 Phase 1-2 状态，确认安全基线完整后方可进入安全决策流程 | `skill/SKILL.md` |
+| 阶段 | 说明 | 入口 | 通过条件 |
+|------|------|------|----------|
+| **Phase 1** | 系统安全加固 — `loongshield seharden --scan --config agentos_baseline` | `skill/references/agent-sec-seharden.md` | 输出包含 `结果：合规` |
+| **Phase 2** | 关键资产保护 — GPG 签名 + SHA-256 哈希校验所有 skill | `skill/references/agent-sec-skill-verify.md` | 输出包含 `VERIFICATION PASSED` |
+| **Phase 3** | 最终安全确认 — 重新执行 Phase 1 scan + Phase 2 verify 作为复检 | `skill/SKILL.md` | 复检全部通过 |
+
+任一 Phase 未通过，后续 Phase 全部取消，Agent 执行被阻断。
 
 ## 风险分级与处置
 
@@ -105,7 +113,7 @@ agent-sec-core/
 │   ├── tests/                 # Rust 集成测试 + Python e2e
 │   └── docs/                  # dev-guide, user-guide
 ├── skill/
-│   ├── SKILL.md               # 完整使用指南（安全工作流 + 安全决策流程）
+│   ├── SKILL.md               # 可执行安全协议（检查工作流 + 安全决策）
 │   ├── scripts/
 │   │   ├── sandbox/
 │   │   │   ├── sandbox_policy.py     # 沙箱策略生成器
@@ -205,7 +213,7 @@ python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 ### 校验流程
 
 1. 加载受信公钥（`skill/scripts/asset-verify/trusted-keys/*.asc`）
-2. 验证 Skill 目录中 `Manifest.json` 的 GPG 签名（`.skill.sig`）
+2. 验证 Skill 目录中 `.skill-meta/Manifest.json` 的 GPG 签名（`.skill-meta/.skill.sig`）
 3. 校验 Manifest 中所有文件的 SHA-256 哈希
 
 ### 错误码
@@ -213,15 +221,39 @@ python3 skill/scripts/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
 | 码 | 含义 |
 |----|------|
 | 0 | 通过 |
-| 10 | 缺失 `.skill.sig` |
-| 11 | 缺失 `Manifest.json` |
+| 10 | 缺失 `.skill-meta/.skill.sig` |
+| 11 | 缺失 `.skill-meta/Manifest.json` |
 | 12 | 签名无效 |
 | 13 | 哈希不匹配 |
 
-### 签名技能
+### Skill 签名（自行部署快速开始）
+
+通过源码部署时，skill 默认未签名。签名后 Phase 2 才能通过：
 
 ```bash
-sign-skill.sh <技能目录>
+# 1. 一次性初始化：生成 GPG 密钥 + 导出公钥
+tools/sign-skill.sh --init
+
+# 2. 批量签名所有 skill
+tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# 3. 验证
+python3 skill/scripts/asset-verify/verifier.py
+```
+
+完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_CN.md)**。
+
+## 审计日志
+
+所有安全事件记录至 `/var/log/agent-sec/violations.log`：
+
+```
+[TIMESTAMP] [RISK_LEVEL] [CATEGORY]
+skill: <skill_name>
+action: <requested_action>
+target: <target_resource>
+decision: ALLOWED | BLOCKED | PENDING_CONFIRM
+reason: <reason>
 ```
 
 ## 开发

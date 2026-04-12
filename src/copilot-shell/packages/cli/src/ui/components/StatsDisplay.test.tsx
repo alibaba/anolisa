@@ -54,6 +54,10 @@ describe('<StatsDisplay />', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
 
     const { lastFrame } = renderWithMockedStats(zeroMetrics);
@@ -104,6 +108,10 @@ describe('<StatsDisplay />', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
 
     const { lastFrame } = renderWithMockedStats(metrics);
@@ -151,6 +159,10 @@ describe('<StatsDisplay />', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
 
     const { lastFrame } = renderWithMockedStats(metrics);
@@ -187,6 +199,10 @@ describe('<StatsDisplay />', () => {
         files: {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
+        },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
         },
       };
 
@@ -226,6 +242,10 @@ describe('<StatsDisplay />', () => {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
 
       const { lastFrame } = renderWithMockedStats(metrics);
@@ -252,6 +272,10 @@ describe('<StatsDisplay />', () => {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
       const { lastFrame } = renderWithMockedStats(metrics);
       expect(lastFrame()).toMatchSnapshot();
@@ -272,6 +296,10 @@ describe('<StatsDisplay />', () => {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
       const { lastFrame } = renderWithMockedStats(metrics);
       expect(lastFrame()).toMatchSnapshot();
@@ -291,6 +319,10 @@ describe('<StatsDisplay />', () => {
         files: {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
+        },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
         },
       };
       const { lastFrame } = renderWithMockedStats(metrics);
@@ -313,6 +345,10 @@ describe('<StatsDisplay />', () => {
         files: {
           totalLinesAdded: 42,
           totalLinesRemoved: 18,
+        },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
         },
       };
 
@@ -340,6 +376,10 @@ describe('<StatsDisplay />', () => {
           totalLinesAdded: 0,
           totalLinesRemoved: 0,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
 
       const { lastFrame } = renderWithMockedStats(metrics);
@@ -347,6 +387,67 @@ describe('<StatsDisplay />', () => {
 
       expect(output).not.toContain('Code Changes:');
       expect(output).toMatchSnapshot();
+    });
+  });
+
+  describe('Sandbox Display', () => {
+    it('displays sandbox rows when sandbox counts are non-zero', () => {
+      const metrics: SessionMetrics = {
+        models: {},
+        tools: {
+          totalCalls: 3,
+          totalSuccess: 2,
+          totalFail: 1,
+          totalDurationMs: 300,
+          totalDecisions: { accept: 0, reject: 0, modify: 0 },
+          byName: {},
+        },
+        files: {
+          totalLinesAdded: 0,
+          totalLinesRemoved: 0,
+        },
+        sandbox: {
+          totalRuns: 5,
+          totalBlocked: 2,
+        },
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).toContain('Sandbox Runs:');
+      expect(output).toContain('5');
+      expect(output).toContain('Sandbox Blocked:');
+      expect(output).toContain('2');
+      expect(output).toMatchSnapshot();
+    });
+
+    it('hides sandbox rows when both counts are zero', () => {
+      const metrics: SessionMetrics = {
+        models: {},
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          totalDurationMs: 100,
+          totalDecisions: { accept: 0, reject: 0, modify: 0 },
+          byName: {},
+        },
+        files: {
+          totalLinesAdded: 0,
+          totalLinesRemoved: 0,
+        },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
+      };
+
+      const { lastFrame } = renderWithMockedStats(metrics);
+      const output = lastFrame();
+
+      expect(output).not.toContain('Sandbox Runs:');
+      expect(output).not.toContain('Sandbox Blocked:');
     });
   });
 
@@ -364,6 +465,10 @@ describe('<StatsDisplay />', () => {
       files: {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
+      },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
       },
     };
 

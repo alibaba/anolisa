@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs, unlinkSync, type Stats } from 'node:fs';
 import * as os from 'os';
-import path from 'node:path';
+import path, * as pathNamed from 'node:path';
 
 import {
   SharedTokenManager,
@@ -36,7 +36,12 @@ vi.mock('node:fs', () => ({
 }));
 
 vi.mock('node:os', () => ({
+  default: {
+    homedir: vi.fn(),
+    tmpdir: vi.fn().mockReturnValue('/tmp'),
+  },
   homedir: vi.fn(),
+  tmpdir: vi.fn().mockReturnValue('/tmp'),
 }));
 
 vi.mock('node:path', () => ({
@@ -44,6 +49,9 @@ vi.mock('node:path', () => ({
     join: vi.fn(),
     dirname: vi.fn(),
   },
+  // Named exports for `import * as path` used by storage.ts
+  join: vi.fn(),
+  dirname: vi.fn(),
 }));
 
 /**
@@ -155,6 +163,7 @@ describe('SharedTokenManager', () => {
   const mockFs = vi.mocked(fs);
   const mockOs = vi.mocked(os);
   const mockPath = vi.mocked(path);
+  const mockPathNamed = vi.mocked(pathNamed);
   const mockUnlinkSync = vi.mocked(unlinkSync);
 
   beforeEach(() => {
@@ -177,6 +186,16 @@ describe('SharedTokenManager', () => {
       // Handle undefined/null input gracefully
       if (!filePath || typeof filePath !== 'string') {
         return '/home/user/.copilot-shell'; // Return the expected directory path
+      }
+      const parts = filePath.split('/');
+      const result = parts.slice(0, -1).join('/');
+      return result || '/';
+    });
+    // Also set up named exports used by storage.ts (import * as path)
+    mockPathNamed.join.mockImplementation((...args) => args.join('/'));
+    mockPathNamed.dirname.mockImplementation((filePath) => {
+      if (!filePath || typeof filePath !== 'string') {
+        return '/home/user/.copilot-shell';
       }
       const parts = filePath.split('/');
       const result = parts.slice(0, -1).join('/');

@@ -7,7 +7,14 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { writeFileSync, rmSync } from 'node:fs';
+import {
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  readdirSync,
+  copyFileSync,
+  existsSync,
+} from 'node:fs';
 
 let esbuild;
 try {
@@ -81,6 +88,20 @@ esbuild
   .then(({ metafile }) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
+    }
+    // Copy hooks/*.py into dist/hooks/ so installCommand can locate them at runtime
+    const hooksSource = path.resolve(__dirname, 'hooks');
+    const hooksTarget = path.resolve(__dirname, 'dist', 'hooks');
+    if (existsSync(hooksSource)) {
+      mkdirSync(hooksTarget, { recursive: true });
+      for (const file of readdirSync(hooksSource)) {
+        if (file.endsWith('.py')) {
+          copyFileSync(
+            path.join(hooksSource, file),
+            path.join(hooksTarget, file),
+          );
+        }
+      }
     }
   })
   .catch((error) => {

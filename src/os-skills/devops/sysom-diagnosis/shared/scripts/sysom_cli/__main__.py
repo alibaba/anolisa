@@ -23,7 +23,21 @@ TOP_COMMANDS: List[Dict[str, Any]] = [
         "help": "内存快速排查：classify / memgraph / oom / javamem；可选 --deep-diagnosis 接深度诊断。",
         "is_subsystem": True,
     },
-
+    {
+        "name": "io",
+        "help": "磁盘与 IO 专项：iofsstat、iodiagnose（与 service_name 对齐）。",
+        "is_subsystem": True,
+    },
+    {
+        "name": "net",
+        "help": "网络专项：packetdrop、netjitter（与 service_name 对齐）。",
+        "is_subsystem": True,
+    },
+    {
+        "name": "load",
+        "help": "系统负载与调度专项：delay、loadtask（与 service_name 对齐）。",
+        "is_subsystem": True,
+    },
     {
         "name": "precheck",
         "help": "环境预检查：验证阿里云认证配置和 SysOM API 权限（自动发现）。",

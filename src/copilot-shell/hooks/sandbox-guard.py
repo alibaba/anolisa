@@ -14,6 +14,8 @@ stdout: HookOutput JSON (decision, systemMessage, hookSpecificOutput)
 import sys
 import json
 import re
+import os
+import base64
 
 LINUX_SANDBOX = "/usr/local/bin/linux-sandbox"
 
@@ -32,8 +34,8 @@ BLOCK_PATTERNS = [
 ]
 
 # 替换为沙箱执行的命令（文件系统/权限/服务类）- 网络隔离
+# 注意：sudo 不在此列表，由 strip_sudo() 预处理后对底层命令评估
 DANGEROUS_PATTERNS = [
-    (r"\bsudo\b", "sudo 提权命令"),
     (r"\bsu\b", "su 切换用户"),
     (r"\bpkexec\b", "pkexec 提权"),
     # rm 危险操作：-rf、-fr、-r -f、--recursive、--force 各种写法
@@ -70,6 +72,19 @@ NETWORK_PATTERNS = [
     (r"\bwget\b", "wget 网络下载"),
     (r"\bnc\b|\bnetcat\b", "netcat 网络工具"),
     (r"\bnmap\b", "nmap 网络扫描"),
+    # 包管理器：需要网络下载，且会写入系统目录（/var/lib、/etc 等），
+    # 沙箱执行会因文件系统只读而失败，触发 bypass 审批弹框让用户决策
+    (r"\byum\s+\S", "yum 包管理"),
+    (r"\bdnf\s+\S", "dnf 包管理"),
+    (r"\bapt\s+\S", "apt 包管理"),
+    (r"\bapt-get\s+\S", "apt-get 包管理"),
+    (r"\bapt-cache\s+\S", "apt-cache 包管理"),
+    (r"\bpip[23]?\s+\S", "pip 包管理"),
+    (r"\bnpm\s+\S", "npm 包管理"),
+    (r"\bpnpm\s+\S", "pnpm 包管理"),
+    (r"\byarn\s+\S", "yarn 包管理"),
+    (r"\bgem\s+\S", "gem 包管理"),
+    (r"\bcargo\s+(install|add|update)\b", "cargo 包管理"),
     # ssh 远程连接命令（排除 .ssh 目录路径，如 ~/.ssh/config 只是查看本地配置）
     (r"\bssh\s+[^/\s]", "ssh 远程连接"),
     (r"\bscp\b", "scp 远程传输"),
@@ -116,28 +131,69 @@ SANDBOX_FS_POLICY = json.dumps(
     separators=(",", ":"),
 )  # compact JSON
 
+# 匹配 sudo 及其常见无交互选项，覆盖自动化脚本最常见场景：
+#   sudo cmd
+#   sudo -n cmd
+#   sudo -u root cmd
+#   sudo -E -n cmd
+#   sudo -- cmd
+# 不尝试覆盖 -i/-s（交互式 shell），这类保留原始命令不处理。
+_SUDO_PREFIX_RE = re.compile(
+    r"^sudo\s+"
+    r"(?:(?:-[nEbkKHPvA]+|--(?:non-interactive|preserve-env|reset-timestamp))\s+)*"  # 无参选项
+    r"(?:(?:-[uUgcCTt])\s+\S+\s+)*"  # 带参选项（-u user 等）
+    r"(?:--\s+)?"  # 分隔符 --
+)
 
-def build_sandbox_command(original_command: str, cwd: str, network_policy: str = "restricted") -> str:
+
+def strip_sudo(command: str) -> tuple:
+    """剥离命令开头的 sudo 前缀及其非交互选项。
+
+    Returns:
+        (stripped_command, had_sudo): 剥离后命令 及 是否包含 sudo 前缀
+    """
+    cmd = command.strip()
+    m = _SUDO_PREFIX_RE.match(cmd)
+    if m:
+        rest = cmd[m.end():].strip()
+        # 确保剥离后仍有命令体（不是空串），且不是交互式 shell 调用
+        if rest and not re.match(r"^-[is]\b", rest):
+            return rest, True
+    return command, False
+
+
+def build_sandbox_command(original_command: str, cwd: str, network_policy: str = "restricted", restore_command: str = "") -> str:
     """将原始命令包裹进 linux-sandbox 执行
-    
+
     Args:
-        original_command: 原始命令
+        original_command: 沙箱内实际执行的命令（已剥离 sudo）
         cwd: 当前工作目录
         network_policy: 网络策略，"restricted" 或 "unrestricted"
+        restore_command: bypass 时还原执行的命令（含 sudo 等完整前缀）；
+                         与 original_command 相同或为空时不编码
     """
     # 转义单引号：' → '\''
     escaped_cmd = original_command.replace("'", "'\\''")
+
+    # 若 restore_command 与实际执行命令不同（如含 sudo），将其 base64 编码
+    # 嵌入为沙箱内 bash 的临时环境变量 COSH_RC，不影响命令执行语义，
+    # sandbox-failure-handler.py 在 bypass 时还原完整原始命令。
+    if restore_command and restore_command != original_command:
+        b64 = base64.b64encode(restore_command.encode()).decode()
+        full_bash_cmd = f"COSH_RC={b64} {escaped_cmd}"
+    else:
+        full_bash_cmd = escaped_cmd
 
     return (
         f"{LINUX_SANDBOX}"
         f' --sandbox-policy-cwd "{cwd}"'
         f" --file-system-sandbox-policy '{SANDBOX_FS_POLICY}'"
         f" --network-sandbox-policy '\"{network_policy}\"'"
-        f" -- bash -c '{escaped_cmd}'"
+        f" -- bash -c '{full_bash_cmd}'"
     )
 
 
-def detect_patterns(command: str, patterns: list) -> list[str]:
+def detect_patterns(command: str, patterns: list) -> list:
     """检测命令中的危险模式，返回匹配的原因列表"""
     reasons = []
     for pattern, reason in patterns:
@@ -164,8 +220,17 @@ def main():
         print(json.dumps({"decision": "allow"}))
         return
 
+    # ── sudo 预处理 
+    # 剥离 sudo 前缀后对底层命令做统一的危险性评估，避免把整条命令
+    # 塞进沙箱（沙箱内 sudo 因权限受限必然失败）。
+    stripped_command, has_sudo = strip_sudo(command)
+    is_root = (os.getuid() == 0)
+
+    # 用剥离 sudo 后的命令做危险检测（以底层命令的语义为准）
+    eval_command = stripped_command if has_sudo else command
+
     # 第一优先级：直接 block 的命令
-    block_reasons = detect_patterns(command, BLOCK_PATTERNS)
+    block_reasons = detect_patterns(eval_command, BLOCK_PATTERNS)
     if block_reasons:
         reasons_str = ", ".join(block_reasons)
         result = {
@@ -180,13 +245,37 @@ def main():
         return
 
     # 第二优先级：替换为沙箱执行（文件系统/权限类风险）
-    sandbox_reasons = detect_patterns(command, DANGEROUS_PATTERNS)
-    network_reasons = detect_patterns(command, NETWORK_PATTERNS)
-    
+    sandbox_reasons = detect_patterns(eval_command, DANGEROUS_PATTERNS)
+    network_reasons = detect_patterns(eval_command, NETWORK_PATTERNS)
+
     if not sandbox_reasons and not network_reasons:
-        # 安全命令，直接放行
-        print(json.dumps({"decision": "allow"}))
+        # 底层命令安全，根据 sudo + 身份决策：
+        #
+        #   root + sudo：sudo 在此上下文中多余，剥离后直接执行，
+        #   避免"root 执行 sudo"因沙箱权限报错。
+        #
+        #   非 root + sudo：保留 sudo，让系统正常完成权限提升后执行。
+        #
+        #   无 sudo：直接放行。
+        if has_sudo and is_root:
+            result = {
+                "decision": "allow",
+                "systemMessage": (
+                    "ℹ️ 检测到 root 用户使用 sudo，已自动剥离 sudo 前缀直接执行"
+                    "（root 不需要 sudo 进行权限提升）。"
+                ),
+                "hookSpecificOutput": {"tool_input": {"command": stripped_command}},
+            }
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            # 安全命令（含非 root 的合法 sudo），直接放行
+            print(json.dumps({"decision": "allow"}))
         return
+
+    # 底层命令危险：进沙箱隔离。
+    # 沙箱内不支持 sudo/pkexec 等提权机制，因此始终以剥离后的命令入沙箱，
+    # 并通过 systemMessage 告知用户 sudo 已被忽略、命令在受限环境中执行。
+    sandbox_source = stripped_command if has_sudo else command
 
     # 判断是否需要放开网络权限
     if network_reasons and not sandbox_reasons:
@@ -200,14 +289,22 @@ def main():
         all_reasons = sandbox_reasons + network_reasons
         policy_desc = "🔒 已替换安全沙箱执行（网络隔离）"
 
+    sudo_strip_note = (
+        "\nℹ️ 检测到 sudo 前缀：沙箱不支持权限提升，已自动剥离 sudo 后在受限环境中执行。"
+        if has_sudo
+        else ""
+    )
+
     # 构建沙箱命令
-    sandbox_cmd = build_sandbox_command(command, cwd, network_policy)
+    # sandbox_source 是沙箱内实际执行的命令（已剥离 sudo）
+    # command 是用户输入的原始完整命令（含 sudo），bypass 时用于还原执行
+    sandbox_cmd = build_sandbox_command(sandbox_source, cwd, network_policy, restore_command=command)
     reasons_str = ", ".join(all_reasons)
 
     result = {
         "decision": "allow",
         "systemMessage": (
-            f"{policy_desc} (检测到: {reasons_str})\n"
+            f"{policy_desc} (检测到: {reasons_str}){sudo_strip_note}\n"
             "💡 如沙箱执行出错且确认命令无风险，可在聊天框输入 `/hooks disable sandbox-guard` 临时关闭防护"
         ),
         "hookSpecificOutput": {"tool_input": {"command": sandbox_cmd}},

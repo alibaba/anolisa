@@ -413,6 +413,15 @@ export interface LoopDetectionConfirmationRequest {
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
 
+export interface SandboxBypassRequest {
+  /** The command that failed inside the sandbox */
+  original_command: string;
+  /** Why bypass is being requested */
+  reason: string;
+  /** Called with true=allow, false=deny */
+  onComplete: (approved: boolean) => void;
+}
+
 export interface SettingInputRequest {
   settingName: string;
   settingDescription: string;

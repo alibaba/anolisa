@@ -8,7 +8,6 @@ import { useEffect, useReducer, useRef } from 'react';
 import type { Config, FileSearch } from '@copilot-shell/core';
 import { FileSearchFactory, escapePath } from '@copilot-shell/core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 
 export enum AtCompletionStatus {
   IDLE = 'idle',
@@ -199,7 +198,6 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       try {
         const results = await fileSearch.current.search(state.pattern, {
           signal: controller.signal,
-          maxResults: MAX_SUGGESTIONS_TO_SHOW * 3,
         });
 
         if (slowSearchTimer.current) {

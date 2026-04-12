@@ -165,3 +165,58 @@ export async function fetchTimeseries(
   if (agentName) params.set('agent_name', agentName);
   return apiFetch<TimeseriesResponse>(`${API_BASE}/api/timeseries?${params.toString()}`);
 }
+
+// ─── ATIF export APIs ────────────────────────────────────────────────────────
+
+import type { AtifDocument, AgentHealthResponse } from '../types';
+
+/**
+ * Export a single trace as an ATIF v1.6 trajectory document.
+ */
+export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/export/atif/trace/${encodeURIComponent(traceId)}`
+  );
+}
+
+/**
+ * Export a full session (all traces) as an ATIF v1.6 trajectory document.
+ */
+export async function fetchAtifBySession(sessionId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/export/atif/session/${encodeURIComponent(sessionId)}`
+  );
+}
+
+// ─── Agent health API ─────────────────────────────────────────────────────────
+
+/**
+ * Fetch the current health status of all discovered agent processes.
+ */
+export async function fetchAgentHealth(): Promise<AgentHealthResponse> {
+  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health`);
+}
+
+/**
+ * Acknowledge and remove an offline agent by PID.
+ */
+export async function deleteAgentHealth(pid: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/agent-health/${pid}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`DELETE /api/agent-health/${pid} -> ${res.status}: ${text}`);
+  }
+}
+
+/**
+ * Kill and re-launch a hung agent process.
+ * Returns the new PID on success.
+ */
+export async function restartAgentHealth(pid: number): Promise<{ ok: boolean; new_pid: number; cmd: string[] }> {
+  const res = await fetch(`${API_BASE}/api/agent-health/${pid}/restart`, { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`POST /api/agent-health/${pid}/restart -> ${res.status}: ${body.error ?? res.statusText}`);
+  }
+  return body;
+}

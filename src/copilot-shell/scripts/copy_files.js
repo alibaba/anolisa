@@ -81,6 +81,23 @@ if (packageName === 'cli') {
   if (fs.existsSync(examplesSource)) {
     fs.cpSync(examplesSource, examplesTarget, { recursive: true });
   }
+
+  // Copy hooks/*.py scripts into dist/hooks/ so installCommand can deploy them
+  const hooksSource = path.join('..', '..', 'hooks');
+  const hooksTarget = path.join('dist', 'hooks');
+  if (fs.existsSync(hooksSource)) {
+    if (!fs.existsSync(hooksTarget)) {
+      fs.mkdirSync(hooksTarget, { recursive: true });
+    }
+    for (const file of fs.readdirSync(hooksSource)) {
+      if (file.endsWith('.py')) {
+        fs.copyFileSync(
+          path.join(hooksSource, file),
+          path.join(hooksTarget, file),
+        );
+      }
+    }
+  }
 }
 
 console.log('Successfully copied files.');

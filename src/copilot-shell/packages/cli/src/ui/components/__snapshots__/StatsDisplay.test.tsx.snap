@@ -145,6 +145,28 @@ exports[`<StatsDisplay /> > Conditional Rendering Tests > hides User Agreement w
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
 
+exports[`<StatsDisplay /> > Sandbox Display > displays sandbox rows when sandbox counts are non-zero 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  Session Stats                                                                                   │
+│                                                                                                  │
+│  Interaction Summary                                                                             │
+│  Session ID:                 test-session-id                                                     │
+│  Tool Calls:                 3 ( ✓ 2 x 1 )                                                       │
+│  Success Rate:               66.7%                                                               │
+│  Sandbox Runs:               5                                                                   │
+│  Sandbox Blocked:            2                                                                   │
+│                                                                                                  │
+│  Performance                                                                                     │
+│  Wall Time:                  1s                                                                  │
+│  Agent Active:               300ms                                                               │
+│    » API Time:               0s (0.0%)                                                           │
+│    » Tool Time:              300ms (100.0%)                                                      │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
 exports[`<StatsDisplay /> > Title Rendering > renders the custom title when a title prop is provided 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │

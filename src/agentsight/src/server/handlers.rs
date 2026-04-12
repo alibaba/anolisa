@@ -1,13 +1,24 @@
 //! API request handlers
 
 use actix_web::{get, web, HttpResponse, Responder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::AppState;
+use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::{AuditStore, TokenStore, GenAISqliteStore};
 use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket};
 use crate::storage::sqlite::token::TokenQuery;
 use crate::TimePeriod;
+
+// ─── Prometheus helpers ───────────────────────────────────────────────────────
+
+/// Escape a Prometheus label value per the text format spec:
+/// backslash → \\, double-quote → \", newline → \n
+fn escape_label(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+}
 
 /// GET /health — health check endpoint
 #[get("/health")]
@@ -227,4 +238,263 @@ fn now_ns() -> u64 {
 /// Calculate nanosecond timestamp for N hours ago
 fn hours_ago_ns(hours: u64) -> u64 {
     now_ns().saturating_sub(hours * 3600 * 1_000_000_000)
+}
+
+// ─── Prometheus metrics endpoint ─────────────────────────────────────────────
+
+/// GET /metrics — Prometheus text format token usage metrics
+///
+/// Exposes per-agent counters for input tokens, output tokens, total tokens,
+/// and LLM request count, aggregated over all recorded history.
+/// The response Content-Type is `text/plain; version=0.0.4` as required by
+/// the Prometheus exposition format.
+#[get("/metrics")]
+pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
+    let db_path = &data.storage_path;
+
+    let summaries = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(store) => match store.get_agent_token_summary() {
+            Ok(v) => v,
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .content_type("text/plain; version=0.0.4")
+                    .body(format!("# ERROR querying metrics: {}\n", e));
+            }
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .content_type("text/plain; version=0.0.4")
+                .body(format!("# ERROR opening database: {}\n", e));
+        }
+    };
+
+    let mut out = String::with_capacity(512 + summaries.len() * 128);
+
+    // agentsight_token_input_total
+    out.push_str("# HELP agentsight_token_input_total Total input tokens consumed by agent (all-time)\n");
+    out.push_str("# TYPE agentsight_token_input_total counter\n");
+    for s in &summaries {
+        out.push_str(&format!(
+            "agentsight_token_input_total{{agent=\"{}\"}} {}\n",
+            escape_label(&s.agent_name), s.input_tokens
+        ));
+    }
+    out.push('\n');
+
+    // agentsight_token_output_total
+    out.push_str("# HELP agentsight_token_output_total Total output tokens consumed by agent (all-time)\n");
+    out.push_str("# TYPE agentsight_token_output_total counter\n");
+    for s in &summaries {
+        out.push_str(&format!(
+            "agentsight_token_output_total{{agent=\"{}\"}} {}\n",
+            escape_label(&s.agent_name), s.output_tokens
+        ));
+    }
+    out.push('\n');
+
+    // agentsight_token_total_total
+    out.push_str("# HELP agentsight_token_total_total Total tokens (input+output) consumed by agent (all-time)\n");
+    out.push_str("# TYPE agentsight_token_total_total counter\n");
+    for s in &summaries {
+        out.push_str(&format!(
+            "agentsight_token_total_total{{agent=\"{}\"}} {}\n",
+            escape_label(&s.agent_name), s.total_tokens
+        ));
+    }
+    out.push('\n');
+
+    // agentsight_llm_requests_total
+    out.push_str("# HELP agentsight_llm_requests_total Total LLM requests made by agent (all-time)\n");
+    out.push_str("# TYPE agentsight_llm_requests_total counter\n");
+    for s in &summaries {
+        out.push_str(&format!(
+            "agentsight_llm_requests_total{{agent=\"{}\"}} {}\n",
+            escape_label(&s.agent_name), s.request_count
+        ));
+    }
+    out.push('\n');
+
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4")
+        .body(out)
+}
+
+// ─── Agent health endpoint ──────────────────────────────────────────────────
+
+/// Response body for /api/agent-health
+#[derive(Debug, Serialize)]
+pub struct AgentHealthResponse {
+    pub agents: Vec<AgentHealthStatus>,
+    pub last_scan_time: u64,
+}
+
+/// GET /api/agent-health
+///
+/// Returns the latest health check results for all discovered agent processes.
+#[get("/api/agent-health")]
+pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
+    let store = data.health_store.read().unwrap();
+    HttpResponse::Ok().json(AgentHealthResponse {
+        agents: store.all_agents(),
+        last_scan_time: store.last_scan_time,
+    })
+}
+
+/// DELETE /api/agent-health/{pid}
+///
+/// User-acknowledges an offline agent and removes it from the store.
+#[actix_web::delete("/api/agent-health/{pid}")]
+pub async fn delete_agent_health(
+    data: web::Data<AppState>,
+    path: web::Path<u32>,
+) -> impl Responder {
+    let pid = path.into_inner();
+    let removed = data.health_store.write().unwrap().remove_by_pid(pid);
+    if removed {
+        HttpResponse::Ok().json(serde_json::json!({"ok": true}))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({"error": "pid not found"}))
+    }
+}
+
+/// POST /api/agent-health/{pid}/restart
+///
+/// Kill the hung process and re-launch it with its original command line.
+#[actix_web::post("/api/agent-health/{pid}/restart")]
+pub async fn restart_agent_health(
+    data: web::Data<AppState>,
+    path: web::Path<u32>,
+) -> impl Responder {
+    let pid = path.into_inner();
+
+    // 从 store 中取出 restart_cmd
+    let restart_cmd = {
+        let store = data.health_store.read().unwrap();
+        store.all_agents()
+            .into_iter()
+            .find(|a| a.pid == pid)
+            .and_then(|a| a.restart_cmd)
+    };
+
+    let cmd = match restart_cmd {
+        Some(c) if !c.is_empty() => c,
+        _ => return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "no restart command available for this pid"})),
+    };
+
+    // Step 1: kill -9
+    use std::process::Command;
+    let kill_result = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
+
+    if let Err(e) = kill_result {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+    }
+
+    // Step 2: 短暂等待进程退出
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Step 3: re-exec（后台启动，不等待）
+    let exe = &cmd[0];
+    let args = &cmd[1..];
+    match Command::new(exe).args(args).spawn() {
+        Ok(child) => {
+            let new_pid = child.id();
+            log::info!(
+                "Restarted agent pid={} -> new pid={}, cmd={:?}",
+                pid, new_pid, cmd
+            );
+            // 从 store 中删除旧 PID 条目，下次扫描时新 PID 会自动加入
+            data.health_store.write().unwrap().remove_by_pid(pid);
+            HttpResponse::Ok().json(serde_json::json!({
+                "ok": true,
+                "new_pid": new_pid,
+                "cmd": cmd,
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("re-exec failed: {}", e)})),
+    }
+}
+
+// ─── ATIF export endpoints ──────────────────────────────────────────────────
+
+/// GET /api/export/atif/trace/{trace_id}
+///
+/// Exports a single trace as an ATIF v1.6 trajectory document.
+#[get("/api/export/atif/trace/{trace_id}")]
+pub async fn export_atif_trace(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let db_path = &data.storage_path;
+    let trace_id = path.into_inner();
+
+    let store = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    let events = match store.get_trace_events(&trace_id) {
+        Ok(e) => e,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    if events.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "trace not found"}));
+    }
+
+    match crate::atif::convert_trace_to_atif(&trace_id, events) {
+        Ok(doc) => HttpResponse::Ok().json(doc),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/export/atif/session/{session_id}
+///
+/// Exports a full session (all traces) as an ATIF v1.6 trajectory document.
+#[get("/api/export/atif/session/{session_id}")]
+pub async fn export_atif_session(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let db_path = &data.storage_path;
+    let session_id = path.into_inner();
+
+    let store = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    let events = match store.get_events_by_session(&session_id) {
+        Ok(e) => e,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    if events.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found"}));
+    }
+
+    match crate::atif::convert_session_to_atif(&session_id, events) {
+        Ok(doc) => HttpResponse::Ok().json(doc),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
 }

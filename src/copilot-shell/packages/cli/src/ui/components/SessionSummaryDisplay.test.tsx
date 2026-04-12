@@ -81,6 +81,10 @@ describe('<SessionSummaryDisplay />', () => {
         totalLinesAdded: 42,
         totalLinesRemoved: 15,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
 
     const { lastFrame } = renderWithMockedStats(metrics);
@@ -106,6 +110,10 @@ describe('<SessionSummaryDisplay />', () => {
       files: {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
+      },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
       },
     };
 
@@ -136,6 +144,10 @@ describe('<SessionSummaryDisplay />', () => {
       files: {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
+      },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
       },
     };
 

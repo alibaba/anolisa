@@ -45,7 +45,7 @@ export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvid
 
   buildHeaders(): Record<string, string | undefined> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
-    const userAgent = `CopilotShell/${version} (${process.platform}; ${process.arch})`;
+    const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
     const defaultHeaders = {
       'User-Agent': userAgent,

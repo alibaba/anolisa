@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.0.4
+
+- Added STS authentication support via ECS RAM role. (#161)
+- Added BeforeModel, AfterModel, and BeforeToolSelection hooks. (#154)
+- Added sandbox usage summary on session exit. (#137)
+- Added Tab-completion for `!` shell mode. (#131)
+- Fixed config-dir source unification and prevented ~/.copilot creation on startup. (#171)
+- Fixed /bug command crash in headless environment. (#175)
+- Fixed undefined metrics.sandbox in StatsDisplay. (#171)
+- Supplement /hooks install step to post-installation guide. (#142)
+- Supplement hooks documentation (index, reference, writing-hooks). (#142)
+
+## 2.0.3
+
+- Migrated config directory from `~/.copilot` to `~/.copilot-shell`. (#78)
+- Added API key detection from configured agents with user approval on bootstrap. (#127)
+- Added support for configuring multiple custom model providers. (task#80737766)
+- Added global API endpoint support for Dashscope. (#133)
+- Added custom skill paths support via `settings.json`. (#128)
+- Added support for loading skills from extension directories with `cosh-extension.json` compatibility. (#54)
+- Added `/bug` command for submitting bug reports. (#122)
+- Added sandbox-guard install command with bypass approval flow. (#125)
+- Added secret redaction for model output and tool results. (#100)
+- Added extensible feature tip banner for first-launch guidance. (#113)
+- Added built-in `/dir cd` command for in-session directory navigation. (#19)
+- Added session renaming command. (task#80737766)
+- Added nvm-aware Node.js detection in `cosh` wrapper script. (#72)
+- Added system-level install via `Makefile` with FHS-compliant directory layout. (#72)
+- Fixed 24-item limit on `@` file completion menu. (#92)
+- Fixed TUI flicker on Qwen OAuth page in limited-height terminals. (#76)
+- Fixed left-arrow key not wrapping from line start to previous line end. (#53)
+- Fixed irrelevant info display in `/model` command. (#85)
+- Fixed credentials encryption support in `settings.json`. (#90)
+- Fixed test failure when running as `root` user. (#29)
+- Fixed pre-commit hook working directory for lint-staged. (#90)
+- Configured Husky hooks and documented pre-commit setup. (#65)
+
 ## 2.0.1
 
 - Renamed OpenAI authentication label to "BaiLian (OpenAI Compatible)" for clarity.

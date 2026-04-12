@@ -19,6 +19,7 @@ import type {
   ToolCall,
   Status as CoreStatus,
   EditorType,
+  SandboxBypassApprovalRequest,
 } from '@copilot-shell/core';
 import { CoreToolScheduler } from '@copilot-shell/core';
 import { useCallback, useState, useMemo } from 'react';
@@ -74,6 +75,9 @@ export function useReactToolScheduler(
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
   onPasswordPrompt?: () => void,
+  onSandboxBypassRequested?: (
+    request: SandboxBypassApprovalRequest,
+  ) => Promise<boolean>,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -161,6 +165,7 @@ export function useReactToolScheduler(
         getPreferredEditor,
         onEditorClose,
         onPasswordPrompt,
+        onSandboxBypassRequested,
       }),
     [
       config,
@@ -170,6 +175,7 @@ export function useReactToolScheduler(
       getPreferredEditor,
       onEditorClose,
       onPasswordPrompt,
+      onSandboxBypassRequested,
     ],
   );
 

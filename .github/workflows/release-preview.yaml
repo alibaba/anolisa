@@ -1,0 +1,57 @@
+name: Release Preview
+
+# =========================================================================
+# Purpose: Manual preview packaging for debugging and content verification.
+#
+# Produces: {component}-{version}.preview.tar.gz, retained 14 days.
+# =========================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to package (preview only, NOT used by release.yaml)'
+        required: true
+        type: choice
+        options:
+          - copilot-shell
+          - agent-sec-core
+          - agentsight
+          - os-skills
+      version:
+        description: 'Version (e.g. 2.1.0, without v prefix)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================================
+  # Package (preview) → triggered by workflow_dispatch
+  # Produces: {component}-{version}.preview.tar.gz, retained 14 days
+  # For debugging and content verification ONLY.
+  # =========================================================================
+  package-preview:
+    name: Packaging Preview ${{ inputs.component }}-${{ inputs.version }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package source archive
+        uses: ./.github/actions/package-source
+        with:
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          artifact-suffix: '.preview'
+          retention-days: 14
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          artifact-suffix: '.preview'
+          retention-days: 14

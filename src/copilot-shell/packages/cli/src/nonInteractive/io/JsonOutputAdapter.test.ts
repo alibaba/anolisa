@@ -580,6 +580,10 @@ describe('JsonOutputAdapter', () => {
           totalLinesAdded: 10,
           totalLinesRemoved: 5,
         },
+        sandbox: {
+          totalRuns: 0,
+          totalBlocked: 0,
+        },
       };
 
       adapter.emitResult({

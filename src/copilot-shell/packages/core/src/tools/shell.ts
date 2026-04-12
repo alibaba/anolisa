@@ -385,6 +385,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       const summarizeConfig = this.config.getSummarizeToolOutputConfig();
+      // Synthesize an error for sandboxed commands that exit with a non-zero
+      // code without a Node.js-level exception.  This ensures PostToolUseFailure
+      // is fired so sandbox-failure-handler.py can request a bypass dialog.
+      const isSandboxedCommand = this.params.command.includes('linux-sandbox');
+      const isSandboxExitFailure =
+        !result.error &&
+        !result.aborted &&
+        result.exitCode !== null &&
+        result.exitCode !== 0 &&
+        isSandboxedCommand;
       const executionError = result.error
         ? {
             error: {
@@ -392,7 +402,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : {};
+        : isSandboxExitFailure
+          ? {
+              error: {
+                message:
+                  result.output.trim() ||
+                  `Command exited with code ${result.exitCode}`,
+                type: ToolErrorType.SHELL_EXECUTE_ERROR,
+              },
+            }
+          : {};
       if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
         const summary = await summarizeToolOutput(
           llmContent,
@@ -632,8 +651,12 @@ export class ShellTool extends BaseDeclarativeTool<
         userSkillsDir,
         resolvedDirectoryPath,
       );
-      if (isWithinUserSkills) {
-        return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
+      // Also block custom skill directories
+      const isWithinCustomSkills = this.config
+        .getResolvedCustomSkillPaths()
+        .some((dir) => isSubpath(dir, resolvedDirectoryPath));
+      if (isWithinUserSkills || isWithinCustomSkills) {
+        return `Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
       const workspaceDirs = this.config.getWorkspaceContext().getDirectories();

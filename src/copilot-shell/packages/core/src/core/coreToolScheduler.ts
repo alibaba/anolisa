@@ -31,6 +31,7 @@ import {
   InputFormat,
   SkillTool,
 } from '../index.js';
+import type { SandboxBypassApprovalRequest } from '../index.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -51,6 +52,12 @@ import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import {
+  redactSecrets,
+  redactPartListUnion,
+  redactAnsiOutput,
+} from '../utils/secretRedactor.js';
+import type { FileDiff } from '../tools/tools.js';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -349,6 +356,14 @@ interface CoreToolSchedulerOptions {
    * Optional callback invoked when a password prompt (e.g. sudo) is detected.
    */
   onPasswordPrompt?: () => void;
+  /**
+   * Optional callback invoked when a sandbox-guarded command fails and the
+   * sandbox-failure-handler hook requests a bypass approval dialog.
+   * Returns true if the user approved the bypass, false otherwise.
+   */
+  onSandboxBypassRequested?: (
+    request: SandboxBypassApprovalRequest,
+  ) => Promise<boolean>;
 }
 
 export class CoreToolScheduler {
@@ -362,6 +377,9 @@ export class CoreToolScheduler {
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
   private onPasswordPrompt?: () => void;
+  private onSandboxBypassRequested?: (
+    request: SandboxBypassApprovalRequest,
+  ) => Promise<boolean>;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private requestQueue: Array<{
@@ -381,6 +399,7 @@ export class CoreToolScheduler {
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
     this.onPasswordPrompt = options.onPasswordPrompt;
+    this.onSandboxBypassRequested = options.onSandboxBypassRequested;
   }
 
   private setStatusInternal(
@@ -1207,6 +1226,36 @@ export class CoreToolScheduler {
 
         try {
           const toolResult: ToolResult = await promise;
+
+          // Redact secrets from tool result before further processing
+          toolResult.llmContent = redactPartListUnion(toolResult.llmContent);
+          if (typeof toolResult.returnDisplay === 'string') {
+            toolResult.returnDisplay = redactSecrets(toolResult.returnDisplay);
+          } else if (
+            toolResult.returnDisplay &&
+            typeof toolResult.returnDisplay === 'object' &&
+            'ansiOutput' in toolResult.returnDisplay
+          ) {
+            const ansiDisplay = toolResult.returnDisplay as {
+              ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
+            };
+            ansiDisplay.ansiOutput = redactAnsiOutput(ansiDisplay.ansiOutput);
+          } else if (
+            toolResult.returnDisplay &&
+            typeof toolResult.returnDisplay === 'object' &&
+            'fileDiff' in toolResult.returnDisplay
+          ) {
+            // Redact secrets from FileDiff display (WriteFile / EditFile results)
+            const diffDisplay = toolResult.returnDisplay as FileDiff;
+            diffDisplay.fileDiff = redactSecrets(diffDisplay.fileDiff);
+            diffDisplay.newContent = redactSecrets(diffDisplay.newContent);
+            if (diffDisplay.originalContent !== null) {
+              diffDisplay.originalContent = redactSecrets(
+                diffDisplay.originalContent,
+              );
+            }
+          }
+
           if (signal.aborted) {
             this.setStatusInternal(
               callId,
@@ -1272,16 +1321,184 @@ export class CoreToolScheduler {
               outputFile,
               contentLength,
             };
+
+            // Fire PostToolUse hook after successful tool execution
+            if (this.config.getEnableHooks()) {
+              const hookSystem = this.config.getHookSystem();
+              if (hookSystem) {
+                try {
+                  const postToolOutput = await hookSystem.firePostToolUseEvent(
+                    toolName,
+                    scheduledCall.request.args,
+                    {
+                      llmContent: typeof content === 'string' ? content : '',
+                      returnDisplay:
+                        typeof toolResult.returnDisplay === 'string'
+                          ? toolResult.returnDisplay
+                          : undefined,
+                    },
+                  );
+
+                  if (postToolOutput) {
+                    // If hook denies, replace tool result with reason
+                    if (postToolOutput.isBlockingDecision()) {
+                      const reason = postToolOutput.getEffectiveReason();
+                      const blockedResponse = convertToFunctionResponse(
+                        toolName,
+                        callId,
+                        reason,
+                      );
+                      successResponse.responseParts = blockedResponse;
+                    }
+
+                    // Append additional context to tool result
+                    const additionalContext =
+                      postToolOutput.getAdditionalContext();
+                    if (
+                      additionalContext &&
+                      !postToolOutput.isBlockingDecision()
+                    ) {
+                      const augmented = convertToFunctionResponse(
+                        toolName,
+                        callId,
+                        (typeof content === 'string' ? content : '') +
+                          '\n' +
+                          additionalContext,
+                      );
+                      successResponse.responseParts = augmented;
+                    }
+
+                    // Handle continue=false
+                    if (postToolOutput.shouldStopExecution()) {
+                      this.setStatusInternal(
+                        callId,
+                        'success',
+                        successResponse,
+                      );
+                      continue;
+                    }
+                  }
+                } catch (hookError) {
+                  console.error(
+                    `PostToolUse hook error for ${toolName}: ${hookError}`,
+                  );
+                }
+              }
+            }
+
             this.setStatusInternal(callId, 'success', successResponse);
           } else {
             // It is a failure
             const error = new Error(toolResult.error.message);
-            const errorResponse = createErrorResponse(
-              scheduledCall.request,
-              error,
-              toolResult.error.type,
-            );
-            this.setStatusInternal(callId, 'error', errorResponse);
+
+            // Attempt sandbox bypass if hooks are enabled and a bypass callback is registered
+            let handledBySandboxBypass = false;
+            if (
+              this.config.getEnableHooks() &&
+              this.onSandboxBypassRequested &&
+              toolName === ShellTool.Name
+            ) {
+              const hookSystem = this.config.getHookSystem();
+              if (hookSystem) {
+                try {
+                  const failureOutput =
+                    await hookSystem.firePostToolUseFailureEvent(
+                      callId,
+                      toolName,
+                      scheduledCall.request.args,
+                      toolResult.error.message,
+                      toolResult.error.type,
+                    );
+                  const bypassRequest =
+                    failureOutput?.getSandboxBypassRequest?.();
+                  if (bypassRequest) {
+                    const approved =
+                      await this.onSandboxBypassRequested(bypassRequest);
+                    if (approved) {
+                      hookSystem.setHookEnabled('sandbox-guard', false);
+                      try {
+                        const originalArgs = {
+                          ...scheduledCall.request.args,
+                          command: bypassRequest.original_command,
+                        };
+                        const originalInvocation = this.buildInvocation(
+                          scheduledCall.tool,
+                          originalArgs,
+                        );
+                        if (!(originalInvocation instanceof Error)) {
+                          let retryPromise: Promise<ToolResult>;
+                          if (
+                            originalInvocation instanceof ShellToolInvocation
+                          ) {
+                            // Provide a setPidCallback so the bypass process pid
+                            // is tracked in tool call state. Without this, the
+                            // ShellInputPrompt would keep referencing the dead
+                            // linux-sandbox PTY and sudo password input would fail.
+                            const bypassSetPidCallback = (pid: number) => {
+                              this.toolCalls = this.toolCalls.map((tc) =>
+                                tc.request.callId === callId &&
+                                tc.status === 'executing'
+                                  ? { ...tc, pid }
+                                  : tc,
+                              );
+                              this.notifyToolCallsUpdate();
+                            };
+                            retryPromise = originalInvocation.execute(
+                              signal,
+                              liveOutputCallback,
+                              shellExecutionConfig,
+                              bypassSetPidCallback,
+                              this.onPasswordPrompt,
+                            );
+                          } else {
+                            retryPromise = originalInvocation.execute(
+                              signal,
+                              liveOutputCallback,
+                              shellExecutionConfig,
+                            );
+                          }
+                          const retryResult = await retryPromise;
+                          if (retryResult.error === undefined) {
+                            const retryContent = retryResult.llmContent;
+                            const retryResponse = convertToFunctionResponse(
+                              toolName,
+                              callId,
+                              retryContent,
+                            );
+                            this.setStatusInternal(callId, 'success', {
+                              callId,
+                              responseParts: retryResponse,
+                              resultDisplay: retryResult.returnDisplay,
+                              error: undefined,
+                              errorType: undefined,
+                            });
+                            handledBySandboxBypass = true;
+                          }
+                        }
+                      } finally {
+                        hookSystem.setHookEnabled('sandbox-guard', true);
+                      }
+                    }
+                  }
+                } catch (hookErr) {
+                  // Hook errors are non-fatal
+                  if (this.config.getDebugMode()) {
+                    console.debug(
+                      `PostToolUseFailure hook error (non-fatal): ${hookErr}`,
+                    );
+                  }
+                }
+              }
+            }
+
+            if (!handledBySandboxBypass) {
+              const errorResponse = createErrorResponse(
+                scheduledCall.request,
+                error,
+                toolResult.error.type,
+              );
+              this.setStatusInternal(callId, 'error', errorResponse);
+            }
           }
         } catch (executionError: unknown) {
           if (signal.aborted) {

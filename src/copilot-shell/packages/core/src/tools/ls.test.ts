@@ -48,6 +48,7 @@ describe('LSTool', () => {
         getGlobalRemoteSkillsDir: () =>
           path.join(os.homedir(), '.copilot-shell', 'remote-skills'),
       },
+      getResolvedCustomSkillPaths: () => [],
     } as unknown as Config;
 
     lsTool = new LSTool(mockConfig);
@@ -335,6 +336,42 @@ describe('LSTool', () => {
 
       expect(result.llmContent).toContain('secondary-file.txt');
       expect(result.returnDisplay).toBe('Listed 1 item(s).');
+    });
+  });
+
+  describe('custom skill paths whitelist', () => {
+    it('should accept paths in custom skill directories', () => {
+      const customSkillDir = '/custom/skills';
+      const customMockConfig = {
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [tempSecondaryDir]),
+        getFileService: () => new FileDiscoveryService(tempRootDir),
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+        }),
+        storage: {
+          getUserSkillsDir: () =>
+            path.join(os.homedir(), '.copilot-shell', 'skills'),
+          getRemoteSkillsDir: () =>
+            path.join(tempRootDir, '.copilot-shell', 'remote-skills'),
+          getGlobalRemoteSkillsDir: () =>
+            path.join(os.homedir(), '.copilot-shell', 'remote-skills'),
+        },
+        getResolvedCustomSkillPaths: () => [customSkillDir],
+      } as unknown as Config;
+
+      const customLsTool = new LSTool(customMockConfig);
+      const params = { path: path.join(customSkillDir, 'my-skill') };
+      expect(customLsTool.build(params)).toBeDefined();
+    });
+
+    it('should reject paths outside custom skill dirs and workspace', () => {
+      const params = { path: '/not-custom/skills' };
+      expect(() => lsTool.build(params)).toThrow(
+        'Path must be within one of the workspace directories',
+      );
     });
   });
 });

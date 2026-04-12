@@ -8,6 +8,7 @@ import {
   AuthType,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  decryptCredential,
   resolveModelConfig,
   type ModelConfigSourcesInput,
   type ProviderModelConfig,
@@ -126,6 +127,13 @@ export function resolveCliGenerationConfig(
     modelProvider,
     env,
   };
+
+  // Decrypt encrypted API key from settings (backward compat: plaintext passes through)
+  if (configSources.settings?.apiKey) {
+    configSources.settings.apiKey = decryptCredential(
+      configSources.settings.apiKey,
+    );
+  }
 
   const resolved = resolveModelConfig(configSources);
 

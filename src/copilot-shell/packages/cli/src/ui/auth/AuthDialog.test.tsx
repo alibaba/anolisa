@@ -323,7 +323,7 @@ describe('AuthDialog', () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // This is a bit brittle, but it's the best way to check which item is selected.
-      expect(lastFrame()).toContain('● 2. Custom Provider');
+      expect(lastFrame()).toContain('● Custom Provider');
     });
 
     it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
@@ -362,8 +362,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Qwen OAuth (first option)
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      // 默认选中阿里云认证（第一个选项）
+      expect(lastFrame()).toContain('● Aliyun Authentication');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -404,9 +404,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Qwen OAuth option
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      // auth dialog 不再显示 QWEN_DEFAULT_AUTH_TYPE 错误，
+      // 回退到默认的阿里云认证选项
+      expect(lastFrame()).toContain('● Aliyun Authentication');
     });
   });
 
@@ -454,7 +454,7 @@ describe('AuthDialog', () => {
 
     // Wait for the dialog to fully render and keypress handler to be registered
     await waitFor(() => {
-      expect(lastFrame()).toContain('\u25cf 1. Qwen OAuth');
+      expect(lastFrame()).toContain('● Aliyun Authentication');
     });
     await wait(); // extra tick: ensure keypress handler re-registered
 
@@ -573,7 +573,7 @@ describe('AuthDialog', () => {
 
     // Wait for the dialog to fully render and keypress handler to be registered
     await waitFor(() => {
-      expect(lastFrame()).toContain('\u25cf 2. Custom Provider');
+      expect(lastFrame()).toContain('● Custom Provider');
     });
     await wait(); // extra tick: ensure keypress handler re-registered
 

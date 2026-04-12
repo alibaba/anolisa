@@ -7,6 +7,7 @@
 import { Box } from 'ink';
 import { Header } from './Header.js';
 import { Tips } from './Tips.js';
+import { FeatureTipBanner } from './FeatureTipBanner.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
@@ -36,6 +37,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
         />
       )}
       {showTips && <Tips />}
+      <FeatureTipBanner />
     </Box>
   );
 };

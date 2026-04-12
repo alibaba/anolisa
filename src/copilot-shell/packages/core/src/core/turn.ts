@@ -27,6 +27,7 @@ import {
   toFriendlyError,
 } from '../utils/errors.js';
 import type { GeminiChat } from './geminiChat.js';
+import { AfterModelHookStopError } from './geminiChat.js';
 import {
   getThoughtText,
   parseThought,
@@ -64,6 +65,7 @@ export enum GeminiEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  AfterModelHookStop = 'after_model_hook_stop',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -204,6 +206,10 @@ export type ServerGeminiHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerGeminiAfterModelHookStopEvent = {
+  type: GeminiEventType.AfterModelHookStop;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
   | ServerGeminiChatCompressedEvent
@@ -212,6 +218,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiErrorEvent
   | ServerGeminiFinishedEvent
   | ServerGeminiHookSystemMessageEvent
+  | ServerGeminiAfterModelHookStopEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiThoughtEvent
@@ -330,6 +337,18 @@ export class Turn {
       if (signal.aborted) {
         yield { type: GeminiEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.
+        return;
+      }
+
+      // AfterModel hook stop signal: not a real error, handle gracefully.
+      if (e instanceof AfterModelHookStopError) {
+        if (e.hookStopReason) {
+          yield {
+            type: GeminiEventType.HookSystemMessage,
+            value: e.hookStopReason,
+          };
+        }
+        yield { type: GeminiEventType.AfterModelHookStop };
         return;
       }
 

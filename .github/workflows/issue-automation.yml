@@ -1,0 +1,211 @@
+###############################################################################
+# Issue Automation — Triage, assign and notify on issue open
+#
+# Triggered only when a new issue is opened. Resolves the component via:
+#   1. Existing component:xxx label (set via API or Issue Form options)
+#   2. Issue Form “Component” dropdown field in the body
+#   3. Title keyword fallback (cosh / agentsight / agent-sec / os-skills)
+#   4. Default maintainer if none of the above matches
+#
+# Component → label and label → owner mappings are read dynamically from
+# .github/CODEOWNERS (# auto-label: annotations) via the codeowners-labels
+# composite action. No hardcoded maps — adding a component to CODEOWNERS
+# is sufficient.
+#
+# Actions taken (all in one pass, no chained label events):
+#   - Apply component label (if not already present)
+#   - Assign responsible maintainer(s)
+#   - Post a triage comment
+#   - Send DingTalk notification (skipped if secrets not configured)
+###############################################################################
+
+name: 🤖 Issue Automation
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    name: 🏷️ Auto Triage
+    runs-on: ubuntu-22.04
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Parse component, apply label, assign maintainers, comment
+      # -----------------------------------------------------------------------
+      - name: 🔍 Resolve component, assign and comment
+        id: triage
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+    
+            // ── Parse CODEOWNERS # auto-label: annotations ────────────────
+            const { data: coFile } = await github.rest.repos.getContent(
+              { owner, repo, path: '.github/CODEOWNERS' }
+            );
+            const coContent = Buffer.from(coFile.content, 'base64').toString();
+            const labelMap = {};  // short → label
+            const ownerMap = {};  // label → owners[]
+            let fallbackOwners = [];  // from the '*' global rule
+            for (const raw of coContent.split('\n')) {
+              const line = raw.trim();
+              if (!line || line.startsWith('#')) continue;
+              const parts = line.split(/\s+/);
+              const owners = parts
+                .filter(p => p.startsWith('@') && !p.startsWith('#'))
+                .map(p => p.slice(1));
+              // Capture global fallback from the '*' catch-all rule
+              if (parts[0] === '*' && owners.length > 0) {
+                fallbackOwners = owners;
+                continue;
+              }
+              const m = line.match(/#\s*auto-label:\s*(\S+)/);
+              if (!m) continue;
+              const label = m[1];
+              if (!label.startsWith('component:')) continue;
+              const short  = label.replace('component:', '');
+              // Respect CODEOWNERS ordering: later matching rules override earlier ones.
+              labelMap[short] = label;
+              ownerMap[label] = owners;
+            }
+    
+            const body  = context.payload.issue.body  || '';
+            const title = context.payload.issue.title || '';
+    
+            // 1. Existing label (e.g. applied via API before the workflow ran)
+            const existingLabels = context.payload.issue.labels.map(l => l.name);
+            let componentLabel = existingLabels.find(l => l.startsWith('component:'));
+            let labelSource = componentLabel ? 'existing label on issue' : null;
+            
+            // 2. Issue Form "Component" dropdown
+            if (!componentLabel) {
+              const match = body.match(/###\s*Component\s*\n\n(.+)/i);
+              const value = (match ? match[1].trim() : '').toLowerCase();
+              const normalized = value.replace(/^component:/, '');
+              componentLabel = labelMap[normalized] || (value.startsWith('component:') ? value : undefined);
+              if (componentLabel) {
+                labelSource = `Issue Form dropdown: "${value}"`;
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: context.issue.number,
+                  labels: [componentLabel],
+                });
+              }
+            }
+            
+            // 3. Title keyword fallback (from labelMap keys + common aliases)
+            if (!componentLabel) {
+              const t = title.toLowerCase();
+              for (const [short, label] of Object.entries(labelMap)) {
+                if (t.includes(short)) { componentLabel = label; labelSource = `title keyword: "${short}"`; break; }
+              }
+              if (componentLabel) {
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: context.issue.number,
+                  labels: [componentLabel],
+                });
+              }
+            }
+            
+            // 4. Resolve maintainers from CODEOWNERS (fallback: global '*' rule owners)
+            const owners      = componentLabel ? (ownerMap[componentLabel] || []) : [];
+            const maintainers = owners.length > 0 ? owners : fallbackOwners;
+            const maintainerSource = owners.length > 0 ? `ownerMap[${componentLabel}]` : "CODEOWNERS '*' global fallback";
+            
+            core.info('=== Issue triage results ===');
+            core.info(`  component: ${componentLabel || 'none'}  \u2190 ${labelSource || 'unresolved'}`);
+            core.info(`  maintainers: ${maintainers.join(', ')}  \u2190 ${maintainerSource}`);
+    
+            // 5. Assign
+            await github.rest.issues.addAssignees({
+              owner, repo, issue_number: context.issue.number,
+              assignees: maintainers,
+            });
+    
+            // 6. Comment
+            const scopeName   = componentLabel ? componentLabel.replace('component:', '') : 'default';
+            const mentionList = maintainers.map(m => `@${m}`).join(' ');
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: context.issue.number,
+              body: [
+                `## 🔀 Issue Triage`,
+                ``,
+                `This issue has been automatically assigned to **${mentionList}** ` +
+                `as the maintainer(s) of \`${scopeName}\`.`,
+                ``,
+                `> Maintainers, please review and triage this issue. ` +
+                `Set a priority label and update the status as needed. Thanks! 🙏`,
+              ].join('\n'),
+            });
+    
+            core.setOutput('maintainers',     maintainers.join(','));
+            core.setOutput('component_label', componentLabel || 'unknown');
+    
+            // 7. Auto-prefix title with [<scope>] if not already prefixed
+            const scopeShort = componentLabel
+              ? componentLabel.replace('component:', '')
+              : null;
+            if (scopeShort && !title.startsWith('[')) {
+              await github.rest.issues.update({
+                owner, repo, issue_number: context.issue.number,
+                title: `[${scopeShort}] ${title}`,
+              });
+            }
+
+      # -----------------------------------------------------------------------
+      # DingTalk notification (skipped if secrets not configured)
+      # -----------------------------------------------------------------------
+      - name: 📣 Send DingTalk notification
+        if: steps.triage.outputs.maintainers != '' && env.DINGTALK_WEBHOOK != ''
+        env:
+          ISSUE_NUMBER:    ${{ github.event.issue.number }}
+          ISSUE_TITLE:     ${{ github.event.issue.title }}
+          ISSUE_URL:       ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR:    ${{ github.event.issue.user.login }}
+          MAINTAINERS:     ${{ steps.triage.outputs.maintainers }}
+          COMPONENT_LABEL: ${{ steps.triage.outputs.component_label }}
+        run: |
+          python3 << 'PYEOF'
+          import hmac, hashlib, base64, urllib.parse, time, os, subprocess, json
+
+          ts     = str(round(time.time() * 1000))
+          secret = os.environ.get('DINGTALK_SECRET', '')
+          sig    = hmac.new(secret.encode(), (ts + '\n' + secret).encode(), hashlib.sha256).digest()
+          sign   = urllib.parse.quote_plus(base64.b64encode(sig).decode())
+
+          issue_number = os.environ.get('ISSUE_NUMBER', '')
+          issue_title  = os.environ.get('ISSUE_TITLE', '')
+          issue_url    = os.environ.get('ISSUE_URL', '')
+          issue_author = os.environ.get('ISSUE_AUTHOR', '')
+          maintainers  = os.environ.get('MAINTAINERS', '')
+          component    = os.environ.get('COMPONENT_LABEL', '')
+          webhook      = os.environ.get('DINGTALK_WEBHOOK', '')
+
+          text = (
+            f"## 🔔 ANOLISA New Issue\n\n"
+            f"**Issue**: [#{issue_number} {issue_title}]({issue_url})\n\n"
+            f"**Component**: `{component}`\n\n"
+            f"**Author**: {issue_author}\n\n"
+            f"**Assigned to**: {maintainers}\n\n"
+            f"> 🤖 ANOLISA Issue Bot"
+          )
+
+          payload = json.dumps({
+            "msgtype": "markdown",
+            "markdown": {"title": f"New Issue #{issue_number}", "text": text}
+          })
+
+          url = f"{webhook}&timestamp={ts}&sign={sign}"
+          subprocess.run(
+            ["curl", "-s", "-X", "POST", url, "-H", "Content-Type: application/json", "-d", payload],
+            check=True
+          )
+          PYEOF

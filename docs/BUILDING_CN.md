@@ -86,6 +86,30 @@ cd anolisa
 2. os-skills 大部分是静态资源，无需编译。
 3. AgentSight 是可选组件，提供审计和可观测性能力，但不是核心功能所必需的。默认构建不包含它，使用 `--component sight` 显式包含。
 4. AgentSight 的系统依赖（clang/llvm/libbpf/内核头文件）需通过发行版包管理器安装。
+5. **沙箱策略 Hooks 不会自动启用。** 安装完成后，需在 Copilot Shell 内执行一次 `/hooks install` 来激活内置的 sandbox-guard hooks。详见 [3.3 安装后：启用沙箱 Hooks](#33-安装后启用沙箱-hooks)。
+
+### 3.3 安装后：启用沙箱 Hooks
+
+构建脚本完成安装后，沙箱策略 hooks 不会自动激活。为防止未经授权的文件系统访问或危险命令执行，请在安装完成后执行以下操作：
+
+```bash
+cosh
+```
+
+进入 Copilot Shell 会话后，执行：
+
+```
+/hooks install
+```
+
+该命令会：
+- 将内置的 `sandbox-guard.py` 和 `sandbox-failure-handler.py` 脚本复制到 `~/.copilot-shell/hooks/`
+- 将其注册为 `PreToolUse` 和 `PostToolUseFailure` hooks，写入用户配置（`~/.copilot-shell/settings.json`）
+- 立即在当前会话中激活这些 hooks
+
+只需执行一次，配置会持久保存，后续会话自动生效。
+
+> **说明：** 沙箱 hooks 依赖 `agent-sec-core`（linux-sandbox）正确构建并安装到 `/usr/local/bin/linux-sandbox`。当 `sandbox-guard.py` 检测到危险命令时，会将其包裹为 `linux-sandbox ... bash -c '...'` 的形式执行。若 `agent-sec-core` 未构建安装，hooks 可以注册成功，但危险命令的沙箱隔离执行将会失败。请确保在依赖沙箱防护前已完成 `agent-sec-core` 的构建（默认 `build-all.sh` 已包含该步骤）。
 
 ---
 

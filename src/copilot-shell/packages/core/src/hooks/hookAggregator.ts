@@ -8,10 +8,18 @@ import {
   HookEventName,
   DefaultHookOutput,
   PreToolUseHookOutput,
+  PostToolUseHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
+  BeforeModelHookOutput,
+  AfterModelHookOutput,
+  BeforeToolSelectionHookOutput,
 } from './types.js';
-import type { HookOutput, HookExecutionResult } from './types.js';
+import type {
+  HookOutput,
+  HookExecutionResult,
+  BeforeToolSelectionOutput,
+} from './types.js';
 
 /**
  * Aggregated result from multiple hook executions
@@ -92,6 +100,15 @@ export class HookAggregator {
         break;
       case HookEventName.PermissionRequest:
         merged = this.mergePermissionRequestOutputs(outputs);
+        break;
+      case HookEventName.BeforeModel:
+      case HookEventName.AfterModel:
+        merged = this.mergeWithFieldReplacement(outputs);
+        break;
+      case HookEventName.BeforeToolSelection:
+        merged = this.mergeToolSelectionOutputs(
+          outputs as BeforeToolSelectionOutput[],
+        );
         break;
       default:
         merged = this.mergeSimple(outputs);
@@ -327,6 +344,95 @@ export class HookAggregator {
   }
 
   /**
+   * Merge outputs with later fields replacing earlier fields.
+   * Used for BeforeModel and AfterModel events where later hooks override earlier ones.
+   */
+  private mergeWithFieldReplacement(outputs: HookOutput[]): HookOutput {
+    let merged: HookOutput = {};
+
+    for (const output of outputs) {
+      // Later outputs override earlier ones
+      merged = {
+        ...merged,
+        ...output,
+        hookSpecificOutput: {
+          ...merged.hookSpecificOutput,
+          ...output.hookSpecificOutput,
+        },
+      };
+    }
+
+    return merged;
+  }
+
+  /**
+   * Merge tool selection outputs with union strategy.
+   *
+   * Rules:
+   * - allowedFunctionNames: union of all hooks (sorted for deterministic caching)
+   * - mode: NONE wins (most restrictive), then ANY > AUTO
+   * - This means hooks can only add/enable tools, not filter them out individually
+   */
+  private mergeToolSelectionOutputs(
+    outputs: BeforeToolSelectionOutput[],
+  ): BeforeToolSelectionOutput {
+    const merged: BeforeToolSelectionOutput = {};
+
+    const allFunctionNames = new Set<string>();
+    let hasNoneMode = false;
+    let hasAnyMode = false;
+
+    for (const output of outputs) {
+      const toolConfig = output.hookSpecificOutput?.toolConfig;
+      if (!toolConfig) {
+        continue;
+      }
+
+      // Check mode
+      if (toolConfig.mode === 'NONE') {
+        hasNoneMode = true;
+      } else if (toolConfig.mode === 'ANY') {
+        hasAnyMode = true;
+      }
+
+      // Collect function names (union of all hooks)
+      if (toolConfig.allowedFunctionNames) {
+        for (const name of toolConfig.allowedFunctionNames) {
+          allFunctionNames.add(name);
+        }
+      }
+    }
+
+    // Determine final mode and function names
+    let finalMode: 'AUTO' | 'ANY' | 'NONE';
+    let finalFunctionNames: string[] = [];
+
+    if (hasNoneMode) {
+      // NONE mode wins - most restrictive
+      finalMode = 'NONE';
+      finalFunctionNames = [];
+    } else if (hasAnyMode) {
+      // ANY mode if present (and no NONE)
+      finalMode = 'ANY';
+      finalFunctionNames = Array.from(allFunctionNames).sort();
+    } else {
+      // Default to AUTO mode
+      finalMode = 'AUTO';
+      finalFunctionNames = Array.from(allFunctionNames).sort();
+    }
+
+    merged.hookSpecificOutput = {
+      hookEventName: 'BeforeToolSelection',
+      toolConfig: {
+        mode: finalMode,
+        allowedFunctionNames: finalFunctionNames,
+      },
+    };
+
+    return merged;
+  }
+
+  /**
    * Create the appropriate specific hook output class based on event type
    */
   private createSpecificHookOutput(
@@ -336,10 +442,18 @@ export class HookAggregator {
     switch (eventName) {
       case HookEventName.PreToolUse:
         return new PreToolUseHookOutput(output);
+      case HookEventName.PostToolUse:
+        return new PostToolUseHookOutput(output);
       case HookEventName.Stop:
         return new StopHookOutput(output);
       case HookEventName.PermissionRequest:
         return new PermissionRequestHookOutput(output);
+      case HookEventName.BeforeModel:
+        return new BeforeModelHookOutput(output);
+      case HookEventName.AfterModel:
+        return new AfterModelHookOutput(output);
+      case HookEventName.BeforeToolSelection:
+        return new BeforeToolSelectionHookOutput(output);
       default:
         return new DefaultHookOutput(output);
     }

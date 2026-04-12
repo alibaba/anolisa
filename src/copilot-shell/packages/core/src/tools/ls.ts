@@ -328,13 +328,18 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
       Storage.getSystemSkillsDir(),
       params.path,
     );
+    // Check custom skill paths whitelist
+    const isUnderCustomSkills = this.config
+      .getResolvedCustomSkillPaths()
+      .some((dir) => isSubpath(dir, params.path));
 
     const workspaceContext = this.config.getWorkspaceContext();
     if (
       !workspaceContext.isPathWithinWorkspace(params.path) &&
       !isUnderUserSkills &&
       !isUnderRemoteSkills &&
-      !isUnderSystemSkills
+      !isUnderSystemSkills &&
+      !isUnderCustomSkills
     ) {
       const directories = workspaceContext.getDirectories();
       return `Path must be within one of the workspace directories: ${directories.join(

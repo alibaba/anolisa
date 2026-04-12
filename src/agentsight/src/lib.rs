@@ -36,8 +36,10 @@ pub mod analyzer;
 pub mod storage;
 pub mod chrome_trace;
 pub mod discovery;
+pub mod health;
 pub mod tokenizer;
 pub mod genai;
+pub mod atif;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod token_breakdown;
@@ -56,6 +58,7 @@ pub use parser::{
     HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse,
     SseParser, ParsedSseEvent,
     ProcTraceParser, ParsedProcEvent, ProcEventType,
+    Http2Parser, Http2FrameType, ParsedHttp2Frame,
     Parser, ParsedMessage, ParseResult,
 };
 pub use analyzer::{

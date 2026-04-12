@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
   workflow_dispatch:
     inputs:
       run_copilot_shell:
@@ -32,7 +32,7 @@ jobs:
   # =========================================================================
   detect-changes:
     name: Detect Changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       copilot_shell: ${{ steps.changes.outputs.copilot_shell }}
       agent_sec_core: ${{ steps.changes.outputs.agent_sec_core }}
@@ -101,7 +101,7 @@ jobs:
     name: Build copilot-shell
     needs: detect-changes
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -145,7 +145,7 @@ jobs:
     name: Test copilot-shell/cli
     needs: [detect-changes, build-copilot-shell]
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -175,7 +175,7 @@ jobs:
     name: Test copilot-shell/core
     needs: [detect-changes, build-copilot-shell]
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -208,7 +208,7 @@ jobs:
     name: Test agent-sec-core
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -249,11 +249,13 @@ jobs:
     name: Test agentsight
     needs: detect-changes
     if: needs.detect-changes.outputs.agentsight == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -267,5 +269,6 @@ jobs:
 
       - name: Run tests
         run: |
+          rustup component add rustfmt
           cd src/agentsight
           cargo test

@@ -28,8 +28,11 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_CONFIG = SCRIPT_DIR / "config.conf"
 DEFAULT_TRUSTED_KEYS_DIR = SCRIPT_DIR / "trusted-keys"
 
-# Check if system gpg is available
-GPG_BIN = shutil.which("gpg")
+# Check if system gpg is available (prefer 'gpg', fall back to 'gpg2' on RHEL/Alinux)
+GPG_BIN = shutil.which("gpg") or shutil.which("gpg2")
+
+# Hidden directory inside each skill that holds signing artifacts
+SIGNING_DIR = ".skill-meta"
 
 
 def load_config(config_path: Path) -> dict:
@@ -199,8 +202,9 @@ def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> N
 def verify_skill(skill_dir: str, trusted_keys: list) -> tuple:
     """Verify a single skill directory"""
     skill_name = os.path.basename(skill_dir)
-    manifest_path = os.path.join(skill_dir, "Manifest.json")
-    sig_path = os.path.join(skill_dir, ".skill.sig")
+    signing_dir = os.path.join(skill_dir, SIGNING_DIR)
+    manifest_path = os.path.join(signing_dir, "Manifest.json")
+    sig_path = os.path.join(signing_dir, ".skill.sig")
 
     if not os.path.exists(manifest_path):
         raise ErrManifestMissing(skill_name)

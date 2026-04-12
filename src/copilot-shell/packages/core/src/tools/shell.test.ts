@@ -64,6 +64,7 @@ describe('ShellTool', () => {
           .fn()
           .mockReturnValue('/test/dir/.copilot-shell/skills'),
       },
+      getResolvedCustomSkillPaths: vi.fn().mockReturnValue([]),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -155,7 +156,7 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
+        'Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.',
       );
     });
 
@@ -167,7 +168,7 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
+        'Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.',
       );
     });
 
@@ -179,7 +180,43 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
+        'Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.',
+      );
+    });
+
+    it('should throw an error for a directory within a custom skill path', () => {
+      (mockConfig.getResolvedCustomSkillPaths as Mock).mockReturnValue([
+        '/custom/skills',
+      ]);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        createMockWorkspaceContext('/test/dir', ['/custom/skills']),
+      );
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/custom/skills/my-skill',
+          is_background: false,
+        }),
+      ).toThrow(
+        'Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.',
+      );
+    });
+
+    it('should throw an error for the custom skill directory itself', () => {
+      (mockConfig.getResolvedCustomSkillPaths as Mock).mockReturnValue([
+        '/custom/skills',
+      ]);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        createMockWorkspaceContext('/test/dir', ['/custom/skills']),
+      );
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/custom/skills',
+          is_background: false,
+        }),
+      ).toThrow(
+        'Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.',
       );
     });
 

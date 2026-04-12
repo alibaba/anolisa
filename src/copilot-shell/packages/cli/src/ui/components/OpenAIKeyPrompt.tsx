@@ -23,6 +23,8 @@ export interface OpenAIProvider {
   defaultModel: string;
   /** URL to apply for an API key; empty string for custom */
   apiKeyUrl: string;
+  /** Optional sub-providers (e.g. regions). If present, selecting this provider shows a sub-menu. */
+  subProviders?: OpenAIProvider[];
 }
 
 export const OPENAI_PROVIDERS: OpenAIProvider[] = [
@@ -32,6 +34,37 @@ export const OPENAI_PROVIDERS: OpenAIProvider[] = [
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     defaultModel: 'qwen3-coder-plus',
     apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+    subProviders: [
+      {
+        id: 'dashscope',
+        name: 'China (Beijing)',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+      },
+      {
+        id: 'dashscope-sg',
+        name: 'Singapore',
+        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+      },
+      {
+        id: 'dashscope-us',
+        name: 'US (Virginia)',
+        baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+      },
+      {
+        id: 'dashscope-hk',
+        name: 'China (Hong Kong)',
+        baseUrl:
+          'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+      },
+    ],
   },
   {
     id: 'dashscope-coding-plan',
@@ -40,6 +73,24 @@ export const OPENAI_PROVIDERS: OpenAIProvider[] = [
     defaultModel: 'qwen3-coder-plus',
     apiKeyUrl:
       'https://bailian.console.aliyun.com/?tab=coding-plan#/efm/coding-plan-detail',
+    subProviders: [
+      {
+        id: 'dashscope-coding-plan',
+        name: 'China (Aliyun)',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl:
+          'https://bailian.console.aliyun.com/?tab=coding-plan#/efm/coding-plan-detail',
+      },
+      {
+        id: 'dashscope-coding-plan-intl',
+        name: 'International (Alibaba Cloud)',
+        baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+        defaultModel: 'qwen3-coder-plus',
+        apiKeyUrl:
+          'https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan',
+      },
+    ],
   },
   {
     id: 'deepseek',
@@ -87,6 +138,18 @@ interface OpenAIKeyPromptProps {
   defaultModel?: string;
 }
 
+/**
+ * Resolve the "effective" provider: if the top-level provider has subProviders,
+ * return the selected sub-provider; otherwise return the top-level provider itself.
+ */
+function getEffectiveProvider(pIdx: number, sIdx: number): OpenAIProvider {
+  const top = OPENAI_PROVIDERS[pIdx]!;
+  if (top.subProviders && top.subProviders.length > 0) {
+    return top.subProviders[sIdx] ?? top.subProviders[0]!;
+  }
+  return top;
+}
+
 export const credentialSchema = z.object({
   apiKey: z.string().min(1, 'API key is required'),
   baseUrl: z
@@ -107,7 +170,7 @@ function maskApiKey(key: string): string {
   return key.slice(0, 3) + '*'.repeat(key.length - 3);
 }
 
-type FieldName = 'provider' | 'apiKey' | 'baseUrl' | 'model';
+type FieldName = 'provider' | 'subProvider' | 'apiKey' | 'baseUrl' | 'model';
 
 export function OpenAIKeyPrompt({
   onSubmit,
@@ -116,38 +179,86 @@ export function OpenAIKeyPrompt({
   defaultBaseUrl,
   defaultModel,
 }: OpenAIKeyPromptProps): React.JSX.Element {
-  // Detect initial provider from defaultBaseUrl
-  const detectInitialProvider = (): number => {
-    if (!defaultBaseUrl) return 0; // custom
-    const idx = OPENAI_PROVIDERS.findIndex(
-      (p) => p.id !== 'custom' && p.baseUrl === defaultBaseUrl,
+  // Detect initial provider & subProvider indices from defaultBaseUrl
+  const detectInitialIndices = (): [number, number] => {
+    if (!defaultBaseUrl) return [0, 0];
+    // Top-level providers with subProviders are category entries only — never match them.
+    // First search leaf providers (no subProviders, e.g. DeepSeek / Kimi).
+    const topIdx = OPENAI_PROVIDERS.findIndex(
+      (p) =>
+        p.id !== 'custom' && !p.subProviders && p.baseUrl === defaultBaseUrl,
     );
-    return idx >= 0 ? idx : 0;
+    if (topIdx >= 0) return [topIdx, 0];
+    // Search subProviders
+    for (let pIdx = 0; pIdx < OPENAI_PROVIDERS.length; pIdx++) {
+      const subs = OPENAI_PROVIDERS[pIdx]!.subProviders;
+      if (!subs) continue;
+      const sIdx = subs.findIndex((s) => s.baseUrl === defaultBaseUrl);
+      if (sIdx >= 0) return [pIdx, sIdx];
+    }
+    return [0, 0];
   };
 
-  const [providerIndex, setProviderIndex] = useState(detectInitialProvider);
+  const [[providerIndex, subProviderIndex], setIndices] =
+    useState(detectInitialIndices);
+  // Remember the initially detected indices to restore defaultApiKey when user navigates back
+  const [initialIndices] = useState(detectInitialIndices);
   const [apiKey, setApiKey] = useState(defaultApiKey || '');
-  const initialProviderIndex = detectInitialProvider();
-  const initialProvider = OPENAI_PROVIDERS[initialProviderIndex];
+
+  const effectiveProvider = getEffectiveProvider(
+    providerIndex,
+    subProviderIndex,
+  );
+  const selectedTopProvider = OPENAI_PROVIDERS[providerIndex]!;
+  const hasSubProviders = Boolean(selectedTopProvider.subProviders?.length);
+
   const [baseUrl, setBaseUrl] = useState(
-    defaultBaseUrl || initialProvider?.baseUrl || '',
+    defaultBaseUrl || effectiveProvider.baseUrl || '',
   );
   const [model, setModel] = useState(
     defaultModel ||
-      (initialProvider?.id !== 'custom' ? initialProvider?.defaultModel : '') ||
+      (effectiveProvider.id !== 'custom'
+        ? effectiveProvider.defaultModel
+        : '') ||
       '',
   );
   const [currentField, setCurrentField] = useState<FieldName>('provider');
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  const selectedProvider = OPENAI_PROVIDERS[providerIndex];
-  const isCustom = selectedProvider?.id === 'custom';
+  const isCustom = effectiveProvider.id === 'custom';
+
+  const applyProvider = (pIdx: number, sIdx: number) => {
+    const p = getEffectiveProvider(pIdx, sIdx);
+    setBaseUrl(p.id !== 'custom' ? p.baseUrl : '');
+    setModel(p.id !== 'custom' ? p.defaultModel : '');
+  };
+
+  const handleProviderChange = (newIndex: number) => {
+    // Atomic update: both providerIndex and subProviderIndex in one setState call
+    setIndices([newIndex, 0]);
+    applyProvider(newIndex, 0);
+    // Restore defaultApiKey if navigating back to the original top-level provider
+    // (regardless of which sub-provider was originally selected), otherwise clear.
+    const [initP] = initialIndices;
+    setApiKey(newIndex === initP ? defaultApiKey || '' : '');
+  };
+
+  const handleSubProviderChange = (newIndex: number) => {
+    // Only update subProviderIndex; providerIndex stays the same
+    setIndices(([p]) => [p, newIndex]);
+    applyProvider(providerIndex, newIndex);
+    // Restore defaultApiKey if navigating back to the original sub-provider, otherwise clear
+    const [initP, initS] = initialIndices;
+    setApiKey(
+      providerIndex === initP && newIndex === initS ? defaultApiKey || '' : '',
+    );
+  };
 
   const validateAndSubmit = () => {
     setValidationError(null);
     const effectiveBaseUrl = isCustom
       ? baseUrl.trim()
-      : (selectedProvider?.baseUrl ?? '');
+      : (effectiveProvider.baseUrl ?? '');
     const effectiveModel = model.trim();
 
     try {
@@ -176,32 +287,31 @@ export function OpenAIKeyPrompt({
     }
   };
 
-  const handleProviderChange = (newIndex: number) => {
-    setProviderIndex(newIndex);
-    // Clear API ke and modely when switching providers
-    setApiKey('');
-    setModel('');
-    const p = OPENAI_PROVIDERS[newIndex];
-    if (p && p.id !== 'custom') {
-      setBaseUrl(p.baseUrl);
-      setModel(p.defaultModel);
-    } else {
-      setBaseUrl('');
-    }
-  };
-
   useKeypress(
     (key) => {
       // Handle escape or Ctrl+C
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-        onCancel();
+        if (currentField === 'subProvider') {
+          // 子菜单返回上级 provider 列表
+          setCurrentField('provider');
+        } else {
+          onCancel();
+        }
         return;
       }
 
       // Handle Enter key
       if (key.name === 'return') {
         if (currentField === 'provider') {
-          // Clear API key when entering from provider selection
+          if (hasSubProviders) {
+            // 进入子菜单
+            setCurrentField('subProvider');
+          } else {
+            setApiKey('');
+            setCurrentField('apiKey');
+          }
+          return;
+        } else if (currentField === 'subProvider') {
           setApiKey('');
           setCurrentField('apiKey');
           return;
@@ -212,11 +322,9 @@ export function OpenAIKeyPrompt({
           setCurrentField('model');
           return;
         } else if (currentField === 'model') {
-          // 只有在提交时才检查 API key 是否为空
           if (apiKey.trim()) {
             validateAndSubmit();
           } else {
-            // 如果 API key 为空，回到 API key 字段
             setCurrentField('apiKey');
           }
         }
@@ -226,7 +334,13 @@ export function OpenAIKeyPrompt({
       // Handle Tab key for field navigation
       if (key.name === 'tab') {
         if (currentField === 'provider') {
-          // Clear API key when leaving provider selection
+          if (hasSubProviders) {
+            setCurrentField('subProvider');
+          } else {
+            setApiKey('');
+            setCurrentField('apiKey');
+          }
+        } else if (currentField === 'subProvider') {
           setApiKey('');
           setCurrentField('apiKey');
         } else if (currentField === 'apiKey') {
@@ -246,8 +360,13 @@ export function OpenAIKeyPrompt({
             (providerIndex - 1 + OPENAI_PROVIDERS.length) %
             OPENAI_PROVIDERS.length;
           handleProviderChange(newIndex);
+        } else if (currentField === 'subProvider') {
+          const subs = selectedTopProvider.subProviders!;
+          handleSubProviderChange(
+            (subProviderIndex - 1 + subs.length) % subs.length,
+          );
         } else if (currentField === 'apiKey') {
-          setCurrentField('provider');
+          setCurrentField(hasSubProviders ? 'subProvider' : 'provider');
         } else if (currentField === 'baseUrl') {
           setCurrentField('apiKey');
         } else if (currentField === 'model') {
@@ -260,6 +379,9 @@ export function OpenAIKeyPrompt({
         if (currentField === 'provider') {
           const newIndex = (providerIndex + 1) % OPENAI_PROVIDERS.length;
           handleProviderChange(newIndex);
+        } else if (currentField === 'subProvider') {
+          const subs = selectedTopProvider.subProviders!;
+          handleSubProviderChange((subProviderIndex + 1) % subs.length);
         } else if (currentField === 'apiKey') {
           setCurrentField(isCustom ? 'baseUrl' : 'model');
         } else if (currentField === 'baseUrl') {
@@ -350,100 +472,223 @@ export function OpenAIKeyPrompt({
         </Box>
       )}
 
-      {/* Provider selector */}
-      <Box marginTop={1} flexDirection="column">
-        <Text
-          color={currentField === 'provider' ? Colors.AccentBlue : Colors.Gray}
-        >
-          {t('Provider:')}
-        </Text>
-        <Box marginLeft={2} flexDirection="column">
-          {OPENAI_PROVIDERS.map((provider, idx) => (
+      {/* 子菜单模式：当前 provider 有 subProviders 且已进入子菜单阶段（subProvider / apiKey / baseUrl / model）
+       * 始终显示 Select Region 列表 + 字段，不切回 Provider 列表 */}
+      {hasSubProviders && currentField !== 'provider' ? (
+        <>
+          <Box marginTop={1} flexDirection="column">
             <Text
-              key={provider.id}
-              color={idx === providerIndex ? Colors.AccentBlue : Colors.Gray}
+              color={
+                currentField === 'subProvider' ? Colors.AccentBlue : Colors.Gray
+              }
             >
-              {idx === providerIndex ? '● ' : '○ '}
-              {provider.name}
+              {t('Select Region:')}
             </Text>
-          ))}
-        </Box>
-      </Box>
+            <Box marginLeft={2} flexDirection="column">
+              {selectedTopProvider.subProviders!.map((sub, idx) => (
+                <Text
+                  key={sub.id}
+                  color={
+                    idx === subProviderIndex ? Colors.AccentBlue : Colors.Gray
+                  }
+                >
+                  {idx === subProviderIndex ? '● ' : '○ '}
+                  {sub.name}
+                </Text>
+              ))}
+            </Box>
+          </Box>
 
-      {/* API key URL hint for preset providers */}
-      {selectedProvider && !isCustom && (
-        <Box marginTop={1} flexDirection="row">
-          <Text color={Colors.Gray}>{t('Get API key from: ')}</Text>
-          <Text color={Colors.AccentBlue}>{selectedProvider.apiKeyUrl}</Text>
-        </Box>
-      )}
-
-      {/* API Key field */}
-      <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
-          <Text
-            color={currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray}
-          >
-            {t('API Key:')}
-          </Text>
-        </Box>
-        <Box flexGrow={1}>
-          <Text>
-            {currentField === 'apiKey' ? '> ' : '  '}
-            {maskApiKey(apiKey) || ' '}
-          </Text>
-        </Box>
-      </Box>
-
-      {/* Base URL: editable for custom, read-only for presets */}
-      <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
-          <Text
-            color={
-              currentField === 'baseUrl' && isCustom
-                ? Colors.AccentBlue
-                : Colors.Gray
-            }
-          >
-            {t('Base URL:')}
-          </Text>
-        </Box>
-        <Box flexGrow={1}>
-          {isCustom ? (
-            <Text>
-              {currentField === 'baseUrl' ? '> ' : '  '}
-              {baseUrl}
-            </Text>
-          ) : (
-            <Text color={Colors.Gray}>
-              {'  '}
-              {selectedProvider?.baseUrl}
-            </Text>
+          {/* API key URL hint */}
+          {!isCustom && (
+            <Box marginTop={1} flexDirection="row">
+              <Text color={Colors.Gray}>{t('Get API key from: ')}</Text>
+              <Text color={Colors.AccentBlue}>
+                {effectiveProvider.apiKeyUrl}
+              </Text>
+            </Box>
           )}
-        </Box>
-      </Box>
 
-      {/* Model field */}
-      <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
-          <Text
-            color={currentField === 'model' ? Colors.AccentBlue : Colors.Gray}
-          >
-            {t('Model:')}
-          </Text>
-        </Box>
-        <Box flexGrow={1}>
-          <Text>
-            {currentField === 'model' ? '> ' : '  '}
-            {model}
-          </Text>
-        </Box>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={Colors.Gray}>
-          {t('↑↓ select provider · Enter/Tab navigate fields · Esc cancel')}
-        </Text>
-      </Box>
+          {/* API Key field */}
+          <Box marginTop={1} flexDirection="row">
+            <Box width={12}>
+              <Text
+                color={
+                  currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray
+                }
+              >
+                {t('API Key:')}
+              </Text>
+            </Box>
+            <Box flexGrow={1}>
+              <Text>
+                {currentField === 'apiKey' ? '> ' : '  '}
+                {maskApiKey(apiKey) || ' '}
+              </Text>
+            </Box>
+          </Box>
+
+          {/* Base URL - read-only for presets */}
+          <Box marginTop={1} flexDirection="row">
+            <Box width={12}>
+              <Text color={Colors.Gray}>{t('Base URL:')}</Text>
+            </Box>
+            <Box flexGrow={1}>
+              <Text color={Colors.Gray}>
+                {'  '}
+                {effectiveProvider.baseUrl}
+              </Text>
+            </Box>
+          </Box>
+
+          {/* Model */}
+          <Box marginTop={1} flexDirection="row">
+            <Box width={12}>
+              <Text
+                color={
+                  currentField === 'model' ? Colors.AccentBlue : Colors.Gray
+                }
+              >
+                {t('Model:')}
+              </Text>
+            </Box>
+            <Box flexGrow={1}>
+              <Text>
+                {currentField === 'model' ? '> ' : '  '}
+                {model}
+              </Text>
+            </Box>
+          </Box>
+
+          <Box marginTop={1}>
+            <Text color={Colors.Gray}>
+              {currentField === 'subProvider'
+                ? t('↑↓ select region · Enter confirm · Esc back')
+                : t('↑↓ select field · Enter/Tab navigate · Esc back')}
+            </Text>
+          </Box>
+        </>
+      ) : (
+        <>
+          {/* Provider selector */}
+          <Box marginTop={1} flexDirection="column">
+            <Text
+              color={
+                currentField === 'provider' ? Colors.AccentBlue : Colors.Gray
+              }
+            >
+              {t('Provider:')}
+            </Text>
+            <Box marginLeft={2} flexDirection="column">
+              {OPENAI_PROVIDERS.map((provider, idx) => (
+                <Text
+                  key={provider.id}
+                  color={
+                    idx === providerIndex ? Colors.AccentBlue : Colors.Gray
+                  }
+                >
+                  {idx === providerIndex ? '● ' : '○ '}
+                  {provider.name}
+                  {provider.subProviders ? ' ›' : ''}
+                </Text>
+              ))}
+            </Box>
+          </Box>
+
+          {/* provider 阶段显示规则：
+           *   - 无 subProviders（如DeepSeek）：始终显示
+           *   - 有 subProviders + 有 apiKey：显示（已配置状态，场景C/F）
+           *   - 有 subProviders + 无 apiKey：隐藏（新配置，等选完region再显示，场景A/E）
+           *   - 非 provider 阶段：始终显示
+           */}
+          {(currentField !== 'provider' || apiKey || !hasSubProviders) && (
+            <>
+              {/* API key URL hint for preset providers */}
+              {!isCustom && (
+                <Box marginTop={1} flexDirection="row">
+                  <Text color={Colors.Gray}>{t('Get API key from: ')}</Text>
+                  <Text color={Colors.AccentBlue}>
+                    {effectiveProvider.apiKeyUrl}
+                  </Text>
+                </Box>
+              )}
+
+              {/* API Key field */}
+              <Box marginTop={1} flexDirection="row">
+                <Box width={12}>
+                  <Text
+                    color={
+                      currentField === 'apiKey'
+                        ? Colors.AccentBlue
+                        : Colors.Gray
+                    }
+                  >
+                    {t('API Key:')}
+                  </Text>
+                </Box>
+                <Box flexGrow={1}>
+                  <Text>
+                    {currentField === 'apiKey' ? '> ' : '  '}
+                    {maskApiKey(apiKey) || ' '}
+                  </Text>
+                </Box>
+              </Box>
+
+              {/* Base URL: editable for custom, read-only for presets */}
+              <Box marginTop={1} flexDirection="row">
+                <Box width={12}>
+                  <Text
+                    color={
+                      currentField === 'baseUrl' && isCustom
+                        ? Colors.AccentBlue
+                        : Colors.Gray
+                    }
+                  >
+                    {t('Base URL:')}
+                  </Text>
+                </Box>
+                <Box flexGrow={1}>
+                  {isCustom ? (
+                    <Text>
+                      {currentField === 'baseUrl' ? '> ' : '  '}
+                      {baseUrl}
+                    </Text>
+                  ) : (
+                    <Text color={Colors.Gray}>
+                      {'  '}
+                      {effectiveProvider.baseUrl}
+                    </Text>
+                  )}
+                </Box>
+              </Box>
+
+              {/* Model field */}
+              <Box marginTop={1} flexDirection="row">
+                <Box width={12}>
+                  <Text
+                    color={
+                      currentField === 'model' ? Colors.AccentBlue : Colors.Gray
+                    }
+                  >
+                    {t('Model:')}
+                  </Text>
+                </Box>
+                <Box flexGrow={1}>
+                  <Text>
+                    {currentField === 'model' ? '> ' : '  '}
+                    {model}
+                  </Text>
+                </Box>
+              </Box>
+            </>
+          )}
+          <Box marginTop={1}>
+            <Text color={Colors.Gray}>
+              {t('↑↓ select provider · Enter/Tab navigate fields · Esc cancel')}
+            </Text>
+          </Box>
+        </>
+      )}
     </Box>
   );
 }

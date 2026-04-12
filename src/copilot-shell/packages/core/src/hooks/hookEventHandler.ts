@@ -16,8 +16,29 @@ import type {
   UserPromptSubmitInput,
   StopInput,
   PreToolUseInput,
+  PostToolUseFailureInput,
+  PostToolUseInput,
+  NotificationInput,
+  SessionStartInput,
+  SessionEndInput,
+  PreCompactInput,
+  BeforeModelInput,
+  AfterModelInput,
+  BeforeToolSelectionInput,
+  McpToolContext,
+} from './types.js';
+import type {
+  NotificationType,
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { defaultHookTranslator } from './hookTranslator.js';
+import type {
+  GenerateContentParameters,
+  GenerateContentResponse,
+} from '@google/genai';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -65,13 +86,20 @@ export class HookEventHandler {
     toolName: string,
     toolInput: Record<string, unknown>,
   ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.firePreToolUseEvent: tool=${toolName}`,
+    );
     const input: PreToolUseInput = {
       ...this.createBaseInput(HookEventName.PreToolUse),
       tool_name: toolName,
       tool_input: toolInput,
     };
 
-    return this.executeHooks(HookEventName.PreToolUse, input);
+    const result = await this.executeHooks(HookEventName.PreToolUse, input);
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.firePreToolUseEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
   }
 
   /**
@@ -89,6 +117,240 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input);
+  }
+
+  /**
+   * Fire a PostToolUseFailure event
+   * Called after a tool execution fails, allowing hooks to react and request bypasses
+   */
+  async firePostToolUseFailureEvent(
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    error: string,
+    errorType?: string,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseFailureInput = {
+      ...this.createBaseInput(HookEventName.PostToolUseFailure),
+      tool_use_id: toolUseId,
+      tool_name: toolName,
+      tool_input: toolInput,
+      error,
+      error_type: errorType,
+    };
+
+    return this.executeHooks(HookEventName.PostToolUseFailure, input);
+  }
+
+  /**
+   * Fire a PostToolUse event
+   * Called after a tool executes successfully, for result auditing, context injection,
+   * or hiding sensitive output from the agent
+   */
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    mcpContext?: McpToolContext,
+    originalRequestName?: string,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.firePostToolUseEvent: tool=${toolName}`,
+    );
+    const input: PostToolUseInput = {
+      ...this.createBaseInput(HookEventName.PostToolUse),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_response: toolResponse,
+      ...(mcpContext && { mcp_context: mcpContext }),
+      ...(originalRequestName && {
+        original_request_name: originalRequestName,
+      }),
+    };
+
+    const context: HookEventContext = { toolName };
+    const result = await this.executeHooks(
+      HookEventName.PostToolUse,
+      input,
+      context,
+    );
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.firePostToolUseEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  /**
+   * Fire a Notification event
+   * Fires when the CLI emits a system alert (e.g., Tool Permissions).
+   * Observability only - cannot block alerts or grant permissions automatically.
+   */
+  async fireNotificationEvent(
+    type: NotificationType,
+    message: string,
+    details: Record<string, unknown>,
+  ): Promise<AggregatedHookResult> {
+    const input: NotificationInput = {
+      ...this.createBaseInput(HookEventName.Notification),
+      notification_type: type,
+      message,
+      details,
+    };
+
+    return this.executeHooks(HookEventName.Notification, input);
+  }
+
+  /**
+   * Fire a SessionStart event
+   * Fires on application startup, resuming a session, or after a /clear command.
+   * Advisory only - continue and decision fields are ignored.
+   */
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireSessionStartEvent: source=${source}`,
+    );
+    const input: SessionStartInput = {
+      ...this.createBaseInput(HookEventName.SessionStart),
+      source,
+    };
+
+    const context: HookEventContext = { trigger: source };
+    const result = await this.executeHooks(
+      HookEventName.SessionStart,
+      input,
+      context,
+    );
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireSessionStartEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  /**
+   * Fire a SessionEnd event
+   * Fires when the CLI exits or a session is cleared.
+   * Best effort - the CLI will not wait for this hook to complete.
+   */
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireSessionEndEvent: reason=${reason}`,
+    );
+    const input: SessionEndInput = {
+      ...this.createBaseInput(HookEventName.SessionEnd),
+      reason,
+    };
+
+    const context: HookEventContext = { trigger: reason };
+    const result = await this.executeHooks(
+      HookEventName.SessionEnd,
+      input,
+      context,
+    );
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireSessionEndEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  /**
+   * Fire a PreCompact event
+   * Fires before the CLI summarizes history to save tokens.
+   * Advisory only - cannot block or modify the compression process.
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+  ): Promise<AggregatedHookResult> {
+    const input: PreCompactInput = {
+      ...this.createBaseInput(HookEventName.PreCompact),
+      trigger,
+    };
+
+    const context: HookEventContext = { trigger };
+    return this.executeHooks(HookEventName.PreCompact, input, context);
+  }
+
+  /**
+   * Fire a BeforeModel event
+   * Called before sending a request to the LLM.
+   * Can modify the request, provide a synthetic response, or block the call.
+   */
+  async fireBeforeModelEvent(
+    llmRequest: GenerateContentParameters,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      '[Hook Debug] hookEventHandler.fireBeforeModelEvent: translating SDK request to hook format',
+    );
+    const input: BeforeModelInput = {
+      ...this.createBaseInput(HookEventName.BeforeModel),
+      llm_request: defaultHookTranslator.toHookLLMRequest(llmRequest),
+    };
+    debugLogger.debug(
+      `[Hook Debug] hookEventHandler.fireBeforeModelEvent: input.llm_request.model=${input.llm_request.model}`,
+    );
+
+    const result = await this.executeHooks(HookEventName.BeforeModel, input);
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireBeforeModelEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  /**
+   * Fire an AfterModel event
+   * Called after receiving a response from the LLM.
+   * Can modify the response, stop execution, or observe for logging.
+   */
+  async fireAfterModelEvent(
+    llmRequest: GenerateContentParameters,
+    llmResponse: GenerateContentResponse,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      '[Hook Debug] hookEventHandler.fireAfterModelEvent: translating SDK request/response to hook format',
+    );
+    const input: AfterModelInput = {
+      ...this.createBaseInput(HookEventName.AfterModel),
+      llm_request: defaultHookTranslator.toHookLLMRequest(llmRequest),
+      llm_response: defaultHookTranslator.toHookLLMResponse(llmResponse),
+    };
+    debugLogger.debug(
+      `[Hook Debug] hookEventHandler.fireAfterModelEvent: response.text.length=${input.llm_response.text?.length ?? 0}`,
+    );
+
+    const result = await this.executeHooks(HookEventName.AfterModel, input);
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireAfterModelEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  /**
+   * Fire a BeforeToolSelection event
+   * Called before selecting tools for the LLM request.
+   * Can modify tool configuration (mode, allowed function names).
+   */
+  async fireBeforeToolSelectionEvent(
+    llmRequest: GenerateContentParameters,
+  ): Promise<AggregatedHookResult> {
+    debugLogger.info(
+      '[Hook Debug] hookEventHandler.fireBeforeToolSelectionEvent: translating SDK request to hook format',
+    );
+    const input: BeforeToolSelectionInput = {
+      ...this.createBaseInput(HookEventName.BeforeToolSelection),
+      llm_request: defaultHookTranslator.toHookLLMRequest(llmRequest),
+    };
+
+    const result = await this.executeHooks(
+      HookEventName.BeforeToolSelection,
+      input,
+    );
+    debugLogger.info(
+      `[Hook Debug] hookEventHandler.fireBeforeToolSelectionEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
+    );
+    return result;
   }
 
   /**

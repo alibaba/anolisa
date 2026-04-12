@@ -107,7 +107,7 @@ export class SkillManager {
 
     const levelsToCheck: SkillLevel[] = options.level
       ? [options.level]
-      : ['project', 'user', 'extension', 'system'];
+      : ['project', 'custom', 'user', 'extension', 'system'];
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
@@ -189,10 +189,16 @@ export class SkillManager {
       return this.findSkillByNameAtLevel(name, level);
     }
 
-    // Try project level first
+    // Try project level first (highest priority)
     const projectSkill = await this.findSkillByNameAtLevel(name, 'project');
     if (projectSkill) {
       return projectSkill;
+    }
+
+    // Try custom level (user-defined paths from settings)
+    const customSkill = await this.findSkillByNameAtLevel(name, 'custom');
+    if (customSkill) {
+      return customSkill;
     }
 
     // Try user level
@@ -295,7 +301,13 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension', 'system'];
+    const levels: SkillLevel[] = [
+      'project',
+      'custom',
+      'user',
+      'extension',
+      'system',
+    ];
 
     for (const level of levels) {
       const levelSkills = await this.listSkillsAtLevel(level);
@@ -471,6 +483,12 @@ export class SkillManager {
       return Storage.getSystemSkillsDir();
     }
 
+    // Custom level: return first custom dir, or empty string
+    if (level === 'custom') {
+      const customDirs = this.config.getResolvedCustomSkillPaths();
+      return customDirs[0] ?? '';
+    }
+
     const baseDir =
       level === 'project'
         ? path.join(
@@ -498,6 +516,17 @@ export class SkillManager {
     // return empty array to avoid conflicts between project and global skills
     if (level === 'project' && isHomeDirectory) {
       return [];
+    }
+
+    // Custom level: scan all user-defined custom directories
+    if (level === 'custom') {
+      const customDirs = this.config.getResolvedCustomSkillPaths();
+      const allSkills: SkillConfig[] = [];
+      for (const dir of customDirs) {
+        const skills = await this.loadSkillsFromDir(dir, 'custom');
+        allSkills.push(...skills);
+      }
+      return allSkills;
     }
 
     if (level === 'extension') {
@@ -597,6 +626,13 @@ export class SkillManager {
         .map((level) => this.getSkillsBaseDir(level))
         .filter((baseDir) => fsSync.existsSync(baseDir)),
     );
+
+    // Also watch custom skill directories
+    for (const dir of this.config.getResolvedCustomSkillPaths()) {
+      if (fsSync.existsSync(dir)) {
+        watchTargets.add(dir);
+      }
+    }
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {

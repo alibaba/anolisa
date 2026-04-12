@@ -83,7 +83,7 @@ install: dist/package.json
 	install -m 644 dist/LICENSE "$(DESTDIR)$(DOCDIR)/LICENSE"
 	# -- executables --
 	install -d "$(DESTDIR)$(BINDIR)"
-	sed 's|@@LIBDIR@@|$(LIBDIR)|g' scripts/cosh-wrapper.sh > "$(DESTDIR)$(BINDIR)/cosh"
+	sed 's|@@LIBDIR@@|$(LIBDIR)|g; s|@@DATADIR@@|$(DATADIR)|g' scripts/cosh-wrapper.sh > "$(DESTDIR)$(BINDIR)/cosh"
 	chmod 755 "$(DESTDIR)$(BINDIR)/cosh"
 	ln -sf cosh "$(DESTDIR)$(BINDIR)/co"
 	ln -sf cosh "$(DESTDIR)$(BINDIR)/copilot"

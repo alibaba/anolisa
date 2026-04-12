@@ -326,6 +326,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      hideFeatureTipBanner: {
+        type: 'boolean',
+        label: 'Hide Feature Tip Banner',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide the one-time feature tip banner shown on first launch',
+        showInDialog: true,
+      },
       showLineNumbers: {
         type: 'boolean',
         label: 'Show Line Numbers in Code',
@@ -1066,8 +1076,7 @@ const SETTINGS_SCHEMA = {
             category: 'Security',
             requiresRestart: true,
             default: undefined as string | undefined,
-            description:
-              'Last used model name for Aliyun AK/SK authentication.',
+            description: 'Last used model name for Aliyun authentication.',
             showInDialog: false,
           },
         },
@@ -1201,6 +1210,27 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Base URL of the remote Skill-OS API. When set, remote skills will be enabled automatically.',
+        showInDialog: false,
+      },
+    },
+  },
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Skills',
+    requiresRestart: true,
+    default: {},
+    description: 'Configuration for skill discovery and custom skill paths.',
+    showInDialog: false,
+    properties: {
+      customPaths: {
+        type: 'array',
+        label: 'Custom Skill Paths',
+        category: 'Skills',
+        requiresRestart: true,
+        default: [] as string[],
+        description:
+          'Additional directories to scan for skills. Supports ~ (home directory), $VAR and ${VAR} environment variable expansion. Each path should point to a directory containing skill subdirectories with SKILL.md files.',
         showInDialog: false,
       },
     },

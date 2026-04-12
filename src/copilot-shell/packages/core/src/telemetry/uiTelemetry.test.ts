@@ -142,6 +142,10 @@ describe('UiTelemetryService', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });
@@ -761,6 +765,166 @@ describe('UiTelemetryService', () => {
       const metrics = service.getMetrics();
       expect(metrics.files.totalLinesAdded).toBe(0);
       expect(metrics.files.totalLinesRemoved).toBe(0);
+    });
+  });
+
+  describe('Sandbox Tracking', () => {
+    it('should increment sandbox.totalRuns when command contains linux-sandbox', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'run_shell_command',
+        true,
+        100,
+      );
+      const event = {
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: {
+          command:
+            '/usr/local/bin/linux-sandbox --sandbox-policy-cwd "/tmp" -- bash -c \'rm -rf /tmp/test\'',
+        },
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+      service.addEvent(event);
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalRuns).toBe(1);
+      expect(metrics.sandbox.totalBlocked).toBe(0);
+    });
+
+    it('should increment sandbox.totalBlocked when error contains sandbox-guard', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'run_shell_command',
+        false,
+        50,
+      );
+      const event = {
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: { command: 'shutdown' },
+        error:
+          'PreToolUse hook blocked execution: \ud83d\udeab 安全策略已阻止执行 (检测到: shutdown 关机命令)。' +
+          '此类命令不允许执行。\n\ud83d\udca1 如确认当前命令无风险，可在聊天框输入 `/hooks disable sandbox-guard` 临时关闭沙箱防护',
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+      service.addEvent(event);
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalRuns).toBe(0);
+      expect(metrics.sandbox.totalBlocked).toBe(1);
+    });
+
+    it('should not increment sandbox.totalBlocked for non-sandbox-guard hook blocks', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'run_shell_command',
+        false,
+        50,
+      );
+      const event = {
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: { command: 'some-command' },
+        error: 'PreToolUse hook blocked execution: blocked by other-hook',
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+      service.addEvent(event);
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalBlocked).toBe(0);
+    });
+
+    it('should not increment sandbox.totalBlocked for non-hook errors mentioning sandbox-guard', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'run_shell_command',
+        false,
+        50,
+      );
+      const event = {
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: { command: 'cat sandbox-guard.py' },
+        error: 'Some other error related to sandbox-guard',
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+      service.addEvent(event);
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalBlocked).toBe(0);
+    });
+
+    it('should not increment sandbox counters for normal shell commands', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'run_shell_command',
+        true,
+        80,
+      );
+      const event = {
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: { command: 'ls -la' },
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+      service.addEvent(event);
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalRuns).toBe(0);
+      expect(metrics.sandbox.totalBlocked).toBe(0);
+    });
+
+    it('should not increment sandbox counters for non-shell tools', () => {
+      const toolCall = createFakeCompletedToolCall('read_file', true, 50);
+      service.addEvent({
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalRuns).toBe(0);
+      expect(metrics.sandbox.totalBlocked).toBe(0);
+    });
+
+    it('should aggregate multiple sandbox events', () => {
+      // Two sandbox runs
+      for (let i = 0; i < 2; i++) {
+        const toolCall = createFakeCompletedToolCall(
+          'run_shell_command',
+          true,
+          100,
+        );
+        service.addEvent({
+          ...structuredClone(new ToolCallEvent(toolCall)),
+          'event.name': EVENT_TOOL_CALL,
+          function_name: 'run_shell_command',
+          function_args: {
+            command:
+              "/usr/local/bin/linux-sandbox -- bash -c 'curl example.com'",
+          },
+        } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+      }
+
+      // One sandbox block
+      const blocked = createFakeCompletedToolCall(
+        'run_shell_command',
+        false,
+        50,
+      );
+      service.addEvent({
+        ...structuredClone(new ToolCallEvent(blocked)),
+        'event.name': EVENT_TOOL_CALL,
+        function_name: 'run_shell_command',
+        function_args: { command: 'reboot' },
+        error:
+          'PreToolUse hook blocked execution: 🚫 安全策略已阻止执行 (检测到: reboot 重启命令)。' +
+          '此类命令不允许执行。\n💡 如确认当前命令无风险，可在聊天框输入 `/hooks disable sandbox-guard` 临时关闭沙箱防护',
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const metrics = service.getMetrics();
+      expect(metrics.sandbox.totalRuns).toBe(2);
+      expect(metrics.sandbox.totalBlocked).toBe(1);
     });
   });
 });

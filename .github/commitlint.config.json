@@ -1,8 +1,30 @@
 {
-  "extends": ["@commitlint/config-conventional"],
+  "extends": [
+    "@commitlint/config-conventional"
+  ],
   "rules": {
-    "scope-enum": [2, "always", ["cosh", "agent-sec-core", "os-skills", "agentsight", "deps", "ci", "docs"]],
-    "scope-empty": [2, "never"],
-    "header-max-length": [2, "always", 120]
+    "scope-enum": [
+      1,
+      "always",
+      [
+        "cosh",
+        "sec-core",
+        "skill",
+        "sight",
+        "deps",
+        "ci",
+        "docs",
+        "chore"
+      ]
+    ],
+    "scope-empty": [
+      2,
+      "never"
+    ],
+    "header-max-length": [
+      2,
+      "always",
+      120
+    ]
   }
 }

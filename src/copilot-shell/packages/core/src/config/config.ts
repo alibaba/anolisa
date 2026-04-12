@@ -98,6 +98,7 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { setDebugLogSession } from '../utils/debugLogger.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -382,6 +383,8 @@ export interface ConfigParameters {
     /** Base URL of the remote Skill-OS API. When set, remote skills will be enabled. */
     baseUrl?: string;
   };
+  /** User-defined custom skill directory paths (supports ~, $VAR, ${VAR} expansion) */
+  customSkillPaths?: string[];
 }
 
 function normalizeConfigOutputFormat(
@@ -524,6 +527,7 @@ export class Config {
   private readonly skillOSConfig?: {
     baseUrl?: string;
   };
+  private readonly customSkillPaths: string[];
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -643,6 +647,7 @@ export class Config {
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.skillOSConfig = params.skillOS;
+    this.customSkillPaths = params.customSkillPaths ?? [];
     this.enableHooks = params.enableHooks ?? false;
     this.hooks = params.hooks;
     this.hooksConfig = params.hooksConfig;
@@ -699,6 +704,9 @@ export class Config {
       throw Error('Config was already initialized');
     }
     this.initialized = true;
+
+    // Activate debug log session so all debugLogger.*() calls write to file
+    setDebugLogSession({ getSessionId: () => this.sessionId });
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -908,6 +916,8 @@ export class Config {
    * Releases resources owned by the config instance.
    */
   async shutdown(): Promise<void> {
+    // Fire SessionEnd hook before releasing resources
+    await this.geminiClient?.shutdown();
     this.skillManager?.stopWatching();
   }
 
@@ -925,6 +935,8 @@ export class Config {
       : undefined;
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
+      // Update debug log latest symlink to point to the new session
+      setDebugLogSession({ getSessionId: () => this.sessionId });
     }
     return this.sessionId;
   }
@@ -1829,6 +1841,20 @@ export class Config {
   // ============================================================================
   // Skill-OS Configuration
   // ============================================================================
+
+  /**
+   * 获取用户自定义技能路径（原始值，未展开）。
+   */
+  getCustomSkillPaths(): string[] {
+    return this.customSkillPaths;
+  }
+
+  /**
+   * 获取用户自定义技能路径（已展开 ~, $VAR, ${VAR} 并解析为绝对路径）。
+   */
+  getResolvedCustomSkillPaths(): string[] {
+    return this.storage.resolveCustomSkillPaths(this.customSkillPaths);
+  }
 
   /**
    * 获取 Skill-OS URL.

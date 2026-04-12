@@ -85,6 +85,14 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
     return false;
   }
 
+  // Compare sandbox
+  if (
+    a.sandbox.totalRuns !== b.sandbox.totalRuns ||
+    a.sandbox.totalBlocked !== b.sandbox.totalBlocked
+  ) {
+    return false;
+  }
+
   // Compare tools
   const toolsA = a.tools;
   const toolsB = b.tools;

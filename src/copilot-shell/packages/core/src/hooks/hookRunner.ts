@@ -222,8 +222,9 @@ export class HookRunner {
 
       const env = {
         ...process.env,
-        GEMINI_PROJECT_DIR: input.cwd,
-        CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
+        COPILOT_SHELL_PROJECT_DIR: input.cwd,
+        GEMINI_PROJECT_DIR: input.cwd, // For Gemini CLI compatibility
+        CLAUDE_PROJECT_DIR: input.cwd, // For Claude Code compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
         ...hookConfig.env,
       };
@@ -304,6 +305,14 @@ export class HookRunner {
       child.on('close', (exitCode) => {
         clearTimeout(timeoutHandle);
         const duration = Date.now() - startTime;
+
+        // Forward hook stderr to terminal for visibility
+        if (stderr.trim()) {
+          const hookId = hookConfig.name || hookConfig.command || 'unknown';
+          debugLogger.info(
+            `[Hook Debug] hookRunner: hook '${hookId}' stderr:\n${stderr.trim()}`,
+          );
+        }
 
         if (timedOut) {
           resolve({
@@ -393,8 +402,10 @@ export class HookRunner {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$COPILOT_SHELL_PROJECT_DIR/g, () => escapedCwd)
+      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd) // For Gemini CLI compatibility
+      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd) // For Claude Code compatibility
+      .replace(/\$QWEN_PROJECT_DIR/g, () => escapedCwd); // For Qwen Code compatibility
   }
 
   /**

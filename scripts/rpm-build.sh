@@ -38,6 +38,21 @@ err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 ok()   { echo -e "${GREEN}[OK]${NC} $*" >&2; }
 
 # -----------------------------------------------------------------------------
+# Install a package using the available package manager
+# -----------------------------------------------------------------------------
+install_package() {
+    local pkg="$1"
+    if command -v dnf &>/dev/null; then
+        dnf install -y "$pkg"
+    elif command -v yum &>/dev/null; then
+        yum install -y "$pkg"
+    else
+        err "No supported package manager found (dnf/yum)"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Setup rpmbuild directory tree under scripts/rpmbuild/
 # -----------------------------------------------------------------------------
 setup_rpmbuild() {
@@ -287,6 +302,10 @@ build_agentsight() {
     local tarball_name="${pkg_name}-${pkg_version}.tar.gz"
 
     log "Step 1/3: Building agentsight..."
+    if ! command -v clang &>/dev/null; then
+        log "clang not found, installing..."
+        install_package clang || { err "Failed to install clang"; return 1; }
+    fi
     (
         cd "$SIGHT_DIR"
         cargo build --release

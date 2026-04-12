@@ -147,9 +147,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const headers = provider.buildHeaders();
 
       expect(headers).toEqual({
-        'User-Agent': `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`,
+        'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
         'X-DashScope-CacheControl': 'enable',
-        'X-DashScope-UserAgent': `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`,
+        'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
         'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
       });
     });
@@ -168,8 +168,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const headers = providerWithCustomHeaders.buildHeaders();
 
-      expect(headers['User-Agent']).toContain('CopilotShell/1.0.0');
-      expect(headers['X-DashScope-UserAgent']).toContain('CopilotShell/1.0.0');
+      expect(headers['User-Agent']).toContain('QwenCode/1.0.0');
+      expect(headers['X-DashScope-UserAgent']).toContain('QwenCode/1.0.0');
       expect(headers['X-DashScope-AuthType']).toBe(AuthType.QWEN_OAUTH);
       expect(headers['X-Custom']).toBe('1');
       expect(headers['X-DashScope-CacheControl']).toBe('disable');
@@ -185,10 +185,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const headers = provider.buildHeaders();
 
       expect(headers['User-Agent']).toBe(
-        `CopilotShell/unknown (${process.platform}; ${process.arch})`,
+        `QwenCode/unknown (${process.platform}; ${process.arch})`,
       );
       expect(headers['X-DashScope-UserAgent']).toBe(
-        `CopilotShell/unknown (${process.platform}; ${process.arch})`,
+        `QwenCode/unknown (${process.platform}; ${process.arch})`,
       );
     });
   });
@@ -204,9 +204,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           timeout: 60000,
           maxRetries: 2,
           defaultHeaders: {
-            'User-Agent': `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`,
+            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-CacheControl': 'enable',
-            'X-DashScope-UserAgent': `CopilotShell/1.0.0 (${process.platform}; ${process.arch})`,
+            'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
           },
         }),

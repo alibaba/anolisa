@@ -49,8 +49,27 @@ export * from './qwen/qwenOAuth2.js';
 
 // Aliyun provider
 export * from './aliyun/aliyunCredentials.js';
+export {
+  ECS_RAM_ROLE_NAME,
+  type STSCredentials,
+  AliyunAuthMethod,
+  getECSInstanceId,
+  getECSRegionId,
+  generateConsoleUrl,
+  pollForECSRamRoleAuthorization,
+  getECSRamRoleCredentials,
+  getValidSTSCredentials,
+  isSTSCredentialsExpired,
+  isRunningOnECS,
+} from './aliyun/aliyunAuthService.js';
 
 // Export utilities
+export {
+  redactSecrets,
+  redactPartListUnion,
+  redactAnsiOutput,
+  containsSecrets,
+} from './utils/secretRedactor.js';
 export * from './utils/paths.js';
 export { migrateConfigDirIfNeeded } from './utils/configDirMigration.js';
 export * from './utils/schemaValidator.js';
@@ -64,6 +83,7 @@ export * from './utils/quotaErrorDetection.js';
 export * from './utils/fileUtils.js';
 export * from './utils/retry.js';
 export * from './utils/shell-utils.js';
+export { shouldLaunchBrowser } from './utils/secure-browser-launcher.js';
 export * from './utils/tool-utils.js';
 export * from './utils/terminalSerializer.js';
 export * from './utils/systemEncoding.js';
@@ -85,6 +105,13 @@ export * from './utils/yaml-parser.js';
 
 // Config resolution utilities
 export * from './utils/configResolver.js';
+
+// Credential encryption (AES-256-GCM)
+export {
+  encryptCredential,
+  decryptCredential,
+  isEncryptedCredential,
+} from './utils/credential-encryptor.js';
 
 // Export services
 export * from './services/fileDiscoveryService.js';

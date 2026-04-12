@@ -252,11 +252,66 @@ export class ContentGenerationPipeline {
       baseRequest.stream_options = { include_usage: true };
     }
 
-    // Add tools if present
+    // Add tools if present, respecting functionCallingConfig mode and allowedFunctionNames
     if (request.config?.tools) {
-      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
-        request.config.tools,
-      );
+      const rawConfig = request.config as Record<string, unknown>;
+      const functionCallingConfig = rawConfig?.['functionCallingConfig'] as
+        | Record<string, unknown>
+        | undefined;
+      const callingMode = functionCallingConfig?.['mode'] as string | undefined;
+      const allowedFunctionNames = functionCallingConfig?.[
+        'allowedFunctionNames'
+      ] as string[] | undefined;
+
+      // mode=NONE means BeforeToolSelection hook disabled all tools entirely.
+      // OpenAI API has no native mode concept, so we simply omit tools from the request.
+      if (callingMode === 'NONE') {
+        // Do not set baseRequest.tools — omitting tools disables function calling.
+      } else {
+        let toolsToUse = request.config.tools;
+
+        // Apply allowedFunctionNames filter if specified (BeforeToolSelection hook support)
+        if (allowedFunctionNames && allowedFunctionNames.length > 0) {
+          const allowedSet = new Set(allowedFunctionNames);
+          // Filter function declarations WITHIN each tool object, not whole tool objects.
+          // All function declarations may be grouped in a single Tool, so we must
+          // produce a new Tool with only the allowed declarations.
+          toolsToUse = (request.config.tools as unknown[]).reduce(
+            (acc: unknown[], tool: unknown) => {
+              if (!tool || typeof tool !== 'object') return acc;
+              const t = tool as Record<string, unknown>;
+              const decls = t['functionDeclarations'];
+              if (Array.isArray(decls)) {
+                const filteredDecls = decls.filter(
+                  (d: unknown) =>
+                    d &&
+                    typeof d === 'object' &&
+                    allowedSet.has(
+                      (d as Record<string, unknown>)['name'] as string,
+                    ),
+                );
+                if (filteredDecls.length > 0) {
+                  acc.push({ ...t, functionDeclarations: filteredDecls });
+                }
+              } else {
+                // Non-function tools (e.g. googleSearch) are kept as-is
+                acc.push(tool);
+              }
+              return acc;
+            },
+            [],
+          ) as typeof request.config.tools;
+        }
+
+        const convertedTools =
+          await this.converter.convertGeminiToolsToOpenAI(toolsToUse);
+        // Only set tools if the result is non-empty.
+        // OpenAI API requires tools to be a non-empty array when present;
+        // sending tools:[] causes a 400 error on most providers.
+        if (convertedTools.length > 0) {
+          baseRequest.tools = convertedTools;
+        }
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)

@@ -1543,3 +1543,36 @@ describe('Skill-OS Configuration', () => {
     expect(config.isRemoteSkillsEnabled()).toBe(true);
   });
 });
+
+describe('Custom Skill Paths Configuration', () => {
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    embeddingModel: 'test-embedding-model',
+    targetDir: '/path/to/target',
+    debugMode: false,
+    usageStatisticsEnabled: false,
+    overrideExtensions: [],
+  };
+
+  it('should return empty array when customSkillPaths is not configured', () => {
+    const config = new Config({ ...baseParams });
+    expect(config.getCustomSkillPaths()).toEqual([]);
+  });
+
+  it('should return raw custom skill paths as configured', () => {
+    const config = new Config({
+      ...baseParams,
+      customSkillPaths: ['~/a', '/b'],
+    });
+    expect(config.getCustomSkillPaths()).toEqual(['~/a', '/b']);
+  });
+
+  it('should return resolved custom skill paths via getResolvedCustomSkillPaths', () => {
+    const config = new Config({
+      ...baseParams,
+      customSkillPaths: ['/absolute/path'],
+    });
+    const resolved = config.getResolvedCustomSkillPaths();
+    expect(resolved).toEqual(['/absolute/path']);
+  });
+});

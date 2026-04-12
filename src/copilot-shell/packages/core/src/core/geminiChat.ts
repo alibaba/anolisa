@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   Content,
   GenerateContentConfig,
+  GenerateContentParameters,
   SendMessageParameters,
   Part,
   Tool,
@@ -31,6 +32,11 @@ import {
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { defaultHookTranslator } from '../hooks/hookTranslator.js';
+import type { LLMRequest } from '../hooks/hookTranslator.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const hookDebugLogger = createDebugLogger('HOOK_DEBUG');
 
 export enum StreamEventType {
   /** A regular content chunk from the API. */
@@ -185,6 +191,24 @@ export class InvalidStreamError extends Error {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
+  }
+}
+
+/**
+ * Thrown by processStreamResponse when an AfterModel hook requests stop or deny.
+ * Distinguishes hook-requested stops from API errors so turn.ts can handle
+ * them gracefully without showing an error to the user.
+ */
+export class AfterModelHookStopError extends Error {
+  /** If true, the model turn was removed from history (decision: "deny"). */
+  readonly discardedModelTurn: boolean;
+  readonly hookStopReason?: string;
+
+  constructor(reason?: string, discardedModelTurn = false) {
+    super('AfterModel hook requested stop');
+    this.name = 'AfterModelHookStopError';
+    this.discardedModelTurn = discardedModelTurn;
+    this.hookStopReason = reason;
   }
 }
 
@@ -347,15 +371,128 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Build the request object
+    let request: GenerateContentParameters = {
+      model,
+      contents: requestContents,
+      config: { ...this.generationConfig, ...params.config },
+    };
+
+    // Fire BeforeModel hook
+    if (this.config.getEnableHooks()) {
+      const hookSystem = this.config.getHookSystem();
+      if (hookSystem) {
+        hookDebugLogger.info(
+          `[Hook Debug] BeforeModel: firing hook, model=${model}, contents.length=${requestContents.length}`,
+        );
+        try {
+          const beforeModelResult =
+            await hookSystem.fireBeforeModelEvent(request);
+          if (beforeModelResult) {
+            hookDebugLogger.info(
+              `[Hook Debug] BeforeModel: received result, decision=${beforeModelResult.isBlockingDecision() ? 'BLOCK' : beforeModelResult.shouldStopExecution() ? 'STOP' : 'ALLOW'}`,
+            );
+            // If hook says stop execution, return empty stream
+            if (beforeModelResult.shouldStopExecution()) {
+              hookDebugLogger.warn(
+                '[Hook Debug] BeforeModel: hook requested stop execution, returning empty stream',
+              );
+              return this.createEmptyStream();
+            }
+            // If hook blocks with a synthetic response, use that instead
+            if (beforeModelResult.isBlockingDecision()) {
+              const syntheticHookResponse =
+                beforeModelResult.getSyntheticResponse();
+              if (syntheticHookResponse) {
+                hookDebugLogger.info(
+                  `[Hook Debug] BeforeModel: using synthetic response from hook (text.length=${syntheticHookResponse.text?.length ?? 0})`,
+                );
+                const syntheticSDKResponse =
+                  defaultHookTranslator.fromHookLLMResponse(
+                    syntheticHookResponse,
+                  );
+                return this.processStreamResponse(
+                  model,
+                  this.createSingleChunkStream(syntheticSDKResponse),
+                  request,
+                );
+              }
+              hookDebugLogger.warn(
+                '[Hook Debug] BeforeModel: blocking decision without synthetic response, returning empty stream',
+              );
+              return this.createEmptyStream();
+            }
+            // Apply request modifications from hook
+            const mods = beforeModelResult.getLLMRequestModifications();
+            if (mods) {
+              hookDebugLogger.info(
+                '[Hook Debug] BeforeModel: applying request modifications from hook',
+              );
+              request = defaultHookTranslator.fromHookLLMRequest(
+                mods as LLMRequest,
+                request,
+              );
+            }
+          } else {
+            hookDebugLogger.debug(
+              '[Hook Debug] BeforeModel: no hook result (no matching hooks)',
+            );
+          }
+        } catch (hookError) {
+          hookDebugLogger.error(
+            `[Hook Debug] BeforeModel: hook error: ${hookError}`,
+          );
+          console.error(`BeforeModel hook error: ${hookError}`);
+        }
+      }
+    }
+
+    // Fire BeforeToolSelection hook
+    if (this.config.getEnableHooks()) {
+      const hookSystem = this.config.getHookSystem();
+      if (hookSystem) {
+        hookDebugLogger.info('[Hook Debug] BeforeToolSelection: firing hook');
+        try {
+          const toolSelResult =
+            await hookSystem.fireBeforeToolSelectionEvent(request);
+          if (toolSelResult) {
+            const hookToolConfig = toolSelResult.getToolConfig();
+            if (hookToolConfig) {
+              hookDebugLogger.info(
+                `[Hook Debug] BeforeToolSelection: applying tool config modification, mode=${hookToolConfig.mode}, allowedFunctions=${JSON.stringify(hookToolConfig.allowedFunctionNames ?? [])}`,
+              );
+              const sdkToolConfig =
+                defaultHookTranslator.fromHookToolConfig(hookToolConfig);
+              request = {
+                ...request,
+                config: {
+                  ...request.config,
+                  ...sdkToolConfig,
+                },
+              };
+            } else {
+              hookDebugLogger.debug(
+                '[Hook Debug] BeforeToolSelection: no tool config modification from hook',
+              );
+            }
+          } else {
+            hookDebugLogger.debug(
+              '[Hook Debug] BeforeToolSelection: no hook result (no matching hooks)',
+            );
+          }
+        } catch (hookError) {
+          hookDebugLogger.error(
+            `[Hook Debug] BeforeToolSelection: hook error: ${hookError}`,
+          );
+          console.error(`BeforeToolSelection hook error: ${hookError}`);
+        }
+      }
+    }
+
     const apiCall = () =>
-      this.config.getContentGenerator().generateContentStream(
-        {
-          model,
-          contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
-        },
-        prompt_id,
-      );
+      this.config
+        .getContentGenerator()
+        .generateContentStream(request, prompt_id);
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -373,7 +510,25 @@ export class GeminiChat {
       authType: this.config.getContentGeneratorConfig()?.authType,
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    return this.processStreamResponse(model, streamResponse, request);
+  }
+
+  /**
+   * Create an empty async generator stream.
+   * Used when a BeforeModel hook blocks the LLM call.
+   */
+  private async *createEmptyStream(): AsyncGenerator<GenerateContentResponse> {
+    // Yield nothing - the stream is intentionally empty
+  }
+
+  /**
+   * Create a single-chunk async generator from a GenerateContentResponse.
+   * Used for synthetic responses from BeforeModel hooks.
+   */
+  private async *createSingleChunkStream(
+    response: GenerateContentResponse,
+  ): AsyncGenerator<GenerateContentResponse> {
+    yield response;
   }
 
   /**
@@ -500,6 +655,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    originalRequest?: GenerateContentParameters,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -624,6 +780,97 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+
+    // Fire AfterModel hook after stream completes (observation + response modification + stop signal)
+    if (originalRequest && this.config.getEnableHooks()) {
+      const hookSystem = this.config.getHookSystem();
+      if (hookSystem) {
+        hookDebugLogger.info(
+          `[Hook Debug] AfterModel: firing hook, response.parts=${consolidatedHistoryParts.length}, hasFinishReason=${hasFinishReason}`,
+        );
+        try {
+          // Build accumulated response for the hook
+          const accumulatedResponse: GenerateContentResponse = {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: consolidatedHistoryParts,
+                },
+                finishReason: hasFinishReason ? 'STOP' : undefined,
+              },
+            ],
+            usageMetadata,
+          } as GenerateContentResponse;
+          const afterResult = await hookSystem.fireAfterModelEvent(
+            originalRequest,
+            accumulatedResponse,
+          );
+          if (afterResult) {
+            hookDebugLogger.info(
+              `[Hook Debug] AfterModel: hook completed, decision=${afterResult.isBlockingDecision() ? 'BLOCK' : afterResult.shouldStopExecution() ? 'STOP' : 'ALLOW'}`,
+            );
+
+            // Apply modified response to history if hook provided one.
+            // Note: streaming text already rendered to UI cannot be reverted;
+            // this only updates the stored history entry.
+            const modifiedResponse = afterResult.getModifiedResponse();
+            if (modifiedResponse) {
+              hookDebugLogger.info(
+                '[Hook Debug] AfterModel: applying modified response to history',
+              );
+              const modifiedSDKResponse =
+                defaultHookTranslator.fromHookLLMResponse(modifiedResponse);
+              const modifiedParts =
+                modifiedSDKResponse.candidates?.[0]?.content?.parts ?? [];
+              if (
+                this.history.length > 0 &&
+                this.history[this.history.length - 1].role === 'model'
+              ) {
+                this.history[this.history.length - 1] = {
+                  ...this.history[this.history.length - 1],
+                  parts: modifiedParts,
+                };
+              }
+            }
+
+            // Blocking decision (decision: "deny"): discard model turn and stop agent loop.
+            if (afterResult.isBlockingDecision()) {
+              hookDebugLogger.warn(
+                '[Hook Debug] AfterModel: blocking decision, discarding model turn from history',
+              );
+              if (
+                this.history.length > 0 &&
+                this.history[this.history.length - 1].role === 'model'
+              ) {
+                this.history.pop();
+              }
+              throw new AfterModelHookStopError(afterResult.reason, true);
+            }
+
+            // continue: false — keep history, signal agent loop to stop.
+            if (afterResult.shouldStopExecution()) {
+              hookDebugLogger.warn(
+                '[Hook Debug] AfterModel: shouldStopExecution, stopping agent loop',
+              );
+              throw new AfterModelHookStopError(afterResult.reason, false);
+            }
+          } else {
+            hookDebugLogger.debug(
+              '[Hook Debug] AfterModel: no hook result (no matching hooks)',
+            );
+          }
+        } catch (hookError) {
+          if (hookError instanceof AfterModelHookStopError) {
+            throw hookError; // Re-throw stop signal, not a real error
+          }
+          hookDebugLogger.error(
+            `[Hook Debug] AfterModel: hook error: ${hookError}`,
+          );
+          console.error(`AfterModel hook error: ${hookError}`);
+        }
+      }
+    }
   }
 }
 

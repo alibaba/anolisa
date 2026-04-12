@@ -362,6 +362,10 @@ describe('computeUsageFromMetrics', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).toEqual({
@@ -415,6 +419,10 @@ describe('computeUsageFromMetrics', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).toEqual({
@@ -457,6 +465,10 @@ describe('computeUsageFromMetrics', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).not.toHaveProperty('total_tokens');
@@ -486,6 +498,10 @@ describe('computeUsageFromMetrics', () => {
       files: {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
+      },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
       },
     };
     const result = computeUsageFromMetrics(metrics);

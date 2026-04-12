@@ -519,7 +519,26 @@ describe('HookRunner', () => {
   });
 
   describe('expandCommand', () => {
-    it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
+    it('should expand COPILOT_SHELL_PROJECT_DIR placeholder', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $COPILOT_SHELL_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with expanded command
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
+      expect(command).toContain('/test/project');
+    });
+
+    it('should expand GEMINI_PROJECT_DIR placeholder for compatibility', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
 
@@ -538,7 +557,7 @@ describe('HookRunner', () => {
       expect(command).toContain('/test/project');
     });
 
-    it('should expand CLAUDE_PROJECT_DIR placeholder for compatibility', async () => {
+    it('should expand CLAUDE_PROJECT_DIR placeholder for Claude Code compatibility', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
 

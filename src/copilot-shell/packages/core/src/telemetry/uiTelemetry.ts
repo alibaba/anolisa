@@ -77,6 +77,10 @@ export interface SessionMetrics {
     totalLinesAdded: number;
     totalLinesRemoved: number;
   };
+  sandbox: {
+    totalRuns: number;
+    totalBlocked: number;
+  };
 }
 
 const createInitialModelMetrics = (): ModelMetrics => ({
@@ -113,6 +117,10 @@ const createInitialMetrics = (): SessionMetrics => ({
   files: {
     totalLinesAdded: 0,
     totalLinesRemoved: 0,
+  },
+  sandbox: {
+    totalRuns: 0,
+    totalBlocked: 0,
   },
 });
 
@@ -245,6 +253,23 @@ export class UiTelemetryService extends EventEmitter {
       }
       if (event.metadata['model_removed_lines'] !== undefined) {
         files.totalLinesRemoved += event.metadata['model_removed_lines'];
+      }
+    }
+
+    // Track sandbox execution and blocking
+    if (event.function_name === 'run_shell_command') {
+      const cmd =
+        typeof event.function_args?.['command'] === 'string'
+          ? event.function_args['command']
+          : '';
+      if (cmd.includes('linux-sandbox')) {
+        this.#metrics.sandbox.totalRuns++;
+      }
+      if (
+        event.error?.includes('PreToolUse hook blocked execution') &&
+        event.error?.includes('sandbox-guard')
+      ) {
+        this.#metrics.sandbox.totalBlocked++;
       }
     }
   }

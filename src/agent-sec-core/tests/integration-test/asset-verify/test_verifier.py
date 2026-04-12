@@ -95,8 +95,10 @@ class TestVerifySkill(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_missing_manifest(self):
-        # Create sig but no manifest
-        sig_path = os.path.join(self.skill_dir, ".skill.sig")
+        # Create sig inside .skill-meta but no manifest
+        meta_dir = os.path.join(self.skill_dir, ".skill-meta")
+        os.makedirs(meta_dir, exist_ok=True)
+        sig_path = os.path.join(meta_dir, ".skill.sig")
         with open(sig_path, "w") as f:
             f.write("fake sig")
 
@@ -104,14 +106,16 @@ class TestVerifySkill(unittest.TestCase):
             verify_skill(self.skill_dir, [])
 
     def test_missing_sig(self):
-        # Create manifest but no sig
+        # Create manifest inside .skill-meta but no sig
         manifest = {
             "version": "0.1",
             "skill_name": "test_skill",
             "algorithm": "SHA256",
             "files": [{"path": "main.py", "hash": self.file_hash}],
         }
-        manifest_path = os.path.join(self.skill_dir, "Manifest.json")
+        meta_dir = os.path.join(self.skill_dir, ".skill-meta")
+        os.makedirs(meta_dir, exist_ok=True)
+        manifest_path = os.path.join(meta_dir, "Manifest.json")
         with open(manifest_path, "w") as f:
             json.dump(manifest, f)
 
@@ -251,8 +255,11 @@ Expire-Date: 0
         with open(main_py, "w") as f:
             f.write("print('hello')")
 
-        # Create manifest
+        # Create .skill-meta directory and manifest
         from verifier import compute_file_hash
+
+        cls.meta_dir = os.path.join(cls.skill_dir, ".skill-meta")
+        os.makedirs(cls.meta_dir)
 
         manifest = {
             "version": "0.1",
@@ -260,12 +267,12 @@ Expire-Date: 0
             "algorithm": "SHA256",
             "files": [{"path": "main.py", "hash": compute_file_hash(main_py)}],
         }
-        cls.manifest_path = os.path.join(cls.skill_dir, "Manifest.json")
+        cls.manifest_path = os.path.join(cls.meta_dir, "Manifest.json")
         with open(cls.manifest_path, "w") as f:
             json.dump(manifest, f)
 
         # Sign manifest
-        cls.sig_path = os.path.join(cls.skill_dir, ".skill.sig")
+        cls.sig_path = os.path.join(cls.meta_dir, ".skill.sig")
         subprocess.run(
             [
                 "gpg",

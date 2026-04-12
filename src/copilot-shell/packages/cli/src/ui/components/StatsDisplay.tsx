@@ -257,6 +257,21 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
               </Text>
             </StatRow>
           )}
+        {(metrics.sandbox?.totalRuns > 0 ||
+          metrics.sandbox?.totalBlocked > 0) && (
+          <>
+            <StatRow title={t('Sandbox Runs:')}>
+              <Text color={theme.text.primary}>
+                {metrics.sandbox.totalRuns}
+              </Text>
+            </StatRow>
+            <StatRow title={t('Sandbox Blocked:')}>
+              <Text color={theme.status.error}>
+                {metrics.sandbox.totalBlocked}
+              </Text>
+            </StatRow>
+          </>
+        )}
       </Section>
 
       <Section title={t('Performance')}>

@@ -9,6 +9,10 @@ import { vi } from 'vitest';
 import { validateAuthMethod } from './auth.js';
 import * as settings from './settings.js';
 
+// An encrypted apiKey (enc: prefix) is truthy, indicating a key exists
+const ENCRYPTED_API_KEY =
+  'enc:0123456789abcdef0123456789abcdef:fedcba9876543210fedcba9876543210:aabbccdd';
+
 vi.mock('./settings.js', () => ({
   loadEnvironment: vi.fn(),
   loadSettings: vi.fn().mockReturnValue({
@@ -226,5 +230,37 @@ describe('validateAuthMethod', () => {
     const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
     expect(result).not.toBeNull();
     expect(result).toContain('CLI_API_KEY');
+  });
+
+  it('should treat encrypted apiKey (enc: prefix) as a valid apiKey', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        security: {
+          auth: {
+            apiKey: ENCRYPTED_API_KEY,
+          },
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI);
+    expect(result).toBeNull();
+  });
+
+  it('should treat encrypted apiKey as valid even without OPENAI_API_KEY env var', () => {
+    delete process.env['OPENAI_API_KEY'];
+
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        security: {
+          auth: {
+            apiKey: ENCRYPTED_API_KEY,
+          },
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI);
+    expect(result).toBeNull();
   });
 });

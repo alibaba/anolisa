@@ -7,6 +7,7 @@
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import { AppHeader } from './AppHeader.js';
+import { AppContext } from '../contexts/AppContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
@@ -48,6 +49,13 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     ...overrides,
   }) as UIState;
 
+const createMockAppState = () => ({
+  version: '1.2.3',
+  startupWarnings: [],
+  dismissWarning: vi.fn(),
+  featureTips: [],
+});
+
 const renderWithProviders = (
   uiState: UIState,
   settings = createSettings(),
@@ -57,11 +65,13 @@ const renderWithProviders = (
   return render(
     <ConfigContext.Provider value={config as never}>
       <SettingsContext.Provider value={settings}>
-        <VimModeProvider settings={settings}>
-          <UIStateContext.Provider value={uiState}>
-            <AppHeader version="1.2.3" />
-          </UIStateContext.Provider>
-        </VimModeProvider>
+        <AppContext.Provider value={createMockAppState()}>
+          <VimModeProvider settings={settings}>
+            <UIStateContext.Provider value={uiState}>
+              <AppHeader version="1.2.3" />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </AppContext.Provider>
       </SettingsContext.Provider>
     </ConfigContext.Provider>,
   );

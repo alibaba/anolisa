@@ -995,6 +995,7 @@ export async function loadCliConfig(
     skillOS: settings.skillOS?.baseUrl
       ? { baseUrl: settings.skillOS.baseUrl }
       : undefined,
+    customSkillPaths: settings.skills?.customPaths ?? [],
     summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,

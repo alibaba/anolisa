@@ -23,7 +23,7 @@ interface SuggestionsDisplayProps {
   width: number;
   scrollOffset: number;
   userInput: string;
-  mode: 'reverse' | 'slash';
+  mode: 'reverse' | 'slash' | 'shell';
   expandedIndex?: number;
 }
 

@@ -309,6 +309,9 @@ export default {
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
+  'Hide Feature Tip Banner': 'Hide Feature Tip Banner',
+  'Hide the one-time feature tip banner shown on first launch':
+    'Hide the one-time feature tip banner shown on first launch',
   'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
@@ -967,6 +970,8 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Get started',
+  'Qwen OAuth': 'Qwen OAuth',
+  'Free · Up to 1,000 requests per day': 'Free · Up to 1,000 requests per day',
   'How would you like to authenticate for this project?':
     'How would you like to authenticate for this project?',
   'OpenAI API key is required to use OpenAI authentication.':
@@ -1042,19 +1047,34 @@ export default {
   '↑↓ select provider · Enter/Tab navigate fields · Esc cancel':
     '↑↓ select provider · Enter/Tab navigate fields · Esc cancel',
   'Custom Provider': 'Custom Provider',
+  'Paid · Use your own API key · Cost depends on provider':
+    'Paid · Use your own API key · Cost depends on provider',
   'Custom (enter Base URL manually)': 'Custom (enter Base URL manually)',
   'Model:': 'Model:',
-  'Aliyun AK/SK Configuration': 'Aliyun AK/SK Configuration',
+  'Aliyun Authentication': 'Aliyun Authentication',
+  'Free with limited quota': 'Free with limited quota',
   'Please enter your Aliyun Access Key credentials. You can get them from':
     'Please enter your Aliyun Access Key credentials. You can get them from',
   'Access Key ID:': 'Access Key ID:',
   'Access Key Secret:': 'Access Key Secret:',
+  'Detecting environment...': 'Detecting environment...',
+  'Please click or copy the URL below to your browser to complete authentication:':
+    'Please click or copy the URL below to your browser to complete authentication:',
+  'ECS Instance ID:': 'ECS Instance ID:',
+  'Preparing authentication...': 'Preparing authentication...',
+  'Authentication failed': 'Authentication failed',
+  'Press Enter to go back · Esc to cancel':
+    'Press Enter to go back · Esc to cancel',
+  'Timeout waiting for RAM role authorization':
+    'Timeout waiting for RAM role authorization',
+  'Failed to get STS credentials': 'Failed to get STS credentials',
 
   // ============================================================================
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Select Model',
   '(Press Esc to close)': '(Press Esc to close)',
+  '(Press Esc to cancel)': '(Press Esc to cancel)',
   'Current (effective) configuration': 'Current (effective) configuration',
   AuthType: 'AuthType',
   'API Key': 'API Key',
@@ -1170,6 +1190,8 @@ export default {
   'User Agreement:': 'User Agreement:',
   reviewed: 'reviewed',
   'Code Changes:': 'Code Changes:',
+  'Sandbox Runs:': 'Sandbox Runs:',
+  'Sandbox Blocked:': 'Sandbox Blocked:',
   Performance: 'Performance',
   'Wall Time:': 'Wall Time:',
   'Agent Active:': 'Agent Active:',
@@ -1446,4 +1468,24 @@ export default {
   'Press Ctrl+C to exit, then type exit to return to the original session.':
     'Press Ctrl+C to exit, then type exit to return to the original session.',
   'Press Enter to start a new session.': 'Press Enter to start a new session.',
+  'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.':
+    'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.',
+  'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
+    'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.',
+  // Agent Key sharing flow
+  '{{agentName}} configuration detected':
+    '{{agentName}} configuration detected',
+  'The following configuration from {{agentName}} will be imported':
+    'The following configuration from {{agentName}} will be imported',
+  'Press Enter or wait 2s to complete authentication':
+    'Press Enter or wait 2s to complete authentication',
+  'Agent Key Sharing': 'Agent Key Sharing',
+  'Authorize importing API keys from the configuration file of installed agents for automatic configuration? Choose an Agent or manually configure it.':
+    'Authorize importing API keys from the configuration file of installed agents for automatic configuration? Choose an Agent or manually configure it.',
+  'No, configure manually': 'No, configure manually',
+  'No API Key found for {{agentName}}.': 'No API Key found for {{agentName}}.',
+  'Returning to agent selection...': 'Returning to agent selection...',
+  'Press Enter or wait 2s to continue': 'Press Enter or wait 2s to continue',
+  '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
+    '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel',
 };

@@ -21,8 +21,12 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 ```
 ┌─────────────────────────────────────────────┐
 │              Agent Application              │
-├─────────────────────────────────────────────┤
-│     Security Decision (Risk Classification) │
+├──────────────────┬──────────────────────────┤
+│ Security Check   │  Sandbox Policy          │
+│ Workflow         │  (agent-sec-sandbox,      │
+│ (SKILL.md)       │   managed independently)  │
+├──────────────────┴──────────────────────────┤
+│  4. Security Decision (Risk Classification) │
 ├─────────────────────────────────────────────┤
 │  Phase 3: Final Security Confirmation       │
 ├─────────────────────────────────────────────┤
@@ -34,15 +38,19 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 └─────────────────────────────────────────────┘
 ```
 
+The security check workflow (Phase 1-3 + Security Decision) is defined in `skill/SKILL.md`. Sandbox policy is managed independently by `skill/references/agent-sec-sandbox.md`.
+
 ## Security Check Workflow
 
-Each Agent execution must complete the following security checks in order (Phase 1–3). Only after all pass can the security decision process proceed:
+Each Agent execution must complete the following security checks **in strict order** (Phase 1-3). Only after all phases pass can the security decision process proceed. See `skill/SKILL.md` for the full executable protocol.
 
-| Phase | Description | Entry |
-|-------|-------------|-------|
-| **Phase 1** | System Hardening — Run `loongshield seharden --config agentos_baseline` for baseline scanning and hardening | `skill/references/agent-sec-seharden.md` |
-| **Phase 2** | Asset Protection — GPG signature verification of system-level skills (Manifest + file hash) to ensure skill integrity | `skill/references/agent-sec-skill-verify.md` |
-| **Phase 3** | Final Confirmation — Aggregate Phase 1–2 results; confirm security baseline is intact before entering the security decision process | `skill/SKILL.md` |
+| Phase | Description | Entry | PASS Condition |
+|-------|-------------|-------|----------------|
+| **Phase 1** | System Hardening — `loongshield seharden --scan --config agentos_baseline` | `skill/references/agent-sec-seharden.md` | Output contains `结果：合规` |
+| **Phase 2** | Asset Protection — GPG signature + SHA-256 hash verification of all skills | `skill/references/agent-sec-skill-verify.md` | Output contains `VERIFICATION PASSED` |
+| **Phase 3** | Final Confirmation — Re-run Phase 1 scan + Phase 2 verify as recheck | `skill/SKILL.md` | Both rechecks pass |
+
+If any phase is not PASS, all subsequent phases are cancelled and the agent execution is blocked.
 
 ## Risk Classification
 
@@ -105,7 +113,7 @@ agent-sec-core/
 │   ├── tests/                 # Rust integration tests + Python e2e
 │   └── docs/                  # dev-guide, user-guide
 ├── skill/
-│   ├── SKILL.md               # Full usage guide (security workflow + decision process)
+│   ├── SKILL.md               # Executable security protocol (check workflow + decision)
 │   ├── scripts/
 │   │   ├── sandbox/
 │   │   │   ├── sandbox_policy.py     # Sandbox policy generator
@@ -205,7 +213,7 @@ Output example:
 ### Verification Flow
 
 1. Load trusted public keys from `skill/scripts/asset-verify/trusted-keys/*.asc`
-2. Verify the GPG signature (`.skill.sig`) of `Manifest.json` in each skill directory
+2. Verify the GPG signature (`.skill-meta/.skill.sig`) of `.skill-meta/Manifest.json` in each skill directory
 3. Validate SHA-256 hashes of all files listed in the Manifest
 
 ### Error Codes
@@ -213,15 +221,39 @@ Output example:
 | Code | Meaning |
 |------|---------|
 | 0 | Passed |
-| 10 | Missing `.skill.sig` |
-| 11 | Missing `Manifest.json` |
+| 10 | Missing `.skill-meta/.skill.sig` |
+| 11 | Missing `.skill-meta/Manifest.json` |
 | 12 | Invalid signature |
 | 13 | Hash mismatch |
 
-### Sign a Skill
+### Sign Skills (Self-Deployment Quick Start)
+
+When deploying from source, skills are unsigned by default. Sign them so Phase 2 passes:
 
 ```bash
-sign-skill.sh <skill-directory>
+# 1. One-time: generate GPG key + export public key
+tools/sign-skill.sh --init
+
+# 2. Batch-sign all skills
+tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# 3. Verify
+python3 skill/scripts/asset-verify/verifier.py
+```
+
+For the complete guide (manual key management, custom skills, CI/CD, troubleshooting), see **[Skill Signing Guide](tools/SIGNING_GUIDE.md)**.
+
+## Audit Log
+
+All security events are logged to `/var/log/agent-sec/violations.log`:
+
+```
+[TIMESTAMP] [RISK_LEVEL] [CATEGORY]
+skill: <skill_name>
+action: <requested_action>
+target: <target_resource>
+decision: ALLOWED | BLOCKED | PENDING_CONFIRM
+reason: <reason>
 ```
 
 ## Development

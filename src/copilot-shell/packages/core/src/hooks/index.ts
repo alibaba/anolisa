@@ -7,6 +7,14 @@
 // Export types
 export * from './types.js';
 
+// Export hook translator (SDK-agnostic LLM type system)
+export { defaultHookTranslator, HookTranslatorImpl } from './hookTranslator.js';
+export type {
+  LLMRequest,
+  LLMResponse,
+  HookToolConfig,
+} from './hookTranslator.js';
+
 // Export core components
 export { HookSystem } from './hookSystem.js';
 export { HookRegistry } from './hookRegistry.js';

@@ -13,6 +13,12 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import type { HookRegistryEntry } from '@copilot-shell/core';
+import { HookEventName, HookType } from '@copilot-shell/core';
+import { SettingScope } from '../../config/settings.js';
+import process from 'node:process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Format hook source for display
@@ -252,13 +258,183 @@ const disableCommand: SlashCommand = {
   },
 };
 
+const installCommand: SlashCommand = {
+  name: 'install',
+  get description() {
+    return t('Install sandbox-guard hooks into user settings');
+  },
+  kind: CommandKind.BUILT_IN,
+  action: async (
+    context: CommandContext,
+    args: string,
+  ): Promise<MessageActionReturn> => {
+    const { config, settings } = context.services;
+    if (!config) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Config not loaded.'),
+      };
+    }
+
+    // Determine script paths
+    const scriptArg = args.trim();
+    const homeDir = process.env['HOME'] || process.env['USERPROFILE'] || '~';
+    const hooksDir = `${homeDir}/.copilot-shell/hooks`;
+
+    // Locate bundled hooks directory:
+    //   Production: $COSH_DATA_DIR/hooks/  (set by cosh-wrapper.sh at install time)
+    //   Development (esbuild bundle): dist/hooks/  (adjacent to dist/cli.js)
+    //   Development (tsc output):     packages/cli/dist/hooks/  (3 levels up)
+    let bundledHooksDir: string;
+    const dataDir = process.env['COSH_DATA_DIR'];
+    if (dataDir) {
+      bundledHooksDir = path.join(dataDir, 'hooks');
+    } else {
+      const thisFile = fileURLToPath(import.meta.url);
+      const distDir = path.dirname(thisFile);
+      const bundleHooksCandidate = path.join(distDir, 'hooks');
+      const tscHooksCandidate = path.join(distDir, '..', '..', '..', 'hooks');
+      bundledHooksDir = fs.existsSync(bundleHooksCandidate)
+        ? bundleHooksCandidate
+        : tscHooksCandidate;
+    }
+
+    // Resolve effective script paths:
+    //   Priority: explicit CLI arg > ~/.copilot-shell/hooks/ (after copy) > bundled fallback
+    // If the user dir script doesn't exist AND the bundled script does, use bundled path
+    // directly so hooks always work even without a successful copy.
+    function resolveScriptPath(scriptName: string, override?: string): string {
+      if (override) return override;
+      const userPath = path.join(hooksDir, scriptName);
+      if (fs.existsSync(userPath)) return userPath;
+      const bundledPath = path.join(bundledHooksDir, scriptName);
+      if (fs.existsSync(bundledPath)) return bundledPath;
+      return userPath; // fall back to user path (will be copied below)
+    }
+
+    // Ensure user hooks directory exists and copy bundled scripts (always overwrite)
+    const copyErrors: string[] = [];
+    try {
+      fs.mkdirSync(hooksDir, { recursive: true });
+      for (const script of ['sandbox-guard.py', 'sandbox-failure-handler.py']) {
+        const dest = path.join(hooksDir, script);
+        const src = path.join(bundledHooksDir, script);
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dest);
+          fs.chmodSync(dest, 0o755);
+        } else {
+          copyErrors.push(`bundled script not found: ${src}`);
+        }
+      }
+    } catch (err) {
+      copyErrors.push(String(err));
+    }
+
+    const guardScript = resolveScriptPath(
+      'sandbox-guard.py',
+      scriptArg || undefined,
+    );
+    const failureScript = resolveScriptPath('sandbox-failure-handler.py');
+    const preToolUseEntry = {
+      hooks: [
+        {
+          type: 'command',
+          command: `python3 ${guardScript}`,
+          name: 'sandbox-guard',
+        },
+      ],
+    };
+    const postToolUseFailureEntry = {
+      hooks: [
+        {
+          type: 'command',
+          command: `python3 ${failureScript}`,
+          name: 'sandbox-failure-handler',
+        },
+      ],
+    };
+
+    // Read current user hooks config (if any)
+    const currentHooks =
+      (
+        settings.forScope(SettingScope.User).settings as Record<string, unknown>
+      )['hooks'] ?? {};
+    const hooksConfig = (currentHooks ?? {}) as Record<string, unknown>;
+
+    // Check idempotency: skip if sandbox-guard is already registered
+    const preToolUseList = (hooksConfig['PreToolUse'] as unknown[]) ?? [];
+    const alreadyInstalled = preToolUseList.some(
+      (entry: unknown) =>
+        Array.isArray((entry as Record<string, unknown>)['hooks']) &&
+        ((entry as Record<string, unknown>)['hooks'] as unknown[]).some(
+          (h: unknown) =>
+            (h as Record<string, unknown>)['name'] === 'sandbox-guard',
+        ),
+    );
+
+    if (!alreadyInstalled) {
+      // Merge new hooks into the existing config
+      const newHooksConfig = {
+        ...hooksConfig,
+        PreToolUse: [...preToolUseList, preToolUseEntry],
+        PostToolUseFailure: [
+          ...((hooksConfig['PostToolUseFailure'] as unknown[]) ?? []),
+          postToolUseFailureEntry,
+        ],
+      };
+      settings.setValue(SettingScope.User, 'hooks', newHooksConfig);
+    }
+
+    // Activate hooks in the current session via dynamic registration
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      hookSystem.registerHook(HookEventName.PreToolUse, {
+        type: HookType.Command,
+        command: `python3 ${guardScript}`,
+        name: 'sandbox-guard',
+      });
+      hookSystem.registerHook(HookEventName.PostToolUseFailure, {
+        type: HookType.Command,
+        command: `python3 ${failureScript}`,
+        name: 'sandbox-failure-handler',
+      });
+      // Enable both hooks
+      hookSystem.setHookEnabled('sandbox-guard', true);
+      hookSystem.setHookEnabled('sandbox-failure-handler', true);
+    }
+
+    const alreadyMsg = alreadyInstalled
+      ? t(' (already in settings, session hooks refreshed)')
+      : '';
+    const copyErrMsg =
+      copyErrors.length > 0
+        ? `\n⚠ Script copy warnings:\n${copyErrors.map((e) => `  - ${e}`).join('\n')}`
+        : '';
+
+    return {
+      type: 'message',
+      messageType: copyErrors.length > 0 ? 'error' : 'info',
+      content: t(
+        'sandbox-guard installed{{already}}\n- PreToolUse: {{guard}}\n- PostToolUseFailure: {{failure}}{{copyErr}}',
+        {
+          already: alreadyMsg,
+          guard: guardScript,
+          failure: failureScript,
+          copyErr: copyErrMsg,
+        },
+      ),
+    };
+  },
+};
+
 export const hooksCommand: SlashCommand = {
   name: 'hooks',
   get description() {
     return t('Manage Cosh hooks');
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [listCommand, enableCommand, disableCommand],
+  subCommands: [listCommand, enableCommand, disableCommand, installCommand],
   action: async (
     context: CommandContext,
     args: string,
@@ -283,12 +459,15 @@ export const hooksCommand: SlashCommand = {
       case 'disable':
         result = await disableCommand.action?.(context, subArgs);
         break;
+      case 'install':
+        result = await installCommand.action?.(context, subArgs);
+        break;
       default:
         return {
           type: 'message',
           messageType: 'error',
           content: t(
-            'Unknown subcommand: {{cmd}}. Available: list, enable, disable',
+            'Unknown subcommand: {{cmd}}. Available: list, enable, disable, install',
             {
               cmd: subcommand,
             },
@@ -298,7 +477,7 @@ export const hooksCommand: SlashCommand = {
     return result ?? { type: 'message', messageType: 'info', content: '' };
   },
   completion: async (context: CommandContext, partialArg: string) => {
-    const subcommands = ['list', 'enable', 'disable'];
+    const subcommands = ['list', 'enable', 'disable', 'install'];
     const parts = partialArg.split(/\s+/);
 
     if (parts.length <= 1) {

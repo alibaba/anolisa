@@ -122,6 +122,44 @@ export class HookRegistry {
   }
 
   /**
+   * Dynamically register a hook for the current session.
+   * Useful for /hooks install to activate hooks immediately without restart.
+   */
+  registerHook(
+    eventName: HookEventName,
+    hookConfig: HookConfig,
+    source: HooksConfigSource = HooksConfigSource.User,
+  ): void {
+    const hookName = hookConfig.name || hookConfig.command || 'unknown-command';
+    const disabledHooks = this.config.getDisabledHooks();
+    const isDisabled = disabledHooks.includes(hookName);
+
+    // Skip duplicates: same name + eventName already registered
+    const isDuplicate = this.entries.some(
+      (existing) =>
+        existing.eventName === eventName &&
+        this.getHookName(existing) === hookName,
+    );
+    if (isDuplicate) {
+      debugLogger.debug(
+        `Hook "${hookName}" already registered for ${eventName}, skipping`,
+      );
+      return;
+    }
+
+    hookConfig.source = source;
+    this.entries.push({
+      config: hookConfig,
+      source,
+      eventName,
+      enabled: !isDisabled,
+    });
+    debugLogger.info(
+      `Dynamically registered hook "${hookName}" for ${eventName}`,
+    );
+  }
+
+  /**
    * Get hook name for identification and display purposes
    */
   private getHookName(

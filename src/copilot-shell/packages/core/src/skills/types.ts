@@ -7,10 +7,12 @@
 /**
  * Represents the storage level for a skill configuration.
  * - 'project': Stored in `.copilot-shell/skills/` within the project directory
+ * - 'custom': User-defined custom skill directories from settings.json
  * - 'user': Stored in `~/.copilot-shell/skills/` in the user's home directory
  * - 'extension': Provided by an installed extension
+ * - 'system': Stored in `/usr/share/anolisa/skills`
  */
-export type SkillLevel = 'project' | 'user' | 'extension' | 'system';
+export type SkillLevel = 'project' | 'custom' | 'user' | 'extension' | 'system';
 
 /**
  * Skill-OS Layer types - 反映 os 分层（skill 的范围和权限）

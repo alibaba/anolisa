@@ -4,9 +4,19 @@
 
 ## Related Issue
 
-<!-- Link the related issue. Required for new features and non-trivial changes. -->
+<!--
+  REQUIRED: Every PR must be linked to an existing issue.
+  Use one of the closing keywords so the issue closes automatically on merge:
 
-- [ ] Related issue linked (recommended for new features and non-trivial changes)
+    closes #<number>
+    fixes #<number>
+    resolves #<number>
+
+  If this is a trivial typo / doc-only fix with no issue, write:
+    no-issue: <reason>
+-->
+
+closes #
 
 ## Type of Change
 
@@ -25,9 +35,9 @@
 <!-- Which sub-project does this PR affect? -->
 
 - [ ] `cosh` (copilot-shell)
-- [ ] `agent-sec-core`
-- [ ] `os-skills`
-- [ ] `agentsight`
+- [ ] `sec-core` (agent-sec-core)
+- [ ] `skill` (os-skills)
+- [ ] `sight` (agentsight)
 - [ ] Multiple / Project-wide
 
 ## Checklist
@@ -39,9 +49,10 @@
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] I have updated the documentation accordingly
 - [ ] For `cosh`: Lint passes, type check passes, and tests pass
-- [ ] For `agent-sec-core` (Rust): `cargo clippy -- -D warnings` and `cargo fmt --check` pass
-- [ ] For `agent-sec-core` (Python): Ruff format and pytest pass
-- [ ] For `os-skills`: Skill directory structure is valid and shell scripts pass syntax check
+- [ ] For `sec-core` (Rust): `cargo clippy -- -D warnings` and `cargo fmt --check` pass
+- [ ] For `sec-core` (Python): Ruff format and pytest pass
+- [ ] For `skill`: Skill directory structure is valid and shell scripts pass syntax check
+- [ ] For `sight`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
 - [ ] Lock files are up to date (`package-lock.json` / `Cargo.lock`)
 
 ## Testing

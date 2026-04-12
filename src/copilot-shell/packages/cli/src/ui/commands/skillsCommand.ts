@@ -14,7 +14,7 @@ import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { AsyncFzf } from 'fzf';
 import type { SkillConfig } from '@copilot-shell/core';
-
+/** FUTURE: Re-enable once remote registry is available
 const cacheClearSubCommand: SlashCommand = {
   name: 'clear',
   get description() {
@@ -127,6 +127,7 @@ const remoteSubCommand: SlashCommand = {
     }
   },
 };
+*/
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -134,7 +135,7 @@ export const skillsCommand: SlashCommand = {
     return t('List available skills.');
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [remoteSubCommand, cacheSubCommand],
+  subCommands: [], // _remoteSubCommand and _cacheSubCommand are disabled (remote registry unavailable)
   action: async (context: CommandContext, args?: string) => {
     const argParts = (args?.trim() ?? '').split(/\s+/);
     const skillName = argParts[0] ?? '';

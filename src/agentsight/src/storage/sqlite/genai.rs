@@ -30,6 +30,16 @@ pub struct ModelTimeseriesBucket {
     pub total_tokens: i64,
 }
 
+/// Per-agent token usage summary (all-time aggregation)
+#[derive(Debug, serde::Serialize)]
+pub struct AgentTokenSummary {
+    pub agent_name: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub request_count: i64,
+}
+
 /// Summary of a single gen_ai.session_id within a time window
 #[derive(Debug, serde::Serialize)]
 pub struct SessionSummary {
@@ -82,6 +92,13 @@ pub struct TraceEventDetail {
     /// Raw full event JSON stored at write time — used as fallback when
     /// output_messages is NULL (e.g. SSE streams that weren't fully parsed)
     pub event_json: Option<String>,
+    /// Trace ID (conversation_id) — needed for session-level ATIF export
+    /// to group events by trace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Cache read tokens — maps to ATIF cached_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
 }
 
 /// SQLite-backed GenAI event storage
@@ -419,6 +436,41 @@ impl GenAISqliteStore {
         Ok(rows)
     }
 
+    /// Return per-agent token usage aggregated over all recorded history.
+    ///
+    /// Groups by `COALESCE(agent_name, process_name, 'unknown')` so that every
+    /// LLM call is attributed to some label even when agent_name is NULL.
+    pub fn get_agent_token_summary(
+        &self,
+    ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(agent_name, process_name, 'unknown') AS agent,
+                    COALESCE(SUM(input_tokens),  0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(total_tokens),  0) AS total_tokens,
+                    COUNT(*)                        AS request_count
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+             GROUP BY agent
+             ORDER BY total_tokens DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AgentTokenSummary {
+                agent_name:    row.get(0)?,
+                input_tokens:  row.get(1)?,
+                output_tokens: row.get(2)?,
+                total_tokens:  row.get(3)?,
+                request_count: row.get(4)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Fetch all LLM call events for a given trace ID.
     pub fn get_trace_events(
         &self,
@@ -432,7 +484,8 @@ impl GenAISqliteStore {
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
-                    agent_name, process_name, pid, user_query, event_json
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens
              FROM genai_events
              WHERE trace_id = ?1
                AND event_type = 'llm_call'
@@ -456,6 +509,57 @@ impl GenAISqliteStore {
                 pid: row.get(13)?,
                 user_query: row.get(14)?,
                 event_json: row.get(15)?,
+                trace_id: row.get(16)?,
+                cache_read_tokens: row.get(17)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Fetch all LLM call events for a given session ID (across all traces).
+    pub fn get_events_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
+                    model,
+                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    COALESCE(output_tokens, 0) AS output_tokens,
+                    COALESCE(total_tokens, 0)  AS total_tokens,
+                    input_messages, output_messages, system_instructions,
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens
+             FROM genai_events
+             WHERE session_id = ?1
+               AND event_type = 'llm_call'
+             ORDER BY start_timestamp_ns ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(TraceEventDetail {
+                id: row.get(0)?,
+                call_id: row.get(1)?,
+                start_timestamp_ns: row.get(2)?,
+                end_timestamp_ns: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                total_tokens: row.get(7)?,
+                input_messages: row.get(8)?,
+                output_messages: row.get(9)?,
+                system_instructions: row.get(10)?,
+                agent_name: row.get(11)?,
+                process_name: row.get(12)?,
+                pid: row.get(13)?,
+                user_query: row.get(14)?,
+                event_json: row.get(15)?,
+                trace_id: row.get(16)?,
+                cache_read_tokens: row.get(17)?,
             })
         })?;
         let mut result = Vec::new();

@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
+  decryptCredential,
   resolveModelConfig,
   type ProviderModelConfig,
 } from '@copilot-shell/core';
@@ -21,6 +22,7 @@ vi.mock('@copilot-shell/core', async (importOriginal) => {
   return {
     ...original,
     resolveModelConfig: vi.fn(),
+    decryptCredential: vi.fn((v: string) => v),
   };
 });
 
@@ -716,6 +718,101 @@ describe('modelConfigUtils', () => {
           }),
         }),
       );
+    });
+
+    it('should decrypt encrypted apiKey from settings', () => {
+      const argv = {};
+      const settings = makeMockSettings({
+        security: {
+          auth: {
+            apiKey: 'enc:mock-encrypted-key',
+            baseUrl: 'https://example.com',
+          },
+        },
+      });
+
+      vi.mocked(decryptCredential).mockReturnValue('decrypted-api-key');
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: '', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(vi.mocked(decryptCredential)).toHaveBeenCalledWith(
+        'enc:mock-encrypted-key',
+      );
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            apiKey: 'decrypted-api-key',
+          }),
+        }),
+      );
+    });
+
+    it('should pass through plaintext apiKey from settings', () => {
+      const argv = {};
+      const settings = makeMockSettings({
+        security: {
+          auth: {
+            apiKey: 'plain-api-key',
+            baseUrl: 'https://example.com',
+          },
+        },
+      });
+
+      vi.mocked(decryptCredential).mockReturnValue('plain-api-key');
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: '', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            apiKey: 'plain-api-key',
+          }),
+        }),
+      );
+    });
+
+    it('should handle undefined apiKey gracefully', () => {
+      const argv = {};
+      const settings = makeMockSettings({
+        security: {
+          auth: {},
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: '', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      // decryptCredential should not be called for undefined apiKey
+      expect(vi.mocked(decryptCredential)).not.toHaveBeenCalled();
     });
   });
 });

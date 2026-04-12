@@ -45,6 +45,9 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Security
 - **alinux-cve-query** — Query Alibaba Cloud Linux CVE vulnerability info
 
+### Other
+- **cosh-guide** - Copilot Shell user guide
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

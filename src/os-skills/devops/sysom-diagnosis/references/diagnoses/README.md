@@ -34,6 +34,27 @@
 | javamem | [javamem.md](./javamem.md) |
 | gomemdump（服务端若仍存在；**本技能 CLI 已不暴露**） | [gomemdump.md](./gomemdump.md) |
 
+### IO 与磁盘（CLI：`io`）
+
+| service_name | 文档 |
+|--------------|------|
+| iofsstat | [iofsstat.md](./iofsstat.md) |
+| iodiagnose | [iodiagnose.md](./iodiagnose.md) |
+
+### 网络（CLI：`net`）
+
+| service_name | 文档 |
+|--------------|------|
+| packetdrop | [packetdrop.md](./packetdrop.md) |
+| netjitter | [netjitter.md](./netjitter.md) |
+
+### 负载与调度（CLI：`load`）
+
+| service_name | 文档 |
+|--------------|------|
+| delay | [delay.md](./delay.md) |
+| loadtask | [loadtask.md](./loadtask.md) |
+
 ## 实现源码（排障）
 
 各诊断在 **SysOM 诊断服务** 侧通常有 `*_pre.py` 或同名脚本，经 **OpenAPI `invoke_diagnosis`** 路由到实例执行；源码不在本仓库技能包内时以 **线上行为** 为准。

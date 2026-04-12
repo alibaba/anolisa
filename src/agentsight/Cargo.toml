@@ -1,6 +1,6 @@
 [package]
 name = "agentsight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [features]
@@ -29,6 +29,7 @@ futures = "0.3.32"
 gimli = "0.30.0"
 glob = "0.3.1"
 httparse = "1.10.1"
+hpack = "0.3"
 libbpf-rs = "0.23.3"
 libc = "0.2.155"
 log = "0.4.22"
@@ -78,13 +79,17 @@ actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }
 # Embed frontend static files into the binary (optional, enabled by "server" feature)
 include_dir = { version = "0.7", optional = true }
-hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40dbb5dc9f1617df1aaef628d49e951f" }
+# hf-hub for downloading tokenizer files (patched to use GitHub version below)
+hf-hub = "0.5"
 
 # [profile.release]
 # debug = true
 
 [profile.dev]
 debug-assertions = false
+
+[patch.crates-io]
+hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40dbb5dc9f1617df1aaef628d49e951f" }
 
 [build-dependencies]
 libbpf-cargo = "0.23.3"

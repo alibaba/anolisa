@@ -113,6 +113,10 @@ describe('JsonFormatter', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
+      },
     };
     const formatted = formatter.format(response, stats);
     const expected = {
@@ -209,6 +213,10 @@ describe('JsonFormatter', () => {
       files: {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
+      },
+      sandbox: {
+        totalRuns: 0,
+        totalBlocked: 0,
       },
     };
     const error: JsonError = {

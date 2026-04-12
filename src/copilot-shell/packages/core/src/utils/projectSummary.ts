@@ -6,6 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { QWEN_DIR } from './paths.js';
 
 export interface ProjectSummaryInfo {
   hasHistory: boolean;
@@ -25,11 +26,7 @@ export interface ProjectSummaryInfo {
  * Reads and parses the project summary file to extract structured information
  */
 export async function getProjectSummaryInfo(): Promise<ProjectSummaryInfo> {
-  const summaryPath = path.join(
-    process.cwd(),
-    '.copilot-shell',
-    'PROJECT_SUMMARY.md',
-  );
+  const summaryPath = path.join(process.cwd(), QWEN_DIR, 'PROJECT_SUMMARY.md');
 
   try {
     await fs.access(summaryPath);

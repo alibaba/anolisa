@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { resolveEnvVarsInString } from '../utils/envVarResolver.js';
 
 export const QWEN_DIR = '.copilot-shell';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -159,6 +160,34 @@ export class Storage {
 
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
+  }
+
+  /**
+   * Resolves an array of custom skill paths by expanding:
+   * - ~ and ~/ to user's home directory
+   * - $VAR and ${VAR} to environment variable values
+   * Then resolves to absolute paths.
+   *
+   * Invalid or empty paths after resolution are filtered out.
+   */
+  resolveCustomSkillPaths(rawPaths: string[]): string[] {
+    const homeDir = os.homedir();
+    return rawPaths
+      .map((p) => {
+        let expanded = p.trim();
+        if (!expanded) return '';
+        // Expand tilde
+        if (expanded === '~') {
+          expanded = homeDir;
+        } else if (expanded.startsWith('~/')) {
+          expanded = path.join(homeDir, expanded.slice(2));
+        }
+        // Expand environment variables ($VAR and ${VAR})
+        expanded = resolveEnvVarsInString(expanded);
+        // Resolve to absolute path
+        return path.resolve(expanded);
+      })
+      .filter((p) => p !== '');
   }
 
   private sanitizeCwd(cwd: string): string {

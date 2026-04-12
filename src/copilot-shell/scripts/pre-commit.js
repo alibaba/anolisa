@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import lintStaged from 'lint-staged';
 
 try {
-  // Get repository root
-  const root = execSync('git rev-parse --show-toplevel').toString().trim();
+  // lint-staged config and eslint.config.js live in src/copilot-shell/,
+  // so cwd must point there — not the git repository root.
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageRoot = path.resolve(scriptDir, '..');
 
   // Run lint-staged with API directly
-  const passed = await lintStaged({ cwd: root });
+  const passed = await lintStaged({ cwd: packageRoot });
 
   // Exit with appropriate code
   process.exit(passed ? 0 : 1);

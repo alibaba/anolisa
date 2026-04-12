@@ -13,6 +13,7 @@ use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::bwrap_args::BwrapNetworkMode;
 use crate::bwrap_args::BwrapOptions;
@@ -166,12 +167,15 @@ fn run_bwrap_with_proc_fallback(
 ) -> ! {
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
+    // Detect once; share across preflight and real invocation.
+    let supports_argv0 = bwrap_supports_argv0();
 
     if mount_proc
         && !preflight_proc_mount_support(
             sandbox_policy_cwd,
             file_system_sandbox_policy,
             network_mode,
+            supports_argv0,
         )
     {
         // Keep the retry silent so sandbox-internal diagnostics do not leak into the
@@ -188,6 +192,7 @@ fn run_bwrap_with_proc_fallback(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
         options,
+        supports_argv0,
     );
     exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
 }
@@ -205,11 +210,45 @@ fn bwrap_network_mode(
     }
 }
 
+/// Detect whether the installed `bwrap` binary supports the `--argv0` option.
+///
+/// `--argv0` was introduced in bubblewrap v0.9.0. On older distributions the
+/// binary may be as old as v0.4.x and will error with "Unknown option --argv0"
+/// if the flag is passed. We query `bwrap --version` at startup and skip the
+/// flag when the version is below 0.9.0.
+fn bwrap_supports_argv0() -> bool {
+    let output = match Command::new("bwrap").arg("--version").output() {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_bwrap_version_supports_argv0(&stdout)
+}
+
+/// Parse `bwrap --version` output and return `true` when the version is >=
+/// 0.9.0 (the release that introduced `--argv0`).
+///
+/// Expected format: `"bubblewrap <MAJOR>.<MINOR>.<PATCH>"`.
+/// Returns `false` on any parse failure so we degrade gracefully.
+fn parse_bwrap_version_supports_argv0(version_output: &str) -> bool {
+    fn parse(s: &str) -> Option<bool> {
+        // e.g. "bubblewrap 0.9.0"
+        let version_str = s.trim().split_whitespace().nth(1)?;
+        let mut parts = version_str.split('.');
+        let major: u32 = parts.next()?.parse().ok()?;
+        let minor: u32 = parts.next()?.parse().ok()?;
+        // supports --argv0 when major > 0, or major == 0 and minor >= 9
+        Some(major > 0 || minor >= 9)
+    }
+    parse(version_output).unwrap_or(false)
+}
+
 fn build_bwrap_argv(
     inner: Vec<String>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     sandbox_policy_cwd: &Path,
     options: BwrapOptions,
+    supports_argv0: bool,
 ) -> crate::bwrap_args::BwrapArgs {
     let mut bwrap_args = create_bwrap_command_args(
         inner,
@@ -219,15 +258,17 @@ fn build_bwrap_argv(
     )
     .unwrap_or_else(|err| panic!("error building bubblewrap command: {err:?}"));
 
-    let command_separator_index = bwrap_args
-        .args
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or_else(|| panic!("bubblewrap argv is missing command separator '--'"));
-    bwrap_args.args.splice(
-        command_separator_index..command_separator_index,
-        ["--argv0".to_string(), "linux-sandbox".to_string()],
-    );
+    if supports_argv0 {
+        let command_separator_index = bwrap_args
+            .args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or_else(|| panic!("bubblewrap argv is missing command separator '--'"));
+        bwrap_args.args.splice(
+            command_separator_index..command_separator_index,
+            ["--argv0".to_string(), "linux-sandbox".to_string()],
+        );
+    }
 
     let mut argv = vec!["bwrap".to_string()];
     argv.extend(bwrap_args.args);
@@ -241,9 +282,10 @@ fn preflight_proc_mount_support(
     sandbox_policy_cwd: &Path,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     network_mode: BwrapNetworkMode,
+    supports_argv0: bool,
 ) -> bool {
     let preflight_argv =
-        build_preflight_bwrap_argv(sandbox_policy_cwd, file_system_sandbox_policy, network_mode);
+        build_preflight_bwrap_argv(sandbox_policy_cwd, file_system_sandbox_policy, network_mode, supports_argv0);
     let stderr = run_bwrap_in_child_capture_stderr(preflight_argv);
     !is_proc_mount_failure(stderr.as_str())
 }
@@ -252,6 +294,7 @@ fn build_preflight_bwrap_argv(
     sandbox_policy_cwd: &Path,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     network_mode: BwrapNetworkMode,
+    supports_argv0: bool,
 ) -> crate::bwrap_args::BwrapArgs {
     let preflight_command = vec![resolve_true_command()];
     build_bwrap_argv(
@@ -262,6 +305,7 @@ fn build_preflight_bwrap_argv(
             mount_proc: true,
             network_mode,
         },
+        supports_argv0,
     )
 }
 
@@ -483,6 +527,7 @@ mod tests {
                 mount_proc: true,
                 network_mode: BwrapNetworkMode::FullAccess,
             },
+            true,
         )
         .args;
         assert_eq!(
@@ -509,6 +554,44 @@ mod tests {
     }
 
     #[test]
+    fn omits_argv0_when_not_supported() {
+        let argv = build_bwrap_argv(
+            vec!["/bin/true".to_string()],
+            &read_only_fs_policy(),
+            Path::new("/"),
+            BwrapOptions {
+                mount_proc: true,
+                network_mode: BwrapNetworkMode::FullAccess,
+            },
+            false,
+        )
+        .args;
+        assert!(!argv.contains(&"--argv0".to_string()));
+        assert!(!argv.contains(&"linux-sandbox".to_string()));
+        // "--" separator must still be present
+        assert!(argv.contains(&"--".to_string()));
+    }
+
+    #[test]
+    fn parse_version_detects_old_bwrap() {
+        assert!(!parse_bwrap_version_supports_argv0("bubblewrap 0.4.0\n"));
+        assert!(!parse_bwrap_version_supports_argv0("bubblewrap 0.8.99\n"));
+    }
+
+    #[test]
+    fn parse_version_detects_new_bwrap() {
+        assert!(parse_bwrap_version_supports_argv0("bubblewrap 0.9.0\n"));
+        assert!(parse_bwrap_version_supports_argv0("bubblewrap 0.10.0\n"));
+        assert!(parse_bwrap_version_supports_argv0("bubblewrap 1.0.0\n"));
+    }
+
+    #[test]
+    fn parse_version_returns_false_on_garbage_input() {
+        assert!(!parse_bwrap_version_supports_argv0(""));
+        assert!(!parse_bwrap_version_supports_argv0("unknown"));
+    }
+
+    #[test]
     fn inserts_unshare_net_when_network_isolation_requested() {
         let argv = build_bwrap_argv(
             vec!["/bin/true".to_string()],
@@ -518,6 +601,7 @@ mod tests {
                 mount_proc: true,
                 network_mode: BwrapNetworkMode::Isolated,
             },
+            false,
         )
         .args;
         assert!(argv.contains(&"--unshare-net".to_string()));
@@ -533,6 +617,7 @@ mod tests {
                 mount_proc: true,
                 network_mode: BwrapNetworkMode::ProxyOnly,
             },
+            false,
         )
         .args;
         assert!(argv.contains(&"--unshare-net".to_string()));
@@ -551,6 +636,7 @@ mod tests {
             Path::new("/"),
             &FileSystemSandboxPolicy::unrestricted(),
             mode,
+            false,
         )
         .args;
         assert!(argv.iter().any(|arg| arg == "--"));

@@ -5,11 +5,13 @@
  */
 
 import { createContext, useContext } from 'react';
+import type { FeatureTip } from '../../utils/featureTips.js';
 
 export interface AppState {
   version: string;
   startupWarnings: string[];
   dismissWarning: (match: string) => void;
+  featureTips: FeatureTip[];
 }
 
 export const AppContext = createContext<AppState | null>(null);
