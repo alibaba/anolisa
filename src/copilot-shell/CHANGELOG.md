@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.4
+
+- Added STS authentication support via ECS RAM role. (#161)
+- Added BeforeModel, AfterModel, and BeforeToolSelection hooks. (#154)
+- Added sandbox usage summary on session exit. (#137)
+- Added Tab-completion for `!` shell mode. (#131)
+- Fixed config-dir source unification and prevented ~/.copilot creation on startup. (#171)
+- Fixed /bug command crash in headless environment. (#175)
+- Fixed undefined metrics.sandbox in StatsDisplay. (#171)
+- Supplement /hooks install step to post-installation guide. (#142)
+- Supplement hooks documentation (index, reference, writing-hooks). (#142)
+
 ## 2.0.3
 
 - Migrated config directory from `~/.copilot` to `~/.copilot-shell`. (#78)
