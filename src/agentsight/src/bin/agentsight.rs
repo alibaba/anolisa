@@ -9,7 +9,7 @@
 use structopt::StructOpt;
 
 mod cli;
-use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand};
+use cli::{token::TokenCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand};
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
 use agentsight::token_breakdown::AnalyzeChatmlCommand;
@@ -19,8 +19,6 @@ use agentsight::token_breakdown::AnalyzeChatmlCommand;
 pub enum Command {
     /// Query token consumption data
     Token(TokenCommand),
-    /// Trace agent activity (default)
-    Trace(TraceCommand),
     /// Query audit events
     Audit(AuditCommand),
     /// Discover running AI agents on the system
@@ -40,7 +38,6 @@ fn main() {
     env_logger::init();
     match cmd {
         Command::Token(token_cmd) => token_cmd.execute(),
-        Command::Trace(trace_cmd) => trace_cmd.execute(),
         Command::Audit(audit_cmd) => audit_cmd.execute(),
         Command::Discover(discover_cmd) => discover_cmd.execute(),
         Command::AnalyzeChatml(cmd) => cmd.execute(),
