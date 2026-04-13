@@ -1,7 +1,7 @@
 ---
 name: storage-resize
 version: 1.0.0
-description: 阿里云 Alinux4 磁盘扩容技能，实现云盘扩容后自动完成分区调整和文件系统扩容。支持系统盘/数据盘在线扩容，适配 XFS/EXT4/Btrfs 文件系统。
+description: Linux 磁盘扩容技能（RPM 包管理系统），实现云盘扩容后自动完成分区调整和文件系统扩容。支持系统盘/数据盘在线扩容，适配 XFS/EXT4/Btrfs 文件系统。适用于 RPM 包管理的 Linux 系统（如 Alibaba Cloud Linux）。
 layer: system
 lifecycle: operations
 dependencies:

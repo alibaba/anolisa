@@ -1,7 +1,7 @@
 ---
 name: install-openclaw
 version: 1.0.0
-description: "在 Alibaba Cloud Linux 4 (Alinux 4) 服务器上安装和配置 OpenClaw，接入钉钉频道与阿里云百炼（通义千问）模型。当用户需要部署 OpenClaw、配置钉钉机器人、接入 DashScope/Qwen 模型、排查 OpenClaw 网关无法启动、或遇到插件不加载等问题时使用此技能。包含完整踩坑记录与正确配置结构。"
+description: 在 RPM 包管理的 Linux 服务器（如 Alibaba Cloud Linux）上安装和配置 OpenClaw，接入钉钉频道与阿里云百炼（通义千问）模型。当用户需要部署 OpenClaw、配置钉钉机器人、接入 DashScope/Qwen 模型、排查 OpenClaw 网关无法启动、或遇到插件不加载等问题时使用此技能。包含完整踩坑记录与正确配置结构。
 layer: application
 lifecycle: usage
 ---
@@ -31,7 +31,7 @@ install-openclaw/
 **优先使用系统包管理器（推荐）**
 
 ```bash
-# alinux4 仓库自带 Node.js 22
+# Linux 仓库自带 Node.js 22
 dnf install -y nodejs
 node -v && npm -v
 ```

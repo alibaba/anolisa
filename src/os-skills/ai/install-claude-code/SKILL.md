@@ -1,7 +1,7 @@
 ---
 name: install-claude-code-linux
 version: 1.0.0
-description: Install and configure Claude Code on Alibaba Cloud Linux 4 (Alinux 4) with multiple fallback methods (native installer, npm, nvm+npm). Includes DashScope/Qwen API configuration template. Use when the user asks to install Claude Code on Alinux 4, set up Claude Code CLI, or configure Claude Code with a custom API endpoint.
+description: Install and configure Claude Code on RPM-based Linux systems (e.g., Alibaba Cloud Linux) with multiple fallback methods (native installer, npm, nvm+npm). Includes DashScope/Qwen API configuration template. Use when the user asks to install Claude Code CLI, set up Claude Code CLI, or configure Claude Code with a custom API endpoint on RPM-based Linux systems.
 layer: application
 lifecycle: usage
 ---
@@ -10,7 +10,7 @@ lifecycle: usage
 
 ## System Requirements
 
-- **OS**: Alibaba Cloud Linux 4
+- **OS**: Linux
 - **RAM**: 4 GB+
 - **Network**: 需要联网
 - **Shell**: Bash

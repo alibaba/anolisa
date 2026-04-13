@@ -1,12 +1,12 @@
 ---
 name: kernel-dev
 version: 1.0.0
-description: 阿里云 Alinux4 内核研发自动化技能，提供内核编译（SRPM/Upstream 双方法）、内核 module 开发环境搭建、依赖安装、示例代码生成等功能。支持 Alinux4 官方内核及上游最新内核，兼容 x86_64 和 aarch64 双架构。使用场景：内核定制开发、驱动模块研发、内核漏洞修复验证。
+description: Linux 内核研发自动化技能（RPM 包管理系统），提供内核编译（SRPM/Upstream 双方法）、内核 module 开发环境搭建、依赖安装、示例代码生成等功能。Linux 官方内核及上游最新内核，兼容 x86_64 和 aarch64 双架构。使用场景：内核定制开发、驱动模块研发、内核漏洞修复验证。适用于 RPM 包管理的 Linux 系统（如 Alibaba Cloud Linux）。
 layer: core
 lifecycle: production
 ---
 
-# Kernel Development - Alinux4 内核研发自动化
+# Kernel Development - Linux 内核研发自动化
 
 ## 核心定位
 
@@ -25,7 +25,7 @@ lifecycle: production
 
 **重要约束：**
 - 🔒 需要 root 权限执行内核相关操作
-- 📦 仅支持 Alinux4 (alnx4) 操作系统
+- 📦 仅Linux操作系统
 - ⚠️ 内核编译会消耗大量系统资源（建议至少 4GB 内存）
 - ⏱️ 编译时间：SRPM 方法 1-3 小时，Upstream 方法 30-60 分钟
 
