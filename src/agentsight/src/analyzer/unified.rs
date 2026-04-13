@@ -442,7 +442,7 @@ impl Analyzer {
             }
             _ => None,
         };
-        
+
         // 5. Token consumption analysis - breakdown by message role
         // This runs for any HTTP request with messages (not just SSE responses)
         // if let Some(breakdown) = self.analyze_token_consumption(result) {

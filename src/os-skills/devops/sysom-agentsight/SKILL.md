@@ -1,6 +1,6 @@
 ---
 name: agentsight
-description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势，或询问 LLM 调用、进程行为审计时使用此技能。
+description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
 ---
 
 # Token 查询
@@ -13,9 +13,6 @@ description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审
 | `/usr/local/bin/agentsight token --period yesterday` | 昨天消耗 |
 | `/usr/local/bin/agentsight token --hours 3` | 最近 3 小时 |
 | `/usr/local/bin/agentsight token --period today --compare` | 今天 vs 昨天对比 |
-| `/usr/local/bin/agentsight token --period today --breakdown` | 按任务分解 |
-| `/usr/local/bin/agentsight token --detail` | 按角色/类型明细 |
-| `/usr/local/bin/agentsight token --detail --records` | 含每条请求记录 |
 
 ## 返回示例
 
@@ -23,9 +20,6 @@ description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审
 今天共消耗 125,000 tokens，比昨天（98,000）增长 27%。
 
 输入: 125,000 | 输出: 85,000
-
-按角色分布：
-  user: 80,000 | system: 30,000 | assistant: 15,000
 ```
 
 ---

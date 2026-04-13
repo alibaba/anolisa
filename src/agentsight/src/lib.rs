@@ -42,7 +42,6 @@ pub mod genai;
 pub mod atif;
 #[cfg(feature = "server")]
 pub mod server;
-pub mod token_breakdown;
 mod unified;
 pub mod ffi;
 
@@ -69,8 +68,6 @@ pub use analyzer::{
     AnthropicRequest, AnthropicResponse, AnthropicMessage, AnthropicUsage,
     MessageRole,
     AnalysisResult, PromptTokenCount, HttpRecord, Analyzer,
-    TokenConsumptionBreakdown, MessageTokenCount, OutputTokenCount,
-    count_request_tokens, count_response_tokens, RequestTokenCount, ResponseTokenCount,
 };
 pub use chrome_trace::{ChromeTraceEvent, TraceArgs, ToChromeTraceEvent, ns_to_us, next_flow_id};
 pub use storage::{
@@ -78,8 +75,6 @@ pub use storage::{
     SqliteStore, AuditStore,
     TokenStore, TokenQuery,
     HttpStore,
-    TokenConsumptionStore, TokenConsumptionRecord,
-    TokenConsumptionFilter, TokenConsumptionQueryResult,
     TimePeriod, TokenQueryResult, TokenBreakdown, TokenComparison, Trend,
     format_tokens, format_tokens_with_commas,
 };
