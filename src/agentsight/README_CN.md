@@ -141,7 +141,7 @@ agentsight serve --db /path/to/genai_events.db
 agentsight discover
 
 # 列出所有已知 Agent 类型
-agentsight discover --list
+agentsight discover --list-known
 
 # 详细输出（包含可执行文件路径）
 agentsight discover --verbose

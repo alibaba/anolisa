@@ -141,7 +141,7 @@ Discover AI agents running on the system.
 agentsight discover
 
 # List all known agent types
-agentsight discover --list
+agentsight discover --list-known
 
 # Verbose output with executable paths
 agentsight discover --verbose
