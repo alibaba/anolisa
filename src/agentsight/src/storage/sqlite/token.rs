@@ -501,33 +501,33 @@ impl<'a> TokenQuery<'a> {
     /// Query with comparison
     pub fn by_period_with_compare(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
-        
+
         // Get previous period data
         let prev_period = period.previous_period();
         let prev_result = self.by_period(prev_period);
-        
-        if prev_result.total_tokens > 0 {
-            let change = result.total_tokens as i64 - prev_result.total_tokens as i64;
-            let change_percent = if prev_result.total_tokens > 0 {
-                (change as f64 / prev_result.total_tokens as f64) * 100.0
+
+        let change = result.total_tokens as i64 - prev_result.total_tokens as i64;
+        let change_percent = if prev_result.total_tokens > 0 {
+            (change as f64 / prev_result.total_tokens as f64) * 100.0
+        } else if result.total_tokens > 0 {
+            100.0 // From 0 to non-zero is 100% increase
+        } else {
+            0.0
+        };
+
+        result.comparison = Some(TokenComparison {
+            previous_total: prev_result.total_tokens,
+            change,
+            change_percent,
+            trend: if change > 0 {
+                Trend::Up
+            } else if change < 0 {
+                Trend::Down
             } else {
-                0.0
-            };
-            
-            result.comparison = Some(TokenComparison {
-                previous_total: prev_result.total_tokens,
-                change,
-                change_percent,
-                trend: if change > 0 {
-                    Trend::Up
-                } else if change < 0 {
-                    Trend::Down
-                } else {
-                    Trend::Flat
-                },
-            });
-        }
-        
+                Trend::Flat
+            },
+        });
+
         result
     }
     
@@ -548,7 +548,7 @@ impl<'a> TokenQuery<'a> {
     /// Query hours with comparison
     pub fn by_hours_with_compare(&self, hours: u64) -> TokenQueryResult {
         let mut result = self.by_hours(hours);
-        
+
         // Get previous period data
         let prev_records = self.store.by_last_hours(hours * 2);
         let prev_records: Vec<_> = prev_records.into_iter().filter(|r| {
@@ -562,31 +562,31 @@ impl<'a> TokenQuery<'a> {
             let mid_ns = now.saturating_sub(hours_ns);
             r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
         }).collect();
-        
+
         let prev_total: u64 = prev_records.iter().map(|r| r.total_tokens()).sum();
-        
-        if prev_total > 0 {
-            let change = result.total_tokens as i64 - prev_total as i64;
-            let change_percent = if prev_total > 0 {
-                (change as f64 / prev_total as f64) * 100.0
+
+        let change = result.total_tokens as i64 - prev_total as i64;
+        let change_percent = if prev_total > 0 {
+            (change as f64 / prev_total as f64) * 100.0
+        } else if result.total_tokens > 0 {
+            100.0 // From 0 to non-zero is 100% increase
+        } else {
+            0.0
+        };
+
+        result.comparison = Some(TokenComparison {
+            previous_total: prev_total,
+            change,
+            change_percent,
+            trend: if change > 0 {
+                Trend::Up
+            } else if change < 0 {
+                Trend::Down
             } else {
-                0.0
-            };
-            
-            result.comparison = Some(TokenComparison {
-                previous_total: prev_total,
-                change,
-                change_percent,
-                trend: if change > 0 {
-                    Trend::Up
-                } else if change < 0 {
-                    Trend::Down
-                } else {
-                    Trend::Flat
-                },
-            });
-        }
-        
+                Trend::Flat
+            },
+        });
+
         result
     }
     
