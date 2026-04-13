@@ -423,9 +423,12 @@ impl Analyzer {
         log::debug!("Analyzing aggregated result({})", result.result_type());
         let mut results = Vec::new();
 
-        // 1. Audit analysis
-        if let Some(record) = self.audit.analyze(result) {
-            results.push(AnalysisResult::Audit(record));
+        // 1. Audit analysis for process actions (non-HTTP)
+        if let AggregatedResult::ProcessComplete(process) = result {
+            if let Some(record) = self.audit.analyze(result) {
+                results.push(AnalysisResult::Audit(record));
+            }
+            return results;
         }
 
         // 2. Token analysis - extract from SSE events
@@ -442,7 +445,7 @@ impl Analyzer {
             }
             _ => None,
         };
-        
+
         // 5. Token consumption analysis - breakdown by message role
         // This runs for any HTTP request with messages (not just SSE responses)
         // if let Some(breakdown) = self.analyze_token_consumption(result) {
@@ -464,6 +467,11 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
+            // Extract audit from HttpRecord (only for SSE responses / LLM calls)
+            if let Some(audit_record) = self.audit.analyze_http(&http_record) {
+                results.push(AnalysisResult::Audit(audit_record));
+            }
+
             if token_result.is_none() && http_record.is_sse {
                 if let Some(body) = &http_record.response_body {
                     if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {

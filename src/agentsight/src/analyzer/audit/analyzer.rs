@@ -5,6 +5,7 @@
 use crate::aggregator::HttpPair;
 use crate::aggregator::AggregatedProcess;
 use crate::aggregator::AggregatedResult;
+use crate::analyzer::HttpRecord;
 use super::record::{AuditEventType, AuditExtra, AuditRecord};
 
 /// Analyzes aggregated results and extracts audit records
@@ -17,19 +18,66 @@ impl AuditAnalyzer {
     }
 
     /// Analyze an aggregated result and extract an audit record if applicable
+    ///
+    /// Note: For HTTP/HTTP2 requests, prefer using `analyze_http` method instead,
+    /// which handles both HTTP/1.1 and HTTP/2 uniformly via HttpRecord.
     pub fn analyze(&self, result: &AggregatedResult) -> Option<AuditRecord> {
         match result {
-            AggregatedResult::HttpComplete(pair) => Some(self.extract_llm_call(pair, false)),
-            AggregatedResult::SseComplete(pair) => Some(self.extract_llm_call(pair, true)),
             AggregatedResult::ProcessComplete(process) => {
                 Some(self.extract_process_action(process))
+            }
+            // HTTP/HTTP2 results should be handled via analyze_http()
+            // This legacy path is kept for backward compatibility
+            AggregatedResult::SseComplete(pair) => {
+                // Only create audit for SSE responses (LLM streaming calls)
+                Some(self.extract_llm_call_legacy(pair, true))
             }
             _ => None,
         }
     }
 
-    /// Extract an LLM call audit record from an HTTP pair
-    fn extract_llm_call(&self, pair: &HttpPair, is_sse: bool) -> AuditRecord {
+    /// Extract audit record from HttpRecord
+    ///
+    /// Only creates llm_call for SSE responses, which are LLM streaming API calls.
+    /// Non-SSE requests (like npm package queries) are filtered out.
+    /// This method works for both HTTP/1.1 and HTTP/2 uniformly.
+    pub fn analyze_http(&self, http_record: &HttpRecord) -> Option<AuditRecord> {
+        // Only create llm_call for SSE responses
+        if !http_record.is_sse {
+            return None;
+        }
+
+        // Extract model from request body if available
+        let model = http_record.request_body
+            .as_ref()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+            .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));
+
+        Some(AuditRecord {
+            id: None,
+            event_type: AuditEventType::LlmCall,
+            timestamp_ns: http_record.timestamp_ns,
+            pid: http_record.pid,
+            ppid: None,
+            comm: http_record.comm.clone(),
+            duration_ns: http_record.duration_ns,
+            extra: AuditExtra::LlmCall {
+                provider: None,
+                model,
+                request_method: Some(http_record.method.clone()),
+                request_path: Some(http_record.path.clone()),
+                response_status: Some(http_record.status_code),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                is_sse: true,
+            },
+        })
+    }
+
+    /// Extract an LLM call audit record from an HTTP pair (legacy method)
+    fn extract_llm_call_legacy(&self, pair: &HttpPair, is_sse: bool) -> AuditRecord {
         let request = &pair.request;
         let pid = request.source_event.pid;
         let comm = request.source_event.comm_str();
@@ -42,8 +90,7 @@ impl AuditAnalyzer {
         // Extract response info
         let response_status = Some(pair.response.parsed.status_code);
 
-        // Detect provider from request path/headers
-        let provider = detect_provider(&request.path, &request.headers);
+        // Extract model from request body
         let model = detect_model_from_request(pair);
 
         // Calculate duration
@@ -59,7 +106,7 @@ impl AuditAnalyzer {
             comm,
             duration_ns,
             extra: AuditExtra::LlmCall {
-                provider,
+                provider: None,
                 model,
                 request_method,
                 request_path,
@@ -96,38 +143,6 @@ impl Default for AuditAnalyzer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Detect LLM provider from request path and headers
-fn detect_provider(
-    path: &str,
-    headers: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    // Check by path patterns
-    if path.contains("/v1/messages") {
-        return Some("Anthropic".to_string());
-    }
-    if path.contains("/v1/chat/completions") || path.contains("/v1/completions") {
-        return Some("OpenAI".to_string());
-    }
-    if path.contains("generateContent") || path.contains("streamGenerateContent") {
-        return Some("Google".to_string());
-    }
-
-    // Check by Host header
-    if let Some(host) = headers.get("host").or_else(|| headers.get("Host")) {
-        if host.contains("anthropic.com") {
-            return Some("Anthropic".to_string());
-        }
-        if host.contains("openai.com") {
-            return Some("OpenAI".to_string());
-        }
-        if host.contains("googleapis.com") || host.contains("gemini") {
-            return Some("Google".to_string());
-        }
-    }
-
-    None
 }
 
 /// Try to detect model from request body JSON
