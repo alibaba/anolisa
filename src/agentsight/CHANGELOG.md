@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- fix(agentsight): add /usr/lib/copilot-shell path to CoshMatcher. (#190)
+
 ## 0.2.0
 
 - AgentSight Dashboard web UI with real-time monitoring interface. (#74)
