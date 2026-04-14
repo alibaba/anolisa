@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.4.1
+
+- Added option to skip authentication on first startup and directly use Bash Shell. (#217)
+
 ## 2.0.4
 
 - Added STS authentication support via ECS RAM role. (#161)
