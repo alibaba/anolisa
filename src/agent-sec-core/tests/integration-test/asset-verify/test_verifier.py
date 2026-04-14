@@ -9,19 +9,22 @@ import sys
 import tempfile
 import unittest
 
-# Add asset-verify to path (updated for new location: tests/integration-test/asset-verify -> agent-sec-cli/asset-verify)
+# Add agent-sec-cli/src to path so the full package is importable
 sys.path.insert(
-    0, os.path.join(os.path.dirname(__file__), "../../../agent-sec-cli/asset-verify")
+    0,
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "agent-sec-cli", "src")
+    ),
 )
 
-from errors import (
+from agent_sec_cli.asset_verify.errors import (
     ErrConfigMissing,
     ErrHashMismatch,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
 )
-from verifier import (
+from agent_sec_cli.asset_verify.verifier import (
     compute_file_hash,
     load_config,
     load_trusted_keys,
@@ -256,7 +259,7 @@ Expire-Date: 0
             f.write("print('hello')")
 
         # Create .skill-meta directory and manifest
-        from verifier import compute_file_hash
+        from agent_sec_cli.asset_verify.verifier import compute_file_hash
 
         cls.meta_dir = os.path.join(cls.skill_dir, ".skill-meta")
         os.makedirs(cls.meta_dir)
