@@ -1,0 +1,10 @@
+[package]
+name = "tokenless-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Schema and response compression for LLM token optimization"
+
+[dependencies]
+serde_json.workspace = true
+regex.workspace = true

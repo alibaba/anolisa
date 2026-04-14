@@ -1,0 +1,3 @@
+[submodule "src/tokenless/third_party/rtk"]
+	path = src/tokenless/third_party/rtk
+	url = https://github.com/rtk-ai/rtk.git

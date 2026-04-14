@@ -1,0 +1,12 @@
+{
+  "name": "@tokenless/openclaw-plugin",
+  "version": "1.0.0",
+  "description": "Unified OpenClaw plugin — RTK command rewriting + tokenless schema/response compression for 60-90% LLM token savings",
+  "main": "index.ts",
+  "peerDependencies": {
+    "rtk": ">=0.28.0",
+    "tokenless": ">=0.1.0"
+  },
+  "files": ["index.ts", "openclaw.plugin.json", "README.md"],
+  "license": "MIT"
+}
