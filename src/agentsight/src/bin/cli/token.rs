@@ -120,5 +120,7 @@ fn print_human_readable(
             format_tokens_with_commas(result.output_tokens)
         );
     }
+
+    println!("(注意：暂不支持Aliyun Authentication)")
 }
 
