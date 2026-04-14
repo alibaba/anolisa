@@ -36,6 +36,7 @@ export interface UIActions {
     authType: AuthType | undefined,
     credentials?: OpenAICredentials | AliyunCredentialsExtended,
   ) => Promise<void>;
+  handleContinueToBash: () => void;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string) => void;
   cancelAuthentication: () => void;

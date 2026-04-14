@@ -16,10 +16,11 @@ import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
 const createMockUIState = (overrides: Partial<UIState> = {}): UIState => {
-  // AuthDialog only uses authError and pendingAuthType
+  // AuthDialog only uses authError, pendingAuthType and showBashOptionInAuthDialog
   const baseState = {
     authError: null,
     pendingAuthType: undefined,
+    showBashOptionInAuthDialog: true,
   } as Partial<UIState>;
 
   return {
@@ -29,9 +30,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState => {
 };
 
 const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
-  // AuthDialog only uses handleAuthSelect
   const baseActions = {
     handleAuthSelect: vi.fn(),
+    handleContinueToBash: vi.fn(),
   } as Partial<UIActions>;
 
   return {
@@ -464,7 +465,7 @@ describe('AuthDialog', () => {
 
     // Should show error message instead of calling handleAuthSelect
     expect(lastFrame()).toContain(
-      'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+      'You must select an auth method or continue to Bash to proceed. Press Ctrl+C again to exit.',
     );
     expect(handleAuthSelect).not.toHaveBeenCalled();
     unmount();
@@ -526,6 +527,354 @@ describe('AuthDialog', () => {
 
     // Should not call handleAuthSelect
     expect(handleAuthSelect).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should render dual sections and bash entry', () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame } = renderAuthDialog(settings);
+
+    expect(lastFrame()).toContain('Get started');
+    expect(lastFrame()).toContain('Use Copilot Shell');
+    expect(lastFrame()).toContain('Continue without Copilot Shell');
+    expect(lastFrame()).not.toContain('Continue without AI');
+    expect(lastFrame()).toContain('Continue to Bash');
+    expect(lastFrame()).not.toContain('● Continue to Bash');
+  });
+
+  it('should hide bash section for manual auth dialog opens', () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame } = renderAuthDialog(settings, {
+      showBashOptionInAuthDialog: false,
+    });
+
+    expect(lastFrame()).toContain('Select authorization');
+    expect(lastFrame()).toContain(
+      "Choose how you'd like to authenticate in Copilot Shell.",
+    );
+    expect(lastFrame()).not.toContain('Use with AI');
+    expect(lastFrame()).not.toContain('Continue without Copilot Shell');
+    expect(lastFrame()).not.toContain('Continue to Bash');
+    expect(lastFrame()).toContain('(↑↓ Select · Enter Continue)');
+  });
+
+  it('should ignore tab when bash section is hidden', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(settings, {
+      showBashOptionInAuthDialog: false,
+    });
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+
+    stdin.write('\t');
+    await wait();
+
+    expect(lastFrame()).toContain('● Aliyun Authentication');
+    expect(lastFrame()).not.toContain('Continue to Bash');
+    unmount();
+  });
+
+  it('should navigate to bash with down arrow and trigger bash on enter', async () => {
+    const handleContinueToBash = vi.fn();
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleContinueToBash },
+    );
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+    stdin.write('\u001b[B');
+    await wait();
+
+    expect(lastFrame()).toContain('● Continue to Bash');
+
+    stdin.write('\r');
+    await wait();
+
+    expect(handleContinueToBash).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  it('should wrap to bash with up arrow from first auth option', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(settings);
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+
+    stdin.write('\u001b[A');
+    await wait();
+
+    expect(lastFrame()).toContain('● Continue to Bash');
+    unmount();
+  });
+
+  it('should switch sections with tab and shift+tab', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(settings);
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+
+    stdin.write('\t');
+    await wait();
+    expect(lastFrame()).toContain('● Continue to Bash');
+
+    stdin.write('\x1b[Z');
+    await wait();
+    expect(lastFrame()).toContain('● Aliyun Authentication');
+    unmount();
+  });
+
+  it('should still select auth option on enter', async () => {
+    const handleAuthSelect = vi.fn();
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleAuthSelect },
+    );
+
+    stdin.write('\r');
+    await wait();
+
+    expect(handleAuthSelect).toHaveBeenCalledWith(AuthType.USE_ALIYUN);
     unmount();
   });
 

@@ -437,13 +437,20 @@ export const AppContainer = (props: AppContainerProps) => {
     authError,
     onAuthError,
     isAuthDialogOpen,
+    showBashOptionInAuthDialog,
     isAuthenticating,
     pendingAuthType,
     qwenAuthState,
     handleAuthSelect,
+    handleContinueToBash,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem);
+  } = useAuthCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    initializationResult.shouldOpenAuthDialog,
+  );
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
@@ -1403,6 +1410,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isConfigInitialized,
       authError,
       isAuthDialogOpen,
+      showBashOptionInAuthDialog,
       pendingAuthType,
       // Qwen OAuth state
       qwenAuthState,
@@ -1497,6 +1505,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isConfigInitialized,
       authError,
       isAuthDialogOpen,
+      showBashOptionInAuthDialog,
       pendingAuthType,
       // Qwen OAuth state
       qwenAuthState,
@@ -1595,6 +1604,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleAuthSelect,
+      handleContinueToBash,
       setAuthState,
       onAuthError,
       cancelAuthentication,
@@ -1638,6 +1648,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleAuthSelect,
+      handleContinueToBash,
       setAuthState,
       onAuthError,
       cancelAuthentication,

@@ -20,6 +20,8 @@ export interface DescriptiveRadioButtonSelectProps<T> {
   items: Array<DescriptiveRadioSelectItem<T>>;
   /** The initial index selected */
   initialIndex?: number;
+  /** Override the visible active index without changing internal navigation state. */
+  activeIndexOverride?: number | null;
   /** Function called when an item is selected. Receives the `value` of the selected item. */
   onSelect: (value: T) => void;
   /** Function called when an item is highlighted. Receives the `value` of the selected item. */
@@ -42,6 +44,7 @@ export interface DescriptiveRadioButtonSelectProps<T> {
 export function DescriptiveRadioButtonSelect<T>({
   items,
   initialIndex = 0,
+  activeIndexOverride,
   onSelect,
   onHighlight,
   isFocused = true,
@@ -53,6 +56,7 @@ export function DescriptiveRadioButtonSelect<T>({
     <BaseSelectionList<T, DescriptiveRadioSelectItem<T>>
       items={items}
       initialIndex={initialIndex}
+      activeIndexOverride={activeIndexOverride}
       onSelect={onSelect}
       onHighlight={onHighlight}
       isFocused={isFocused}
