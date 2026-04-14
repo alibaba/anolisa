@@ -921,15 +921,30 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': '开始使用',
+  'Use Copilot Shell': '使用 Copilot Shell',
   'Qwen OAuth': 'Qwen OAuth',
   'Free · Up to 1,000 requests per day': '免费 · 每天最多 1,000 次请求',
   'How would you like to authenticate for this project?':
     '您希望如何为此项目进行身份验证？',
+
+  'Select authorization': '选择授权方式',
+  "Choose how you'd like to authenticate in Copilot Shell.":
+    '请选择你希望在 Copilot Shell 中使用的认证方式。',
+
+  'Continue without Copilot Shell': '不使用 Copilot Shell',
+  'Continue to Bash': '继续进入 Bash',
+  'Open an interactive Bash shell without configuring AI authentication':
+    '无需配置 AI 认证，直接进入交互式 Bash Shell',
   'OpenAI API key is required to use OpenAI authentication.':
     '使用 OpenAI 认证需要 OpenAI API 密钥',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
+  'You must select an auth method or continue to Bash to proceed. Press Ctrl+C again to exit.':
+    '您必须选择一种认证方式，或继续进入 Bash，才能继续。再次按 Ctrl+C 可退出。',
   '(Use Enter to Set Auth)': '（使用 Enter 设置认证）',
+  '(↑↓ Select · Tab Switch Section · Enter Continue)':
+    '（↑↓ 选择 · Tab 切换分区 · Enter 继续）',
+  '(↑↓ Select · Enter Continue)': '（↑↓ 选择 · Enter 继续）',
   'Terms of Services and Privacy Notice for Copilot Shell':
     'Copilot Shell 的服务条款和隐私声明',
   OpenAI: 'OpenAI',

@@ -970,15 +970,30 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Get started',
+  'Use Copilot Shell': 'Use Copilot Shell',
   'Qwen OAuth': 'Qwen OAuth',
   'Free · Up to 1,000 requests per day': 'Free · Up to 1,000 requests per day',
   'How would you like to authenticate for this project?':
     'How would you like to authenticate for this project?',
+
+  'Select authorization': 'Select authorization',
+  "Choose how you'd like to authenticate in Copilot Shell.":
+    "Choose how you'd like to authenticate in Copilot Shell.",
+
+  'Continue without Copilot Shell': 'Continue without Copilot Shell',
+  'Continue to Bash': 'Continue to Bash',
+  'Open an interactive Bash shell without configuring AI authentication':
+    'Open an interactive Bash shell without configuring AI authentication',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI API key is required to use OpenAI authentication.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+  'You must select an auth method or continue to Bash to proceed. Press Ctrl+C again to exit.':
+    'You must select an auth method or continue to Bash to proceed. Press Ctrl+C again to exit.',
   '(Use Enter to Set Auth)': '(Use Enter to Set Auth)',
+  '(↑↓ Select · Tab Switch Section · Enter Continue)':
+    '(↑↓ Select · Tab Switch Section · Enter Continue)',
+  '(↑↓ Select · Enter Continue)': '(↑↓ Select · Enter Continue)',
   'Terms of Services and Privacy Notice for Copilot Shell':
     'Terms of Services and Privacy Notice for Copilot Shell',
   'Copilot Shell OAuth': 'Copilot Shell OAuth',

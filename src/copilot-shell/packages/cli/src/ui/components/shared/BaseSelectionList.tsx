@@ -24,6 +24,7 @@ export interface BaseSelectionListProps<
 > {
   items: TItem[];
   initialIndex?: number;
+  activeIndexOverride?: number | null;
   onSelect: (value: T) => void;
   onHighlight?: (value: T) => void;
   isFocused?: boolean;
@@ -53,6 +54,7 @@ export function BaseSelectionList<
 >({
   items,
   initialIndex = 0,
+  activeIndexOverride,
   onSelect,
   onHighlight,
   isFocused = true,
@@ -70,20 +72,29 @@ export function BaseSelectionList<
     showNumbers,
   });
 
+  const visibleActiveIndex =
+    activeIndexOverride === undefined ? activeIndex : activeIndexOverride;
   const [scrollOffset, setScrollOffset] = useState(0);
 
   // Handle scrolling for long lists
   useEffect(() => {
+    if (visibleActiveIndex === null) {
+      return;
+    }
+
     const newScrollOffset = Math.max(
       0,
-      Math.min(activeIndex - maxItemsToShow + 1, items.length - maxItemsToShow),
+      Math.min(
+        visibleActiveIndex - maxItemsToShow + 1,
+        items.length - maxItemsToShow,
+      ),
     );
-    if (activeIndex < scrollOffset) {
-      setScrollOffset(activeIndex);
-    } else if (activeIndex >= scrollOffset + maxItemsToShow) {
+    if (visibleActiveIndex < scrollOffset) {
+      setScrollOffset(visibleActiveIndex);
+    } else if (visibleActiveIndex >= scrollOffset + maxItemsToShow) {
       setScrollOffset(newScrollOffset);
     }
-  }, [activeIndex, items.length, scrollOffset, maxItemsToShow]);
+  }, [visibleActiveIndex, items.length, scrollOffset, maxItemsToShow]);
 
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const numberColumnWidth = String(items.length).length;
@@ -101,7 +112,7 @@ export function BaseSelectionList<
 
       {visibleItems.map((item, index) => {
         const itemIndex = scrollOffset + index;
-        const isSelected = activeIndex === itemIndex;
+        const isSelected = visibleActiveIndex === itemIndex;
 
         // Determine colors based on selection and disabled state
         let titleColor = theme.text.primary;

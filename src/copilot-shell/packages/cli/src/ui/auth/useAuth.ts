@@ -23,6 +23,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
@@ -33,6 +34,7 @@ export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  showBashOptionOnStartup: boolean,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;
 
@@ -44,6 +46,9 @@ export const useAuthCommand = (
 
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(unAuthenticated);
+  const [showBashOptionInAuthDialog, setShowBashOptionInAuthDialog] = useState(
+    showBashOptionOnStartup,
+  );
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,
   );
@@ -67,6 +72,7 @@ export const useAuthCommand = (
   const handleAuthFailure = useCallback(
     (error: unknown) => {
       setIsAuthenticating(false);
+      setShowBashOptionInAuthDialog(false);
       setIsAuthDialogOpen(true); // Reopen dialog to show error
 
       const errorMessage = t('Failed to authenticate. Message: {{message}}', {
@@ -228,6 +234,7 @@ export const useAuthCommand = (
       credentials?: OpenAICredentials | AliyunCredentialsExtended,
     ) => {
       if (!authType) {
+        setShowBashOptionInAuthDialog(false);
         setIsAuthDialogOpen(false);
         setAuthError(null);
         return;
@@ -251,6 +258,7 @@ export const useAuthCommand = (
 
       setPendingAuthType(authType);
       setAuthError(null);
+      setShowBashOptionInAuthDialog(false);
       setIsAuthDialogOpen(false);
       setIsAuthenticating(true);
 
@@ -353,7 +361,19 @@ export const useAuthCommand = (
   );
 
   const openAuthDialog = useCallback(() => {
+    setShowBashOptionInAuthDialog(false);
     setIsAuthDialogOpen(true);
+  }, []);
+
+  const handleContinueToBash = useCallback(() => {
+    setAuthError(null);
+    setIsAuthenticating(false);
+    setShowBashOptionInAuthDialog(false);
+    setIsAuthDialogOpen(false);
+    appEvents.emit(
+      AppEvent.SpawnShell,
+      process.platform === 'win32' ? 'cmd.exe' : 'bash',
+    );
   }, []);
 
   const cancelAuthentication = useCallback(() => {
@@ -369,6 +389,7 @@ export const useAuthCommand = (
 
     // Do not reset pendingAuthType here, persist the previously selected type.
     setIsAuthenticating(false);
+    setShowBashOptionInAuthDialog(false);
     setIsAuthDialogOpen(true);
     setAuthError(null);
   }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
@@ -419,10 +440,12 @@ export const useAuthCommand = (
     authError,
     onAuthError,
     isAuthDialogOpen,
+    showBashOptionInAuthDialog,
     isAuthenticating,
     pendingAuthType,
     qwenAuthState,
     handleAuthSelect,
+    handleContinueToBash,
     openAuthDialog,
     cancelAuthentication,
   };

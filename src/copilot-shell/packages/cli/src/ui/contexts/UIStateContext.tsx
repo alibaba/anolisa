@@ -44,6 +44,7 @@ export interface UIState {
   isConfigInitialized: boolean;
   authError: string | null;
   isAuthDialogOpen: boolean;
+  showBashOptionInAuthDialog: boolean;
   pendingAuthType: AuthType | undefined;
   // Qwen OAuth state
   qwenAuthState: QwenAuthState;

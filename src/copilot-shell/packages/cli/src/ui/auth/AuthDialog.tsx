@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { AuthType } from '@copilot-shell/core';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
@@ -30,52 +30,76 @@ function parseDefaultAuthType(
 }
 
 export function AuthDialog(): React.JSX.Element {
-  const { pendingAuthType, authError } = useUIState();
-  const { handleAuthSelect: onAuthSelect } = useUIActions();
+  const { pendingAuthType, authError, showBashOptionInAuthDialog } =
+    useUIState();
+  const {
+    handleAuthSelect: onAuthSelect,
+    handleContinueToBash: onContinueToBash,
+  } = useUIActions();
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const authItems = useMemo(
+    () => [
+      {
+        key: AuthType.USE_ALIYUN,
+        label: t('Aliyun Authentication'),
+        title: t('Aliyun Authentication'),
+        description: t('Free with limited quota'),
+        value: AuthType.USE_ALIYUN,
+      },
+      {
+        key: AuthType.USE_OPENAI,
+        label: t('Custom Provider'),
+        title: t('Custom Provider'),
+        description: t(
+          'Paid · Use your own API key · Cost depends on provider',
+        ),
+        value: AuthType.USE_OPENAI,
+      },
+      {
+        key: AuthType.QWEN_OAUTH,
+        label: t('Qwen OAuth'),
+        title: t('Qwen OAuth'),
+        description: t('Free · Up to 1,000 requests per day'),
+        value: AuthType.QWEN_OAUTH,
+      },
+    ],
+    [],
+  );
+  const bashItem = useMemo(
+    () => ({
+      key: 'bash',
+      label: t('Continue to Bash'),
+      title: t('Continue to Bash'),
+      description: t(
+        'Open an interactive Bash shell without configuring AI authentication',
+      ),
+      value: 'bash' as const,
+    }),
+    [],
+  );
 
-  const items = [
-    {
-      key: AuthType.USE_ALIYUN,
-      label: t('Aliyun Authentication'),
-      title: t('Aliyun Authentication'),
-      description: t('Free with limited quota'),
-      value: AuthType.USE_ALIYUN,
-    },
-    {
-      key: AuthType.USE_OPENAI,
-      label: t('Custom Provider'),
-      title: t('Custom Provider'),
-      description: t('Paid · Use your own API key · Cost depends on provider'),
-      value: AuthType.USE_OPENAI,
-    },
-    {
-      key: AuthType.QWEN_OAUTH,
-      label: t('Qwen OAuth'),
-      title: t('Qwen OAuth'),
-      description: t('Free · Up to 1,000 requests per day'),
-      value: AuthType.QWEN_OAUTH,
-    },
-  ];
+  const orderedOptions = useMemo(
+    () =>
+      showBashOptionInAuthDialog
+        ? [...authItems.map((item) => item.value), bashItem.value]
+        : authItems.map((item) => item.value),
+    [authItems, bashItem, showBashOptionInAuthDialog],
+  );
 
   const initialAuthIndex = Math.max(
     0,
-    items.findIndex((item) => {
-      // Priority 1: pendingAuthType
+    authItems.findIndex((item) => {
       if (pendingAuthType) {
         return item.value === pendingAuthType;
       }
 
-      // Priority 2: config.getAuthType() - the source of truth
       const currentAuthType = config.getAuthType();
       if (currentAuthType) {
         return item.value === currentAuthType;
       }
 
-      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
       const defaultAuthType = parseDefaultAuthType(
         process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
@@ -83,53 +107,181 @@ export function AuthDialog(): React.JSX.Element {
         return item.value === defaultAuthType;
       }
 
-      // Priority 4: 默认选中阿里云认证
       return item.value === AuthType.USE_ALIYUN;
     }),
   );
 
+  const [activeOption, setActiveOption] = useState<AuthType | 'bash'>(
+    authItems[initialAuthIndex]?.value ?? AuthType.USE_ALIYUN,
+  );
+  const [lastAuthOption, setLastAuthOption] = useState<AuthType>(
+    authItems[initialAuthIndex]?.value ?? AuthType.USE_ALIYUN,
+  );
+
+  useEffect(() => {
+    const nextOption =
+      authItems[initialAuthIndex]?.value ?? AuthType.USE_ALIYUN;
+    setActiveOption(nextOption);
+    setLastAuthOption(nextOption);
+  }, [initialAuthIndex, authItems]);
+
+  const activeSection = activeOption === 'bash' ? 'bash' : 'auth';
+  const authSelectedIndex = Math.max(
+    0,
+    authItems.findIndex((item) => item.value === lastAuthOption),
+  );
+
+  const authDisplayIndex = activeSection === 'auth' ? authSelectedIndex : null;
+  const bashDisplayIndex =
+    showBashOptionInAuthDialog && activeSection === 'bash' ? 0 : null;
+  const isManualAuthDialog = !showBashOptionInAuthDialog;
   const hasApiKey = Boolean(config.getContentGeneratorConfig()?.apiKey);
   const currentSelectedAuthType =
-    selectedIndex !== null
-      ? items[selectedIndex]?.value
-      : items[initialAuthIndex]?.value;
+    activeOption === 'bash' ? undefined : activeOption;
 
-  const handleAuthSelect = async (authMethod: AuthType) => {
+  useEffect(() => {
+    if (!showBashOptionInAuthDialog && activeOption === 'bash') {
+      const nextOption =
+        authItems[initialAuthIndex]?.value ??
+        lastAuthOption ??
+        AuthType.USE_ALIYUN;
+      setActiveOption(nextOption);
+      setLastAuthOption(nextOption);
+    }
+  }, [
+    showBashOptionInAuthDialog,
+    activeOption,
+    authItems,
+    initialAuthIndex,
+    lastAuthOption,
+  ]);
+
+  const handleAuthSelect = useCallback(
+    async (authMethod: AuthType) => {
+      setErrorMessage(null);
+      await onAuthSelect(authMethod);
+    },
+    [onAuthSelect],
+  );
+
+  const handleContinueToBash = useCallback(() => {
     setErrorMessage(null);
-    await onAuthSelect(authMethod);
-  };
+    onContinueToBash();
+  }, [onContinueToBash]);
 
-  const handleHighlight = (authMethod: AuthType) => {
-    const index = items.findIndex((item) => item.value === authMethod);
-    setSelectedIndex(index);
-  };
+  const handleHighlight = useCallback((value: AuthType | 'bash') => {
+    setActiveOption(value);
+    if (value !== 'bash') {
+      setLastAuthOption(value);
+    }
+  }, []);
 
-  // 用 useCallback 稳定 handler 引用，避免每次渲染都触发 unsubscribe/resubscribe
-  // 导致 CI 慢环境下出现短暂的无 handler 窗口，造成 ESC 按键漏检
-  const handleEscapeKeypress = useCallback(
+  const moveOption = useCallback(
+    (direction: 'up' | 'down') => {
+      const currentIndex = orderedOptions.findIndex(
+        (option) => option === activeOption,
+      );
+      const currentSafeIndex = currentIndex >= 0 ? currentIndex : 0;
+      const step = direction === 'down' ? 1 : -1;
+      const nextIndex =
+        (currentSafeIndex + step + orderedOptions.length) %
+        orderedOptions.length;
+      const nextOption = orderedOptions[nextIndex] ?? orderedOptions[0];
+      handleHighlight(nextOption);
+    },
+    [orderedOptions, activeOption, handleHighlight],
+  );
+
+  const moveSection = useCallback(
+    (direction: 'forward' | 'backward') => {
+      if (!showBashOptionInAuthDialog) {
+        return;
+      }
+
+      if (direction === 'forward') {
+        if (activeSection === 'auth') {
+          handleHighlight('bash');
+          return;
+        }
+        handleHighlight(lastAuthOption);
+        return;
+      }
+
+      if (activeSection === 'bash') {
+        handleHighlight(lastAuthOption);
+        return;
+      }
+      handleHighlight('bash');
+    },
+    [
+      showBashOptionInAuthDialog,
+      activeSection,
+      lastAuthOption,
+      handleHighlight,
+    ],
+  );
+
+  const handleDialogKeypress = useCallback(
     (key: Key) => {
       if (key.name === 'escape') {
-        // Prevent exit if there is an error message.
-        // This means they user is not authenticated yet.
         if (errorMessage) {
           return;
         }
         if (config.getAuthType() === undefined) {
-          // Prevent exiting if no auth method is set
           setErrorMessage(
             t(
-              'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+              'You must select an auth method or continue to Bash to proceed. Press Ctrl+C again to exit.',
             ),
           );
           return;
         }
         onAuthSelect(undefined);
+        return;
+      }
+
+      if (key.name === 'up') {
+        setErrorMessage(null);
+        moveOption('up');
+        return;
+      }
+
+      if (key.name === 'down') {
+        setErrorMessage(null);
+        moveOption('down');
+        return;
+      }
+
+      if (key.name === 'tab') {
+        if (!showBashOptionInAuthDialog) {
+          return;
+        }
+        setErrorMessage(null);
+        moveSection(key.shift ? 'backward' : 'forward');
+        return;
+      }
+
+      if (key.name === 'return') {
+        if (activeOption === 'bash') {
+          handleContinueToBash();
+          return;
+        }
+        handleAuthSelect(activeOption);
       }
     },
-    [errorMessage, config, onAuthSelect],
+    [
+      errorMessage,
+      config,
+      onAuthSelect,
+      moveOption,
+      moveSection,
+      activeOption,
+      handleContinueToBash,
+      handleAuthSelect,
+      showBashOptionInAuthDialog,
+    ],
   );
 
-  useKeypress(handleEscapeKeypress, { isActive: true });
+  useKeypress(handleDialogKeypress, { isActive: true });
 
   return (
     <Box
@@ -139,25 +291,67 @@ export function AuthDialog(): React.JSX.Element {
       padding={1}
       width="100%"
     >
-      <Text bold>{t('Get started')}</Text>
-      <Box marginTop={1}>
-        <Text>{t('How would you like to authenticate for this project?')}</Text>
+      <Text bold>
+        {isManualAuthDialog ? t('Select authorization') : t('Get started')}
+      </Text>
+      {isManualAuthDialog && (
+        <Box marginTop={1}>
+          <Text>
+            {t("Choose how you'd like to authenticate in Copilot Shell.")}
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={1} flexDirection="column">
+        {!isManualAuthDialog && (
+          <Text
+            bold
+            color={activeSection === 'auth' ? Colors.AccentBlue : Colors.Gray}
+          >
+            {t('Use Copilot Shell')}
+          </Text>
+        )}
+        <Box marginTop={1}>
+          <DescriptiveRadioButtonSelect
+            items={authItems}
+            initialIndex={authSelectedIndex}
+            activeIndexOverride={authDisplayIndex}
+            onSelect={handleAuthSelect}
+            onHighlight={handleHighlight}
+            isFocused={false}
+          />
+        </Box>
       </Box>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={items}
-          initialIndex={initialAuthIndex}
-          onSelect={handleAuthSelect}
-          onHighlight={handleHighlight}
-        />
-      </Box>
+      {showBashOptionInAuthDialog && (
+        <Box marginTop={1} flexDirection="column">
+          <Text
+            bold
+            color={activeSection === 'bash' ? Colors.AccentBlue : Colors.Gray}
+          >
+            {t('Continue without Copilot Shell')}
+          </Text>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={[bashItem]}
+              initialIndex={0}
+              activeIndexOverride={bashDisplayIndex}
+              onSelect={handleContinueToBash}
+              onHighlight={handleHighlight}
+              isFocused={false}
+            />
+          </Box>
+        </Box>
+      )}
       {(authError || errorMessage) && (
         <Box marginTop={1}>
           <Text color={Colors.AccentRed}>{authError || errorMessage}</Text>
         </Box>
       )}
       <Box marginTop={1}>
-        <Text color={Colors.AccentPurple}>{t('(Use Enter to Set Auth)')}</Text>
+        <Text color={Colors.AccentPurple}>
+          {showBashOptionInAuthDialog
+            ? t('(↑↓ Select · Tab Switch Section · Enter Continue)')
+            : t('(↑↓ Select · Enter Continue)')}
+        </Text>
       </Box>
       {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
         <Box marginTop={1}>
