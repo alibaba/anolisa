@@ -12,15 +12,17 @@ cd src/agent-sec-core/agent-sec-cli
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install build dependencies
-pip install build wheel setuptools
+# Install maturin
+pip install maturin
 
-# Build the package
-python -m build
+# Build and install in development mode
+maturin develop --release
+
+# Or build wheel package
+maturin build --release
 
 # Output files:
-# dist/agent_sec_cli-0.0.1-py3-none-any.whl
-# dist/agent_sec_cli-0.0.1.tar.gz
+# dist/agent_sec_cli-0.0.1-cp312-cp312-linux_x86_64.whl
 ```
 
 ### Install the Package
@@ -231,6 +233,69 @@ The RPM spec file (`agent-sec-core.spec`) has been updated to copy files from th
 ```spec
 # Install scripts
 cp -rp agent-sec-cli/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/
+```
+
+---
+
+## Rust Development
+
+### Project Structure
+
+```
+agent-sec-cli/
+├── Cargo.toml              # Rust dependencies
+├── src/
+│   ├── lib.rs              # Rust native module
+│   └── agent_sec_cli/      # Python package
+└── pyproject.toml          # Build configuration (maturin)
+```
+
+### Build Commands
+
+```bash
+# Build and install in development mode
+maturin develop --release
+
+# Build wheel for distribution
+maturin build --release
+
+# Build for specific Python version
+maturin build --release -i python3.11
+
+# Run Rust tests
+cargo test
+
+# Check Rust code
+cargo clippy
+```
+
+### Adding New Native Functions
+
+1. Add function in `src/lib.rs`:
+
+```rust
+#[pyfunction]
+fn my_security_function(param: &str) -> PyResult<String> {
+    // Implementation
+    Ok(format!("Result: {}", param))
+}
+```
+
+2. Register in `#[pymodule]`:
+
+```rust
+#[pymodule]
+fn _native(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(my_security_function, m)?)?;
+    Ok(())
+}
+```
+
+3. Use from Python:
+
+```python
+from agent_sec_cli._native import my_security_function
+result = my_security_function("test")
 ```
 
 ---

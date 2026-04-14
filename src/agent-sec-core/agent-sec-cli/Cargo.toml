@@ -1,0 +1,16 @@
+[package]
+name = "agent-sec-cli"
+version = "0.0.1"
+edition = "2021"
+description = "Agent Security Core CLI - Native Rust extensions"
+license = "Apache-2.0"
+
+[lib]
+# Library name: will generate _native.cpython-XXX.so
+name = "agent_sec_cli_native"
+# cdylib for generating Python extension module
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3: Rust bindings for Python
+pyo3 = { version = "0.20", features = ["extension-module"] }

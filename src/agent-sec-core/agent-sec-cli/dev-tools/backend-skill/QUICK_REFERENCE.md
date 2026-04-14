@@ -54,18 +54,20 @@ Use backend-skill in folder dev-tools to create a new rust backend called crypto
 ```
 
 **What gets created**:
-1. Backend wrapper: `security_middleware/backends/crypto_verify.py` (with Python fallback)
-2. Rust function stub in `rust_backends/src/lib.rs`
+1. Backend wrapper: `security_middleware/backends/crypto_verify.py`
+2. Rust function stub in `src/lib.rs` (or separate module via `add-rust-module` sub-skill)
 3. Router entry in `router.py`
 4. Lifecycle category in `lifecycle.py`
 5. CLI subcommand in `src/agent_sec_cli/cli.py`
 
 **You need to implement**:
-- Rust logic in `rust_backends/src/lib.rs` (see SKILL.md Section 4.2)
+- Rust logic in `src/lib.rs` or a separate module (see SKILL.md Section 4)
+- For complex modules, use `add-rust-module` sub-skill
 
 **Build**:
 ```bash
-make build-rust-backends
+cd agent-sec-cli
+maturin develop --release
 ```
 
 ## Testing
@@ -82,16 +84,12 @@ agent-sec-cli my_scanner --param1 value
 ### Rust Backend
 ```bash
 # Rust unit tests
-cd src/agent_sec_cli/rust_backends
+cd agent-sec-cli
 cargo test
 
 # E2E through CLI
+maturin develop --release
 agent-sec-cli crypto_verify --param1 value
-
-# Test Python fallback
-mv src/agent_sec_cli/rust_ext/rust_backends.so src/agent_sec_cli/rust_ext/rust_backends.so.bak
-agent-sec-cli crypto_verify --param1 value
-mv src/agent_sec_cli/rust_ext/rust_backends.so.bak src/agent_sec_cli/rust_ext/rust_backends.so
 ```
 
 ## Key Files
@@ -99,6 +97,7 @@ mv src/agent_sec_cli/rust_ext/rust_backends.so.bak src/agent_sec_cli/rust_ext/ru
 | File | Purpose |
 |------|---------|
 | `dev-tools/backend-skill/SKILL.md` | Complete step-by-step guide |
+| `dev-tools/backend-skill/sub-skills/add-rust-module.md` | Rust module creation sub-skill |
 | `dev-tools/backend-skill/templates/python_backend.py` | Python backend template |
 | `dev-tools/backend-skill/templates/rust_backend.py` | Rust backend template |
 | `src/agent_sec_cli/asset_verify/` | Example Python backend (production) |
@@ -118,13 +117,15 @@ def _run(module, **kwargs) -> ActionResult:
     )
 ```
 
-### Pattern 2: Rust with Fallback
+### Pattern 2: Rust Native Call
 ```python
 # In backend wrapper
+from agent_sec_cli._native import crypto_verify as rust_crypto_verify
+
 def execute(self, ctx, **kwargs) -> ActionResult:
-    if RUST_AVAILABLE:
-        return self._execute_rust(**kwargs)
-    return self._execute_python(**kwargs)  # Fallback
+    req = json.dumps(kwargs)
+    resp = json.loads(rust_crypto_verify(req))
+    return ActionResult(success=True, data=resp, stdout=self._format_stdout(resp))
 ```
 
 ### Pattern 3: CLI Subcommand
@@ -150,9 +151,9 @@ ModuleNotFoundError: No module named 'agent_sec_cli.my_scanner'
 
 ### Issue: Rust extension not loading
 ```
-ImportError: cannot import name 'rust_backends'
+ImportError: cannot import name 'xxx' from 'agent_sec_cli._native'
 ```
-**Solution**: Run `make build-rust-backends` and copy `.so` to `rust_ext/`
+**Solution**: Run `maturin develop --release` and ensure function is registered in `#[pymodule]`
 
 ### Issue: No CLI output
 **Solution**: Ensure `ActionResult` has `stdout` or `error` field populated

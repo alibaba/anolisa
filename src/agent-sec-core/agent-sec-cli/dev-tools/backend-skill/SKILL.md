@@ -64,8 +64,8 @@ agent-sec-cli  ──→  security_middleware.invoke("{action_name}", **kwargs)
                             │
                             ├─ backend.execute(ctx, **kwargs) → ActionResult
                             │      │
-                            │      ├─ [Rust]  import rust_backends ← PyO3 .so
-                            │      │          rust_backends.{action_name}(json_in) → json_out
+                            │      ├─ [Rust]  from agent_sec_cli._native import {action_name}
+                            │      │          {action_name}(json_in) → json_out
                             │      │
                             │      └─ [Python] import {module_path}
                             │                  module.function(**kwargs) → result
@@ -172,78 +172,21 @@ agent-sec-cli {action_name} --param1 value
 
 > Skip this section if `backend_type=python`.
 
-### 4.1 Create the Rust Project (if not exists)
+> **Sub-skill available**: For complex Rust modules (multiple files, shared types,
+> or workspace-scale projects), use the **`add-rust-module`** sub-skill at
+> `sub-skills/add-rust-module.md`. It covers single-file modules, directory modules,
+> and Cargo workspace layouts.
+>
+> The steps below cover the **simple inline case** (adding a function directly to
+> `src/lib.rs`). For anything beyond a single function, delegate to the sub-skill:
+>
+> ```
+> add-rust-module module_name="{action_name}" functions="{action_name}"
+> ```
 
-Check whether `agent-sec-cli/src/agent_sec_cli/rust_backends/` exists. If not, create the
-entire project scaffold.
+### 4.1 Add Rust Function to lib.rs
 
-#### 4.1.1 Create `Cargo.toml`
-
-```toml
-[package]
-name = "rust_backends"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-
-[lib]
-name = "rust_backends"
-crate-type = ["cdylib"]       # Produces .so for Python import
-
-[lints.clippy]
-uninlined_format_args = "deny"
-redundant_closure_for_method_calls = "deny"
-
-[dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-```
-
-#### 4.1.2 Create `rust-toolchain.toml`
-
-```toml
-[toolchain]
-channel = "1.93.0"
-components = ["clippy", "rustfmt", "rust-src"]
-```
-
-#### 4.1.3 Create `src/lib.rs` (empty scaffold)
-
-```rust
-//! Rust backends for the agent-sec-core security middleware.
-//!
-//! Each exported `#[pyfunction]` follows the JSON-in / JSON-out pattern and
-//! releases the GIL during computation so Python threads are not blocked.
-
-use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
-
-// --- backend functions are added below by the add-backend skill ---
-
-#[pymodule]
-fn rust_backends(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Functions are registered here as they are added.
-    Ok(())
-}
-```
-
-### 4.2 Add the Rust Function
-
-#### 4.2.1 Rust Coding Rules
-
-| Rule | Reason |
-|------|--------|
-| Use `py: Python<'_>` param, not `Python::with_gil()` | GIL is already held in `#[pyfunction]` |
-| Use `py.allow_threads(\|\| { ... })` | Releases GIL for concurrency |
-| No Python API calls inside `allow_threads` | GIL not held — would segfault |
-| Use `&Bound<'_, PyModule>` in `#[pymodule]` | PyO3 0.22+ API |
-| Return `PyResult<String>` (JSON) | Clean boundary, no Python objects in Rust |
-
-#### 4.2.2 Add Request/Response Structs and Logic to `lib.rs`
-
-Insert **above** the `#[pymodule]` block. Follow this pattern exactly, replacing
-placeholders with the actual backend name:
+Edit `agent-sec-cli/src/lib.rs` — add your Rust function above the `#[pymodule]` block:
 
 ```rust
 // ---------------------------------------------------------------------------
@@ -284,93 +227,97 @@ fn {action_name}(py: Python<'_>, request_json: &str) -> PyResult<String> {
 }
 ```
 
-#### 4.2.3 Register in `#[pymodule]`
+### 4.2 Register in #[pymodule]
 
-Add this line inside the `rust_backends` pymodule function:
+Add this line inside the `_native` pymodule function in `src/lib.rs`:
 
 ```rust
 m.add_function(wrap_pyfunction!({action_name}, m)?)?;
 ```
 
-#### 4.2.4 Add Rust Unit Tests
+### 4.3 Update Python Backend Wrapper
 
-Append a `#[cfg(test)]` module at the bottom of `lib.rs`:
+Edit `agent-sec-cli/src/agent_sec_cli/security_middleware/backends/{action_name}.py`:
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+```python
+from agent_sec_cli._native import {action_name} as rust_{action_name}
 
-    #[test]
-    fn {action_name}_basic() {
-        let req = {ActionName}Request { /* test fields */ };
-        let resp = do_{action_name}(&req).unwrap();
-        // Add assertions here
-    }
-}
+class {BackendName}Backend:
+    def execute(self, ctx, **kwargs) -> ActionResult:
+        try:
+            req = json.dumps(kwargs)
+            resp_json = rust_{action_name}(req)
+            resp = json.loads(resp_json)
+            return ActionResult(
+                success=True,
+                data=resp,
+                stdout=self._format_stdout(resp),
+            )
+        except Exception as exc:
+            return ActionResult(success=False, error=f"Rust error: {exc}", exit_code=1)
 ```
 
-### 4.3 Build and Test
+**Key changes**:
+- No `RUST_AVAILABLE` check needed (Rust code is always available)
+- Import directly from `agent_sec_cli._native`
+- No Python fallback (unless you intentionally keep it)
 
-#### 4.3.1 Rust Unit Tests
+### 4.4 Build and Test
+
+#### 4.4.1 Rebuild with maturin
 
 ```bash
-cd agent-sec-cli/src/agent_sec_cli/rust_backends
+cd agent-sec-cli
+maturin develop --release
+```
+
+#### 4.4.2 Test from Python
+
+```python
+from agent_sec_cli._native import {action_name}
+import json
+
+req = json.dumps({"param": "value"})
+resp = {action_name}(req)
+print(json.loads(resp))
+```
+
+#### 4.4.3 Run Rust Tests
+
+```bash
+cd agent-sec-cli
 cargo test
 ```
 
-#### 4.3.2 Development Build (maturin)
+### 4.5 Add Dependencies (if needed)
 
-```bash
-cd agent-sec-cli/src/agent_sec_cli/rust_backends
-pip install maturin
-maturin develop
-python3 python/test_integration.py
+If your Rust function needs additional crates (e.g., `serde`, `serde_json`),
+edit `agent-sec-cli/Cargo.toml`:
+
+```toml
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 ```
 
-#### 4.3.3 Where the .so Goes
+### 4.6 Complex Rust Modules
 
-| Context | Location | How |
-|---------|----------|-----|
-| **Dev** (`maturin develop`) | Python site-packages | Automatic — importable as `import rust_backends` |
-| **Manual** | Next to Python scripts | Copy to `agent-sec-cli/src/agent_sec_cli/rust_ext/rust_backends.so` |
-| **RPM** | `%{_datadir}/anolisa/skills/agent-sec-core/scripts/rust_ext/` | Via spec `%install` section |
+If the Rust logic is too large for a single function in `lib.rs`, use the
+**`add-rust-module`** sub-skill to create a dedicated module:
 
-#### 4.3.4 Deploy the `.so` for Local Testing
-
-After `cargo build --release`, copy the shared library to the location the Python
-backend expects:
-
-```bash
-# From agent-sec-core/
-mkdir -p agent-sec-cli/src/agent_sec_cli/rust_ext
-cp agent-sec-cli/src/agent_sec_cli/rust_backends/target/release/librust_backends.so agent-sec-cli/src/agent_sec_cli/rust_ext/rust_backends.so
+```
+add-rust-module module_name="{action_name}" functions="{action_name}" complex="true"
 ```
 
-### 4.4 Update Build System
+This will:
+1. Create `src/{action_name}/mod.rs` with proper sub-module layout
+2. Wire `mod {action_name};` into `src/lib.rs`
+3. Register all `#[pyfunction]`s in the `#[pymodule]` block
+4. Add required dependencies to `Cargo.toml`
 
-#### 4.4.1 Add Makefile Target
-
-Append to `agent-sec-core/Makefile` (in the BUILD section, after `build-sandbox`):
-
-```makefile
-.PHONY: build-rust-backends
-build-rust-backends: ## Build Rust PyO3 backends (.so)
-	cd rust_backends && cargo build --release
-```
-
-#### 4.4.2 Update RPM Spec
-
-In `agent-sec-core/agent-sec-core.spec`:
-
-- Add `BuildRequires: python3-devel` in the build dependencies section
-- In `%build`, after `make build-sandbox`, add: `make build-rust-backends`
-- In `%install`, add:
-  ```
-  install -d -m 0755 $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/rust_ext
-  install -p -m 0755 rust_backends/target/release/librust_backends.so \
-      $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/rust_ext/rust_backends.so
-  ```
+See `sub-skills/add-rust-module.md` for full details including the Cargo
+workspace pattern for very large projects.
 
 ---
 
@@ -461,14 +408,14 @@ pytest agent_sec_cli/{backend_name}/tests/
 
 ### 6.1 Integration Tests
 
-**For Rust backends**, create `agent-sec-cli/src/agent_sec_cli/rust_backends/python/test_integration.py`:
+**For Rust backends**, create a test script (e.g., `tests/test_{action_name}_integration.py`):
 
 ```python
 #!/usr/bin/env python3
-"""Standalone integration test for rust_backends.{action_name}.
+"""Integration test for {action_name} native function.
 
-Run after ``maturin develop``:
-    python3 python/test_integration.py
+Run after ``maturin develop``::
+    python3 tests/test_{action_name}_integration.py
 """
 import json
 import sys
@@ -476,22 +423,22 @@ import sys
 
 def main() -> int:
     try:
-        import rust_backends
+        from agent_sec_cli._native import {action_name}
     except ImportError:
-        print("SKIP: rust_backends not importable (run `maturin develop` first)")
+        print("SKIP: _native not importable (run `maturin develop` first)")
         return 0
 
     errors = 0
 
     # 1. Basic test
-    req = json.dumps({/* test input */})
-    resp = json.loads(rust_backends.{action_name}(req))
+    req = json.dumps({"param": "value"})
+    resp = json.loads({action_name}(req))
     # Add assertions
-    print(f"PASS: basic test (resp={resp})")
+    print(f"PASS: basic test (resp={{resp}})")
 
     # 2. Invalid JSON
     try:
-        rust_backends.{action_name}("{{bad json")
+        {action_name}("{{bad json")
         print("FAIL: expected ValueError for invalid JSON")
         errors += 1
     except ValueError:
@@ -536,21 +483,7 @@ Expected behaviour:
 - `result.data` contains the Rust backend's JSON response fields.
 - No `"python fallback"` note in the output (confirms the Rust path was used).
 
-#### 6.2.3 Verify Python Fallback Path (Rust backends only)
-
-Temporarily remove or rename the `.so` and re-run the same command:
-
-```bash
-mv src/agent_sec_cli/rust_ext/rust_backends.so src/agent_sec_cli/rust_ext/rust_backends.so.bak
-agent-sec-cli {action_name} --param1 value
-mv src/agent_sec_cli/rust_ext/rust_backends.so.bak src/agent_sec_cli/rust_ext/rust_backends.so
-```
-
-Expected behaviour:
-- Exit code `0` (fallback succeeds).
-- Output contains `"python fallback — Rust extension not available"` in the data.
-
-#### 6.2.4 Negative / Error-Path Test
+#### 6.2.3 Negative / Error-Path Test
 
 Pass invalid or adversarial input to confirm the backend returns a non-zero exit
 code and a meaningful error message:
@@ -584,19 +517,17 @@ Expected behaviour:
 ### Rust-Specific (backend_type=rust)
 
 ```
-- [ ] rust_backends/ project created (or already exists)
-- [ ] Cargo.toml: edition = "2024", crate-type = ["cdylib"]
-- [ ] rust-toolchain.toml pins 1.93.0
+- [ ] Rust function added to src/lib.rs or separate module (see sub-skills/add-rust-module.md)
 - [ ] Rust function uses JSON-in/JSON-out boundary
 - [ ] GIL released with py.allow_threads()
 - [ ] No Python API calls inside allow_threads block
-- [ ] PyO3 0.22+ API (Bound<'_, PyModule>)
+- [ ] PyO3 0.20 API (Python + &PyModule)
 - [ ] Function registered in #[pymodule] via m.add_function()
+- [ ] Required crate dependencies added to Cargo.toml
+- [ ] maturin develop --release succeeds
 - [ ] Rust unit tests added and pass (cargo test)
-- [ ] Makefile build-rust-backends target exists
-- [ ] RPM spec includes python3-devel BuildRequires
-- [ ] E2E: .so deployed to agent-sec-cli/src/agent_sec_cli/rust_ext/, CLI returns Rust result
-- [ ] E2E: .so removed, CLI returns Python fallback result
+- [ ] Function importable: from agent_sec_cli._native import {action_name}
+- [ ] E2E: CLI returns Rust result with correct data
 ```
 
 ### Python-Specific (backend_type=python)

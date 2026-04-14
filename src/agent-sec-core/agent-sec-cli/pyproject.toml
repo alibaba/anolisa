@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "agent-sec-cli"
@@ -28,6 +28,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
 ]
@@ -56,19 +57,20 @@ Repository = "https://github.com/alibaba/anolisa.git"
 Issues = "https://github.com/alibaba/anolisa/issues"
 Changelog = "https://github.com/alibaba/anolisa/blob/main/src/agent-sec-core/CHANGELOG.md"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["agent_sec_cli*"]
-
-[tool.setuptools.package-data]
-agent_sec_cli = [
-    "asset_verify/config.conf",
-    "asset_verify/trusted-keys/*.asc",
+[tool.maturin]
+# Python source directory
+python-source = "src"
+# Include Python package data files
+include = [
+    "src/agent_sec_cli/asset_verify/config.conf",
+    "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
 ]
+# Native module name (must match lib.rs function name)
+module-name = "agent_sec_cli._native"
 
 [tool.black]
 line-length = 100
-target-version = ["py36"]
+target-version = ["py37"]
 
 [tool.isort]
 profile = "black"
