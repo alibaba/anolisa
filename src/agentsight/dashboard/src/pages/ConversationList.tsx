@@ -343,21 +343,21 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
-        <td colSpan={8} className="px-8 py-2">
-          <div className="grid grid-cols-8 text-xs font-semibold text-blue-700 uppercase tracking-wide">
-            <div className="col-span-2">Trace ID</div>
-            <div className="col-span-2">用户请求</div>
-            <div>输入 Token</div>
-            <div>输出 Token</div>
-            <div>开始时间</div>
-            <div className="text-right">操作</div>
+        <td colSpan={8} className="px-4 lg:px-8 py-2">
+          <div className="grid grid-cols-8 text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
+            <div className="col-span-2 w-[220px]">Trace ID</div>
+            <div className="col-span-2 w-[200px]">用户请求</div>
+            <div className="w-[110px]">输入 Token</div>
+            <div className="w-[110px]">输出 Token</div>
+            <div className="w-[150px]">开始时间</div>
+            <div className="text-right w-[80px]">操作</div>
           </div>
         </td>
       </tr>
 
       {traces.length === 0 && (
         <tr className="bg-blue-50">
-          <td colSpan={8} className="px-8 py-3 text-sm text-gray-400">
+          <td colSpan={8} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
             该 Session 下暂无 Trace
           </td>
         </tr>
@@ -365,25 +365,25 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
 
       {pageTraces.map((tr) => (
         <tr key={tr.trace_id} className="bg-blue-50 hover:bg-blue-100 transition-colors">
-          <td colSpan={8} className="px-8 py-2">
-            <div className="grid grid-cols-8 items-center text-sm">
+          <td colSpan={8} className="px-4 lg:px-8 py-2">
+            <div className="grid grid-cols-8 items-center text-sm min-w-[800px]">
               {/* Col 1: Trace ID */}
-              <div className="col-span-2 min-w-0 pr-2">
+              <div className="col-span-2 min-w-0 pr-2 w-[220px]">
                 <div className="flex items-center gap-1">
                   <span
                     className="font-mono text-xs text-blue-600 block truncate"
                     title={tr.trace_id}
                   >
-                    {shortId(tr.trace_id, 20)}
+                    {shortId(tr.trace_id, 18)}
                   </span>
                   <CopyButton text={tr.trace_id} />
                 </div>
               </div>
               {/* Col 2: User query */}
-              <div className="col-span-2 min-w-0 pr-2">
+              <div className="col-span-2 min-w-0 pr-2 w-[200px]">
                 {tr.user_query ? (
                   <div
-                    className="text-sm text-gray-800 truncate max-w-xs"
+                    className="text-sm text-gray-800 truncate"
                     title={tr.user_query}
                   >
                     {tr.user_query}
@@ -392,14 +392,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
                   <span className="text-xs text-gray-400">—</span>
                 )}
               </div>
-              <div className="text-blue-600 font-semibold">
+              <div className="text-blue-600 font-semibold w-[110px]">
                 {fmtTokens(tr.total_input_tokens)}
               </div>
-              <div className="text-green-600 font-semibold">
+              <div className="text-green-600 font-semibold w-[110px]">
                 {fmtTokens(tr.total_output_tokens)}
               </div>
-              <div className="text-xs text-gray-500">{nsToDate(tr.start_ns)}</div>
-              <div className="text-right">
+              <div className="text-xs text-gray-500 w-[150px]">{nsToDate(tr.start_ns)}</div>
+              <div className="text-right w-[80px]">
                 <button
                   onClick={() => navigate(`/atif?type=trace&id=${encodeURIComponent(tr.trace_id)}`)}
                   className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors"
@@ -415,7 +415,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
       {/* 分页控制 */}
       {totalPages > 1 && (
         <tr className="bg-blue-50 border-t border-blue-100">
-          <td colSpan={8} className="px-8 py-2">
+          <td colSpan={8} className="px-4 lg:px-8 py-2">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-xs text-gray-500">
                 {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length} 条
@@ -965,39 +965,40 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
             {/* ── Session table ── */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      Session ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      Agent
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      Model
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      Traces
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      输入 Token
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      输出 Token
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      最近活跃
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                      操作
-                    </th>
-                  </tr>
-                </thead>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px]">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[220px]">
+                        Session ID
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[120px]">
+                        Agent
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
+                        Model
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
+                        Traces
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
+                        输入 Token
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
+                        输出 Token
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[150px]">
+                        最近活跃
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
+                        操作
+                      </th>
+                    </tr>
+                  </thead>
                 <tbody className="divide-y divide-gray-100">
                   {!loading && sessions.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-12 text-center text-gray-400">
+                      <td colSpan={8} className="px-4 lg:px-6 py-12 text-center text-gray-400">
                         <div className="text-4xl mb-2">🔍</div>
                         <p>所选时间范围内暂无 Session 数据</p>
                         <p className="text-xs mt-1">请确认 agentsight 服务已启动并有数据写入</p>
@@ -1018,45 +1019,47 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                             setExpandedSession(isExpanded ? null : sess.session_id)
                           }
                         >
-                          <td className="px-6 py-4">
+                          <td className="px-4 lg:px-6 py-4">
                             <div className="flex items-center gap-2">
-                              <span className="text-gray-400 text-xs">
+                              <span className="text-gray-400 text-xs flex-shrink-0">
                                 {isExpanded ? '▼' : '▶'}
                               </span>
                               <span
-                                className="font-mono text-sm text-gray-800"
+                                className="font-mono text-sm text-gray-800 truncate"
                                 title={sess.session_id}
                               >
-                                {shortId(sess.session_id, 24)}
+                                {shortId(sess.session_id, 20)}
                               </span>
                               <CopyButton text={sess.session_id} />
                             </div>
                           </td>
-                          <td className="px-6 py-4 text-sm text-gray-700">
-                            {sess.agent_name ?? <span className="text-gray-400">—</span>}
+                          <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">
+                            <span className="truncate block" title={sess.agent_name ?? ''}>
+                              {sess.agent_name ?? <span className="text-gray-400">—</span>}
+                            </span>
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="px-4 lg:px-6 py-4">
                             {sess.model ? (
-                              <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-xs font-medium">
+                              <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-xs font-medium truncate max-w-[80px] block" title={sess.model}>
                                 {sess.model}
                               </span>
                             ) : (
                               <span className="text-gray-400 text-sm">—</span>
                             )}
                           </td>
-                          <td className="px-6 py-4 text-sm text-gray-700">
+                          <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">
                             {sess.trace_count}
                           </td>
-                          <td className="px-6 py-4 text-sm font-semibold text-blue-600">
+                          <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-blue-600">
                             {fmtTokens(sess.total_input_tokens)}
                           </td>
-                          <td className="px-6 py-4 text-sm font-semibold text-green-600">
+                          <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-green-600">
                             {fmtTokens(sess.total_output_tokens)}
                           </td>
-                          <td className="px-6 py-4 text-xs text-gray-500">
+                          <td className="px-4 lg:px-6 py-4 text-xs text-gray-500">
                             {nsToDate(sess.last_seen_ns)}
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="px-4 lg:px-6 py-4">
                             <a
                               href={`#/atif?type=session&id=${encodeURIComponent(sess.session_id)}`}
                               onClick={(e) => e.stopPropagation()}
@@ -1077,7 +1080,8 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                     );
                   })}
                 </tbody>
-              </table>
+                </table>
+              </div>
             </div>
           </>
         )}

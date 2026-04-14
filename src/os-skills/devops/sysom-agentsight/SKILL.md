@@ -1,11 +1,11 @@
 ---
 name: agentsight
-description: 通过命令行或 Dashboard 查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
+description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
 ---
 
-# Dashboard
+# Dashboard（前端）
 
-AgentSight 提供 Web Dashboard 用于可视化查看 token 消耗和会话历史。
+AgentSight 提供 Web Dashboard（前端） 用于可视化查看 token 消耗和会话历史。
 
 **访问方式：**
 - 远程访问：`http://<server-ip>:7396`（需确保安全组已开放该端口）
