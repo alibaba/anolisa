@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.0.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-green.svg)](CHANGELOG.md)
 
 **Agent Security Core CLI** is a comprehensive security toolkit for AI Agents, providing system hardening, sandbox isolation, asset integrity verification, and security event tracking.
 
@@ -51,7 +51,7 @@ pip install -e .
 # Or build and install the wheel
 pip install build
 python -m build
-pip install dist/agent_sec_cli-0.0.1-py3-none-any.whl
+pip install dist/agent_sec_cli-0.3.0-py3-none-any.whl
 ```
 
 ### From RPM Package
@@ -62,7 +62,7 @@ cd ..
 make rpm
 
 # Install RPM
-sudo rpm -i agent-sec-core-0.0.1-1.el8.x86_64.rpm
+sudo rpm -i agent-sec-core-0.3.0-1.el8.x86_64.rpm
 ```
 
 ### Dependencies
@@ -195,8 +195,8 @@ python -m build
 
 # Output:
 # dist/
-#   ├── agent_sec_cli-0.0.1-py3-none-any.whl
-#   └── agent-sec-cli-0.0.1.tar.gz
+#   ├── agent_sec_cli-0.3.0-py3-none-any.whl
+#   └── agent-sec-cli-0.3.0.tar.gz
 ```
 
 ---

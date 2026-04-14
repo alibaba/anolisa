@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "agent-sec-cli"
-version = "0.0.1"
+version = "0.3.0"
 description = "Agent Security Core CLI - System hardening, sandbox isolation, and asset integrity verification for AI Agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -35,6 +35,7 @@ classifiers = [
 
 dependencies = [
     "gnupg>=2.0",
+    "pydantic>=2.0",
     "typer>=0.9.0",
 ]
 

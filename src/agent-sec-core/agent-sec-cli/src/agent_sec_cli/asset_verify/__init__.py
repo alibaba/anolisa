@@ -8,7 +8,7 @@ from .errors import (
     ErrSigInvalid,
     ErrSigMissing,
 )
-from .verifier import compute_file_hash, load_config, load_trusted_keys, verify_manifest_hashes, verify_skill, verify_skills_dir
+from .verifier import compute_file_hash, load_config, load_trusted_keys, run_verification, verify_manifest_hashes, verify_skill, verify_skills_dir
 
 __all__ = [
     "ErrConfigMissing",
@@ -23,4 +23,5 @@ __all__ = [
     "verify_manifest_hashes",
     "verify_skill",
     "verify_skills_dir",
+    "run_verification",
 ]

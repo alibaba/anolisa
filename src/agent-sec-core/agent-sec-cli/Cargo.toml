@@ -1,6 +1,6 @@
 [package]
 name = "agent-sec-cli"
-version = "0.0.1"
+version = "0.3.0"
 edition = "2021"
 description = "Agent Security Core CLI - Native Rust extensions"
 license = "Apache-2.0"

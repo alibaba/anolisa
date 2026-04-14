@@ -38,9 +38,10 @@ install: ## Install linux-sandbox binary, sign-skill.sh and skill files
 	install -d -m 0755 $(DESTDIR)$(PREFIX)/bin
 	install -p -m 0755 linux-sandbox/target/release/linux-sandbox $(DESTDIR)$(PREFIX)/bin/
 	install -p -m 0755 tools/sign-skill.sh $(DESTDIR)$(PREFIX)/bin/
+	pip3 install --root=$(DESTDIR) --no-deps --no-cache-dir --prefix=/usr \
+		agent-sec-cli/target/wheels/agent_sec_cli-*.whl
 	install -d -m 0755 $(DESTDIR)$(SKILL_DIR)/scripts
 	install -d -m 0755 $(DESTDIR)$(SKILL_DIR)/references
-	cp -rp agent-sec-cli/* $(DESTDIR)$(SKILL_DIR)/scripts/
 	cp -rp skill/references/* $(DESTDIR)$(SKILL_DIR)/references/
 	cp skill/SKILL.md $(DESTDIR)$(SKILL_DIR)/
 	find $(DESTDIR)$(SKILL_DIR) -type f -name '*.sh' -exec chmod 0755 {} +

@@ -47,7 +47,7 @@ This will:
 maturin build --release
 ```
 
-Output: `dist/agent_sec_cli-0.0.1-cp312-cp312-linux_x86_64.whl`
+Output: `dist/agent_sec_cli-0.3.0-cp312-cp312-linux_x86_64.whl`
 
 **Note**: The wheel is **platform-specific** and includes the compiled `.so` file.
 

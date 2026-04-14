@@ -1,6 +1,7 @@
 """Unit tests for security_events.writer — SecurityEventWriter."""
 
 import json
+import multiprocessing
 import os
 import tempfile
 import threading
@@ -227,7 +228,8 @@ class TestWriterAutoRotation(unittest.TestCase):
             suffix = backup_file[len(base_name) + 1:]
             self.assertTrue(
                 timestamp_pattern.match(suffix),
-                f"Backup file '{backup_file}' should have timestamp format YYYYMMDD-HHMMSS.fff, got suffix: {suffix}"
+                f"Backup file '{backup_file}' should have timestamp format "
+                f"YYYYMMDD-HHMMSS.fff, got suffix: {suffix}"
             )
 
     def test_oldest_backups_are_deleted(self):
@@ -418,6 +420,288 @@ class TestWriterAutoRotation(unittest.TestCase):
                 mtimes[i + 1],
                 f"Backups should be ordered by time: backup[{i}] <= backup[{i+1}]"
             )
+
+
+# ------------------------------------------------------------------
+# Helper for cross-process tests (must be module-level & picklable)
+# ------------------------------------------------------------------
+
+def _child_writer(path, proc_id, event_count, max_bytes, backup_count):
+    """Entry point executed inside each child process."""
+    kwargs = {"path": path}
+    if max_bytes:
+        kwargs["max_bytes"] = max_bytes
+        kwargs["backup_count"] = backup_count
+    writer = SecurityEventWriter(**kwargs)
+    for i in range(event_count):
+        evt = SecurityEvent(
+            event_type=f"p{proc_id}_e{i}",
+            category="mp_test",
+            details={"proc": proc_id, "seq": i, "pad": "x" * 30},
+        )
+        writer.write(evt)
+
+
+class TestWriterMultiProcessSafety(unittest.TestCase):
+    """Cross-process flock contention tests.
+
+    Each test spawns real child processes, each with its own
+    ``SecurityEventWriter`` instance pointing at the **same** JSONL file.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        )
+        self.tmp.close()
+
+    def tearDown(self):
+        dir_path = os.path.dirname(self.tmp.name)
+        base_name = os.path.basename(self.tmp.name)
+        # Remove main file, all backups, and the lock file
+        for name in os.listdir(dir_path):
+            if name == base_name or name.startswith(f"{base_name}."):
+                try:
+                    os.unlink(os.path.join(dir_path, name))
+                except OSError:
+                    pass
+
+    # -- helpers --------------------------------------------------------
+
+    def _spawn_and_wait(self, n_procs, events_per_proc, max_bytes=0, backup_count=0):
+        """Fork *n_procs* children, wait, and assert clean exit."""
+        procs = [
+            multiprocessing.Process(
+                target=_child_writer,
+                args=(self.tmp.name, pid, events_per_proc, max_bytes, backup_count),
+            )
+            for pid in range(n_procs)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+        for i, p in enumerate(procs):
+            self.assertEqual(
+                p.exitcode, 0, f"Child {i} exited with code {p.exitcode}"
+            )
+        return procs
+
+    def _collect_all_events(self):
+        """Read every JSONL line from the main file and all rotated backups."""
+        dir_path = os.path.dirname(self.tmp.name)
+        base_name = os.path.basename(self.tmp.name)
+        all_files = [self.tmp.name]
+        for name in os.listdir(dir_path):
+            if name.startswith(f"{base_name}.") and not name.endswith(".lock"):
+                all_files.append(os.path.join(dir_path, name))
+
+        events = []
+        for filepath in all_files:
+            if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                continue
+            with open(filepath) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        events.append(json.loads(line))
+        return events
+
+    # -- tests ---------------------------------------------------------
+
+    # Required fields that every serialised SecurityEvent must carry
+    _REQUIRED_FIELDS = {
+        "event_id", "event_type", "category", "timestamp",
+        "trace_id", "pid", "uid", "session_id", "details",
+    }
+
+    def _assert_valid_event(self, record, context=""):
+        """Assert *record* (parsed dict) has the full SecurityEvent schema."""
+        missing = self._REQUIRED_FIELDS - record.keys()
+        self.assertFalse(
+            missing,
+            f"Event missing fields {missing}: {record!r} {context}",
+        )
+        # Basic type checks
+        self.assertIsInstance(record["event_type"], str)
+        self.assertIsInstance(record["pid"], int)
+        self.assertIsInstance(record["details"], dict)
+
+    def test_cross_process_concurrent_writes_no_rotation(self):
+        """Multiple processes appending to the same file must not lose events."""
+        n_procs = 4
+        events_per_proc = 25
+        self._spawn_and_wait(n_procs, events_per_proc)
+
+        with open(self.tmp.name) as fh:
+            lines = fh.readlines()
+
+        self.assertEqual(
+            len(lines),
+            n_procs * events_per_proc,
+            f"Expected {n_procs * events_per_proc} lines, got {len(lines)}",
+        )
+        # Every line must be valid JSON with full SecurityEvent schema
+        for i, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                self.fail(f"Line {i} is not valid JSON: {line!r}")
+            self._assert_valid_event(record, context=f"(line {i})")
+
+    def test_cross_process_rotation_under_contention(self):
+        """Flock contention during rotation must not lose or corrupt events."""
+        n_procs = 4
+        events_per_proc = 30
+        # max_bytes=5000 keeps rotation realistic (~10 events / file) while
+        # ensuring consecutive rotations are spaced >1 ms apart so that
+        # millisecond-precision backup timestamps never collide.
+        # backup_count is set high so cleanup doesn't delete any backups,
+        # allowing us to verify zero-loss across all files.
+        self._spawn_and_wait(
+            n_procs, events_per_proc, max_bytes=5000, backup_count=200
+        )
+
+        events = self._collect_all_events()
+        expected = n_procs * events_per_proc
+        self.assertEqual(
+            len(events),
+            expected,
+            f"Expected {expected} total events across all files, got {len(events)}",
+        )
+
+        # Every expected event_type tag must be present
+        tags = {e["event_type"] for e in events}
+        for pid in range(n_procs):
+            for seq in range(events_per_proc):
+                tag = f"p{pid}_e{seq}"
+                self.assertIn(tag, tags, f"Missing event {tag}")
+
+        # Schema check on every event
+        for evt in events:
+            self._assert_valid_event(evt)
+
+    def test_new_events_land_in_current_file_after_rotation(self):
+        """After rotation, new writes must go to the current file, not a backup.
+
+        This catches the os.fstat TOCTOU bug: if _open() records the wrong
+        inode, a process silently keeps writing to the old (rotated) file.
+        """
+        n_procs = 4
+        events_per_proc = 30
+        self._spawn_and_wait(
+            n_procs, events_per_proc, max_bytes=5000, backup_count=200
+        )
+
+        dir_path = os.path.dirname(self.tmp.name)
+        base_name = os.path.basename(self.tmp.name)
+
+        # Identify backup files (sorted by name → chronological order)
+        backup_files = sorted([
+            os.path.join(dir_path, f)
+            for f in os.listdir(dir_path)
+            if f.startswith(f"{base_name}.") and not f.endswith(".lock")
+               and os.path.isfile(os.path.join(dir_path, f))
+        ])
+
+        # Skip if no rotation happened (nothing to verify)
+        if not backup_files:
+            return
+
+        # Collect timestamps from every event, grouped by file
+        def _max_ts(filepath):
+            """Return the latest event timestamp in *filepath*."""
+            ts = None
+            with open(filepath) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        t = json.loads(line)["timestamp"]
+                        if ts is None or t > ts:
+                            ts = t
+            return ts
+
+        def _min_ts(filepath):
+            """Return the earliest event timestamp in *filepath*."""
+            ts = None
+            with open(filepath) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        t = json.loads(line)["timestamp"]
+                        if ts is None or t < ts:
+                            ts = t
+            return ts
+
+        current_min = _min_ts(self.tmp.name)
+        latest_backup_max = max(_max_ts(bf) for bf in backup_files)
+
+        # The earliest event in the current file should be roughly no older
+        # than the latest event in any backup.  A tolerance of 1 second
+        # accounts for normal multi-process scheduling jitter (event
+        # timestamps are set at creation time, not write time, so two
+        # events created ~simultaneously can land in different files in
+        # either order).  The real stale-fd bug would produce a gap of
+        # seconds — an entire test's worth of events in the wrong file.
+        from datetime import datetime, timedelta
+
+        current_min_dt = datetime.fromisoformat(current_min)
+        backup_max_dt = datetime.fromisoformat(latest_backup_max)
+        tolerance = timedelta(seconds=1)
+
+        self.assertGreaterEqual(
+            current_min_dt + tolerance,
+            backup_max_dt,
+            f"Current file min ts ({current_min}) is >1 s older than "
+            f"latest backup max ts ({latest_backup_max}) — "
+            "a process is likely still writing to a rotated file",
+        )
+
+    def test_flock_loser_reopens_and_writes(self):
+        """Processes that lose the flock race must still write all events.
+
+        Uses more processes than the contention test above to create
+        additional flock losers per rotation cycle.  max_bytes is kept
+        large enough that rotation timestamps never collide.
+        """
+        n_procs = 6
+        events_per_proc = 20
+
+        self._spawn_and_wait(
+            n_procs, events_per_proc, max_bytes=5000, backup_count=200
+        )
+
+        events = self._collect_all_events()
+        expected = n_procs * events_per_proc
+        self.assertEqual(
+            len(events),
+            expected,
+            f"Expected {expected} events, got {len(events)} "
+            "(flock losers may have lost events)",
+        )
+
+        # Every process must have contributed events
+        pids_seen = {e["event_type"].split("_")[0] for e in events}
+        for pid in range(n_procs):
+            self.assertIn(
+                f"p{pid}", pids_seen,
+                f"Process p{pid} has zero events — flock loser path likely broken",
+            )
+
+    def test_cross_process_events_carry_distinct_pids(self):
+        """Each child process should stamp its real OS PID in the event."""
+        n_procs = 3
+        events_per_proc = 5
+        self._spawn_and_wait(n_procs, events_per_proc)
+
+        events = self._collect_all_events()
+        pids = {e["pid"] for e in events}
+        # There must be at least n_procs distinct PIDs (parent is not writing)
+        self.assertGreaterEqual(
+            len(pids),
+            n_procs,
+            f"Expected >= {n_procs} distinct PIDs, got {pids}",
+        )
 
 
 class TestWriterFireAndForget(unittest.TestCase):

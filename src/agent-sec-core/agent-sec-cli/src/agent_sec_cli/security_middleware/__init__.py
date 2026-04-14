@@ -9,13 +9,13 @@ Public API
 
 from __future__ import annotations
 
-import inspect
-import os
+import sys
+from pathlib import PurePath
 from typing import List
 
-from . import lifecycle, router
-from .context import RequestContext
-from .result import ActionResult
+from agent_sec_cli.security_middleware import lifecycle, router
+from agent_sec_cli.security_middleware.context import RequestContext
+from agent_sec_cli.security_middleware.result import ActionResult
 
 # ---------------------------------------------------------------------------
 # Caller auto-detection
@@ -31,13 +31,19 @@ _CALLER_MAP = {
 def _detect_caller() -> str:
     """Walk the call stack to identify the outermost known caller.
 
+    Uses :func:`sys._getframe` instead of :func:`inspect.stack` to avoid
+    the overhead of capturing locals and source context for every frame
+    — important because this runs on every :func:`invoke` call.
+
     Returns a human-friendly string such as ``"sandbox-guard"`` or ``"cli"``.
     Falls back to ``"unknown"`` when no known entry point is found.
     """
-    for frame_info in inspect.stack():
-        basename = os.path.basename(frame_info.filename)
+    frame = sys._getframe()
+    while frame is not None:
+        basename = PurePath(frame.f_code.co_filename).name
         if basename in _CALLER_MAP:
             return _CALLER_MAP[basename]
+        frame = frame.f_back
     return "unknown"
 
 

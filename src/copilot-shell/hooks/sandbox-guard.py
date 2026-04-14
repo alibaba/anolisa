@@ -11,7 +11,6 @@ stdin: PreToolUse JSON (tool_name, tool_input, cwd, ...)
 stdout: HookOutput JSON (decision, systemMessage, hookSpecificOutput)
 """
 
-import os
 import sys
 import json
 import re
@@ -44,11 +43,15 @@ def _log_sandbox_event(action: str = "log-sandbox", **kwargs) -> None:
                 cmd.append(f"--{key.replace('_', '-')}")
                 cmd.append(str(value))
         
-        # Execute asynchronously to avoid blocking the hook
+        # Execute asynchronously to avoid blocking the hook.
+        # start_new_session=True detaches the child into its own session so
+        # it is reparented to init(1) once this hook process exits, preventing
+        # zombie accumulation in long-running Agent Loop sessions.
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except Exception:
         # Silently ignore any errors - logging must not affect hook behavior

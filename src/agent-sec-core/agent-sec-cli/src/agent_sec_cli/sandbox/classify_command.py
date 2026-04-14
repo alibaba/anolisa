@@ -16,10 +16,10 @@
 """
 
 import json
-import os
 import re
 import shlex
 import sys
+from pathlib import PurePath
 from typing import Any, Dict, List, Optional, Tuple
 
 from rules import (
@@ -45,7 +45,7 @@ class RuleEngine:
         if not parts:
             return False, ""
 
-        cmd = os.path.basename(parts[0])
+        cmd = PurePath(parts[0]).name
         args = parts[1:]
         reason = rule.get("reason", "")
 
@@ -141,7 +141,7 @@ class CommandClassifier:
         if len(parts) < 3:
             return None
 
-        cmd = os.path.basename(parts[0])
+        cmd = PurePath(parts[0]).name
         if cmd not in ("bash", "sh", "zsh") or parts[1] not in ("-c", "-lc"):
             return None
 
@@ -188,7 +188,7 @@ class CommandClassifier:
 
     def _is_destructive(self, parts: List[str], full_cmd: str) -> Tuple[bool, str]:
         """检查是否为毁灭性命令（含 sudo 递归）"""
-        if parts and os.path.basename(parts[0]) == "sudo" and len(parts) > 1:
+        if parts and PurePath(parts[0]).name == "sudo" and len(parts) > 1:
             ok, reason = self._is_destructive(parts[1:], " ".join(parts[1:]))
             if ok:
                 return True, f"sudo 提权 + {reason}"
@@ -197,7 +197,7 @@ class CommandClassifier:
     def _is_dangerous(self, parts: List[str], full_cmd: str) -> Tuple[bool, str]:
         """检查是否为危险命令"""
         # sudo 递归：所有 sudo 子命令视为 dangerous（destructive 层已优先检查）
-        if parts and os.path.basename(parts[0]) == "sudo" and len(parts) > 1:
+        if parts and PurePath(parts[0]).name == "sudo" and len(parts) > 1:
             return True, f"sudo 提权执行: {' '.join(parts[1:])}"
         return self._check_with_shell_wrapper(DANGEROUS_RULES, parts, full_cmd)
 
@@ -206,7 +206,7 @@ class CommandClassifier:
         """单条命令安全检查（frozenset + 条件规则 + 特殊处理）"""
         if not parts:
             return False, ""
-        cmd = os.path.basename(parts[0])
+        cmd = PurePath(parts[0]).name
         args = parts[1:]
 
         # 1. 无条件安全命令
@@ -286,7 +286,7 @@ class CommandClassifier:
         """从 PERMISSION_RULES 查找匹配的额外权限（优先匹配更具体的规则）"""
         if not parts:
             return None
-        cmd = os.path.basename(parts[0])
+        cmd = PurePath(parts[0]).name
         args = parts[1:]
 
         for rule in PERMISSION_RULES:

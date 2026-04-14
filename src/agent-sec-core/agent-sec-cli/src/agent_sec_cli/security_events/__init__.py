@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .schema import SecurityEvent
-from .writer import SecurityEventWriter
+from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.writer import SecurityEventWriter
 
 _writer: Optional[SecurityEventWriter] = None
 

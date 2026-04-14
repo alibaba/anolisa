@@ -13,7 +13,6 @@
 
 import json
 import shlex
-import sys
 from typing import Any, Dict, List, Optional
 
 from classify_command import CommandClassifier

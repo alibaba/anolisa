@@ -244,6 +244,37 @@ def verify_skills_dir(skills_dir: str, trusted_keys: list) -> dict:
     return results
 
 
+def run_verification(skill: str | None = None) -> dict:
+    """Run verification and return structured results.
+
+    Handles the full workflow: load trusted keys, verify single skill or
+    all configured directories, and aggregate results.
+
+    Args:
+        skill: Optional path to a single skill directory.  When *None*,
+               all directories listed in ``config.conf`` are scanned.
+
+    Returns:
+        dict with ``passed`` (list[str]) and ``failed`` (list[dict]) keys.
+    """
+    trusted_keys = load_trusted_keys(DEFAULT_TRUSTED_KEYS_DIR)
+
+    if skill is not None:
+        verify_skill(skill, trusted_keys)
+        return {"passed": [os.path.basename(skill)], "failed": []}
+
+    config = load_config(DEFAULT_CONFIG)
+    all_passed: list[str] = []
+    all_failed: list[dict] = []
+
+    for skills_dir in config.get("skills_dirs", []):
+        results = verify_skills_dir(skills_dir, trusted_keys)
+        all_passed.extend(results["passed"])
+        all_failed.extend(results["failed"])
+
+    return {"passed": all_passed, "failed": all_failed}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Verify skill integrity and signatures"
@@ -252,38 +283,21 @@ def main():
     args = parser.parse_args()
 
     try:
-        trusted_keys = load_trusted_keys(DEFAULT_TRUSTED_KEYS_DIR)
+        results = run_verification(args.skill)
 
-        if args.skill:
-            verify_skill(args.skill, trusted_keys)
-            print(f"[OK] {os.path.basename(args.skill)}")
-            return 0
-
-        config = load_config(DEFAULT_CONFIG)
-
-        all_passed = []
-        all_failed = []
-
-        for skills_dir in config.get("skills_dirs", []):
-            results = verify_skills_dir(skills_dir, trusted_keys)
-            all_passed.extend(results["passed"])
-            all_failed.extend(results["failed"])
-
-        # Print results
-        for name in all_passed:
+        for name in results["passed"]:
             print(f"[OK] {name}")
 
-        for item in all_failed:
+        for item in results["failed"]:
             print(f"[ERROR] {item['name']}")
             print(f"  {item['error']}")
 
-        # Summary
         print(f"\n{'='*50}")
-        print(f"PASSED: {len(all_passed)}")
-        print(f"FAILED: {len(all_failed)}")
+        print(f"PASSED: {len(results['passed'])}")
+        print(f"FAILED: {len(results['failed'])}")
         print(f"{'='*50}")
 
-        if all_failed:
+        if results["failed"]:
             print("VERIFICATION FAILED")
             return 1
         else:

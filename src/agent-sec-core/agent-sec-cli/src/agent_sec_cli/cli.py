@@ -1,12 +1,7 @@
 """CLI entry point for agent-sec-cli package."""
 
-import sys
-import os
 
 import typer
-
-# Ensure security_middleware is importable
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from agent_sec_cli.security_middleware import invoke
 

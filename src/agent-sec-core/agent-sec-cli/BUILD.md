@@ -22,14 +22,14 @@ maturin develop --release
 maturin build --release
 
 # Output files:
-# dist/agent_sec_cli-0.0.1-cp312-cp312-linux_x86_64.whl
+# dist/agent_sec_cli-0.3.0-cp312-cp312-linux_x86_64.whl
 ```
 
 ### Install the Package
 
 ```bash
 # From wheel file
-pip install dist/agent_sec_cli-0.0.1-py3-none-any.whl
+pip install dist/agent_sec_cli-0.3.0-py3-none-any.whl
 
 # Or install in development mode
 pip install -e .
@@ -87,8 +87,8 @@ agent-sec-cli/
 ├── README.md                       # Documentation
 ├── .gitignore
 └── dist/                           # Build output
-    ├── agent_sec_cli-0.0.1-py3-none-any.whl
-    └── agent_sec_cli-0.0.1.tar.gz
+    ├── agent_sec_cli-0.3.0-py3-none-any.whl
+    └── agent_sec_cli-0.3.0.tar.gz
 ```
 
 ---
@@ -232,7 +232,8 @@ The RPM spec file (`agent-sec-core.spec`) has been updated to copy files from th
 
 ```spec
 # Install scripts
-cp -rp agent-sec-cli/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/
+pip3 install --root=$RPM_BUILD_ROOT --no-deps --no-cache-dir --prefix=/usr \
+    agent-sec-cli/target/wheels/agent_sec_cli-*.whl
 ```
 
 ---
@@ -302,7 +303,7 @@ result = my_security_function("test")
 
 ## Version History
 
-- **0.0.1** - Current version
+- **0.3.0** - Current version
   - Restructured as proper Python package
   - Added wheel build support
   - Updated all imports to use package paths

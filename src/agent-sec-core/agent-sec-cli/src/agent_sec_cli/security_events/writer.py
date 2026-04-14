@@ -9,10 +9,11 @@ import shutil
 import sys
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, TextIO
 
-from .config import get_log_path
-from .schema import SecurityEvent
+from agent_sec_cli.security_events.config import get_log_path
+from agent_sec_cli.security_events.schema import SecurityEvent
 
 # Default maximum log file size before rotation (100 MB)
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024
@@ -36,11 +37,11 @@ class SecurityEventWriter:
 
     def __init__(
         self,
-        path: Optional[str] = None,
+        path: str | Path | None = None,
         max_bytes: int = DEFAULT_MAX_BYTES,
         backup_count: int = DEFAULT_BACKUP_COUNT,
     ) -> None:
-        self._path: str = path or get_log_path()
+        self._path: Path = Path(path) if path else Path(get_log_path())
         self._max_bytes = max_bytes
         self._backup_count = backup_count
         self._lock = threading.Lock()
@@ -55,8 +56,8 @@ class SecurityEventWriter:
     def _open(self) -> None:
         """Open (or reopen) the log file and record its inode."""
         try:
-            self._fd = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
-            self._inode = os.stat(self._path).st_ino
+            self._fd = self._path.open("a", encoding="utf-8")
+            self._inode = os.fstat(self._fd.fileno()).st_ino
         except OSError as exc:
             print(
                 f"[security_events] failed to open {self._path}: {exc}",
@@ -78,8 +79,8 @@ class SecurityEventWriter:
     def _ensure_file(self) -> None:
         """Reopen the log file when inode changed or file was deleted."""
         try:
-            stat = os.stat(self._path)
-            if stat.st_ino != self._inode:
+            st = self._path.stat()
+            if st.st_ino != self._inode:
                 self._close()
                 self._open()
         except FileNotFoundError:
@@ -96,8 +97,8 @@ class SecurityEventWriter:
     def _needs_rotation(self, additional_bytes: int = 0) -> bool:
         """Check if the current log file would exceed the size limit after adding additional_bytes."""
         try:
-            stat = os.stat(self._path)
-            return stat.st_size + additional_bytes >= self._max_bytes
+            st = self._path.stat()
+            return st.st_size + additional_bytes >= self._max_bytes
         except OSError:
             return False
 
@@ -113,7 +114,7 @@ class SecurityEventWriter:
         """
         # Generate timestamp-based backup filename with millisecond precision
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S.%f")[:-3]  # Truncate to milliseconds
-        backup_path = f"{self._path}.{timestamp}"
+        backup_path = self._path.parent / f"{self._path.name}.{timestamp}"
 
         # Rotate current file to timestamp-named backup
         try:
@@ -145,10 +146,10 @@ class SecurityEventWriter:
         - **Losers** get ``BlockingIOError``, skip rotation, and reopen
           the (now-new) log file.
         """
-        lock_path = self._path + ".lock"
+        lock_path = self._path.parent / (self._path.name + ".lock")
         lock_fd = None
         try:
-            lock_fd = open(lock_path, "w")  # noqa: SIM115
+            lock_fd = lock_path.open("w")
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             # Another process is rotating — just reopen and continue
@@ -183,18 +184,17 @@ class SecurityEventWriter:
         """
         try:
             # Find all backup files matching the pattern
-            dir_path = os.path.dirname(self._path) or "."
-            base_name = os.path.basename(self._path)
-            
+            dir_path = self._path.parent
+            base_name = self._path.name
+
             backup_files = []
-            for filename in os.listdir(dir_path):
+            for entry in dir_path.iterdir():
                 # Match pattern: {base_name}.{timestamp}
-                if filename.startswith(f"{base_name}.") and not filename.endswith((".tmp", ".lock")):
-                    full_path = os.path.join(dir_path, filename)
-                    if os.path.isfile(full_path):
+                if entry.name.startswith(f"{base_name}.") and not entry.name.endswith((".tmp", ".lock")):
+                    if entry.is_file():
                         # Use mtime to sort (more reliable than parsing timestamp)
-                        mtime = os.path.getmtime(full_path)
-                        backup_files.append((full_path, mtime))
+                        mtime = entry.stat().st_mtime
+                        backup_files.append((entry, mtime))
 
             # Sort by modification time (oldest first)
             backup_files.sort(key=lambda x: x[1])
@@ -203,7 +203,7 @@ class SecurityEventWriter:
             while len(backup_files) > self._backup_count:
                 oldest_path, _ = backup_files.pop(0)
                 try:
-                    os.remove(oldest_path)
+                    oldest_path.unlink()
                 except OSError:
                     pass
         except OSError as exc:

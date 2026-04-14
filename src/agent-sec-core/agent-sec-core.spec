@@ -6,7 +6,7 @@
 %undefine __brp_mangle_shebangs
 
 Name:           agent-sec-core
-Version:        0.0.9
+Version:        0.3.0
 Release:        %{anolis_release}%{?dist}
 Summary:        Agent Security Core Package
 
@@ -56,7 +56,6 @@ make build-cli
 %install
 rm -rf $RPM_BUILD_ROOT
 install -d -m 0755 %{buildroot}/usr/local/bin
-install -d -m 0755 $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts
 install -d -m 0755 $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/references
 
 # Install linux-sandbox binary
@@ -69,26 +68,15 @@ install -p -m 0755 tools/sign-skill.sh %{buildroot}/usr/local/bin/
 pip3 install --root=$RPM_BUILD_ROOT --no-deps --no-cache-dir --prefix=/usr \
     agent-sec-cli/target/wheels/agent_sec_cli-*.whl
 
-# Also copy scripts to skill directory for copilot-shell integration
-cp -rp agent-sec-cli/src/agent_sec_cli/* \
-    $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/scripts/
-
 # Install references files
 cp -rp skill/references/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/references/
 
 # Install documentation
 cp skill/SKILL.md $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/
 
-# Set permissions for executable scripts
-find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type f -name '*.sh' -exec chmod 0755 {} +
-find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type f -name '*.py' -exec chmod 0755 {} +
-
-# Set permissions for regular files
-find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type f \
-    ! -name '*.sh' ! -name '*.py' -exec chmod 0644 {} +
-
-# Set permissions for directories
+# Set permissions for skill directory
 find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type d -exec chmod 0755 {} +
+find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type f -exec chmod 0644 {} +
 
 %files
 %defattr(0644,root,root,0755)
@@ -98,15 +86,15 @@ find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type d -exec chmo
 %{_bindir}/agent-sec-cli
 %{python3_sitearch}/agent_sec_cli/
 %{python3_sitearch}/agent_sec_cli-*.dist-info/
-# Skill scripts and references for copilot-shell
-%attr(0755,root,root) %{_datadir}/anolisa/skills/agent-sec-core/scripts/*/*.py
+# Skill references and documentation for copilot-shell
 %{_datadir}/anolisa/skills/agent-sec-core/
 
 %changelog
-* Mon Apr 14 2026 Xingdong Li <XingDong.Li@linux.alibaba.com> - 0.0.9-1
+* Mon Apr 14 2026 Xingdong Li <XingDong.Li@linux.alibaba.com> - 0.3.0-1
 - Switch agent-sec-cli build to maturin for Rust native extension support
 - Add python3-devel and python3-pip BuildRequires for maturin wheel building
 - Install agent-sec-cli as proper Python wheel with native .so extension
+- Remove legacy script copy to skill directory (now handled by pip install)
 
 * Mon Mar 23 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.0.8-1
 - Disable brp-mangle-shebangs to preserve #!/usr/bin/env bash for cross-platform compatibility

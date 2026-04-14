@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import copy
-import sys
 from typing import Any, Dict
 
 from agent_sec_cli.security_events import SecurityEvent, log_event
 
-from .context import RequestContext
-from .result import ActionResult
+from agent_sec_cli.security_middleware.context import RequestContext
+from agent_sec_cli.security_middleware.result import ActionResult
 
 # ---------------------------------------------------------------------------
 # Action → SecurityEvent category mapping

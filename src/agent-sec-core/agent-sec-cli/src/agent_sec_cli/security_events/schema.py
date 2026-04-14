@@ -1,12 +1,13 @@
-"""SecurityEvent dataclass — the canonical event envelope."""
+"""SecurityEvent pydantic model — the canonical event envelope."""
 
 from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
 
 
 def _now_iso() -> str:
@@ -17,8 +18,7 @@ def _new_uuid() -> str:
     return str(uuid.uuid4())
 
 
-@dataclass
-class SecurityEvent:
+class SecurityEvent(BaseModel):
     """Single security event to be persisted as a JSONL record.
 
     Required fields (caller must supply):
@@ -38,22 +38,24 @@ class SecurityEvent:
     category: str
     details: Dict[str, Any]
     trace_id: str = ""
-    timestamp: str = field(default_factory=_now_iso)
-    event_id: str = field(default_factory=_new_uuid)
-    pid: int = field(default_factory=os.getpid)
-    uid: int = field(default_factory=os.getuid)
+    timestamp: str = Field(default_factory=_now_iso)
+    event_id: str = Field(default_factory=_new_uuid)
+    pid: int = Field(default_factory=os.getpid)
+    uid: int = Field(default_factory=os.getuid)
     session_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a plain ``dict`` suitable for ``json.dumps``."""
+        d = self.model_dump()
+        # Return keys in the canonical order expected by callers.
         return {
-            "event_id": self.event_id,
-            "event_type": self.event_type,
-            "category": self.category,
-            "timestamp": self.timestamp,
-            "trace_id": self.trace_id,
-            "pid": self.pid,
-            "uid": self.uid,
-            "session_id": self.session_id,
-            "details": self.details,
+            "event_id": d["event_id"],
+            "event_type": d["event_type"],
+            "category": d["category"],
+            "timestamp": d["timestamp"],
+            "trace_id": d["trace_id"],
+            "pid": d["pid"],
+            "uid": d["uid"],
+            "session_id": d["session_id"],
+            "details": d["details"],
         }
