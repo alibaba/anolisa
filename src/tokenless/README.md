@@ -223,4 +223,4 @@ make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE).

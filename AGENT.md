@@ -11,9 +11,10 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **copilot-shell** (`cosh`) | `src/copilot-shell/` | TypeScript / Node.js | All |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux only |
+| **tokenless** | `src/tokenless/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 
-> `agent-sec-core` and `agentsight` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, and `tokenless` require Linux. Do **not** attempt to build them on macOS or Windows.
 
 ## Development Commands
 
@@ -49,6 +50,11 @@ cargo test
 
 # os-skills
 cd src/os-skills   # Skill definitions are static assets, no compilation needed
+
+# tokenless (per-component)
+cd src/tokenless
+cargo build --release
+cargo test
 ```
 
 ## Commit Message Rules
@@ -68,6 +74,7 @@ Format: `type(scope): description`
 | `src/agent-sec-core/` | `sec-core` |
 | `src/os-skills/` | `skill` |
 | `src/agentsight/` | `sight` |
+| `src/tokenless/` | `tokenless` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -134,6 +141,7 @@ When generating a PR description, use `.github/pull_request_template.md` as the 
 - `sec-core` → any file under `src/agent-sec-core/`
 - `skill` → any file under `src/os-skills/`
 - `sight` → any file under `src/agentsight/`
+- `tokenless` → any file under `src/tokenless/`
 - `Multiple / Project-wide` → cross-component or root-level changes
 
 **Checklist** — mark items that actually apply to this PR; skip items for unaffected components.
@@ -178,6 +186,7 @@ closes #42
 - [x] My code follows the project's code style
 - [x] I have added tests that prove my fix is effective or that my feature works
 - [x] For `cosh`: Lint passes, type check passes, and tests pass
+- [x] For `tokenless`: Cargo test passes, clippy warnings resolved
 - [x] Lock files are up to date
 
 ## Testing

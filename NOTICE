@@ -25,9 +25,52 @@ agentsight (src/agentsight/)
   Copyright eunomia-bpf contributors
   Licensed under the MIT License
 
+tokenless (src/tokenless/)
+  Based on tokenless (https://github.com/open-compress/token-less)
+  Copyright Token-less Contributors
+  Licensed under the MIT License
+
+=========================================================================
+Rust Dependencies (src/tokenless/)
+=========================================================================
+
+The tokenless component includes the following Rust crate dependencies:
+
+serde (v1.0)
+  Source: https://crates.io/crates/serde
+  Licensed under the MIT License
+
+serde_json (v1.0)
+  Source: https://crates.io/crates/serde_json
+  Licensed under the MIT License
+
+regex (v1.10)
+  Source: https://crates.io/crates/regex
+  Licensed under the MIT License
+
+thiserror (v2.0)
+  Source: https://crates.io/crates/thiserror
+  Licensed under the MIT License
+
+clap (v4.5)
+  Source: https://crates.io/crates/clap
+  Licensed under the MIT License
+
+All dependencies are used in compliance with their original license terms.
+
 =========================================================================
 Third-Party Software
 =========================================================================
+
+rtk (src/tokenless/third_party/rtk/)
+  Git submodule from https://github.com/rtk-ai/rtk.git
+  Copyright RTK Contributors
+  Licensed under the Apache License, Version 2.0
+
+  RTK (Rust Token Killer) is a high-performance CLI proxy for LLM
+  token optimization, providing command rewriting and output filtering
+  to achieve 60-90% token savings on common development commands.
+  Included in the tokenless component.
 
 ripgrep (src/copilot-shell/dist/)
   Vendored binary

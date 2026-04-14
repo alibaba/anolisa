@@ -15,6 +15,7 @@
 #   skills   os-skills          (Markdown skill definitions, no compilation)
 #   sec-core agent-sec-core     (Rust sandbox, Linux only)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
+#   tokenless tokenless         (Rust compression library, cross-platform)
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -105,7 +106,7 @@ detect_distro() {
 
 # Default components (sight is excluded — it is optional and provides audit
 # capabilities only; use --component sight to include it explicitly).
-DEFAULT_COMPONENTS=(cosh skills sec-core)
+DEFAULT_COMPONENTS=(cosh skills sec-core tokenless)
 
 want_component() {
     local c="$1"
@@ -273,7 +274,7 @@ install_build_tools() {
 }
 
 install_rust() {
-    step "Rust (for agent-sec-core, agentsight)"
+    step "Rust (for agent-sec-core, agentsight, tokenless)"
     local REQUIRED="1.91.0"
 
     # Package name mapping (DEB uses "rustc"/"cargo", RPM uses "rust"/"cargo")
@@ -636,7 +637,7 @@ do_install_deps() {
         install_build_tools
     fi
 
-    if want_component sec-core || want_component sight; then
+    if want_component sec-core || want_component sight || want_component tokenless; then
         install_rust
     fi
 
@@ -746,11 +747,46 @@ build_sight() {
     fi
 }
 
+build_tokenless() {
+    step "Building tokenless"
+    local dir="$PROJECT_ROOT/src/tokenless"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    # Initialize submodules if not already done
+    if [ ! -d "third_party/rtk/.git" ]; then
+        info "Initializing git submodules..."
+        git submodule update --init --recursive
+    fi
+
+    info "cargo build --release --workspace ..."
+    if [[ -f Makefile ]] && grep -q 'build' Makefile; then
+        make build
+    else
+        # Build tokenless
+        cargo build --release --workspace
+        # Build rtk from submodule
+        cargo build --release --manifest-path third_party/rtk/Cargo.toml
+    fi
+
+    local bin="target/release/tokenless"
+    local rtk_bin="third_party/rtk/target/release/rtk"
+    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]]; then
+        ARTIFACT_NAMES+=("tokenless" "rtk")
+        ARTIFACT_PATHS+=("src/tokenless/$bin" "src/tokenless/$rtk_bin")
+        ok "tokenless and rtk built successfully"
+    else
+        [[ -f "$bin" ]] || warn "Expected artifact $bin not found"
+        [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
+    fi
+}
+
 do_build() {
-    # Fixed build order: cosh -> skills -> sec-core -> sight (sight only if explicitly requested)
+    # Fixed build order: cosh -> skills -> sec-core -> tokenless -> sight (sight only if explicitly requested)
     if want_component cosh;     then build_cosh;     fi
     if want_component skills;   then build_skills;   fi
     if want_component sec-core; then build_sec_core; fi
+    if want_component tokenless; then build_tokenless; fi
     if want_component sight;    then build_sight;    fi
 }
 
@@ -790,12 +826,31 @@ install_sight() {
     ok "agentsight installed to /usr/local/bin/"
 }
 
+install_tokenless() {
+    step "Installing tokenless"
+    local dir="$PROJECT_ROOT/src/tokenless"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    info "Installing tokenless and rtk binaries..."
+    if [[ -f Makefile ]] && grep -q 'install' Makefile; then
+        make install
+    else
+        # Install both binaries
+        install -d -m 0755 /usr/local/bin
+        install -p -m 0755 target/release/tokenless /usr/local/bin/
+        install -p -m 0755 third_party/rtk/target/release/rtk /usr/local/bin/
+    fi
+    ok "tokenless and rtk installed to /usr/local/bin/"
+}
+
 do_install() {
     step "Installing components"
     if want_component cosh;     then install_cosh;     fi
     # skills are deployed during build, no separate install needed
     if want_component sec-core; then install_sec_core; fi
     if want_component sight;    then install_sight;    fi
+    if want_component tokenless; then install_tokenless; fi
 }
 
 print_artifacts() {
@@ -829,8 +884,8 @@ $(echo -e "${BOLD}Options:${NC}")
   --ignore-deps           Skip dependency installation
   --deps-only             Install dependencies only, do not build
   --component <name>      Build specific component (can be repeated).
-                          Valid names: cosh, skills, sec-core, sight
-                          Default (no --component): cosh, skills, sec-core
+                          Valid names: cosh, skills, sec-core, sight, tokenless
+                          Default (no --component): cosh, skills, sec-core, tokenless
                           (sight is optional and must be explicitly requested)
   -h, --help              Show this help
 
@@ -848,12 +903,13 @@ $(echo -e "${BOLD}Components:${NC}")
   skills   os-skills          Markdown skill definitions (deploy only)          [default]
   sec-core agent-sec-core     Rust secure sandbox (Linux only)                  [default]
   sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
+  tokenless tokenless         Rust token compression library (cross-platform)   [default]
 
 $(echo -e "${BOLD}What this script does:${NC}")
   1. Detects installed toolchains and queries system repositories for available versions
   2. Installs via system package manager (dnf/yum/apt) when repository versions meet requirements
   3. Falls back to upstream installers (nvm, rustup, uv) when system packages don't suffice
-  4. Builds default components in order: cosh -> skills -> sec-core
+  4. Builds default components in order: cosh -> skills -> sec-core -> tokenless
      (sight is optional — add --component sight to include it)
   5. Installs components to system paths (use --no-install to skip)
   6. Reports artifact locations at the end
@@ -884,10 +940,10 @@ parse_args() {
                 shift
                 ;;
             --component)
-                [[ -n "${2:-}" ]] || die "--component requires a value (cosh, skills, sec-core, sight)"
+                [[ -n "${2:-}" ]] || die "--component requires a value (cosh, skills, sec-core, sight, tokenless)"
                 case "$2" in
-                    cosh|skills|sec-core|sight) COMPONENTS+=("$2") ;;
-                    *) die "Unknown component: $2. Valid: cosh, skills, sec-core, sight" ;;
+                    cosh|skills|sec-core|sight|tokenless) COMPONENTS+=("$2") ;;
+                    *) die "Unknown component: $2. Valid: cosh, skills, sec-core, sight, tokenless" ;;
                 esac
                 shift 2
                 ;;
