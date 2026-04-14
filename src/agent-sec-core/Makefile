@@ -16,6 +16,11 @@ python-code-pretty: ## Format Python code using black and isort
 build-sandbox: ## Build linux-sandbox binary
 	cd linux-sandbox && cargo build --release
 
+.PHONY: build-cli
+build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
+	pip3 install maturin
+	cd agent-sec-cli && maturin build --release
+
 # =============================================================================
 # INSTALL
 # =============================================================================

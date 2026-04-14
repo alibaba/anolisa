@@ -198,7 +198,7 @@ build_agent_sec_core() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${pkg_version}"
-    mkdir -p "$pkg_dir"/{skill,linux-sandbox,tools}
+    mkdir -p "$pkg_dir"/{skill,linux-sandbox,tools,agent-sec-cli}
 
     cp -rp "${SEC_DIR}/skill/"* "$pkg_dir/skill/"
     cp -rp "${SEC_DIR}/linux-sandbox/"* "$pkg_dir/linux-sandbox/"
@@ -206,6 +206,17 @@ build_agent_sec_core() {
     cp "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
+
+    # Include agent-sec-cli source for maturin wheel build
+    # Exclude development artifacts (.venv, target, __pycache__, .egg-info, dist)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='.venv' \
+        --exclude='target' \
+        --exclude='__pycache__' \
+        --exclude='*.egg-info' \
+        --exclude='dist' \
+        --exclude='.pytest_cache' \
+        agent-sec-cli/ | tar -xf - -C "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${pkg_version}"
     rm -rf "$tmp_dir"
