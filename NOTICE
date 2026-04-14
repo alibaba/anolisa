@@ -44,6 +44,17 @@ regex-mastery skill (src/os-skills/system-admin/regex-mastery/)
   Source: https://github.com/AbsolutelySkilled/AbsolutelySkilled
   Licensed under the MIT License
 
+humanizer skill (src/os-skills/others/humanizer/)
+  Based on Wikipedia's "Signs of AI writing" guide
+  (https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing)
+  Licensed under the MIT License
+
+xlsx skill (src/os-skills/others/xlsx/)
+  Based on MiniMax's xlsx skill
+  (https://github.com/MiniMax-AI/skills)
+  Copyright 2025 MiniMax AI
+  Licensed under the MIT License
+
 =========================================================================
 Test Assets
 =========================================================================
