@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- Support enable AgentSight dashboard in `agentsight` skill. (#222)
+
 ## 0.2.1
 
 - Upgraded `xlsx` skill with MiniMax open-source implementation. (#218)
