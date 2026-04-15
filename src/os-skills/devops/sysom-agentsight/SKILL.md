@@ -1,6 +1,31 @@
 ---
 name: agentsight
-description: 通过命令行查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
+description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
+---
+
+# Dashboard（前端）
+
+AgentSight 提供 Web Dashboard（前端） 用于可视化查看 token 消耗和会话历史。
+
+**访问方式：**
+- 远程访问：`http://<server-ip>:7396`（需确保安全组已开放该端口）
+- 本地访问：`http://127.0.0.1:7396`
+
+**功能：**
+- Token 消耗趋势图（按天/小时）
+- 会话历史浏览
+- LLM 调用详情查看
+- 支持按时间范围、进程过滤
+
+**启动服务：**
+```bash
+# 如果服务未运行，启动它
+sudo systemctl start agentsight
+
+# 查看服务状态
+sudo systemctl status agentsight
+```
+
 ---
 
 # Token 查询

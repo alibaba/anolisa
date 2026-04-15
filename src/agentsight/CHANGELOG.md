@@ -1,8 +1,11 @@
 # Changelog
 
-## 0.2.1
+## 0.2.2
 
-### Bug Fixes
+- Support starting backend-server for dashboard with AgentSight service.
+- Fix dashboard frontend dynamic width for multiple display-size.
+
+## 0.2.1
 
 - Add `/usr/lib/copilot-shell` path to CoshMatcher for agent discovery. (#190)
 - Add 200MB size limit for `genai_events.db` to prevent unbounded growth. (#211)
