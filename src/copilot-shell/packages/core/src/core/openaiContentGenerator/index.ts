@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import OpenAI from 'openai';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -92,3 +93,43 @@ export function determineProvider(
 }
 
 export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';
+
+/**
+ * Validate OpenAI API credentials and model availability by calling the /models endpoint.
+ *
+ * - Throws if the API key is invalid (HTTP 401).
+ * - Throws if the configured model is not present in the returned models list.
+ * - Silently passes for all other errors (e.g. network issues, providers that do not
+ *   expose a /models endpoint) so that legitimate custom providers are not blocked.
+ */
+export async function validateOpenAICredentials(
+  contentGeneratorConfig: ContentGeneratorConfig,
+  cliConfig: Config,
+): Promise<void> {
+  const provider = determineProvider(contentGeneratorConfig, cliConfig);
+  const client = provider.buildClient();
+
+  let models: string[] | undefined;
+
+  try {
+    const response = await client.models.list();
+    models = response.data.map((m) => m.id);
+  } catch (error) {
+    if (error instanceof OpenAI.APIError && error.status === 401) {
+      throw new Error(
+        'Invalid API key. Please check your API key and try again.',
+      );
+    }
+    // For other errors (network issues, unsupported /models endpoint, etc.),
+    // skip credential validation to avoid blocking legitimate custom providers.
+    return;
+  }
+
+  // Validate that the configured model is available
+  const model = contentGeneratorConfig.model;
+  if (models && models.length > 0 && !models.includes(model)) {
+    throw new Error(
+      `Model "${model}" is not available with the provided credentials. Please verify the model name and try again.`,
+    );
+  }
+}

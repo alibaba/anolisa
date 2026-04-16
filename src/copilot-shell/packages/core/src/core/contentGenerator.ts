@@ -298,8 +298,9 @@ export async function createContentGenerator(
   let baseGenerator: ContentGenerator;
 
   if (authType === AuthType.USE_OPENAI) {
-    const { createOpenAIContentGenerator } =
+    const { createOpenAIContentGenerator, validateOpenAICredentials } =
       await import('./openaiContentGenerator/index.js');
+    await validateOpenAICredentials(generatorConfig, config);
     baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
   } else if (authType === AuthType.QWEN_OAUTH) {
     const { getQwenOAuthClient: getQwenOauthClient } =

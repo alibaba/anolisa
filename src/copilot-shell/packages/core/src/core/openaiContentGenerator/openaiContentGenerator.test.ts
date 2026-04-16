@@ -25,8 +25,37 @@ vi.mock('../../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 
+// Mock OpenAI client used by validateOpenAICredentials
+const mockModelsList = vi.fn();
+
+vi.mock('openai', async () => {
+  class MockAPIError extends Error {
+    status: number;
+    headers: Record<string, string>;
+    constructor(
+      status: number,
+      _error: unknown,
+      message: string,
+      headers: Record<string, string> = {},
+    ) {
+      super(message);
+      this.status = status;
+      this.headers = headers;
+      this.name = 'APIError';
+    }
+  }
+  const MockOpenAI = vi.fn(() => ({
+    models: { list: mockModelsList },
+    chat: { completions: { create: vi.fn() } },
+    embeddings: { create: vi.fn() },
+  }));
+  (MockOpenAI as unknown as Record<string, unknown>).APIError = MockAPIError;
+  return { default: MockOpenAI };
+});
+
 // Now import the modules that depend on the mocked modules
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
+import { validateOpenAICredentials } from './index.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
@@ -401,5 +430,75 @@ describe('OpenAIContentGenerator (Refactored)', () => {
 
       expect(result).toBe(true);
     });
+  });
+});
+
+describe('validateOpenAICredentials', () => {
+  const baseGeneratorConfig = {
+    model: 'gpt-4',
+    apiKey: 'test-api-key',
+    baseUrl: 'https://api.openai.com/v1',
+    authType: AuthType.USE_OPENAI,
+  };
+
+  let mockCliConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCliConfig = {
+      getContentGeneratorConfig: vi.fn().mockReturnValue(baseGeneratorConfig),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getProxy: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+  });
+
+  it('throws with a clear message when the API key is invalid (401)', async () => {
+    const OpenAI = (await import('openai')).default;
+    const authError = new OpenAI.APIError(401, null, 'Unauthorized', {});
+    mockModelsList.mockRejectedValueOnce(authError);
+
+    await expect(
+      validateOpenAICredentials(baseGeneratorConfig, mockCliConfig),
+    ).rejects.toThrow(
+      'Invalid API key. Please check your API key and try again.',
+    );
+  });
+
+  it('throws when the configured model is not in the available models list', async () => {
+    mockModelsList.mockResolvedValueOnce({
+      data: [{ id: 'gpt-3.5-turbo' }, { id: 'gpt-4o' }],
+    });
+
+    await expect(
+      validateOpenAICredentials(baseGeneratorConfig, mockCliConfig),
+    ).rejects.toThrow(
+      'Model "gpt-4" is not available with the provided credentials.',
+    );
+  });
+
+  it('resolves successfully when the API key is valid and the model is available', async () => {
+    mockModelsList.mockResolvedValueOnce({
+      data: [{ id: 'gpt-3.5-turbo' }, { id: 'gpt-4' }, { id: 'gpt-4o' }],
+    });
+
+    await expect(
+      validateOpenAICredentials(baseGeneratorConfig, mockCliConfig),
+    ).resolves.toBeUndefined();
+  });
+
+  it('resolves without error when /models endpoint returns a non-auth error', async () => {
+    mockModelsList.mockRejectedValueOnce(new Error('Service unavailable'));
+
+    await expect(
+      validateOpenAICredentials(baseGeneratorConfig, mockCliConfig),
+    ).resolves.toBeUndefined();
+  });
+
+  it('resolves without error when /models endpoint returns an empty models list', async () => {
+    mockModelsList.mockResolvedValueOnce({ data: [] });
+
+    await expect(
+      validateOpenAICredentials(baseGeneratorConfig, mockCliConfig),
+    ).resolves.toBeUndefined();
   });
 });
