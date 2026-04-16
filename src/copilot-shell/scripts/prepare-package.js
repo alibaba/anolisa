@@ -1,16 +1,11 @@
 /**
  * @license
- * Copyright 2025 Qwen
+ * Copyright 2026 Alibaba Cloud
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Prepares the bundled CLI package for npm publishing
- * This script adds publishing metadata (package.json, README, LICENSE) to dist/
- * All runtime assets (cli.js, vendor/, *.sb) are already in dist/ from the bundle step
- */
-
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
@@ -23,7 +18,6 @@ const distDir = path.join(rootDir, 'dist');
 const cliBundlePath = path.join(distDir, 'cli.js');
 const vendorDir = path.join(distDir, 'vendor');
 
-// Verify dist directory and bundle exist
 if (!fs.existsSync(distDir)) {
   console.error('Error: dist/ directory not found');
   console.error('Please run "npm run bundle" first');
@@ -42,7 +36,6 @@ if (!fs.existsSync(vendorDir)) {
   process.exit(1);
 }
 
-// Copy README and LICENSE
 console.log('Copying documentation files...');
 const filesToCopy = ['README.md', 'LICENSE'];
 for (const file of filesToCopy) {
@@ -56,7 +49,6 @@ for (const file of filesToCopy) {
   }
 }
 
-// Copy locales folder
 console.log('Copying locales folder...');
 const localesSourceDir = path.join(
   rootDir,
@@ -69,7 +61,6 @@ const localesSourceDir = path.join(
 const localesDestDir = path.join(distDir, 'locales');
 
 if (fs.existsSync(localesSourceDir)) {
-  // Recursive copy function
   function copyRecursiveSync(src, dest) {
     const stats = fs.statSync(src);
     if (stats.isDirectory()) {
@@ -93,22 +84,18 @@ if (fs.existsSync(localesSourceDir)) {
   console.warn(`Warning: locales folder not found at ${localesSourceDir}`);
 }
 
-// Copy @lydell/node-pty native modules to dist/node_modules/
-// These are native addons excluded from the esbuild bundle and must be
-// present at runtime next to cli.js so that dynamic import() can resolve them.
 console.log('Copying @lydell/node-pty native modules...');
 const distNodeModulesDir = path.join(distDir, 'node_modules');
 const rootNodeModulesDir = path.join(rootDir, 'node_modules');
 
-// Packages to copy: the main JS wrapper plus all platform-specific binary packages
 const ptyPackages = [
   '@lydell/node-pty',
   '@lydell/node-pty-darwin-arm64',
   '@lydell/node-pty-darwin-x64',
-  '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-linux-arm64',
-  '@lydell/node-pty-win32-x64',
+  '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
+  '@lydell/node-pty-win32-x64',
   'node-pty',
 ];
 
@@ -130,23 +117,68 @@ function copyRecursiveSyncForPty(src, dest) {
   }
 }
 
+function fetchPackageViaNpm(pkgName, version, dest) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-pack-'));
+  try {
+    const pkgSpec = `${pkgName}@${version}`;
+    console.log(`  Fetching ${pkgSpec} via npm pack...`);
+    execSync(`npm pack ${pkgSpec} --pack-destination "${tmpDir}"`, {
+      stdio: 'pipe',
+      cwd: tmpDir,
+    });
+    const tarballs = fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tgz'));
+    if (tarballs.length === 0) {
+      console.warn(`  Warning: npm pack produced no tarball for ${pkgSpec}`);
+      return false;
+    }
+    const tarball = path.join(tmpDir, tarballs[0]);
+    fs.mkdirSync(dest, { recursive: true });
+    execSync(`tar -xzf "${tarball}" --strip-components=1 -C "${dest}"`, {
+      stdio: 'pipe',
+    });
+    console.log(`  Fetched and extracted ${pkgSpec}`);
+    return true;
+  } catch (err) {
+    console.warn(`  Warning: Failed to fetch ${pkgName}: ${err.message}`);
+    return false;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+const rootPackageJson = JSON.parse(
+  fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
+);
+const optionalVersions = rootPackageJson.optionalDependencies ?? {};
+
 for (const pkg of ptyPackages) {
   const srcPkg = path.join(rootNodeModulesDir, pkg);
   const destPkg = path.join(distNodeModulesDir, pkg);
   if (fs.existsSync(srcPkg)) {
     copyRecursiveSyncForPty(srcPkg, destPkg);
     console.log(`Copied ${pkg}`);
+  } else {
+    const version = optionalVersions[pkg];
+    if (version) {
+      fetchPackageViaNpm(pkg, version, destPkg);
+    } else {
+      console.warn(
+        `Warning: ${pkg} not found locally and no version info, skipping.`,
+      );
+    }
   }
 }
 console.log('Done copying node-pty modules.');
 
-// Copy package.json from root and modify it for publishing
 console.log('Creating package.json for distribution...');
-const rootPackageJson = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
+
+const distBin = Object.fromEntries(
+  Object.entries(rootPackageJson.bin ?? {}).map(([cmd, p]) => [
+    cmd,
+    path.basename(p),
+  ]),
 );
 
-// Create a clean package.json for the published package
 const distPackageJson = {
   name: rootPackageJson.name,
   version: rootPackageJson.version,
@@ -155,10 +187,7 @@ const distPackageJson = {
   repository: rootPackageJson.repository,
   type: 'module',
   main: 'cli.js',
-  bin: {
-    co: 'cli.js',
-    copilot: 'cli.js',
-  },
+  bin: distBin,
   files: [
     'cli.js',
     'vendor',
@@ -167,17 +196,11 @@ const distPackageJson = {
     'README.md',
     'LICENSE',
     'locales',
+    'hooks',
   ],
   config: rootPackageJson.config,
   dependencies: {},
-  optionalDependencies: {
-    '@lydell/node-pty': '1.1.0',
-    '@lydell/node-pty-darwin-arm64': '1.1.0',
-    '@lydell/node-pty-darwin-x64': '1.1.0',
-    '@lydell/node-pty-linux-x64': '1.1.0',
-    '@lydell/node-pty-win32-arm64': '1.1.0',
-    '@lydell/node-pty-win32-x64': '1.1.0',
-  },
+  optionalDependencies: rootPackageJson.optionalDependencies ?? {},
   engines: rootPackageJson.engines,
 };
 
