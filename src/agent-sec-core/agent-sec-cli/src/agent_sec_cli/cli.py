@@ -1,6 +1,7 @@
 """CLI entry point for agent-sec-cli package."""
 
 import typer
+from agent_sec_cli.prompt_scanner.cli import scanner_app
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.backends.hardening import (
     DEFAULT_HARDEN_CONFIG,
@@ -56,6 +57,10 @@ def _with_default_harden_args(args: list[str]) -> list[str]:
     ):
         normalized.extend(["--config", DEFAULT_HARDEN_CONFIG])
     return normalized
+
+
+# Register prompt scanner sub-command
+app.add_typer(scanner_app, name="scan-prompt")
 
 
 @app.command(name="log-sandbox", hidden=True)
