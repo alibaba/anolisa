@@ -7,6 +7,7 @@ name = "agent-sec-cli"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "gnupg" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -30,6 +31,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "gnupg", specifier = ">=2.0" },
     { name = "pgpy", marker = "extra == 'pgpy'", specifier = ">=0.5" },
     { name = "pydantic", specifier = ">=2.0" },

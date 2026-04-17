@@ -17,6 +17,7 @@ _ACTION_CATEGORY: Dict[str, str] = {
     "verify": "asset_verify",
     "summary": "summary",
     "code_scan": "code_scan",
+    "skill_ledger": "skill_ledger",
 }
 
 

@@ -13,6 +13,7 @@ _REGISTRY: Dict[str, str] = {
     "verify": "agent_sec_cli.security_middleware.backends.asset_verify",
     "summary": "agent_sec_cli.security_middleware.backends.summary",
     "code_scan": "agent_sec_cli.security_middleware.backends.code_scan",
+    "skill_ledger": "agent_sec_cli.security_middleware.backends.skill_ledger",
 }
 
 # Module base name → expected class name convention.

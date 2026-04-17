@@ -5,12 +5,16 @@ from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.backends.hardening import (
     DEFAULT_HARDEN_CONFIG,
 )
+from agent_sec_cli.skill_ledger.cli import app as skill_ledger_app
 
 app = typer.Typer(
     name="agent-sec-cli",
     help="AgentSecCore unified CLI entry point",
     add_completion=True,
 )
+
+# Mount skill-ledger as a subcommand group: agent-sec-cli skill-ledger <cmd>
+app.add_typer(skill_ledger_app, name="skill-ledger")
 
 _HARDEN_HELP_TEXT = f"""\
 Usage: agent-sec-cli harden [SEHARDEN_ARGS]...
