@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { act } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { OpenAIKeyPrompt, credentialSchema } from './OpenAIKeyPrompt.js';
+import type { Key } from '../hooks/useKeypress.js';
+import { useKeypress } from '../hooks/useKeypress.js';
 
 // Mock useKeypress hook
 vi.mock('../hooks/useKeypress.js', () => ({
@@ -254,5 +257,156 @@ describe('OpenAIKeyPrompt', () => {
       model: 'gpt-4',
     });
     expect(result.success).toBe(true);
+  });
+
+  // ─── API Key retention on navigation (#240) ─────────────────────────────────
+
+  describe('API Key retention on navigation (#240)', () => {
+    const makeKey = (overrides: Partial<Key> = {}): Key => ({
+      name: '',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+      ...overrides,
+    });
+
+    function getLatestHandler(): (key: Key) => void {
+      const mock = vi.mocked(useKeypress);
+      return mock.mock.calls[mock.mock.calls.length - 1]![0];
+    }
+
+    async function pressKey(key: Partial<Key>): Promise<void> {
+      await act(() => {
+        getLatestHandler()(makeKey(key));
+      });
+    }
+
+    it('should retain defaultApiKey when navigating to apiKey via Enter on leaf provider', async () => {
+      // DeepSeek is a leaf provider (no subProviders)
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Masked key visible on initial render
+      expect(lastFrame()).toContain('sk-***');
+
+      // Press Enter to navigate from provider to apiKey field
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      // API key should still be displayed (not cleared)
+      expect(lastFrame()).toContain('sk-***');
+    });
+
+    it('should retain defaultApiKey when navigating to apiKey via Tab on leaf provider', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Press Tab to navigate from provider to apiKey field
+      await pressKey({ name: 'tab', sequence: '\t' });
+
+      // API key should still be displayed
+      expect(lastFrame()).toContain('sk-***');
+    });
+
+    it('should retain defaultApiKey when navigating through subProvider to apiKey', async () => {
+      // DashScope Singapore is a sub-provider
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Press Enter to enter subProvider menu
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      // Press Enter on subProvider to go to apiKey
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      // API key should still be displayed
+      expect(lastFrame()).toContain('sk-***');
+    });
+
+    it('should clear entire apiKey on first backspace when showing default key', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Navigate to apiKey field
+      await pressKey({ name: 'return', sequence: '\r' });
+      expect(lastFrame()).toContain('sk-***');
+
+      // Press backspace - should clear the entire field
+      await pressKey({ name: 'backspace', sequence: '\b' });
+
+      // API key should be completely gone
+      expect(lastFrame()).not.toContain('sk-');
+    });
+
+    it('should replace default key on first character input', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Navigate to apiKey field
+      await pressKey({ name: 'return', sequence: '\r' });
+      expect(lastFrame()).toContain('sk-***');
+
+      // Type 'x' - should replace the entire default key, not append
+      await pressKey({ sequence: 'x' });
+
+      // Should no longer show original key prefix
+      expect(lastFrame()).not.toContain('sk-');
+    });
+
+    it('should delete single char on backspace after user clears and types new key', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // Navigate to apiKey field and clear default
+      await pressKey({ name: 'return', sequence: '\r' });
+      await pressKey({ name: 'backspace', sequence: '\b' });
+
+      // Type 'abcd' (4 chars → maskApiKey shows 'abc*')
+      for (const ch of ['a', 'b', 'c', 'd']) {
+        await pressKey({ sequence: ch });
+      }
+      expect(lastFrame()).toContain('abc*');
+
+      // Backspace should only delete last char, leaving 'abc' (3 chars → '***')
+      await pressKey({ name: 'backspace', sequence: '\b' });
+      expect(lastFrame()).not.toContain('abc*');
+    });
   });
 });

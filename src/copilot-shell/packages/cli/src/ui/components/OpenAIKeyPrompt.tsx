@@ -204,6 +204,10 @@ export function OpenAIKeyPrompt({
   // Remember the initially detected indices to restore defaultApiKey when user navigates back
   const [initialIndices] = useState(detectInitialIndices);
   const [apiKey, setApiKey] = useState(defaultApiKey || '');
+  // Track whether the apiKey is the original default (not yet edited by the user).
+  // When true, backspace clears the whole field and typing replaces it.
+  const [isApiKeyFromDefault, setIsApiKeyFromDefault] =
+    useState(!!defaultApiKey);
 
   const effectiveProvider = getEffectiveProvider(
     providerIndex,
@@ -240,7 +244,9 @@ export function OpenAIKeyPrompt({
     // Restore defaultApiKey if navigating back to the original top-level provider
     // (regardless of which sub-provider was originally selected), otherwise clear.
     const [initP] = initialIndices;
-    setApiKey(newIndex === initP ? defaultApiKey || '' : '');
+    const isInitialProvider = newIndex === initP;
+    setApiKey(isInitialProvider ? defaultApiKey || '' : '');
+    setIsApiKeyFromDefault(isInitialProvider && !!defaultApiKey);
   };
 
   const handleSubProviderChange = (newIndex: number) => {
@@ -249,9 +255,9 @@ export function OpenAIKeyPrompt({
     applyProvider(providerIndex, newIndex);
     // Restore defaultApiKey if navigating back to the original sub-provider, otherwise clear
     const [initP, initS] = initialIndices;
-    setApiKey(
-      providerIndex === initP && newIndex === initS ? defaultApiKey || '' : '',
-    );
+    const isInitialSubProvider = providerIndex === initP && newIndex === initS;
+    setApiKey(isInitialSubProvider ? defaultApiKey || '' : '');
+    setIsApiKeyFromDefault(isInitialSubProvider && !!defaultApiKey);
   };
 
   const validateAndSubmit = () => {
@@ -307,12 +313,10 @@ export function OpenAIKeyPrompt({
             // 进入子菜单
             setCurrentField('subProvider');
           } else {
-            setApiKey('');
             setCurrentField('apiKey');
           }
           return;
         } else if (currentField === 'subProvider') {
-          setApiKey('');
           setCurrentField('apiKey');
           return;
         } else if (currentField === 'apiKey') {
@@ -337,11 +341,9 @@ export function OpenAIKeyPrompt({
           if (hasSubProviders) {
             setCurrentField('subProvider');
           } else {
-            setApiKey('');
             setCurrentField('apiKey');
           }
         } else if (currentField === 'subProvider') {
-          setApiKey('');
           setCurrentField('apiKey');
         } else if (currentField === 'apiKey') {
           setCurrentField(isCustom ? 'baseUrl' : 'model');
@@ -393,7 +395,13 @@ export function OpenAIKeyPrompt({
       // Handle backspace/delete
       if (key.name === 'backspace' || key.name === 'delete') {
         if (currentField === 'apiKey') {
-          setApiKey((prev) => prev.slice(0, -1));
+          if (isApiKeyFromDefault) {
+            // First backspace on an unmodified default key clears the entire field
+            setApiKey('');
+            setIsApiKeyFromDefault(false);
+          } else {
+            setApiKey((prev) => prev.slice(0, -1));
+          }
         } else if (currentField === 'baseUrl') {
           setBaseUrl((prev) => prev.slice(0, -1));
         } else if (currentField === 'model') {
@@ -423,7 +431,13 @@ export function OpenAIKeyPrompt({
 
         if (cleanInput.length > 0) {
           if (currentField === 'apiKey') {
-            setApiKey((prev) => prev + cleanInput);
+            if (isApiKeyFromDefault) {
+              // First paste replaces the unmodified default key
+              setApiKey(cleanInput);
+              setIsApiKeyFromDefault(false);
+            } else {
+              setApiKey((prev) => prev + cleanInput);
+            }
           } else if (currentField === 'baseUrl') {
             setBaseUrl((prev) => prev + cleanInput);
           } else if (currentField === 'model') {
@@ -443,7 +457,13 @@ export function OpenAIKeyPrompt({
 
         if (cleanInput.length > 0) {
           if (currentField === 'apiKey') {
-            setApiKey((prev) => prev + cleanInput);
+            if (isApiKeyFromDefault) {
+              // First keystroke replaces the unmodified default key
+              setApiKey(cleanInput);
+              setIsApiKeyFromDefault(false);
+            } else {
+              setApiKey((prev) => prev + cleanInput);
+            }
           } else if (currentField === 'baseUrl') {
             setBaseUrl((prev) => prev + cleanInput);
           } else if (currentField === 'model') {
