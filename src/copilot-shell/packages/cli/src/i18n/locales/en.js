@@ -1503,4 +1503,10 @@ export default {
   'Press Enter or wait 2s to continue': 'Press Enter or wait 2s to continue',
   '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
     '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel',
+  "Set up Copilot Shell's status line UI":
+    "Set up Copilot Shell's status line UI",
+  'Toggle compact mode': 'Toggle compact mode',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)':
+    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)',
+  verbose: 'verbose',
 };
