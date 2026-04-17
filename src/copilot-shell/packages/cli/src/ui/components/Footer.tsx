@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -12,11 +18,12 @@ import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
-import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
+import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { ApprovalMode } from '@copilot-shell/core';
 import { t } from '../../i18n/index.js';
 
@@ -24,6 +31,8 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const { verboseMode } = useCompactMode();
+  const { text: statusLineText } = useStatusLine();
 
   const {
     errorCount,
@@ -40,7 +49,6 @@ export const Footer: React.FC = () => {
   const showErrorIndicator = !showErrorDetails && errorCount > 0;
 
   const { columns: terminalWidth } = useTerminalSize();
-  const isNarrow = isNarrowWidth(terminalWidth);
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
@@ -48,11 +56,15 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
+  // Hide "? for shortcuts" when a custom status line is active (it already
+  // occupies the top row, so the hint is redundant). Matches upstream behavior.
+  const suppressHint = !!statusLineText;
+
   // Left section should show exactly ONE thing at any time, in priority order.
   const leftContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
+    <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
@@ -62,7 +74,7 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : (uiState.buffer?.text?.length ?? 0) > 0 ? null : (
+  ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 
@@ -94,31 +106,32 @@ export const Footer: React.FC = () => {
     });
   }
 
+  if (verboseMode) {
+    rightItems.push({
+      key: 'verbose',
+      node: <Text color={theme.text.accent}>{t('verbose')}</Text>,
+    });
+  }
+
   return (
     <Box
       justifyContent="space-between"
       width="100%"
       flexDirection="row"
-      alignItems="center"
+      minHeight={1}
     >
-      {/* Left Section: Exactly one status line (exit prompts / mode indicator / default hint) */}
-      <Box
-        marginLeft={2}
-        justifyContent="flex-start"
-        flexDirection={isNarrow ? 'column' : 'row'}
-        alignItems={isNarrow ? 'flex-start' : 'center'}
-      >
+      <Box flexShrink={1} width={Math.floor(terminalWidth * 0.6)}>
         {leftContent}
       </Box>
-
-      {/* Right Section: Debug Mode, Context Usage, and Console Summary */}
-      <Box alignItems="center" justifyContent="flex-end" marginRight={2}>
-        {rightItems.map(({ key, node }, index) => (
-          <Box key={key} alignItems="center">
-            {index > 0 && <Text color={theme.text.secondary}> | </Text>}
-            {node}
-          </Box>
-        ))}
+      <Box flexGrow={1} flexShrink={1} alignItems="flex-start">
+        {statusLineText ? (
+          <Text color={theme.text.secondary} wrap="truncate">
+            {statusLineText}
+          </Text>
+        ) : null}
+      </Box>
+      <Box flexShrink={1} justifyContent="flex-end">
+        <Box gap={1}>{rightItems.map((item) => item.node)}</Box>
       </Box>
     </Box>
   );
