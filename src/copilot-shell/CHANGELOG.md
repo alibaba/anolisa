@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0
+
+- Added startup bash entry and simplified manual auth dialog. (#217)
+- Added async fzf-based tab completion optimization. (#214)
+- Fixed OpenAI API key and model validation via /models endpoint on auth. (#243)
+- Fixed API key retention when navigating to apiKey field in auth dialog. (#241)
+- Fixed node-pty native binary bundling for both linux architectures. (#232)
+- Fixed stream redaction by replacing integer offset with committed text reference. (#210)
+- Fixed missing fields in hook system. (#188)
+
 ## 2.0.4
 
 - Added STS authentication support via ECS RAM role. (#161)
