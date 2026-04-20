@@ -36,6 +36,11 @@ dependencies = [
 
 [project.optional-dependencies]
 pgpy = ["pgpy>=0.5"]
+ml = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "modelscope>=1.10",
+]
 
 [dependency-groups]
 dev = [

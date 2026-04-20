@@ -38,7 +38,7 @@ class ScanConfig(BaseModel):
     custom_rules_path: str | None = None
 
     # ML model identifier
-    model_name: str = "prompt-guard-2-86m"
+    model_name: str = "LLM-Research/Llama-Prompt-Guard-2-86M"
 
     # Compute device for ML inference
     model_device: str = "cpu"
