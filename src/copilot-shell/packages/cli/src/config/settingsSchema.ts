@@ -289,6 +289,17 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as
+          | { type: 'command'; command: string; padding?: number }
+          | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: true,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
@@ -420,6 +431,26 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 0,
         description: 'The last time the feedback dialog was shown.',
+        showInDialog: false,
+      },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: false,
+      },
+      verboseMode: {
+        type: 'boolean',
+        label: 'Verbose Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show full tool output and thinking in verbose mode (toggle with ctrl+O).',
         showInDialog: false,
       },
     },

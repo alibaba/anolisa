@@ -142,6 +142,12 @@ export const Help: React.FC<Help> = ({ commands, width }) => (
     </Text>
     <Text color={theme.text.primary}>
       <Text bold color={theme.text.accent}>
+        Ctrl+O
+      </Text>{' '}
+      - {t('Toggle verbose/compact mode')}
+    </Text>
+    <Text color={theme.text.primary}>
+      <Text bold color={theme.text.accent}>
         Enter
       </Text>{' '}
       - {t('Send message')}
