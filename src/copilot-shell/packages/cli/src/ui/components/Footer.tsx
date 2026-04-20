@@ -4,12 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @license
- * Copyright 2025 Google LLC
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -64,7 +58,8 @@ export const Footer: React.FC = () => {
   const leftContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
+    // [FIX] Corrected text from Ctrl+C to Ctrl+D
+    <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
@@ -118,20 +113,42 @@ export const Footer: React.FC = () => {
       justifyContent="space-between"
       width="100%"
       flexDirection="row"
+      alignItems="center"
       minHeight={1}
     >
-      <Box flexShrink={1} width={Math.floor(terminalWidth * 0.6)}>
+      {/* Left Section: Exactly one status line (exit prompts / mode indicator / default hint) */}
+      <Box marginLeft={2} justifyContent="flex-start" flexShrink={1}>
         {leftContent}
       </Box>
-      <Box flexGrow={1} flexShrink={1} alignItems="flex-start">
+
+      {/* Middle Section: Custom Status Line (if active) */}
+      <Box
+        flexGrow={1}
+        flexShrink={1}
+        alignItems="center"
+        justifyContent="center"
+        marginX={2}
+      >
         {statusLineText ? (
           <Text color={theme.text.secondary} wrap="truncate">
             {statusLineText}
           </Text>
         ) : null}
       </Box>
-      <Box flexShrink={1} justifyContent="flex-end">
-        <Box gap={1}>{rightItems.map((item) => item.node)}</Box>
+
+      {/* Right Section: Debug Mode, Context Usage, and Console Summary */}
+      <Box
+        alignItems="center"
+        justifyContent="flex-end"
+        marginRight={2}
+        flexShrink={1}
+      >
+        {rightItems.map(({ key, node }, index) => (
+          <Box key={key} alignItems="center" flexDirection="row">
+            {index > 0 && <Text color={theme.text.secondary}> | </Text>}
+            {node}
+          </Box>
+        ))}
       </Box>
     </Box>
   );
