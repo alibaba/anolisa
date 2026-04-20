@@ -531,6 +531,31 @@ fn build_agent_step(
     }
 }
 
+/// Extract only the latest-round tool responses from a full message history.
+/// In an agentic loop the pattern is:
+///   ... | assistant(tool_calls) | tool | tool | ... | assistant(tool_calls) | tool | tool
+/// The tool responses for the *current* step are the `tool`-role messages that
+/// follow the last `assistant` message which contains ToolCall parts.
+fn latest_round_messages(messages: &[InputMessage]) -> &[InputMessage] {
+    // Find the last assistant message that contains a ToolCall part.
+    let last_assistant_with_tc = messages.iter().rposition(|m| {
+        m.role == "assistant"
+            && m.parts.iter().any(|p| matches!(p, MessagePart::ToolCall { .. }))
+    });
+
+    if let Some(idx) = last_assistant_with_tc {
+        // Return messages after that assistant message (the tool responses).
+        &messages[idx + 1..]
+    } else {
+        // No assistant-with-tool-call found; fall back to messages after last user.
+        if let Some(idx) = messages.iter().rposition(|m| m.role == "user") {
+            &messages[idx + 1..]
+        } else {
+            messages
+        }
+    }
+}
+
 /// Build observation by looking for ToolCallResponse in the next event's input.
 fn build_observation(
     tool_calls: &[AtifToolCall],
@@ -547,14 +572,16 @@ fn build_observation(
     let mut results: Vec<AtifObservationResult> = Vec::new();
     let mut matched_by_id = vec![false; tool_calls.len()];
 
-    // Strategy 1: from parsed LLMCall's full request messages
+    // Strategy 1: from parsed LLMCall's full request messages (latest round only)
     if let Some(call) = next_parsed {
-        collect_tool_responses(&call.request.messages, &tc_ids, &mut results, &mut matched_by_id);
+        let latest = latest_round_messages(&call.request.messages);
+        collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
     } else {
-        // Strategy 2: from event_json parsed as LLMCall
+        // Strategy 2: from event_json parsed as LLMCall (latest round only)
         if let Some(call) = parse_event_json(next_event) {
+            let latest = latest_round_messages(&call.request.messages);
             collect_tool_responses(
-                &call.request.messages,
+                latest,
                 &tc_ids,
                 &mut results,
                 &mut matched_by_id,
@@ -562,7 +589,7 @@ fn build_observation(
         }
     }
 
-    // Strategy 3: from input_messages column (incremental messages)
+    // Strategy 3: from input_messages column (already incremental — latest round)
     if results.is_empty() {
         if let Some(ref json) = next_event.input_messages {
             if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
