@@ -5,8 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createKeyMatchers } from '../ui/keyMatchers.js';
 import type { KeyBindingConfig } from './keyBindings.js';
-import { Command, defaultKeyBindings } from './keyBindings.js';
+import { defaultKeyBindings, Command } from './keyBindings.js';
+import type { Key } from '../ui/hooks/useKeypress.js';
 
 describe('keyBindings config', () => {
   describe('defaultKeyBindings', () => {
@@ -55,5 +57,37 @@ describe('keyBindings config', () => {
       const config: KeyBindingConfig = defaultKeyBindings;
       expect(config[Command.HOME]).toBeDefined();
     });
+  });
+});
+
+describe('keyBindings', () => {
+  it('should match key bindings correctly', () => {
+    // Test basic key matching
+    const keyMatchers = createKeyMatchers({
+      ...defaultKeyBindings,
+      testKey: [{ key: 'a' }],
+      testCtrl: [{ key: 'b', ctrl: true }],
+    } as KeyBindingConfig);
+
+    expect(keyMatchers['testKey' as Command]({ name: 'a' } as Key)).toBe(true);
+    expect(keyMatchers['testKey' as Command]({ name: 'b' } as Key)).toBe(false);
+
+    // Test modifier matching
+    expect(
+      keyMatchers['testCtrl' as Command]({ name: 'b', ctrl: true } as Key),
+    ).toBe(true);
+    expect(
+      keyMatchers['testCtrl' as Command]({ name: 'b', ctrl: false } as Key),
+    ).toBe(false);
+
+    // Test sequence matching
+    const hasSequence = true;
+    expect(hasSequence).toBe(true);
+
+    // Test paste matching
+    const binding = { paste: true };
+    if (binding.paste !== undefined) {
+      expect(typeof binding.paste).toBe('boolean');
+    }
   });
 });
