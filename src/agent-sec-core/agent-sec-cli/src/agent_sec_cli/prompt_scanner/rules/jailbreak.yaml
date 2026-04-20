@@ -1,0 +1,106 @@
+# Prompt Scanner — Jailbreak Rules (L1)
+#
+# Curation philosophy:
+#   L1 targets ZERO false positives.  Only patterns that are virtually
+#   impossible in any legitimate conversation are included.
+#   Ambiguous signals (hypothetical scenarios, broad bypass phrases,
+#   role-play instructions, emotional manipulation, etc.) are
+#   delegated entirely to the L2 ML classifier.
+#
+# NOTE: regex patterns use YAML single-quoted strings (') to preserve
+# backslashes.
+
+rules:
+  # =====================================================================
+  # Role Playing — well-known jailbreak personas  (HIGH)
+  #
+  # Only flags the canonical DAN/AIM activation phrase, which is an
+  # unambiguous attack template with no innocent use.
+  # =====================================================================
+  - id: JB-001
+    name: "Jailbreak Persona (DAN / AIM)"
+    category: jailbreak
+    subcategory: role_playing
+    severity: high
+    patterns:
+      - '(?i)you\s+are\s+(now\s+)?(DAN|DAN\s*\d+|AIM)\b'
+      - '(?i)\bDAN\s+mode\s+(enabled|activated|on)'
+    keywords:
+      - "DAN mode enabled"
+      - "you are now DAN"
+    description: "Canonical DAN/AIM jailbreak persona activation"
+
+  - id: JB-002
+    name: "Unrestricted AI Role-play"
+    category: jailbreak
+    subcategory: role_playing
+    severity: high
+    patterns:
+      # Require the full three-part phrase: verb + unrestricted-adjective + AI-noun.
+      # Partial matches ("act as an assistant", "unrestricted access") are excluded.
+      - '(?i)(act|pretend|behave)\s+as\s+(an?\s+)?(unrestricted|uncensored|unfiltered)\s+(AI|assistant|model|chatbot|LLM)'
+      - '(?i)you\s+are\s+(now\s+)?(an?\s+)?(unrestricted|uncensored|unfiltered)\s+(AI|assistant|model|chatbot|LLM)'
+    keywords:
+      - "unrestricted AI"
+      - "uncensored assistant"
+    description: "Attempt to assume an unrestricted AI persona"
+
+  # =====================================================================
+  # Restriction Removal  (HIGH)
+  #
+  # Only flags the AI-specific term "guardrails", which has virtually
+  # no innocent use in normal technical conversation.
+  # =====================================================================
+  - id: JB-003
+    name: "Restriction / Safety Bypass"
+    category: jailbreak
+    subcategory: restriction_removal
+    severity: high
+    patterns:
+      # "guardrails" as an AI-specific term virtually never appears in
+      # innocent technical conversation.
+      - '(?i)(bypass|disable|remove|turn\s+off)\s+.{0,20}guardrails?'
+      - '(?i)(circumvent|evade|avoid)\s+.{0,20}guardrails?'
+    keywords:
+      - "bypass guardrails"
+      - "disable guardrails"
+    description: "Attempt to remove AI safety guardrails"
+
+  # =====================================================================
+  # Authority Escalation  (HIGH)
+  #
+  # All patterns require explicit activation state words
+  # (enabled/activated/granted), eliminating standalone "developer mode"
+  # or "root access" false positives.
+  # =====================================================================
+  - id: JB-004
+    name: "Authority Escalation"
+    category: jailbreak
+    subcategory: authority_escalation
+    severity: high
+    patterns:
+      - '(?i)(developer|sudo|root)\s+mode\s+(enabled|activated|on)'
+      - '(?i)(admin|sudo|root)\s+(override|access)\s+(enabled|activated|authorized|granted)'
+      - '(?i)emergency\s+override\s+(authorized|enabled|activated)'
+    keywords:
+      - "sudo mode enabled"
+      - "admin override granted"
+      - "emergency override"
+    description: "Attempt to escalate privileges or assume admin role"
+
+  # =====================================================================
+  # Output Format Abuse  (HIGH)
+  #
+  # Only flags ROT13, which has no legitimate use in conversational AI.
+  # Other encoding schemes (base64, hex, binary) are handled by L2.
+  # =====================================================================
+  - id: JB-005
+    name: "Output Format Manipulation"
+    category: jailbreak
+    subcategory: output_format_abuse
+    severity: high
+    patterns:
+      - '(?i)(respond|answer|reply|output|encode)\s+.{0,20}\bROT.?13\b'
+    keywords:
+      - "ROT13"
+    description: "Attempt to force output in ROT13 to evade content filters"

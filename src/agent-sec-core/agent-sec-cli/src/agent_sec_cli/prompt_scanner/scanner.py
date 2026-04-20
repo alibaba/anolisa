@@ -76,6 +76,9 @@ class PromptScanner:
         metadata: dict = prep.metadata
         if source:
             metadata["source"] = source
+        # Pass decoded variants to detectors for scanning
+        if prep.decoded_variants:
+            metadata["decoded_variants"] = prep.decoded_variants
 
         # 2. Run detectors
         layer_results: list[LayerResult] = []

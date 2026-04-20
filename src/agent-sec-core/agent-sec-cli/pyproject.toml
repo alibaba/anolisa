@@ -67,6 +67,7 @@ include = [
     "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
     "src/agent_sec_cli/code_scanner/scripts/*.sh",
     "src/agent_sec_cli/code_scanner/hook_adapter/openclaw/plugin/*",
+    "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
 ]
 # Native module name (must match lib.rs function name)
 module-name = "agent_sec_cli._native"

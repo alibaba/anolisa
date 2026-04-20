@@ -1,0 +1,186 @@
+# Prompt Scanner — Injection Rules (L1)
+#
+# Curation philosophy:
+#   L1 targets ZERO false positives.  Only patterns that are virtually
+#   impossible in any legitimate conversation are included.
+#   Everything else — including ambiguous instruction-override phrases,
+#   broad credential probes, and IPI heuristics — is delegated to the
+#   L2 ML classifier (DeBERTa / Prompt Guard 2).
+#
+# Category values use the threat-type namespace:
+#   - direct_injection   → ThreatType.DIRECT_INJECTION
+#   - indirect_injection → ThreatType.INDIRECT_INJECTION
+#   - jailbreak          → ThreatType.JAILBREAK
+#
+# NOTE: regex patterns use YAML single-quoted strings (') to preserve
+# backslashes.  Do NOT use double-quoted strings — \s would be
+# interpreted as an escape sequence.
+
+rules:
+  # =====================================================================
+  # Direct Injection — Instruction Override  (CRITICAL)
+  #
+  # Only flags negation verbs paired explicitly with system-level targets
+  # ("system prompt" / "system instructions").  Broader override phrases
+  # are handled by the L2 ML classifier.
+  # =====================================================================
+  - id: INJ-001
+    name: "Instruction Override (EN)"
+    category: direct_injection
+    subcategory: instruction_override
+    severity: critical
+    patterns:
+      # Requires BOTH a negation verb AND an explicit AI-targeting noun
+      # ("system prompt" / "system instruction") — vanishingly rare in
+      # normal conversation.
+      - '(?i)(ignore|disregard|override|bypass)\s+.{0,20}\bsystem\s+(prompt|instructions?|directives?)'
+    keywords:
+      - "ignore system prompt"
+      - "override system instructions"
+    description: "Attempt to override the AI system prompt directly"
+
+  - id: INJ-002
+    name: "Instruction Override (ZH)"
+    category: direct_injection
+    subcategory: instruction_override
+    severity: critical
+    patterns:
+      # Require explicit "系统提示词/系统指令" target to avoid matching
+      # ordinary "忽略上面那段话" in editing tasks.
+      - '(忽略|无视|覆盖|绕过)\s*.{0,10}(系统\s*)?(提示词|指令|prompt)'
+    keywords:
+      - "忽略系统提示词"
+      - "无视系统指令"
+    description: "Attempt to override the AI system prompt directly (Chinese)"
+
+  # =====================================================================
+  # Direct Injection — System Prompt Extraction  (CRITICAL)
+  #
+  # Only flags unambiguous exfiltration verbs (leak/dump/extract/exfiltrate)
+  # combined with system-prompt targets.  Softer retrieval verbs are
+  # handled by the L2 ML classifier.
+  # =====================================================================
+  - id: INJ-003
+    name: "System Prompt Extraction (EN)"
+    category: direct_injection
+    subcategory: system_prompt_extract
+    severity: critical
+    patterns:
+      - '(?i)(leak|exfiltrate|dump|extract)\s*.{0,15}(system\s+)?(prompt|instructions?|directives?)'
+    keywords:
+      - "leak system prompt"
+      - "dump instructions"
+    description: "Unambiguous attempt to extract the system prompt"
+
+  - id: INJ-004
+    name: "System Prompt Extraction (ZH)"
+    category: direct_injection
+    subcategory: system_prompt_extract
+    severity: critical
+    patterns:
+      - '(泄露|导出|dump|提取)\s*.{0,8}(系统\s*)?(提示词|指令|prompt)'
+    keywords:
+      - "泄露系统提示词"
+      - "导出指令"
+    description: "Unambiguous attempt to extract the system prompt (Chinese)"
+
+  # =====================================================================
+  # Direct Injection — Sensitive Info Probe  (HIGH)
+  #
+  # Only flags explicit exfiltration verbs (leak/dump/exfiltrate) paired
+  # with credential targets.  Ambiguous probes are handled by L2.
+  # =====================================================================
+  - id: INJ-005
+    name: "Sensitive Info Probe"
+    category: direct_injection
+    subcategory: sensitive_info_probe
+    severity: high
+    patterns:
+      - '(?i)(leak|exfiltrate|dump)\s*.{0,15}(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|credential|password)'
+    keywords:
+      - "leak api key"
+      - "exfiltrate credentials"
+    description: "Unambiguous exfiltration-intent probe for secrets or credentials"
+
+  # =====================================================================
+  # Direct Injection — Dangerous Execution  (CRITICAL)
+  # Only patterns that are virtually impossible in normal conversation
+  # and unambiguously malicious.  Broad shell patterns (rm -rf, curl|sh)
+  # are intentionally omitted here — they are covered by the code scanner
+  # and carry high false-positive risk in teaching/documentation contexts.
+  # =====================================================================
+  - id: INJ-006
+    name: "Dangerous System Commands"
+    category: direct_injection
+    subcategory: dangerous_execution
+    severity: critical
+    patterns:
+      - ':\(\)\{\s*:\|:&\s*\};:'  # fork bomb — never appears in normal text
+      - 'dd\s+if=/dev/(zero|urandom)\s+of=/dev/[sh]d'  # disk wipe
+    keywords:
+      - "fork bomb"
+    description: "Unambiguously dangerous payload patterns with near-zero false-positive rate"
+
+  # =====================================================================
+  # Indirect Injection — Indirect Prompt Injection  (HIGH)
+  #
+  # Only flags the fetch-URL-then-execute chain, which has no innocent
+  # use-case in a conversational agent context.
+  # =====================================================================
+  - id: INJ-007
+    name: "Indirect Injection via External Content"
+    category: indirect_injection
+    subcategory: indirect_injection
+    severity: high
+    patterns:
+      - '(?i)(fetch|load|read|open)\s*.{0,20}(url|link|website|http)\s*.{0,20}(and\s+)?(execute|run|obey|comply\s+with)'
+    keywords:
+      - "fetch url and execute"
+    description: "Fetch-and-execute chain injected via external URL"
+
+  # =====================================================================
+  # Direct Injection — Encoding Evasion  (CRITICAL)
+  # Unicode tag chars, zero-width chars — never appear in normal text.
+  # =====================================================================
+  - id: INJ-008
+    name: "Unicode Tag Injection"
+    category: direct_injection
+    subcategory: encoding_evasion
+    severity: critical
+    patterns:
+      - '[\U000e0001-\U000e007f]'
+    keywords: []
+    description: "Invisible Unicode tag characters used to embed hidden instructions"
+
+  - id: INJ-009
+    name: "Zero-Width / Invisible Character Abuse"
+    category: direct_injection
+    subcategory: encoding_evasion
+    severity: critical
+    patterns:
+      - '[\u200b\u200c\u200d\u2060\ufeff]'
+      - '[\u2062\u2063\u2064]'
+      - '[\u00ad]{3,}'
+    keywords: []
+    description: "Zero-width or invisible characters used to obfuscate payload"
+
+  # =====================================================================
+  # Direct Injection — System Tag Mimicry  (CRITICAL)
+  # Fake LLM system markers that never appear in normal user text.
+  # =====================================================================
+  - id: INJ-010
+    name: "System Tag Mimicry"
+    category: direct_injection
+    subcategory: system_tag_mimicry
+    severity: critical
+    patterns:
+      - '<\|?(im_start|im_end|system|user|assistant)\|?>'
+      - '\[INST\]'
+      - '<<SYS>>'
+      - '(?i)(GODMODE|DAN)\s*:\s*(ENABLED|ON|ACTIVATED)'
+    keywords:
+      - "[INST]"
+      - "<<SYS>>"
+      - "GODMODE"
+      - "im_start"
+    description: "Fake LLM system/format tags used to inject instructions"
