@@ -1343,4 +1343,19 @@ export default {
   'Press Enter or wait 2s to continue': '按 Enter 或等待 2 秒继续',
   '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
     '↑↓ 或 j/k 导航 · 1/2/3 选择 · Enter 确认 · Esc 取消',
+  // 导出命令
+  'Export current session message history to a file':
+    '将当前会话消息历史导出到文件',
+  'Export to Markdown format': '导出为 Markdown 格式',
+  'Export to HTML format': '导出为 HTML 格式',
+  'Export to JSON format': '导出为 JSON 格式',
+  'Export to JSONL format': '导出为 JSONL 格式',
+  'Could not determine current working directory.': '无法确定当前工作目录。',
+  'No active session found to export.': '未找到可导出的活跃会话。',
+  'Session exported to markdown: {{filename}}':
+    '会话已导出为 Markdown：{{filename}}',
+  'Session exported to HTML: {{filename}}': '会话已导出为 HTML：{{filename}}',
+  'Session exported to JSON: {{filename}}': '会话已导出为 JSON：{{filename}}',
+  'Session exported to JSONL: {{filename}}': '会话已导出为 JSONL：{{filename}}',
+  'Failed to export session: {{error}}': '导出会话失败：{{error}}',
 };

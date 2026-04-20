@@ -1512,4 +1512,23 @@ export default {
   'Press Enter or wait 2s to continue': 'Press Enter or wait 2s to continue',
   '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
     '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel',
+  // Export command
+  'Export current session message history to a file':
+    'Export current session message history to a file',
+  'Export to Markdown format': 'Export to Markdown format',
+  'Export to HTML format': 'Export to HTML format',
+  'Export to JSON format': 'Export to JSON format',
+  'Export to JSONL format': 'Export to JSONL format',
+  'Could not determine current working directory.':
+    'Could not determine current working directory.',
+  'No active session found to export.': 'No active session found to export.',
+  'Session exported to markdown: {{filename}}':
+    'Session exported to markdown: {{filename}}',
+  'Session exported to HTML: {{filename}}':
+    'Session exported to HTML: {{filename}}',
+  'Session exported to JSON: {{filename}}':
+    'Session exported to JSON: {{filename}}',
+  'Session exported to JSONL: {{filename}}':
+    'Session exported to JSONL: {{filename}}',
+  'Failed to export session: {{error}}': 'Failed to export session: {{error}}',
 };
