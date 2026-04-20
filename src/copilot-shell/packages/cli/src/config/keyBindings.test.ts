@@ -62,23 +62,26 @@ describe('keyBindings config', () => {
 
 describe('keyBindings', () => {
   it('should match key bindings correctly', () => {
-    // Test basic key matching
-    const keyMatchers = createKeyMatchers({
+    // Create a custom config that extends defaultKeyBindings with some overrides
+    const customKeyBindings: KeyBindingConfig = {
       ...defaultKeyBindings,
-      testKey: [{ key: 'a' }],
-      testCtrl: [{ key: 'b', ctrl: true }],
-    } as KeyBindingConfig);
+      [Command.RETURN]: [{ key: 'a' }], // Override RETURN command to trigger with 'a'
+      [Command.ESCAPE]: [{ key: 'b', ctrl: true }], // Override ESCAPE command to trigger with Ctrl+B
+    };
 
-    expect(keyMatchers['testKey' as Command]({ name: 'a' } as Key)).toBe(true);
-    expect(keyMatchers['testKey' as Command]({ name: 'b' } as Key)).toBe(false);
+    const keyMatchers = createKeyMatchers(customKeyBindings);
 
-    // Test modifier matching
-    expect(
-      keyMatchers['testCtrl' as Command]({ name: 'b', ctrl: true } as Key),
-    ).toBe(true);
-    expect(
-      keyMatchers['testCtrl' as Command]({ name: 'b', ctrl: false } as Key),
-    ).toBe(false);
+    // Test that RETURN command now triggers with 'a'
+    expect(keyMatchers[Command.RETURN]({ name: 'a' } as Key)).toBe(true);
+    expect(keyMatchers[Command.RETURN]({ name: 'b' } as Key)).toBe(false);
+
+    // Test modifier matching for ESCAPE command
+    expect(keyMatchers[Command.ESCAPE]({ name: 'b', ctrl: true } as Key)).toBe(
+      true,
+    );
+    expect(keyMatchers[Command.ESCAPE]({ name: 'b', ctrl: false } as Key)).toBe(
+      false,
+    );
 
     // Test sequence matching
     const hasSequence = true;
