@@ -75,6 +75,16 @@ class PromptGuardClassifier:
     # Public inference API
     # ------------------------------------------------------------------
 
+    def warmup(self) -> None:
+        """Eagerly load the model into memory.
+
+        Triggers ModelScope download (first run) and loads the model+tokenizer
+        into the shared ModelManager cache.  Subsequent calls are no-ops.
+        """
+        self._ensure_available()
+        self._manager.load_model(self._model_name)
+        log.info("PromptGuardClassifier warmup complete for '%s'.", self._model_name)
+
     def classify(self, text: str) -> ClassifierResult:
         """Classify a single prompt and return a ``ClassifierResult``.
 
@@ -115,6 +125,7 @@ class PromptGuardClassifier:
         model, tokenizer = self._manager.load_model(self._model_name)
 
         import torch  # noqa: PLC0415
+        from torch.nn.functional import softmax  # noqa: PLC0415
 
         preprocessed = [self._preprocess(t, tokenizer) for t in texts]
         inputs = tokenizer(
@@ -131,8 +142,6 @@ class PromptGuardClassifier:
             logits = model(**inputs).logits  # (batch, num_labels)
 
         scaled = logits / self._temperature
-        from torch.nn.functional import softmax  # noqa: PLC0415
-
         probs_tensor = softmax(scaled, dim=-1)  # (batch, num_labels)
         return [self._probs_to_result(probs_tensor[i]) for i in range(len(texts))]
 
@@ -155,7 +164,7 @@ class PromptGuardClassifier:
         if missing:
             raise LayerNotAvailableError(
                 f"Prompt Guard requires: {', '.join(missing)}. "
-                "Install with: uv add 'agent-sec-cli[ml]'"
+                "Install with: uv sync --extra ml"
             )
 
     @staticmethod

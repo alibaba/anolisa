@@ -43,7 +43,7 @@ def load_rules_from_yaml(path: str | Path) -> list[Rule]:
         raise FileNotFoundError(f"Rule file not found: {path}")
 
     try:
-        with open(path, encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as exc:
         raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc

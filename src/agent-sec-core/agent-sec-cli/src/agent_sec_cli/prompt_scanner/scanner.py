@@ -1,13 +1,19 @@
 """Core scanner – orchestrates the multi-layer detection pipeline."""
 
 import asyncio
+import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from agent_sec_cli.prompt_scanner.config import ScanConfig, ScanMode, get_config
 from agent_sec_cli.prompt_scanner.detectors.base import DetectionLayer
 from agent_sec_cli.prompt_scanner.detectors.ml_classifier import MLClassifier
 from agent_sec_cli.prompt_scanner.detectors.rule_engine import RuleEngine
-from agent_sec_cli.prompt_scanner.exceptions import LayerNotAvailableError
+from agent_sec_cli.prompt_scanner.exceptions import (
+    LayerNotAvailableError,
+    ScannerInputError,
+)
 from agent_sec_cli.prompt_scanner.preprocessor import Preprocessor
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
@@ -20,12 +26,19 @@ from agent_sec_cli.prompt_scanner.scoring import (
     determine_verdict,
 )
 
+log = logging.getLogger(__name__)
+
 # Registry: detector name -> class
 # Note: L3 "semantic" layer is planned but not yet implemented.
-_DETECTOR_REGISTRY: dict[str, type] = {
+_DETECTOR_REGISTRY: dict[str, type[DetectionLayer]] = {
     "rule_engine": RuleEngine,
     "ml_classifier": MLClassifier,
 }
+
+# Detectors that can be skipped silently when unavailable.
+# L1 (rule_engine) is mandatory.  L2/L3 are optional — if their deps
+# are missing, we log a warning and continue with fewer layers.
+_OPTIONAL_DETECTORS = frozenset({"ml_classifier", "semantic"})
 
 
 class PromptScanner:
@@ -55,6 +68,25 @@ class PromptScanner:
         self._preprocessor = Preprocessor(detect_encoding=self._config.detect_encoding)
         self._detectors: list[DetectionLayer] = self._init_detectors()
 
+    def warmup(self) -> None:
+        """Pre-load all ML models so the first scan has no cold-start delay.
+
+        Call this once during service startup (or via ``scan-prompt warmup``
+        CLI command) to trigger ModelScope download and model load eagerly.
+        Has no effect for FAST mode (no ML models involved).
+
+        Example::
+
+            scanner = PromptScanner()   # STANDARD: L1 + L2
+            scanner.warmup()            # downloads / loads L2 model now
+            result = scanner.scan(text) # no cold-start delay
+        """
+        log.info("Warming up %d detector(s)...", len(self._detectors))
+        for detector in self._detectors:
+            if hasattr(detector, "warmup"):
+                detector.warmup()
+        log.info("Warmup complete.")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -63,17 +95,23 @@ class PromptScanner:
         """Scan a single prompt text through the detection pipeline.
 
         Args:
-            text: Raw prompt string.
+            text:   Raw prompt string.
             source: Optional label for the input origin (e.g. "user_input").
 
         Returns:
             A fully populated ScanResult.
+
+        Raises:
+            ScannerInputError: If *text* is empty after stripping.
         """
+        text = text.strip()
+        if not text:
+            raise ScannerInputError("Input text must not be empty.")
         t0 = time.perf_counter()
 
         # 1. Preprocess
         prep = self._preprocessor.preprocess(text)
-        metadata: dict = prep.metadata
+        metadata: dict[str, Any] = prep.metadata
         if source:
             metadata["source"] = source
         # Pass decoded variants to detectors for scanning
@@ -109,16 +147,44 @@ class PromptScanner:
             verdict=verdict,
         )
 
-    def scan_batch(self, texts: list[str]) -> list[ScanResult]:
-        """Scan multiple prompts.  (stub – sequential for now)"""
-        return [self.scan(t) for t in texts]
+    def scan_batch(
+        self,
+        texts: list[str],
+        max_workers: int = 4,
+    ) -> list[ScanResult]:
+        """Scan multiple prompts concurrently using a thread pool.
+
+        Args:
+            texts:       List of raw prompt strings.
+            max_workers: Maximum thread pool size (default 4).
+                         For FAST mode (pure Python regex), I/O parallelism
+                         yields modest speedup; for STANDARD/STRICT mode
+                         (ML inference releases GIL during tokenization),
+                         parallelism is more effective.
+
+        Returns:
+            List of ScanResults in the same order as *texts*.
+        """
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.scan(texts[0])]
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(texts))) as pool:
+            futures = [pool.submit(self.scan, t) for t in texts]
+            return [f.result() for f in futures]
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _init_detectors(self) -> list[DetectionLayer]:
-        """Instantiate detectors listed in config.layers."""
+        """Instantiate detectors listed in config.layers.
+
+        Mandatory detectors (rule_engine) raise immediately if unavailable.
+        Optional detectors (ml_classifier, semantic) log a warning and are
+        skipped — this allows the scanner to run in degraded mode when ML
+        dependencies are not installed.
+        """
         detectors: list[DetectionLayer] = []
         for name in self._config.layers:
             cls = _DETECTOR_REGISTRY.get(name)
@@ -126,6 +192,14 @@ class PromptScanner:
                 raise ValueError(f"Unknown detector: {name}")
             detector = cls()
             if not detector.is_available():
+                if name in _OPTIONAL_DETECTORS:
+                    log.warning(
+                        "Detector '%s' is not available (missing dependencies) "
+                        "and will be skipped. Install with: "
+                        "uv sync --extra ml",
+                        name,
+                    )
+                    continue
                 raise LayerNotAvailableError(
                     f"Detector '{name}' is not available. "
                     "Check that its dependencies are installed."

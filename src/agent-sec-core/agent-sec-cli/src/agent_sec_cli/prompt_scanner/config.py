@@ -37,7 +37,7 @@ class ScanConfig(BaseModel):
     # Path to user-supplied custom rules (JSON / YAML)
     custom_rules_path: str | None = None
 
-    # ML model identifier
+    # ML model identifier (ModelScope ID)
     model_name: str = "LLM-Research/Llama-Prompt-Guard-2-86M"
 
     # Compute device for ML inference

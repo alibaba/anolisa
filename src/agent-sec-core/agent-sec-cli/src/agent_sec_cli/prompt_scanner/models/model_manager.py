@@ -140,7 +140,7 @@ class ModelManager:
             import torch  # noqa: PLC0415
         except ImportError as exc:
             raise ModelLoadError(
-                "torch is required. Install with: uv add 'agent-sec-cli[ml]'"
+                "torch is required. " "Install with: uv add 'agent-sec-cli[ml]'"
             ) from exc
 
         try:
@@ -150,16 +150,21 @@ class ModelManager:
             )
         except ImportError as exc:
             raise ModelLoadError(
-                "transformers is required. Install with: uv add 'agent-sec-cli[ml]'"
+                "transformers is required. " "Install with: uv add 'agent-sec-cli[ml]'"
             ) from exc
 
         try:
             from modelscope import snapshot_download  # noqa: PLC0415
         except ImportError as exc:
             raise ModelLoadError(
-                "modelscope is required for model download. "
-                "Install with: uv add 'agent-sec-cli[ml]'"
+                "modelscope is required for model download. Install with: uv sync --extra ml"
             ) from exc
+
+        log.info(
+            "Downloading model '%s' via ModelScope (cached after first run).",
+            model_name,
+        )
+        import os  # noqa: PLC0415
 
         cache_dir = os.path.expanduser(self._cache_dir)
         already_cached = os.path.isdir(
@@ -180,7 +185,9 @@ class ModelManager:
             ) from exc
 
         # --- load from local path ----------------------------------------
-        log.info("Loading model from '%s' onto '%s'.", local_model_path, self._device)
+        log.info(
+            "Loading model from '%s' onto device '%s'.", local_model_path, self._device
+        )
         try:
             tokenizer = AutoTokenizer.from_pretrained(local_model_path)
             model = AutoModelForSequenceClassification.from_pretrained(local_model_path)
@@ -190,9 +197,6 @@ class ModelManager:
             raise ModelLoadError(
                 f"Failed to load model from '{local_model_path}': {exc}"
             ) from exc
-
-        model.to(torch.device(self._device))
-        model.eval()
 
         log.info("Model '%s' loaded successfully.", model_name)
         return model, tokenizer

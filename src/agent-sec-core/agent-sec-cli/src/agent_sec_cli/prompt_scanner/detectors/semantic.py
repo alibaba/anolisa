@@ -4,6 +4,8 @@ This module is a placeholder.  The semantic detection layer (L3) will be
 implemented in a future commit.
 """
 
+from typing import Any
+
 from agent_sec_cli.prompt_scanner.detectors.base import DetectionLayer
 from agent_sec_cli.prompt_scanner.result import LayerResult
 
@@ -23,7 +25,7 @@ class SemanticDetector(DetectionLayer):
         # L3 is not yet implemented.
         return False
 
-    def detect(self, text: str, metadata: dict | None = None) -> LayerResult:
+    def detect(self, text: str, metadata: dict[str, Any] | None = None) -> LayerResult:
         """Not implemented – reserved for future semantic prompt guard."""
         raise NotImplementedError(
             "Semantic detection layer (L3) is not yet implemented. "

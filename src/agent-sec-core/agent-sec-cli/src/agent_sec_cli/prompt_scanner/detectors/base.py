@@ -1,6 +1,7 @@
 """Abstract base class for all detection layers."""
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from agent_sec_cli.prompt_scanner.result import LayerResult
 
@@ -15,7 +16,7 @@ class DetectionLayer(ABC):
         pass
 
     @abstractmethod
-    def detect(self, text: str, metadata: dict | None = None) -> LayerResult:
+    def detect(self, text: str, metadata: dict[str, Any] | None = None) -> LayerResult:
         """Run detection on *text* and return a LayerResult.
 
         Args:

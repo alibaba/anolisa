@@ -30,3 +30,9 @@ class ConfigError(PromptScannerError):
     """Raised when scanner configuration is invalid."""
 
     pass
+
+
+class ScannerInputError(PromptScannerError):
+    """Raised when the input to the scanner is invalid or empty."""
+
+    pass

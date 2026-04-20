@@ -82,6 +82,19 @@ class ScanResult(BaseModel):
         """Serialize to the CLI JSON output format.
 
         Output schema follows the design spec (schema_version 1.0).
+
+        Fields:
+            schema_version: Always "1.0".
+            ok:             True when no threat detected.
+            verdict:        PASS / WARN / DENY / ERROR.
+            risk_level:     critical / high / medium / low.
+            threat_type:    direct_injection / indirect_injection / jailbreak / benign.
+            confidence:     Overall confidence (0.0–1.0).
+            summary:        Human-readable one-liner.
+            findings:       List of individual rule/model hits.
+            layer_results:  Per-layer breakdown (name, detected, score, latency_ms).
+            engine_version: Semantic version string.
+            elapsed_ms:     Total scan time in milliseconds.
         """
         findings = []
         for lr in self.layer_results:
@@ -93,16 +106,30 @@ class ScanResult(BaseModel):
                         "title": detail.description,
                         "message": detail.description,
                         "evidence": detail.matched_text,
+                        "category": detail.category,
                     }
                 )
+
+        layer_summary = [
+            {
+                "layer": lr.layer_name,
+                "detected": lr.detected,
+                "score": round(lr.score, 4),
+                "latency_ms": round(lr.latency_ms, 2),
+            }
+            for lr in self.layer_results
+        ]
 
         return {
             "schema_version": "1.0",
             "ok": not self.is_threat,
             "verdict": self.verdict.value,
             "risk_level": _score_to_severity(self.risk_score).value,
+            "threat_type": self.threat_type.value,
+            "confidence": round(self.confidence, 4),
             "summary": self._build_summary(),
             "findings": findings,
+            "layer_results": layer_summary,
             "engine_version": "0.1.0",
             "elapsed_ms": round(self.latency_ms, 2),
         }

@@ -9,7 +9,7 @@ class DeBERTaClassifier:
     Provides binary classification: INJECTION vs BENIGN.
     Accuracy: 99.14% on reference benchmark.
 
-    This is a stub – real implementation in Commit 4.
+    This is a placeholder – full implementation is planned for a future release.
     """
 
     def __init__(

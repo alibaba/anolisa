@@ -64,6 +64,15 @@ class MLClassifier(DetectionLayer):
         except ImportError:
             return False
 
+    def warmup(self) -> None:
+        """Eagerly download and load the ML model.
+
+        Triggers ModelScope snapshot_download and transformers model load
+        so that the first detect() call has no cold-start delay.
+        Idempotent: subsequent calls return immediately from the in-memory cache.
+        """
+        self._classifier.warmup()
+
     def detect(self, text: str, metadata: dict | None = None) -> LayerResult:
         """Classify *text* via PromptGuardClassifier and return a LayerResult.
 
@@ -81,7 +90,7 @@ class MLClassifier(DetectionLayer):
         if not self.is_available():
             raise LayerNotAvailableError(
                 "ML classifier requires torch and transformers. "
-                "Install with: uv add 'agent-sec-cli[ml]'"
+                "Install with: uv sync --extra ml"
             )
 
         t0 = time.perf_counter()
