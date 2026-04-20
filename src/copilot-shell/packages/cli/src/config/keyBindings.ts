@@ -164,7 +164,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // External tools
   [Command.OPEN_EXTERNAL_EDITOR]: [
     { key: 'x', ctrl: true },
-    { key: 'x', sequence: '\x18', ctrl: true },
+    { sequence: '\x18', ctrl: true },
   ],
   [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
 
