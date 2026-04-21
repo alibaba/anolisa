@@ -164,6 +164,13 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
+  );
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
+
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
@@ -939,6 +946,26 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
+  // Migration logic to handle old verboseMode setting
+  useEffect(() => {
+    // Access raw settings object to check for verboseMode
+    const uiSettings = settings.merged.ui as Record<string, unknown>;
+    if (
+      uiSettings &&
+      Object.prototype.hasOwnProperty.call(uiSettings, 'verboseMode') &&
+      !Object.prototype.hasOwnProperty.call(uiSettings, 'compactMode')
+    ) {
+      // If verboseMode exists but compactMode doesn't, set compactMode to the opposite of verboseMode
+      const verboseModeValue = uiSettings['verboseMode'] as boolean;
+      const compactModeValue = !verboseModeValue;
+      void settings.setValue(
+        SettingScope.User,
+        'ui.compactMode',
+        compactModeValue,
+      );
+    }
+  }, [settings]);
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -949,13 +976,6 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
-
-  const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? false,
-  );
-  const [frozenSnapshot, setFrozenSnapshot] = useState<
-    HistoryItemWithoutId[] | null
-  >(null);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1261,10 +1281,10 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.TOGGLE_VERBOSE_MODE]?.(key)) {
-        const newValue = !verboseMode;
-        setVerboseMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+      if (keyMatchers[Command.TOGGLE_COMPACT_MODE]?.(key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
         if (newValue && streamingState !== StreamingState.Idle) {
           setFrozenSnapshot([...pendingHistoryItems]);
@@ -1304,8 +1324,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowErrorDetails,
       showToolDescriptions,
       setShowToolDescriptions,
-      verboseMode,
-      setVerboseMode,
+      compactMode,
+      setCompactMode,
       setFrozenSnapshot,
       pendingHistoryItems,
       refreshStatic,
@@ -1582,6 +1602,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
+      currentModel,
       contextFileNames,
       errorCount,
       availableTerminalHeight,
@@ -1601,7 +1622,6 @@ export const AppContainer = (props: AppContainerProps) => {
       showIdeRestartPrompt,
       ideTrustRestartReason,
       isRestarting,
-      currentModel,
       extensionsUpdateState,
       activePtyId,
       historyManager,
@@ -1710,8 +1730,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ verboseMode, frozenSnapshot }),
-    [verboseMode, frozenSnapshot],
+    () => ({ compactMode, setCompactMode, frozenSnapshot, setFrozenSnapshot }),
+    [compactMode, setCompactMode, frozenSnapshot, setFrozenSnapshot],
   );
 
   useEffect(() => {

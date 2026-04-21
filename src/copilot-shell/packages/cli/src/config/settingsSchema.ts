@@ -443,16 +443,6 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: false,
       },
-      verboseMode: {
-        type: 'boolean',
-        label: 'Verbose Mode',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Show full tool output and thinking in verbose mode (toggle with ctrl+O).',
-        showInDialog: false,
-      },
     },
   },
 
