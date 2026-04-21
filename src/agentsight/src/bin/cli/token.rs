@@ -121,6 +121,5 @@ fn print_human_readable(
         );
     }
 
-    println!("(注意：暂不支持Aliyun Authentication)")
 }
 

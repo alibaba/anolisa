@@ -31,15 +31,61 @@ impl ParsedRequest {
     
     /// 尝试将 body 解析为 JSON
     /// 
-    /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value
-    /// 否则返回 null
+    /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value。
+    /// 如果直接解析失败，会尝试剥离 HTTP chunked transfer encoding 后再解析。
     pub fn json_body(&self) -> Option<serde_json::Value> {
         if self.body_len == 0 {
             return None;
         }
         let body = self.body();
         let body_str = String::from_utf8_lossy(body);
-        serde_json::from_str(&body_str).ok()
+
+        // Try direct JSON parse first
+        if let Ok(v) = serde_json::from_str(&body_str) {
+            return Some(v);
+        }
+
+        // Fallback: try stripping HTTP chunked transfer encoding
+        // Format: {hex_size}\r\n{data}\r\n...0\r\n\r\n
+        Self::decode_chunked_json(&body_str)
+    }
+
+    /// Decode HTTP chunked transfer encoding and parse as JSON
+    fn decode_chunked_json(body: &str) -> Option<serde_json::Value> {
+        let mut decoded = String::new();
+        let mut remaining = body;
+
+        loop {
+            // Find the chunk size line
+            let newline_pos = remaining.find("\r\n")?;
+            let size_str = &remaining[..newline_pos];
+            let chunk_size = usize::from_str_radix(size_str.trim(), 16).ok()?;
+
+            if chunk_size == 0 {
+                break; // End of chunks
+            }
+
+            let data_start = newline_pos + 2;
+            let data_end = data_start + chunk_size;
+            if data_end > remaining.len() {
+                // Partial chunk — decode what we have
+                decoded.push_str(&remaining[data_start..]);
+                break;
+            }
+            decoded.push_str(&remaining[data_start..data_end]);
+
+            // Skip past chunk data and trailing \r\n
+            remaining = &remaining[data_end..];
+            if remaining.starts_with("\r\n") {
+                remaining = &remaining[2..];
+            }
+        }
+
+        if decoded.is_empty() {
+            return None;
+        }
+
+        serde_json::from_str(&decoded).ok()
     }
 }
 

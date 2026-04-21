@@ -295,7 +295,6 @@ impl AgentSight {
 
         // Analyze and store results
         for agg_result in &aggregated_results {
-            // Original analysis and storage pipeline
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events from analysis results (reuse extracted data)
