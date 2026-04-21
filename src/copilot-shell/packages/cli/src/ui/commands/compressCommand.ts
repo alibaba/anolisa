@@ -20,6 +20,7 @@ export const compressCommand: SlashCommand = {
   action: async (context) => {
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
+    const abortSignal = context.abortSignal;
 
     if (executionMode === 'interactive' && ui.pendingItem) {
       ui.addItem(
@@ -96,6 +97,11 @@ export const compressCommand: SlashCommand = {
 
       const compressed = await doCompress();
 
+      // If cancelled via ESC, return early (cancelSlashCommand already handled UI)
+      if (abortSignal?.aborted) {
+        return;
+      }
+
       if (!compressed) {
         if (executionMode === 'interactive') {
           ui.addItem(
@@ -137,6 +143,11 @@ export const compressCommand: SlashCommand = {
         content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
       };
     } catch (e) {
+      // If cancelled via ESC, return early — cancelSlashCommand already handled UI
+      if (abortSignal?.aborted) {
+        return;
+      }
+
       if (executionMode === 'interactive') {
         ui.addItem(
           {

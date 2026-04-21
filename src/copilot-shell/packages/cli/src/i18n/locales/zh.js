@@ -770,6 +770,11 @@ export default {
     '项目摘要已保存到 {{filePathForDisplay}}',
   'Saving project summary...': '正在保存项目摘要...',
   'Generating project summary...': '正在生成项目摘要...',
+  'Processing summary...': '正在处理摘要...',
+  'Project summary generated and saved successfully!':
+    '项目摘要生成并保存成功！',
+  '{{baseMessage}} Saved to: {{filePath}}':
+    '{{baseMessage}} 已保存到：{{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     '生成摘要失败 - 未从 LLM 响应中接收到文本内容',
 
@@ -1358,4 +1363,7 @@ export default {
   'Session exported to JSON: {{filename}}': '会话已导出为 JSON：{{filename}}',
   'Session exported to JSONL: {{filename}}': '会话已导出为 JSONL：{{filename}}',
   'Failed to export session: {{error}}': '导出会话失败：{{error}}',
+
+  // ESC 取消
+  'Command cancelled.': '命令已取消。',
 };

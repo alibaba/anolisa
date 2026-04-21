@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useState, useContext } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useState,
+  useContext,
+} from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -40,6 +47,8 @@ import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import { useKeypress } from './useKeypress.js';
+import { t } from '../../i18n/index.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
 
@@ -90,6 +99,7 @@ export const useSlashCommandProcessor = (
   loadHistory: UseHistoryManagerReturn['loadHistory'],
   refreshStatic: () => void,
   toggleVimEnabled: () => Promise<boolean>,
+  isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
@@ -134,6 +144,34 @@ export const useSlashCommandProcessor = (
 
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
     null,
+  );
+
+  // AbortController for cancelling async slash commands via ESC
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelSlashCommand = useCallback(() => {
+    if (!abortControllerRef.current) {
+      return;
+    }
+    abortControllerRef.current.abort();
+    addItem(
+      {
+        type: MessageType.INFO,
+        text: t('Command cancelled.'),
+      },
+      Date.now(),
+    );
+    setPendingItem(null);
+    setIsProcessing(false);
+  }, [addItem, setIsProcessing]);
+
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') {
+        cancelSlashCommand();
+      }
+    },
+    { isActive: isProcessing },
   );
 
   const pendingHistoryItems = useMemo(() => {
@@ -327,6 +365,10 @@ export const useSlashCommandProcessor = (
 
       setIsProcessing(true);
 
+      // Create a new AbortController for this command execution
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       const userMessageTimestamp = Date.now();
       addItemWithRecording(
         { type: MessageType.USER, text: trimmed },
@@ -359,6 +401,7 @@ export const useSlashCommandProcessor = (
                 name: commandToExecute.name,
                 args,
               },
+              abortSignal: abortController.signal,
               overwriteConfirmed,
             };
 
@@ -373,10 +416,24 @@ export const useSlashCommandProcessor = (
                 ]),
               };
             }
-            const result = await commandToExecute.action(
-              fullCommandContext,
-              args,
-            );
+
+            // Use Promise.race to allow ESC to cancel the command immediately
+            const abortPromise = new Promise<undefined>((resolve) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => resolve(undefined),
+                { once: true },
+              );
+            });
+            const result = await Promise.race([
+              commandToExecute.action(fullCommandContext, args),
+              abortPromise,
+            ]);
+
+            // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
+            if (abortController.signal.aborted) {
+              return { type: 'handled' };
+            }
 
             if (result) {
               switch (result.type) {
@@ -573,6 +630,10 @@ export const useSlashCommandProcessor = (
 
         return { type: 'handled' };
       } catch (e: unknown) {
+        // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
+        if (abortController.signal.aborted) {
+          return { type: 'handled' };
+        }
         hasError = true;
         if (config) {
           const event = makeSlashCommandEvent({

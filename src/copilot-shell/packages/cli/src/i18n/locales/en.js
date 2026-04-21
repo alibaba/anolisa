@@ -816,6 +816,11 @@ export default {
     'Saved project summary to {{filePathForDisplay}}.',
   'Saving project summary...': 'Saving project summary...',
   'Generating project summary...': 'Generating project summary...',
+  'Processing summary...': 'Processing summary...',
+  'Project summary generated and saved successfully!':
+    'Project summary generated and saved successfully!',
+  '{{baseMessage}} Saved to: {{filePath}}':
+    '{{baseMessage}} Saved to: {{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     'Failed to generate summary - no text content received from LLM response',
 
@@ -1531,4 +1536,7 @@ export default {
   'Session exported to JSONL: {{filename}}':
     'Session exported to JSONL: {{filename}}',
   'Failed to export session: {{error}}': 'Failed to export session: {{error}}',
+
+  // ESC cancel
+  'Command cancelled.': 'Command cancelled.',
 };
