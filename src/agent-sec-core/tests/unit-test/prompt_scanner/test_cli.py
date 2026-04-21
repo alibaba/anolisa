@@ -272,7 +272,6 @@ class TestPrintText(unittest.TestCase):
         d["findings"] = [
             {
                 "rule_id": "INJ-001",
-                "severity": "critical",
                 "title": "Instruction override",
                 "message": "Instruction override",
                 "evidence": "ignore all previous instructions",
@@ -281,7 +280,6 @@ class TestPrintText(unittest.TestCase):
         ]
         output = self._capture(d)
         self.assertIn("INJ-001", output)
-        self.assertIn("CRITICAL", output)
 
 
 # ---------------------------------------------------------------------------

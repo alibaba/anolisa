@@ -9,17 +9,15 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "gnupg" },
+    { name = "modelscope" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "torch" },
+    { name = "transformers" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
-ml = [
-    { name = "modelscope" },
-    { name = "torch" },
-    { name = "transformers" },
-]
 pgpy = [
     { name = "pgpy" },
 ]
@@ -38,15 +36,15 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=42.0" },
     { name = "gnupg", specifier = ">=2.0" },
-    { name = "modelscope", marker = "extra == 'ml'", specifier = ">=1.10" },
+    { name = "modelscope", specifier = ">=1.10" },
     { name = "pgpy", marker = "extra == 'pgpy'", specifier = ">=0.5" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0" },
-    { name = "transformers", marker = "extra == 'ml'", specifier = ">=4.40" },
+    { name = "torch", specifier = ">=2.0" },
+    { name = "transformers", specifier = ">=4.40" },
     { name = "typer", specifier = ">=0.9.0" },
 ]
-provides-extras = ["pgpy", "ml"]
+provides-extras = ["pgpy"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -21,10 +21,7 @@ from agent_sec_cli.prompt_scanner.result import (
     ThreatType,
     Verdict,
 )
-from agent_sec_cli.prompt_scanner.scoring import (
-    compute_score,
-    determine_verdict,
-)
+from agent_sec_cli.prompt_scanner.verdict import determine_verdict
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +33,9 @@ _DETECTOR_REGISTRY: dict[str, type[DetectionLayer]] = {
 }
 
 # Detectors that can be skipped silently when unavailable.
-# L1 (rule_engine) is mandatory.  L2/L3 are optional — if their deps
-# are missing, we log a warning and continue with fewer layers.
-_OPTIONAL_DETECTORS = frozenset({"ml_classifier", "semantic"})
+# L1 (rule_engine) and L2 (ml_classifier) are mandatory — their deps ship
+# with the package.  Only future optional layers (e.g. L3 semantic) go here.
+_OPTIONAL_DETECTORS = frozenset({"semantic"})
 
 
 class PromptScanner:
@@ -126,9 +123,8 @@ class PromptScanner:
             if self._config.fast_fail and lr.detected:
                 break
 
-        # 3. Score
-        risk_score = compute_score(layer_results)
-        verdict = determine_verdict(risk_score, self._config.threshold)
+        # 3. Verdict
+        verdict = determine_verdict(layer_results)
 
         # 4. Determine threat type
         threat_type = self._determine_threat_type(layer_results)
@@ -139,8 +135,6 @@ class PromptScanner:
         return ScanResult(
             is_threat=is_threat,
             threat_type=threat_type,
-            risk_score=risk_score,
-            confidence=risk_score,  # simplified; refine later
             layer_results=layer_results,
             latency_ms=elapsed,
             metadata=metadata,
@@ -152,15 +146,21 @@ class PromptScanner:
         texts: list[str],
         max_workers: int = 4,
     ) -> list[ScanResult]:
-        """Scan multiple prompts concurrently using a thread pool.
+        """Scan multiple prompts, choosing the best execution strategy.
+
+        Strategy selection:
+        - **FAST mode** (L1 regex only): Uses a ``ThreadPoolExecutor`` for
+          modest I/O parallelism.  Regex detection is thread-safe and
+          benefits from concurrent execution.
+        - **STANDARD / STRICT mode** (L1 + L2 ML): Iterates sequentially.
+          The ML tokenizer (Rust-backed HuggingFace) is NOT thread-safe
+          and must be serialised with a lock, so a thread pool would only
+          add overhead (thread creation, context switching, lock contention)
+          without any throughput gain.
 
         Args:
             texts:       List of raw prompt strings.
-            max_workers: Maximum thread pool size (default 4).
-                         For FAST mode (pure Python regex), I/O parallelism
-                         yields modest speedup; for STANDARD/STRICT mode
-                         (ML inference releases GIL during tokenization),
-                         parallelism is more effective.
+            max_workers: Maximum thread pool size (only used in FAST mode).
 
         Returns:
             List of ScanResults in the same order as *texts*.
@@ -169,6 +169,19 @@ class PromptScanner:
             return []
         if len(texts) == 1:
             return [self.scan(texts[0])]
+
+        has_ml = any(isinstance(d, MLClassifier) for d in self._detectors)
+        if has_ml:
+            # Why sequential?  The HuggingFace tokenizer (Rust-backed,
+            # uses RefCell internally) is NOT thread-safe.  To prevent
+            # "Already borrowed" panics, PromptGuardClassifier serialises
+            # all inference behind _inference_lock.  With that lock in
+            # place a ThreadPoolExecutor only adds thread-creation and
+            # context-switch overhead while every worker queues on the
+            # same lock — net effect is *slower* than a plain loop.
+            return [self.scan(t) for t in texts]
+
+        # FAST mode (L1 only): pure-regex detectors are thread-safe.
         with ThreadPoolExecutor(max_workers=min(max_workers, len(texts))) as pool:
             futures = [pool.submit(self.scan, t) for t in texts]
             return [f.result() for f in futures]
@@ -180,23 +193,26 @@ class PromptScanner:
     def _init_detectors(self) -> list[DetectionLayer]:
         """Instantiate detectors listed in config.layers.
 
-        Mandatory detectors (rule_engine) raise immediately if unavailable.
-        Optional detectors (ml_classifier, semantic) log a warning and are
-        skipped — this allows the scanner to run in degraded mode when ML
-        dependencies are not installed.
+        Mandatory detectors (rule_engine, ml_classifier) raise immediately
+        if unavailable.  Optional detectors (semantic) log a warning and
+        are skipped — this allows the scanner to degrade gracefully when
+        future optional layers are not yet installed.
         """
         detectors: list[DetectionLayer] = []
         for name in self._config.layers:
             cls = _DETECTOR_REGISTRY.get(name)
             if cls is None:
                 raise ValueError(f"Unknown detector: {name}")
-            detector = cls()
+            # Pass model-specific config to detectors that accept it.
+            if name == "ml_classifier":
+                detector = cls(model_name=self._config.model_name)
+            else:
+                detector = cls()
             if not detector.is_available():
                 if name in _OPTIONAL_DETECTORS:
                     log.warning(
                         "Detector '%s' is not available (missing dependencies) "
-                        "and will be skipped. Install with: "
-                        "uv sync --extra ml",
+                        "and will be skipped.",
                         name,
                     )
                     continue

@@ -17,17 +17,30 @@ import logging
 import threading
 from pathlib import Path
 
+import torch
+from agent_sec_cli.prompt_scanner.exceptions import ModelLoadError
+from agent_sec_cli.prompt_scanner.result import ThreatType
+from modelscope import snapshot_download
 from pydantic import BaseModel
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 log = logging.getLogger(__name__)
 
 
 class ClassifierResult(BaseModel):
-    """Unified result returned by any ML classifier wrapper."""
+    """Unified result returned by any ML classifier wrapper.
 
-    label: str  # e.g. "JAILBREAK", "BENIGN"
+    ``threat_type`` carries the model-specific label already translated to
+    a domain ``ThreatType``.  This translation is the responsibility of the
+    classifier wrapper (e.g. ``PromptGuardClassifier``) that understands
+    the model's label schema; callers such as ``MLClassifier`` should use
+    this field directly rather than re-mapping ``label`` themselves.
+    """
+
+    label: str  # Raw model label, e.g. "JAILBREAK", "BENIGN"
     confidence: float  # Probability of the predicted label (0.0–1.0)
     probabilities: dict[str, float]  # Full label -> prob mapping
+    threat_type: ThreatType  # Domain type translated by the classifier wrapper
 
 
 class ModelManager:
@@ -106,17 +119,11 @@ class ModelManager:
         """Auto-detect the best available compute device.
 
         Priority: CUDA > MPS (Apple Silicon) > CPU.
-        Falls back to ``"cpu"`` if *torch* is not installed.
         """
-        try:
-            import torch  # noqa: PLC0415
-
-            if torch.cuda.is_available():
-                return "cuda"
-            if torch.backends.mps.is_available():
-                return "mps"
-        except ImportError:
-            pass
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
         return "cpu"
 
     # ------------------------------------------------------------------
@@ -143,49 +150,23 @@ class ModelManager:
         Raises:
             ModelLoadError: missing deps, download failure, or load failure.
         """
-        from agent_sec_cli.prompt_scanner.exceptions import ModelLoadError
-
-        # --- dependency checks -------------------------------------------
-        try:
-            import torch  # noqa: PLC0415
-        except ImportError as exc:
-            raise ModelLoadError(
-                "torch is required. " "Install with: uv add 'agent-sec-cli[ml]'"
-            ) from exc
-
-        try:
-            from transformers import (  # noqa: PLC0415
-                AutoModelForSequenceClassification,
-                AutoTokenizer,
-            )
-        except ImportError as exc:
-            raise ModelLoadError(
-                "transformers is required. " "Install with: uv add 'agent-sec-cli[ml]'"
-            ) from exc
-
-        try:
-            from modelscope import snapshot_download  # noqa: PLC0415
-        except ImportError as exc:
-            raise ModelLoadError(
-                "modelscope is required for model download. Install with: uv sync --extra ml"
-            ) from exc
-
         log.info(
             "Downloading model '%s' via ModelScope (cached after first run).",
             model_name,
         )
 
         cache_dir = Path(self._cache_dir).expanduser()
+        _ms_logger = logging.getLogger("modelscope")
+        _orig_level = _ms_logger.level
+        _ms_logger.setLevel(logging.ERROR)
         try:
-            _ms_logger = logging.getLogger("modelscope")
-            _orig_level = _ms_logger.level
-            _ms_logger.setLevel(logging.ERROR)
             local_model_path = snapshot_download(model_name, cache_dir=str(cache_dir))
-            _ms_logger.setLevel(_orig_level)
         except Exception as exc:
             raise ModelLoadError(
                 f"ModelScope download failed for '{model_name}': {exc}"
             ) from exc
+        finally:
+            _ms_logger.setLevel(_orig_level)
 
         # --- load from local path ----------------------------------------
         log.info(

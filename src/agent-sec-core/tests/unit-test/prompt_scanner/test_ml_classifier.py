@@ -158,19 +158,25 @@ class TestClassifierResult(unittest.TestCase):
         self.ClassifierResult = ClassifierResult
 
     def test_valid_construction(self) -> None:
+        from agent_sec_cli.prompt_scanner.result import ThreatType
+
         r = self.ClassifierResult(
-            label="INJECTION",
+            label="JAILBREAK",
             confidence=0.9,
-            probabilities={"BENIGN": 0.1, "INJECTION": 0.9},
+            probabilities={"BENIGN": 0.1, "JAILBREAK": 0.9},
+            threat_type=ThreatType.JAILBREAK,
         )
-        self.assertEqual(r.label, "INJECTION")
+        self.assertEqual(r.label, "JAILBREAK")
         self.assertAlmostEqual(r.confidence, 0.9)
 
     def test_probabilities_dict(self) -> None:
+        from agent_sec_cli.prompt_scanner.result import ThreatType
+
         r = self.ClassifierResult(
             label="BENIGN",
             confidence=0.95,
-            probabilities={"BENIGN": 0.95, "INJECTION": 0.05},
+            probabilities={"BENIGN": 0.95, "JAILBREAK": 0.05},
+            threat_type=ThreatType.BENIGN,
         )
         self.assertIn("BENIGN", r.probabilities)
 
@@ -182,38 +188,47 @@ class TestClassifierResult(unittest.TestCase):
 
 class TestModelManagerDeviceDetect(unittest.TestCase):
     def test_returns_cpu_without_torch(self) -> None:
-        with patch.dict(sys.modules, {"torch": None}):
-            from agent_sec_cli.prompt_scanner.models.model_manager import (
-                ModelManager,
-            )
+        from agent_sec_cli.prompt_scanner.models.model_manager import (
+            ModelManager,
+        )
 
+        fake_torch = _make_fake_torch(cuda=False, mps=False)
+        with patch(
+            "agent_sec_cli.prompt_scanner.models.model_manager.torch", fake_torch
+        ):
             self.assertEqual(ModelManager.detect_device(), "cpu")
 
     def test_returns_cuda_when_available(self) -> None:
-        fake_torch = _make_fake_torch(cuda=True)
-        with patch.dict(sys.modules, {"torch": fake_torch}):
-            from agent_sec_cli.prompt_scanner.models.model_manager import (
-                ModelManager,
-            )
+        from agent_sec_cli.prompt_scanner.models.model_manager import (
+            ModelManager,
+        )
 
+        fake_torch = _make_fake_torch(cuda=True, mps=False)
+        with patch(
+            "agent_sec_cli.prompt_scanner.models.model_manager.torch", fake_torch
+        ):
             self.assertEqual(ModelManager.detect_device(), "cuda")
 
     def test_returns_mps_when_cuda_unavailable(self) -> None:
-        fake_torch = _make_fake_torch(cuda=False, mps=True)
-        with patch.dict(sys.modules, {"torch": fake_torch}):
-            from agent_sec_cli.prompt_scanner.models.model_manager import (
-                ModelManager,
-            )
+        from agent_sec_cli.prompt_scanner.models.model_manager import (
+            ModelManager,
+        )
 
+        fake_torch = _make_fake_torch(cuda=False, mps=True)
+        with patch(
+            "agent_sec_cli.prompt_scanner.models.model_manager.torch", fake_torch
+        ):
             self.assertEqual(ModelManager.detect_device(), "mps")
 
     def test_returns_cpu_when_neither(self) -> None:
-        fake_torch = _make_fake_torch(cuda=False, mps=False)
-        with patch.dict(sys.modules, {"torch": fake_torch}):
-            from agent_sec_cli.prompt_scanner.models.model_manager import (
-                ModelManager,
-            )
+        from agent_sec_cli.prompt_scanner.models.model_manager import (
+            ModelManager,
+        )
 
+        fake_torch = _make_fake_torch(cuda=False, mps=False)
+        with patch(
+            "agent_sec_cli.prompt_scanner.models.model_manager.torch", fake_torch
+        ):
             self.assertEqual(ModelManager.detect_device(), "cpu")
 
 
@@ -321,11 +336,10 @@ class TestPromptGuardClassifier(unittest.TestCase):
         return clf
 
     def _classify_with_mock(self, clf, text: str):
-        """Call classify() with _ensure_available patched out."""
-        with patch.object(
-            clf.__class__, "_ensure_available", staticmethod(lambda: None)
-        ):
-            return clf.classify(text)
+        """Call classify() with load_model patched out to avoid actual downloads."""
+        mgr = clf._manager
+        mgr._loaded_models[clf._model_name] = (MagicMock(), MagicMock())
+        return clf.classify(text)
 
     def test_classify_injection_as_jailbreak_label(self) -> None:
         # Prompt Guard 2 is a binary classifier; both injection and jailbreak
@@ -365,15 +379,14 @@ class TestPromptGuardClassifier(unittest.TestCase):
         self.assertNotIn("INJECTION", result.probabilities)
 
     def test_classify_raises_when_deps_missing(self) -> None:
-        from agent_sec_cli.prompt_scanner.exceptions import (
-            LayerNotAvailableError,
-        )
+        from agent_sec_cli.prompt_scanner.exceptions import ModelLoadError
 
         mgr = self.ModelManager(device="cpu")
         clf = self.PromptGuardClassifier(model_name="test-model", manager=mgr)
-        with patch.dict(sys.modules, {"torch": None, "transformers": None}):
-            with self.assertRaises(LayerNotAvailableError):
-                clf.classify("test")
+        # No model cached; load_model will call snapshot_download which fails
+        # for an invalid repo_id – this raises ModelLoadError.
+        with self.assertRaises(ModelLoadError):
+            clf.classify("test")
 
     def test_classify_batch_empty_returns_empty_list(self) -> None:
         mgr = self.ModelManager(device="cpu")
@@ -417,17 +430,23 @@ class TestMLClassifierLayer(unittest.TestCase):
         from agent_sec_cli.prompt_scanner.models.model_manager import (
             ClassifierResult,
         )
+        from agent_sec_cli.prompt_scanner.result import ThreatType
 
+        threat_map = {
+            "JAILBREAK": ThreatType.JAILBREAK,
+            "INJECTION": ThreatType.DIRECT_INJECTION,
+            "BENIGN": ThreatType.BENIGN,
+        }
         layer = self.MLClassifier.__new__(self.MLClassifier)
         mock_clf = MagicMock()
         mock_clf.classify.return_value = ClassifierResult(
             label=label,
             confidence=confidence,
-            probabilities={"BENIGN": 0.1, label: confidence},
+            probabilities={"BENIGN": 1 - confidence, label: confidence},
+            threat_type=threat_map.get(label, ThreatType.BENIGN),
         )
         layer._classifier = mock_clf
         layer._threshold = 0.5
-        layer._is_available_override = True
         return layer
 
     def test_name_property(self) -> None:
@@ -435,9 +454,10 @@ class TestMLClassifierLayer(unittest.TestCase):
         self.assertEqual(layer.name, "ml_classifier")
 
     def test_is_available_false_without_deps(self) -> None:
+        # MLClassifier.is_available() is inherited from DetectionLayer and
+        # always returns True (deps are mandatory); this verifies it returns True.
         layer = self.MLClassifier.__new__(self.MLClassifier)
-        with patch.dict(sys.modules, {"torch": None, "transformers": None}):
-            self.assertFalse(layer.is_available())
+        self.assertTrue(layer.is_available())
 
     def test_is_available_true_with_deps(self) -> None:
         fake_torch = _make_fake_torch()
@@ -452,9 +472,11 @@ class TestMLClassifierLayer(unittest.TestCase):
         )
 
         layer = self.MLClassifier.__new__(self.MLClassifier)
-        layer._classifier = MagicMock()
+        mock_clf = MagicMock()
+        mock_clf.classify.side_effect = LayerNotAvailableError("deps missing")
+        layer._classifier = mock_clf
         layer._threshold = 0.5
-        with patch.dict(sys.modules, {"torch": None, "transformers": None}):
+        with patch.object(layer.__class__, "is_available", return_value=False):
             with self.assertRaises(LayerNotAvailableError):
                 layer.detect("test")
 
@@ -463,7 +485,13 @@ class TestMLClassifierLayer(unittest.TestCase):
         from agent_sec_cli.prompt_scanner.models.model_manager import (
             ClassifierResult,
         )
+        from agent_sec_cli.prompt_scanner.result import ThreatType
 
+        threat_map = {
+            "JAILBREAK": ThreatType.JAILBREAK,
+            "INJECTION": ThreatType.DIRECT_INJECTION,
+            "BENIGN": ThreatType.BENIGN,
+        }
         layer = self.MLClassifier.__new__(self.MLClassifier)
         layer._threshold = 0.5
         mock_clf = MagicMock()
@@ -471,6 +499,7 @@ class TestMLClassifierLayer(unittest.TestCase):
             label=label,
             confidence=confidence,
             probabilities={"BENIGN": 1 - confidence, label: confidence},
+            threat_type=threat_map.get(label, ThreatType.BENIGN),
         )
         layer._classifier = mock_clf
         with patch.object(layer.__class__, "is_available", return_value=True):

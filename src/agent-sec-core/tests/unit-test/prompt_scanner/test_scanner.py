@@ -58,9 +58,9 @@ class TestPromptScannerInit(unittest.TestCase):
             PromptScanner(config=config)
 
     def test_custom_config_used_over_mode(self) -> None:
-        config = ScanConfig(layers=["rule_engine"], threshold=0.3)
+        config = ScanConfig(layers=["rule_engine"])
         scanner = PromptScanner(config=config)
-        self.assertEqual(scanner._config.threshold, 0.3)
+        self.assertEqual(scanner._config.layers, ["rule_engine"])
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +116,20 @@ class TestPromptScannerScan(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.DENY)
 
     def test_warn_range(self) -> None:
-        # rule_engine weight=0.7; score=0.8 → weighted=0.56 → WARN (0.5 ≤ 0.56 < 0.8)
-        scanner = self._make_scanner_with_mock_layer(True, 0.8)
+        # L1 (rule_engine) fires but no L2 present (FAST mode) → DENY
+        # To get WARN: need L1 detected + L2 ran but not detected
+        scanner = PromptScanner.__new__(PromptScanner)
+        from agent_sec_cli.prompt_scanner.config import ScanConfig
+        from agent_sec_cli.prompt_scanner.preprocessor import Preprocessor
+
+        scanner._config = ScanConfig(
+            layers=["rule_engine", "ml_classifier"], fast_fail=False
+        )
+        scanner._preprocessor = Preprocessor()
+        scanner._detectors = [
+            _mock_layer("rule_engine", True, 0.8),
+            _mock_layer("ml_classifier", False, 0.1),
+        ]
         result = scanner.scan("suspicious text here")
         self.assertEqual(result.verdict, Verdict.WARN)
 
@@ -190,9 +202,9 @@ class TestPromptScannerBatch(unittest.TestCase):
         self.assertFalse(results[2].is_threat)
 
     def test_batch_uses_thread_pool(self) -> None:
-        # Verify ThreadPoolExecutor path is taken for 2+ items
+        # FAST mode (L1 only) uses ThreadPoolExecutor
         texts = ["hello", "world", "foo"]
-        results = self.scanner.scan_batch(texts, max_workers=2)
+        results = self.scanner.scan_batch(texts)
         self.assertEqual(len(results), 3)
 
 
@@ -211,7 +223,8 @@ class TestScanResultToDict(unittest.TestCase):
         )
 
     def test_to_dict_has_required_keys(self) -> None:
-        d = self._make_result().to_dict()
+        # Use a threat result so that 'confidence' is present
+        d = self._make_result(detected=True).to_dict()
         required = {
             "schema_version",
             "ok",
@@ -256,14 +269,14 @@ class TestScanResultToDict(unittest.TestCase):
 
 class TestScannerSoftDegradation(unittest.TestCase):
     def test_unavailable_optional_detector_is_skipped(self) -> None:
-        """ml_classifier is_available()=False → skipped, no exception."""
-        config = ScanConfig(layers=["rule_engine", "ml_classifier"])
+        """Optional detector (semantic) is_available()=False → skipped, no exception."""
+        config = ScanConfig(layers=["rule_engine", "semantic"])
 
         mock_instance = MagicMock()
         mock_instance.is_available.return_value = False
         with patch.dict(
             "agent_sec_cli.prompt_scanner.scanner._DETECTOR_REGISTRY",
-            {"ml_classifier": lambda: mock_instance},
+            {"semantic": lambda **kwargs: mock_instance},
         ):
             scanner = PromptScanner(config=config)
             # Only rule_engine should be in detectors

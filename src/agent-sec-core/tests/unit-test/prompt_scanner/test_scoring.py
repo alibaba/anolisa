@@ -1,91 +1,82 @@
-"""Unit tests for prompt_scanner.scoring."""
+"""Unit tests for prompt_scanner.verdict.determine_verdict."""
 
 import unittest
 
 from agent_sec_cli.prompt_scanner.result import LayerResult, Verdict
-from agent_sec_cli.prompt_scanner.scoring import (
-    WEIGHTS,
-    compute_score,
-    determine_verdict,
-)
+from agent_sec_cli.prompt_scanner.verdict import determine_verdict
 
 
-def _lr(name: str, score: float, detected: bool = True) -> LayerResult:
+def _lr(name: str, detected: bool, score: float = 0.5) -> LayerResult:
     """Helper: build a minimal LayerResult."""
     return LayerResult(layer_name=name, detected=detected, score=score)
 
 
-class TestComputeScore(unittest.TestCase):
-    """Tests for compute_score (weighted-max)."""
-
-    def test_empty_returns_zero(self) -> None:
-        self.assertEqual(compute_score([]), 0.0)
-
-    def test_single_rule_engine(self) -> None:
-        result = compute_score([_lr("rule_engine", 1.0)])
-        self.assertAlmostEqual(result, 1.0 * WEIGHTS["rule_engine"])
-
-    def test_single_ml_classifier(self) -> None:
-        result = compute_score([_lr("ml_classifier", 0.9)])
-        self.assertAlmostEqual(result, 0.9 * WEIGHTS["ml_classifier"])
-
-    def test_max_wins(self) -> None:
-        # rule_engine score=1.0 → 0.7; ml_classifier score=0.8 → 0.8 → max=0.8
-        result = compute_score(
-            [
-                _lr("rule_engine", 1.0),
-                _lr("ml_classifier", 0.8),
-            ]
-        )
-        self.assertAlmostEqual(result, 0.8)
-
-    def test_unknown_layer_weight_defaults_to_one(self) -> None:
-        result = compute_score([_lr("custom_layer", 0.6)])
-        self.assertAlmostEqual(result, 0.6)
-
-    def test_all_layers(self) -> None:
-        # rule_engine=0.5 → 0.35; ml=1.0 → 1.0; semantic=0.9 → 0.72 → max=1.0
-        result = compute_score(
-            [
-                _lr("rule_engine", 0.5),
-                _lr("ml_classifier", 1.0),
-                _lr("semantic", 0.9),
-            ]
-        )
-        self.assertAlmostEqual(result, 1.0)
-
-    def test_low_scores_no_detection(self) -> None:
-        result = compute_score(
-            [
-                _lr("rule_engine", 0.1, detected=False),
-                _lr("ml_classifier", 0.1, detected=False),
-            ]
-        )
-        # rule_engine: 0.1*0.7=0.07; ml: 0.1*1.0=0.1 → max=0.1
-        self.assertAlmostEqual(result, 0.1)
-
-
 class TestDetermineVerdict(unittest.TestCase):
-    """Tests for determine_verdict."""
+    """Tests for determine_verdict semantic layer logic."""
 
-    def test_below_threshold_is_pass(self) -> None:
-        self.assertEqual(determine_verdict(0.0), Verdict.PASS)
-        self.assertEqual(determine_verdict(0.49), Verdict.PASS)
+    # --- PASS ---
 
-    def test_at_threshold_is_warn(self) -> None:
-        self.assertEqual(determine_verdict(0.5), Verdict.WARN)
+    def test_no_layers_is_pass(self) -> None:
+        self.assertEqual(determine_verdict([]), Verdict.PASS)
 
-    def test_mid_range_is_warn(self) -> None:
-        self.assertEqual(determine_verdict(0.7), Verdict.WARN)
-        self.assertEqual(determine_verdict(0.79), Verdict.WARN)
+    def test_all_layers_clean_is_pass(self) -> None:
+        results = [
+            _lr("rule_engine", detected=False),
+            _lr("ml_classifier", detected=False),
+        ]
+        self.assertEqual(determine_verdict(results), Verdict.PASS)
 
-    def test_at_0_8_is_deny(self) -> None:
-        self.assertEqual(determine_verdict(0.8), Verdict.DENY)
+    # --- DENY via L2 (ml_classifier) ---
 
-    def test_above_0_8_is_deny(self) -> None:
-        self.assertEqual(determine_verdict(1.0), Verdict.DENY)
+    def test_ml_classifier_detected_is_deny(self) -> None:
+        results = [_lr("ml_classifier", detected=True)]
+        self.assertEqual(determine_verdict(results), Verdict.DENY)
 
-    def test_custom_threshold(self) -> None:
-        self.assertEqual(determine_verdict(0.3, threshold=0.4), Verdict.PASS)
-        self.assertEqual(determine_verdict(0.4, threshold=0.4), Verdict.WARN)
-        self.assertEqual(determine_verdict(0.8, threshold=0.4), Verdict.DENY)
+    def test_ml_detected_overrides_rule_engine(self) -> None:
+        results = [
+            _lr("rule_engine", detected=True),
+            _lr("ml_classifier", detected=True),
+        ]
+        self.assertEqual(determine_verdict(results), Verdict.DENY)
+
+    def test_ml_detected_even_if_rule_engine_clean(self) -> None:
+        results = [
+            _lr("rule_engine", detected=False),
+            _lr("ml_classifier", detected=True),
+        ]
+        self.assertEqual(determine_verdict(results), Verdict.DENY)
+
+    # --- DENY via L1 only (FAST mode, no L2 present) ---
+
+    def test_rule_engine_only_detected_is_deny(self) -> None:
+        """FAST mode: L1 is sole authority → DENY."""
+        results = [_lr("rule_engine", detected=True)]
+        self.assertEqual(determine_verdict(results), Verdict.DENY)
+
+    # --- WARN: L1 fired but L2 present and did not confirm ---
+
+    def test_rule_engine_fired_ml_did_not_is_warn(self) -> None:
+        results = [
+            _lr("rule_engine", detected=True),
+            _lr("ml_classifier", detected=False),
+        ]
+        self.assertEqual(determine_verdict(results), Verdict.WARN)
+
+    # --- Edge cases ---
+
+    def test_only_rule_engine_clean_is_pass(self) -> None:
+        results = [_lr("rule_engine", detected=False)]
+        self.assertEqual(determine_verdict(results), Verdict.PASS)
+
+    def test_unknown_layer_detected_no_ml_is_deny(self) -> None:
+        """Unknown layer with no confirm-layer present → DENY (L1 path)."""
+        results = [_lr("custom_layer", detected=True)]
+        self.assertEqual(determine_verdict(results), Verdict.DENY)
+
+    def test_unknown_layer_detected_ml_clean_is_warn(self) -> None:
+        """Unknown layer fires, ML ran but clean → WARN."""
+        results = [
+            _lr("custom_layer", detected=True),
+            _lr("ml_classifier", detected=False),
+        ]
+        self.assertEqual(determine_verdict(results), Verdict.WARN)

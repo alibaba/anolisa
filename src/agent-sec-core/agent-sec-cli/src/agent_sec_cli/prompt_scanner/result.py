@@ -71,8 +71,6 @@ class ScanResult(BaseModel):
 
     is_threat: bool  # Whether a threat was detected
     threat_type: ThreatType  # INJECTION / JAILBREAK / BENIGN
-    risk_score: float  # Overall risk score (0.0 - 1.0)
-    confidence: float  # Confidence of the result (0.0 - 1.0)
     layer_results: list[LayerResult] = Field(default_factory=list)
     latency_ms: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -87,9 +85,10 @@ class ScanResult(BaseModel):
             schema_version: Always "1.0".
             ok:             True when no threat detected.
             verdict:        PASS / WARN / DENY / ERROR.
-            risk_level:     critical / high / medium / low.
+            risk_level:     critical / high / medium / low (derived from verdict).
             threat_type:    direct_injection / indirect_injection / jailbreak / benign.
-            confidence:     Overall confidence (0.0–1.0).
+            confidence:     Best available confidence (ML softmax prob when available,
+                            otherwise highest rule-engine score).  None when PASS/ERROR.
             summary:        Human-readable one-liner.
             findings:       List of individual rule/model hits.
             layer_results:  Per-layer breakdown (name, detected, score, latency_ms).
@@ -102,7 +101,6 @@ class ScanResult(BaseModel):
                 findings.append(
                     {
                         "rule_id": detail.rule_id,
-                        "severity": _score_to_severity(lr.score).value,
                         "title": detail.description,
                         "message": detail.description,
                         "evidence": detail.matched_text,
@@ -124,9 +122,13 @@ class ScanResult(BaseModel):
             "schema_version": "1.0",
             "ok": not self.is_threat,
             "verdict": self.verdict.value,
-            "risk_level": _score_to_severity(self.risk_score).value,
+            "risk_level": _verdict_to_risk_level(self.verdict),
             "threat_type": self.threat_type.value,
-            "confidence": round(self.confidence, 4),
+            **(
+                {"confidence": round(_best_confidence(self.layer_results), 3)}
+                if self.is_threat
+                else {}
+            ),
             "summary": self._build_summary(),
             "findings": findings,
             "layer_results": layer_summary,
@@ -134,18 +136,90 @@ class ScanResult(BaseModel):
             "elapsed_ms": round(self.latency_ms, 2),
         }
 
-    def _build_summary(self) -> str:
+    def _build_summary(self) -> str:  # noqa: PLR0912
+        """Build a human-readable one-liner that explains the scan outcome.
+
+        Format (threat detected)::
+
+            [<layers>] <ThreatType> detected (confidence: <N>%) — "<evidence>"
+
+        Format (clean)::
+
+            No threats detected (benign probability: <N>%)
+
+        The confidence figure comes from the ML layer when available (model-
+        backed softmax probability), otherwise from the rule-engine score.
+        Evidence is the first matched_text snippet, truncated to 60 chars.
+        """
         if not self.is_threat:
+            # Try to surface the ML benign confidence so the user has a signal.
+            for lr in self.layer_results:
+                if lr.layer_name == "ml_classifier" and not lr.detected:
+                    pct = round(lr.score * 100, 1) if lr.score else None
+                    if pct is not None:
+                        # lr.score for a benign result is the *jailbreak* prob,
+                        # so benign probability = 1 - score.
+                        benign_pct = round((1.0 - lr.score) * 100, 1)
+                        return (
+                            f"No threats detected (ML benign confidence: {benign_pct}%)"
+                        )
             return "No threats detected"
-        return f"Potential prompt {self.threat_type.value} detected"
+
+        # --- Threat path ---
+        # 1. Which layers fired?
+        fired_layers = [
+            _LAYER_SHORT.get(lr.layer_name, lr.layer_name)
+            for lr in self.layer_results
+            if lr.detected
+        ]
+        layer_tag = "+".join(fired_layers) if fired_layers else "unknown"
+
+        # 2. Confidence: reuse shared helper.
+        raw_conf = _best_confidence(self.layer_results)
+        confidence_pct = round(raw_conf * 100, 1) if raw_conf else None
+
+        # 3. First evidence snippet (truncated).
+        evidence: str | None = None
+        for lr in self.layer_results:
+            if lr.detected and lr.details:
+                raw = lr.details[0].matched_text.strip()
+                evidence = raw[:60] + ("…" if len(raw) > 60 else "")
+                break
+
+        threat_label = self.threat_type.value.replace("_", " ").title()
+        base = f"[{layer_tag}] {threat_label} detected (confidence: {confidence_pct}%)"
+        if evidence:
+            base = f'{base} — "{evidence}"'
+        return base
 
 
-def _score_to_severity(score: float) -> Severity:
-    """Map a 0-1 risk score to a severity level."""
-    if score >= 0.9:
-        return Severity.CRITICAL
-    if score >= 0.7:
-        return Severity.HIGH
-    if score >= 0.4:
-        return Severity.MEDIUM
-    return Severity.LOW
+# Short display names for layer tags in the summary.
+_LAYER_SHORT: dict[str, str] = {
+    "rule_engine": "Rule",
+    "ml_classifier": "ML",
+    "semantic": "Semantic",
+}
+
+
+def _verdict_to_risk_level(verdict: Verdict) -> str:
+    """Map a Verdict to a risk_level string for the JSON output."""
+    return {
+        Verdict.PASS: "low",
+        Verdict.WARN: "medium",
+        Verdict.DENY: "high",
+        Verdict.ERROR: "unknown",
+    }.get(verdict, "unknown")
+
+
+def _best_confidence(layer_results: list[LayerResult]) -> float:
+    """Return the best available confidence value from detected layers.
+
+    Prefers the ML classifier score (model-backed softmax probability) over
+    rule-engine scores.  Falls back to the highest score among all detected
+    layers when no ML result is present.
+    """
+    for lr in layer_results:
+        if lr.layer_name == "ml_classifier" and lr.detected:
+            return lr.score
+    scores = [lr.score for lr in layer_results if lr.detected]
+    return max(scores) if scores else 0.0

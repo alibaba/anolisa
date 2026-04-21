@@ -1,5 +1,6 @@
 """L2 ML Classifier detector – Transformer-based classification."""
 
+import threading
 import time
 from typing import Any
 
@@ -8,23 +9,13 @@ from agent_sec_cli.prompt_scanner.exceptions import LayerNotAvailableError
 from agent_sec_cli.prompt_scanner.models.model_manager import ModelManager
 from agent_sec_cli.prompt_scanner.models.prompt_guard import (
     PromptGuardClassifier,
+    get_default_threshold,
 )
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
     ThreatDetail,
     ThreatType,
 )
-
-# Minimum score to set ``detected = True`` in the LayerResult
-_DETECTION_THRESHOLD = 0.5
-
-# Map PromptGuard label -> ThreatType
-# Note: Llama-Prompt-Guard-2 is a binary classifier; LABEL_1 covers both
-# injection and jailbreak attempts and is mapped to JAILBREAK here.
-_LABEL_TO_THREAT: dict[str, ThreatType] = {
-    "JAILBREAK": ThreatType.JAILBREAK,
-    "BENIGN": ThreatType.BENIGN,
-}
 
 
 class MLClassifier(DetectionLayer):
@@ -37,33 +28,28 @@ class MLClassifier(DetectionLayer):
 
     # Singleton ModelManager shared across all MLClassifier instances
     _shared_manager: ModelManager | None = None
+    _manager_lock: threading.Lock = threading.Lock()
 
     def __init__(
         self,
         model_name: str = "LLM-Research/Llama-Prompt-Guard-2-86M",
-        threshold: float = _DETECTION_THRESHOLD,
+        threshold: float | None = None,
     ) -> None:
-        if MLClassifier._shared_manager is None:
-            MLClassifier._shared_manager = ModelManager()
+        with MLClassifier._manager_lock:
+            if MLClassifier._shared_manager is None:
+                MLClassifier._shared_manager = ModelManager()
         self._classifier = PromptGuardClassifier(
             model_name=model_name,
             manager=MLClassifier._shared_manager,
         )
-        self._threshold = threshold
+        # Fall back to the per-model recommended threshold when no override given.
+        self._threshold = (
+            threshold if threshold is not None else get_default_threshold(model_name)
+        )
 
     @property
     def name(self) -> str:
         return "ml_classifier"
-
-    def is_available(self) -> bool:
-        """Return ``True`` if torch and transformers are installed."""
-        try:
-            import torch  # noqa: F401, PLC0415
-            import transformers  # noqa: F401, PLC0415
-
-            return True
-        except ImportError:
-            return False
 
     def warmup(self) -> None:
         """Eagerly download and load the ML model.
@@ -91,15 +77,16 @@ class MLClassifier(DetectionLayer):
         if not self.is_available():
             raise LayerNotAvailableError(
                 "ML classifier requires torch and transformers. "
-                "Install with: uv sync --extra ml"
             )
 
         t0 = time.perf_counter()
         result = self._classifier.classify(text)
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        threat_type = _LABEL_TO_THREAT.get(result.label, ThreatType.BENIGN)
-        is_threat = result.label != "BENIGN" and result.confidence >= self._threshold
+        threat_type = result.threat_type
+        is_threat = (
+            threat_type != ThreatType.BENIGN and result.confidence >= self._threshold
+        )
 
         details: list[ThreatDetail] = []
         if is_threat:

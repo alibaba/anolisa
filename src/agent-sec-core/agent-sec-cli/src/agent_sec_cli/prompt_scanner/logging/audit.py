@@ -40,16 +40,14 @@ class AuditLogger:
         level = logging.WARNING if result.is_threat else logging.INFO
         _audit_logger.log(
             level,
-            "scan verdict=%s risk=%.2f threat_type=%s latency=%.1fms",
+            "scan verdict=%s threat_type=%s latency=%.1fms",
             result.verdict.value,
-            result.risk_score,
             result.threat_type.value,
             result.latency_ms,
         )
         self._write_jsonl(
             event="scan",
             verdict=result.verdict.value,
-            risk_score=round(result.risk_score, 4),
             threat_type=result.threat_type.value,
             is_threat=result.is_threat,
             latency_ms=round(result.latency_ms, 2),
@@ -69,16 +67,14 @@ class AuditLogger:
             for detail in lr.details
         ]
         _audit_logger.warning(
-            "THREAT DETECTED verdict=%s risk=%.2f type=%s findings=%d",
+            "THREAT DETECTED verdict=%s type=%s findings=%d",
             result.verdict.value,
-            result.risk_score,
             result.threat_type.value,
             len(findings),
         )
         self._write_jsonl(
             event="threat",
             verdict=result.verdict.value,
-            risk_score=round(result.risk_score, 4),
             threat_type=result.threat_type.value,
             latency_ms=round(result.latency_ms, 2),
             findings=findings,

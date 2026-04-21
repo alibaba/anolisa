@@ -30,7 +30,6 @@ class TestScanConfig(unittest.TestCase):
         cfg = ScanConfig()
         self.assertEqual(cfg.layers, ["rule_engine", "ml_classifier"])
         self.assertTrue(cfg.fast_fail)
-        self.assertEqual(cfg.threshold, 0.5)
         self.assertIsNone(cfg.custom_rules_path)
         self.assertTrue(cfg.detect_encoding)
 
@@ -38,10 +37,6 @@ class TestScanConfig(unittest.TestCase):
         cfg = ScanConfig()
         self.assertIn("86M", cfg.model_name)
         self.assertIn("LLM-Research", cfg.model_name)
-
-    def test_custom_threshold(self) -> None:
-        cfg = ScanConfig(threshold=0.3)
-        self.assertEqual(cfg.threshold, 0.3)
 
     def test_custom_layers(self) -> None:
         cfg = ScanConfig(layers=["rule_engine"])
@@ -76,10 +71,9 @@ class TestGetConfig(unittest.TestCase):
     def test_returns_copy(self) -> None:
         c1 = get_config(ScanMode.FAST)
         c2 = get_config(ScanMode.FAST)
-        # Modifying one must not affect the other
-        c1.threshold = 0.99
-        c2_threshold = get_config(ScanMode.FAST).threshold
-        self.assertNotEqual(c2_threshold, 0.99)
+        # Modifying one must not affect the other (deep copy)
+        c1.fast_fail = False
+        self.assertTrue(get_config(ScanMode.FAST).fast_fail)
 
     def test_all_modes_return_config(self) -> None:
         for mode in ScanMode:

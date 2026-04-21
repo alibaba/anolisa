@@ -31,9 +31,6 @@ class ScanConfig(BaseModel):
     # Stop on first positive detection
     fast_fail: bool = True
 
-    # Risk-score threshold for triggering a threat verdict
-    threshold: float = 0.5
-
     # Path to user-supplied custom rules (JSON / YAML)
     custom_rules_path: str | None = None
 
@@ -58,7 +55,7 @@ PRESET_CONFIGS: dict[ScanMode, ScanConfig] = {
     ),
     ScanMode.STANDARD: ScanConfig(
         layers=["rule_engine", "ml_classifier"],
-        fast_fail=True,
+        fast_fail=False,
     ),
     # L3 (semantic) is planned but not yet implemented.
     # STRICT preset is kept as a placeholder for future use.

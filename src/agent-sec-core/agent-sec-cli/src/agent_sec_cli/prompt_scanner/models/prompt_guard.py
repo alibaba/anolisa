@@ -14,14 +14,15 @@ separate INJECTION label; the model flags any malicious prompt
 """
 
 import logging
+import threading
 
-from agent_sec_cli.prompt_scanner.exceptions import (
-    LayerNotAvailableError,
-)
+import torch
 from agent_sec_cli.prompt_scanner.models.model_manager import (
     ClassifierResult,
     ModelManager,
 )
+from agent_sec_cli.prompt_scanner.result import ThreatType
+from torch.nn.functional import softmax
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,53 @@ _IDX_JAILBREAK = 1
 
 # Label names aligned with the model's id2label config (LABEL_0, LABEL_1)
 _LABELS = ["BENIGN", "JAILBREAK"]
+
+# Translate PromptGuard raw labels to domain ThreatType.
+# Llama-Prompt-Guard-2 is a binary classifier: LABEL_1 covers both
+# injection and jailbreak attempts and is unified as JAILBREAK here.
+# This mapping lives here (not in MLClassifier) because it is specific
+# to PromptGuard's label schema.
+_LABEL_TO_THREAT: dict[str, ThreatType] = {
+    "JAILBREAK": ThreatType.JAILBREAK,
+    "BENIGN": ThreatType.BENIGN,
+}
+
+# Default detection threshold (MALICIOUS softmax probability).
+#
+# Background: Llama-Prompt-Guard-2 is a binary classifier.  Its inference
+# code (Meta's official inference.py) applies softmax over the two logits
+# and returns ``probabilities[0, 1]`` — i.e. the probability assigned to
+# the MALICIOUS class.  This value lives in [0, 1].
+#
+# 0.5 as decision boundary: Meta's Model Card example code uses
+# ``logits.argmax()`` to determine the predicted class.  For a
+# two-class softmax, argmax is mathematically equivalent to using 0.5
+# as the decision boundary.  Meta never explicitly recommends 0.5 in the
+# model card; the only guidance they give is that the threshold should be
+# tuned for the target false-positive rate (Model Card v1:
+# "In cases where 3–5 % false-positive rate is too high, a higher
+# threshold … can be selected").
+#
+# Per-model guidance (our own assessment, not Meta's recommendation):
+#   - 86M model: well-calibrated; 0.5 mirrors argmax and is a safe default
+#   - 22M model: less calibrated; raise to 0.75 to reduce false positives
+#     at the cost of missing low-confidence attacks
+#
+# Unknown / custom models fall back to the conservative 0.5.
+_MODEL_THRESHOLDS: dict[str, float] = {
+    _MODEL_86M: 0.5,
+    _MODEL_22M: 0.75,
+}
+
+
+def get_default_threshold(model_name: str) -> float:
+    """Return the recommended detection threshold for *model_name*.
+
+    Looks up a per-model table (see ``_MODEL_THRESHOLDS``).  Unknown or
+    custom model names fall back to 0.5 (the argmax-equivalent boundary
+    for a binary softmax classifier).
+    """
+    return _MODEL_THRESHOLDS.get(model_name, 0.5)
 
 
 class PromptGuardClassifier:
@@ -70,6 +118,12 @@ class PromptGuardClassifier:
         self._model_name = model_name
         self._temperature = temperature
         self._manager = manager or ModelManager(device=device)
+        # The HuggingFace tokenizer (Rust-backed) uses RefCell internally
+        # and is NOT thread-safe.  Concurrent calls from scan_batch's
+        # ThreadPoolExecutor cause "Already borrowed" panics.  We
+        # serialise inference with a lock; L1 (regex) still runs in
+        # parallel so overall throughput is barely affected.
+        self._inference_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public inference API
@@ -81,14 +135,15 @@ class PromptGuardClassifier:
         Triggers ModelScope download (first run) and loads the model+tokenizer
         into the shared ModelManager cache.  Subsequent calls are no-ops.
         """
-        self._ensure_available()
         self._manager.load_model(self._model_name)
         log.info("PromptGuardClassifier warmup complete for '%s'.", self._model_name)
 
     def classify(self, text: str) -> ClassifierResult:
         """Classify a single prompt and return a ``ClassifierResult``.
 
-        Lazy-loads the model on the first call.
+        Lazy-loads the model on the first call.  Thread-safe: concurrent
+        calls are serialised via ``_inference_lock`` because the Rust-backed
+        tokenizer is not re-entrant.
 
         Args:
             text: Raw prompt text to classify.
@@ -98,12 +153,11 @@ class PromptGuardClassifier:
             and the full probability distribution.
 
         Raises:
-            LayerNotAvailableError: if torch / transformers are not installed.
             ModelLoadError: if the model cannot be loaded.
         """
-        self._ensure_available()
         model, tokenizer = self._manager.load_model(self._model_name)
-        probs = self._get_probabilities(text, model, tokenizer)
+        with self._inference_lock:
+            probs = self._get_probabilities(text, model, tokenizer)
         return self._probs_to_result(probs)
 
     def classify_batch(self, texts: list[str]) -> list[ClassifierResult]:
@@ -116,30 +170,26 @@ class PromptGuardClassifier:
             List of ``ClassifierResult`` in the same order as *texts*.
 
         Raises:
-            LayerNotAvailableError: if torch / transformers are not installed.
             ModelLoadError: if the model cannot be loaded.
         """
         if not texts:
             return []
-        self._ensure_available()
         model, tokenizer = self._manager.load_model(self._model_name)
 
-        import torch  # noqa: PLC0415
-        from torch.nn.functional import softmax  # noqa: PLC0415
+        with self._inference_lock:
+            preprocessed = [self._preprocess(t, tokenizer) for t in texts]
+            inputs = tokenizer(
+                preprocessed,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            device = torch.device(self._manager.device)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        preprocessed = [self._preprocess(t, tokenizer) for t in texts]
-        inputs = tokenizer(
-            preprocessed,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512,
-        )
-        device = torch.device(self._manager.device)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            logits = model(**inputs).logits  # (batch, num_labels)
+            with torch.no_grad():
+                logits = model(**inputs).logits  # (batch, num_labels)
 
         scaled = logits / self._temperature
         probs_tensor = softmax(scaled, dim=-1)  # (batch, num_labels)
@@ -148,24 +198,6 @@ class PromptGuardClassifier:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _ensure_available() -> None:
-        """Raise ``LayerNotAvailableError`` if torch/transformers are missing."""
-        missing: list[str] = []
-        try:
-            import torch  # noqa: F401, PLC0415
-        except ImportError:
-            missing.append("torch")
-        try:
-            import transformers  # noqa: F401, PLC0415
-        except ImportError:
-            missing.append("transformers")
-        if missing:
-            raise LayerNotAvailableError(
-                f"Prompt Guard requires: {', '.join(missing)}. "
-                "Install with: uv sync --extra ml"
-            )
 
     @staticmethod
     def _preprocess(text: str, tokenizer: object) -> str:  # type: ignore[override]
@@ -196,9 +228,6 @@ class PromptGuardClassifier:
 
     def _get_probabilities(self, text: str, model: object, tokenizer: object) -> object:
         """Run a single forward pass and return the softmax probability tensor."""
-        import torch  # noqa: PLC0415
-        from torch.nn.functional import softmax  # noqa: PLC0415
-
         preprocessed = self._preprocess(text, tokenizer)
         inputs = tokenizer(  # type: ignore[operator]
             preprocessed,
@@ -234,8 +263,10 @@ class PromptGuardClassifier:
         )
         prob_map = {label: prob_list[i] for i, label in enumerate(_LABELS)}
         best_idx = int(max(range(len(prob_list)), key=lambda i: prob_list[i]))
+        best_label = _LABELS[best_idx]
         return ClassifierResult(
-            label=_LABELS[best_idx],
+            label=best_label,
             confidence=prob_list[best_idx],
             probabilities=prob_map,
+            threat_type=_LABEL_TO_THREAT.get(best_label, ThreatType.BENIGN),
         )

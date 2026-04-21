@@ -157,10 +157,20 @@ def scan_prompt(
         scanner = PromptScanner(mode=scan_mode)
         results = scanner.scan_batch(texts)
     except ScannerInputError as exc:
-        typer.echo(json.dumps(_build_error_output(f"Input error: {exc}"), indent=2))
+        typer.echo(
+            json.dumps(
+                _build_error_output(f"Input error: {exc}"), indent=2, ensure_ascii=False
+            )
+        )
         raise typer.Exit(code=0)
     except Exception as exc:
-        typer.echo(json.dumps(_build_error_output(f"Scanner error: {exc}"), indent=2))
+        typer.echo(
+            json.dumps(
+                _build_error_output(f"Scanner error: {exc}"),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         raise typer.Exit(code=0)  # exit 0: scanner ran, verdict in JSON
 
     # --- Audit ---
@@ -175,7 +185,7 @@ def scan_prompt(
         if output_format == "text":
             _print_text(result.to_dict())
         else:
-            typer.echo(json.dumps(result.to_dict(), indent=2))
+            typer.echo(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
 
     raise typer.Exit(code=0)
 
@@ -191,7 +201,7 @@ def _print_text(d: dict[str, Any]) -> None:
     if d["findings"]:
         typer.echo("    Findings:")
         for f in d["findings"]:
-            typer.echo(f"      [{f['severity'].upper()}] {f['rule_id']} — {f['title']}")
+            typer.echo(f"      {f['rule_id']} — {f['title']}")
             if f.get("evidence"):
                 evidence = f["evidence"][:80]
                 typer.echo(f"        evidence: {evidence!r}")

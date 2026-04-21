@@ -1,5 +1,5 @@
-"""Unit tests covering remaining branches in detectors/base, semantic,
-deberta_classifier, and result._score_to_severity."""
+"""Unit tests covering DetectionLayer base, SemanticDetector,
+DeBERTaClassifier, and result helper functions."""
 
 import unittest
 
@@ -11,10 +11,10 @@ from agent_sec_cli.prompt_scanner.models.deberta_classifier import (
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
     ScanResult,
-    Severity,
     ThreatType,
     Verdict,
-    _score_to_severity,
+    _best_confidence,
+    _verdict_to_risk_level,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,6 @@ class TestDetectionLayerBase(unittest.TestCase):
         self.assertEqual(result.layer_name, "stub")
 
     def test_is_available_default_true(self) -> None:
-        # Default implementation in base returns True
         layer = self._make_concrete(available=True)
         self.assertTrue(layer.is_available())
 
@@ -121,34 +120,55 @@ class TestDeBERTaClassifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: result._score_to_severity boundary values
+# Tests: _verdict_to_risk_level
 # ---------------------------------------------------------------------------
 
 
-class TestScoreToSeverity(unittest.TestCase):
-    def test_critical_at_0_9(self) -> None:
-        self.assertEqual(_score_to_severity(0.9), Severity.CRITICAL)
+class TestVerdictToRiskLevel(unittest.TestCase):
+    def test_pass_is_low(self) -> None:
+        self.assertEqual(_verdict_to_risk_level(Verdict.PASS), "low")
 
-    def test_critical_above_0_9(self) -> None:
-        self.assertEqual(_score_to_severity(1.0), Severity.CRITICAL)
+    def test_warn_is_medium(self) -> None:
+        self.assertEqual(_verdict_to_risk_level(Verdict.WARN), "medium")
 
-    def test_high_at_0_7(self) -> None:
-        self.assertEqual(_score_to_severity(0.7), Severity.HIGH)
+    def test_deny_is_high(self) -> None:
+        self.assertEqual(_verdict_to_risk_level(Verdict.DENY), "high")
 
-    def test_high_below_0_9(self) -> None:
-        self.assertEqual(_score_to_severity(0.89), Severity.HIGH)
+    def test_error_is_unknown(self) -> None:
+        self.assertEqual(_verdict_to_risk_level(Verdict.ERROR), "unknown")
 
-    def test_medium_at_0_4(self) -> None:
-        self.assertEqual(_score_to_severity(0.4), Severity.MEDIUM)
 
-    def test_medium_below_0_7(self) -> None:
-        self.assertEqual(_score_to_severity(0.69), Severity.MEDIUM)
+# ---------------------------------------------------------------------------
+# Tests: _best_confidence
+# ---------------------------------------------------------------------------
 
-    def test_low_below_0_4(self) -> None:
-        self.assertEqual(_score_to_severity(0.39), Severity.LOW)
 
-    def test_low_at_zero(self) -> None:
-        self.assertEqual(_score_to_severity(0.0), Severity.LOW)
+def _lr(name: str, score: float, detected: bool = True) -> LayerResult:
+    return LayerResult(layer_name=name, detected=detected, score=score)
+
+
+class TestBestConfidence(unittest.TestCase):
+    def test_empty_returns_zero(self) -> None:
+        self.assertEqual(_best_confidence([]), 0.0)
+
+    def test_prefers_ml_classifier(self) -> None:
+        results = [_lr("rule_engine", 0.9), _lr("ml_classifier", 0.75)]
+        self.assertAlmostEqual(_best_confidence(results), 0.75)
+
+    def test_falls_back_to_rule_engine(self) -> None:
+        results = [_lr("rule_engine", 0.8)]
+        self.assertAlmostEqual(_best_confidence(results), 0.8)
+
+    def test_no_detected_returns_zero(self) -> None:
+        results = [_lr("rule_engine", 0.8, detected=False)]
+        self.assertEqual(_best_confidence(results), 0.0)
+
+    def test_ml_not_detected_ignored(self) -> None:
+        results = [
+            _lr("rule_engine", 0.8),
+            _lr("ml_classifier", 0.9, detected=False),
+        ]
+        self.assertAlmostEqual(_best_confidence(results), 0.8)
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +181,6 @@ class TestScanResultBuildSummary(unittest.TestCase):
         return ScanResult(
             is_threat=is_threat,
             threat_type=threat_type,
-            risk_score=0.9 if is_threat else 0.1,
-            confidence=0.9 if is_threat else 0.1,
             verdict=Verdict.DENY if is_threat else Verdict.PASS,
         )
 
@@ -172,12 +190,15 @@ class TestScanResultBuildSummary(unittest.TestCase):
 
     def test_injection_summary(self) -> None:
         result = self._make(True, ThreatType.DIRECT_INJECTION)
-        self.assertIn("direct_injection", result._build_summary())
+        summary = result._build_summary()
+        self.assertIn("Direct Injection", summary)
 
     def test_jailbreak_summary(self) -> None:
         result = self._make(True, ThreatType.JAILBREAK)
-        self.assertIn("jailbreak", result._build_summary())
+        summary = result._build_summary()
+        self.assertIn("Jailbreak", summary)
 
     def test_indirect_injection_summary(self) -> None:
         result = self._make(True, ThreatType.INDIRECT_INJECTION)
-        self.assertIn("indirect_injection", result._build_summary())
+        summary = result._build_summary()
+        self.assertIn("Indirect Injection", summary)
