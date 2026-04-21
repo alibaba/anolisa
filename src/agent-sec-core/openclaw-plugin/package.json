@@ -16,12 +16,14 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "pack": "npm run build && npm pack",
-    "smoke": "npx tsx tests/smoke-test.ts"
+    "smoke": "npx tsx tests/smoke-test.ts",
+    "test:skill-ledger": "npx tsx tests/skill-ledger-test.ts"
   },
   "peerDependencies": {
     "openclaw": "*"
   },
   "devDependencies": {
+    "@types/node": ">=22",
     "openclaw": ">=0.8.0",
     "tsx": "^4.21.0",
     "typescript": "^5.8.0"

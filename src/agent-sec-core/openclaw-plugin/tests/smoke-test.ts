@@ -6,8 +6,12 @@ import { inboundFilter } from "../src/capabilities/inbound-filter.js";
 import { promptAnalyzer } from "../src/capabilities/prompt-analyzer.js";
 import { promptGuard } from "../src/capabilities/prompt-guard.js";
 import { llmAudit } from "../src/capabilities/llm-audit.js";
+import { skillLedger } from "../src/capabilities/skill-ledger.js";
 
 // 每个 hook 的 mock 事件（字段与真实类型一致）
+// Note: before_tool_call has two entries — one for exec-based tools (tool-gate, code-scan)
+// and one for read_file-based tools (skill-ledger). The shared mock uses "shell" for
+// backward compatibility. skill-ledger uses its own dedicated mock events below.
 const mockEvents: Record<string, Record<string, unknown>> = {
   before_tool_call: {
     toolName: "shell",
@@ -59,6 +63,23 @@ const mockCtx: Record<string, Record<string, unknown>> = {
 
 const caps = [toolGate, codeScan, inboundFilter, promptAnalyzer, promptGuard, llmAudit];
 
+// skill-ledger needs a dedicated mock with read_file + SKILL.md path
+const skillLedgerMockEvents: Record<string, Record<string, unknown>> = {
+  ...mockEvents,
+  before_tool_call: {
+    toolName: "read_file",
+    params: { file_path: "/home/user/.openclaw/skills/github/SKILL.md" },
+    runId: "run-002",
+    toolCallId: "tc-002",
+  },
+};
+const skillLedgerMockCtx: Record<string, Record<string, unknown>> = {
+  ...mockCtx,
+  before_tool_call: {
+    sessionKey: "sk-001", runId: "run-002", toolName: "read_file", toolCallId: "tc-002",
+  },
+};
+
 console.log("=== Agent-Sec Smoke Test ===");
 console.log(`Mode: ${process.env.AGENT_SEC_LIVE ? "LIVE (real CLI)" : "MOCK (no CLI needed)"}\n`);
 
@@ -72,3 +93,13 @@ for (const cap of caps) {
   }
   console.log();
 }
+
+// ── skill-ledger (separate mock events) ──────────────────────────
+console.log(`[${skillLedger.id}] hooks: [${skillLedger.hooks.join(", ")}]`);
+const slResults = await testCapability(skillLedger, skillLedgerMockEvents, undefined, skillLedgerMockCtx);
+for (const r of slResults) {
+  const status = r.error ? `FAIL: ${r.error.message}` : "OK";
+  const detail = r.result ? ` → ${JSON.stringify(r.result)}` : "";
+  console.log(`  ${r.hookName}: ${status} (${r.durationMs.toFixed(0)}ms)${detail}`);
+}
+console.log();

@@ -1,6 +1,6 @@
 # agent-sec OpenClaw Plugin
 
-OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`, providing tool gating, inbound filtering, prompt analysis, prompt guarding, and LLM output auditing.
+OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`, providing tool gating, code scanning, skill integrity verification, inbound filtering, prompt analysis, prompt guarding, and LLM output auditing.
 
 ---
 
@@ -26,6 +26,8 @@ openclaw-plugin/
 │   ├── utils.ts                # CLI invocation utility (callAgentSecCli)
 │   └── capabilities/           # One file per security capability
 │       ├── tool-gate.ts        #   before_tool_call hook
+│       ├── code-scan.ts        #   before_tool_call hook (exec commands)
+│       ├── skill-ledger.ts     #   before_tool_call hook (SKILL.md reads)
 │       ├── inbound-filter.ts   #   before_dispatch hook
 │       ├── prompt-analyzer.ts  #   before_agent_reply hook
 │       ├── prompt-guard.ts     #   before_prompt_build hook
@@ -90,11 +92,11 @@ npm run build
 ```bash
 # Create tarball
 npm run pack
-# Output: agent-sec-openclaw-plugin-0.1.0.tgz
+# Output: agent-sec-openclaw-plugin-0.3.0.tgz
 
 # Extract to target directory
 mkdir -p /opt/agent-sec/openclaw-plugin
-tar -xzf agent-sec-openclaw-plugin-0.1.0.tgz \
+tar -xzf agent-sec-openclaw-plugin-0.3.0.tgz \
     --strip-components=1 \
     -C /opt/agent-sec/openclaw-plugin
 
@@ -165,7 +167,7 @@ id: agent-sec
 Security hooks powered by agent-sec-cli
 
 Status: loaded
-Version: 0.1.0
+Version: 0.3.0
 Source: ~/path/to/openclaw-plugin/dist/index.js
 
 Typed hooks:
@@ -182,7 +184,7 @@ llm_output (priority 0)
 
 ### Smoke Test (Mock Mode)
 
-Runs all 5 capabilities against mock events without requiring a real `agent-sec-cli` installation:
+Runs all 7 capabilities against mock events without requiring a real `agent-sec-cli` installation:
 
 ```bash
 npm run smoke
@@ -203,6 +205,8 @@ AGENT_SEC_LIVE=1 npm run smoke
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
 | `tool-gate`        | `before_tool_call`    | 100      | Gates tool execution; blocks if risk threshold met   |
+| `code-scan`        | `before_tool_call`    | 80       | Scans shell commands for security issues             |
+| `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read         |
 | `inbound-filter`   | `before_dispatch`     | 200      | Scans inbound messages; blocks high-risk content     |
 | `prompt-analyzer`  | `before_agent_reply`  | 150      | Detects prompt injection attacks                     |
 | `prompt-guard`     | `before_prompt_build` | 50       | Injects security policy into prompt context          |
@@ -220,6 +224,12 @@ Configure via OpenClaw plugin settings:
   }
 }
 ```
+
+### Configuring `skill-ledger`
+
+The `skill-ledger` capability checks skill integrity by invoking `agent-sec-cli skill-ledger check` when the agent reads a `SKILL.md` file. It automatically initializes signing keys on first use.
+
+**Prerequisites**: `agent-sec-cli skill-ledger check` must be available. Signing keys are auto-initialized (no passphrase) if not present.
 
 ---
 

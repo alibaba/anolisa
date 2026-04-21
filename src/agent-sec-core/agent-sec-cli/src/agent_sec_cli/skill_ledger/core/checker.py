@@ -19,8 +19,10 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
 )
 from agent_sec_cli.skill_ledger.core.version_chain import (
     create_snapshot,
+    latest_json_path,
+    list_version_ids,
     load_latest_manifest,
-    next_version_id,
+    load_version_manifest,
     save_manifest,
 )
 from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
@@ -39,15 +41,44 @@ def _auto_create_manifest(
     """Create an initial manifest when none exists (scanStatus: "none").
 
     Requires the signing private key (first-time auto-creation).
+
+    If prior versions exist (e.g. latest.json was deleted but versions/ has
+    entries), the chain linkage fields are preserved so the audit trail stays
+    intact.
     """
     skill_name = Path(skill_dir).name
-    vid = next_version_id(skill_dir)
+
+    # Single traversal of .skill-meta/versions/ to derive all chain fields
+    existing_ids = list_version_ids(skill_dir)
+    if not existing_ids:
+        vid = "v000001"
+        prev_vid = None
+        prev_sig = None
+    else:
+        last_num = int(existing_ids[-1][1:])
+        if last_num >= 999999:
+            from agent_sec_cli.skill_ledger.errors import SkillLedgerError
+
+            raise SkillLedgerError(
+                "Version ID overflow — maximum 999999 versions reached for "
+                f"{skill_name}"
+            )
+        vid = f"v{last_num + 1:06d}"
+        prev_vid = existing_ids[-1]
+        last_manifest = load_version_manifest(skill_dir, prev_vid)
+        prev_sig = (
+            last_manifest.signature.value
+            if last_manifest is not None and last_manifest.signature is not None
+            else None
+        )
 
     manifest = SignedManifest(
         versionId=vid,
+        previousVersionId=prev_vid,
         skillName=skill_name,
         fileHashes=file_hashes,
         scanStatus="none",
+        previousManifestSignature=prev_sig,
     )
 
     # Compute hash and sign
@@ -71,7 +102,18 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     Returns a JSON-serialisable dict with at minimum ``{"status": "<status>"}``.
     """
     # Step 1: Load latest.json
-    manifest = load_latest_manifest(skill_dir)
+    # If the file exists but is malformed/corrupted, treat as tampered.
+    try:
+        manifest = load_latest_manifest(skill_dir)
+    except Exception as exc:
+        # File exists but cannot be parsed — corrupted or tampered metadata
+        if latest_json_path(skill_dir).is_file():
+            return {
+                "status": "tampered",
+                "reason": f"manifest file is corrupted: {exc}",
+            }
+        # File doesn't exist and some other error — treat as missing
+        manifest = None
 
     # Step 2: Compute current file hashes
     current_hashes = compute_file_hashes(skill_dir)
