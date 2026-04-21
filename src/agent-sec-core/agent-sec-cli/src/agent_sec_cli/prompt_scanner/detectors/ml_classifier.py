@@ -1,6 +1,7 @@
 """L2 ML Classifier detector – Transformer-based classification."""
 
 import time
+from typing import Any
 
 from agent_sec_cli.prompt_scanner.detectors.base import DetectionLayer
 from agent_sec_cli.prompt_scanner.exceptions import LayerNotAvailableError
@@ -73,7 +74,7 @@ class MLClassifier(DetectionLayer):
         """
         self._classifier.warmup()
 
-    def detect(self, text: str, metadata: dict | None = None) -> LayerResult:
+    def detect(self, text: str, metadata: dict[str, Any] | None = None) -> LayerResult:
         """Classify *text* via PromptGuardClassifier and return a LayerResult.
 
         Args:

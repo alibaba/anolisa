@@ -13,6 +13,7 @@ Ambiguous signals are left to the L2 ML classifier.
 
 import re
 import time
+from typing import Any
 
 from agent_sec_cli.prompt_scanner.detectors.base import DetectionLayer
 from agent_sec_cli.prompt_scanner.result import (
@@ -49,14 +50,14 @@ class RuleEngine(DetectionLayer):
         return "rule_engine"
 
     def __init__(self) -> None:
-        self._rules: list[dict] = []  # compiled rule dicts
+        self._rules: list[dict[str, Any]] = []  # compiled rule dicts
         self._load_rules()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def detect(self, text: str, metadata: dict | None = None) -> LayerResult:
+    def detect(self, text: str, metadata: dict[str, Any] | None = None) -> LayerResult:
         """Scan *text* against all enabled rules.
 
         If *metadata* contains a ``"decoded_variants"`` list (produced by
@@ -129,7 +130,7 @@ class RuleEngine(DetectionLayer):
             )
 
     @staticmethod
-    def _match_rule(texts: list[str], compiled_rule: dict) -> str | None:
+    def _match_rule(texts: list[str], compiled_rule: dict[str, Any]) -> str | None:
         """Try to match *compiled_rule* against any of *texts*.
 
         Returns the first matched text snippet, or ``None``.

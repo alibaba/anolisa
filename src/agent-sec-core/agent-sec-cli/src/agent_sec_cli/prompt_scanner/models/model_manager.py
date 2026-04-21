@@ -14,7 +14,8 @@ ModelScope mirror IDs for Llama Prompt Guard 2:
 """
 
 import logging
-import os
+import threading
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -49,6 +50,7 @@ class ModelManager:
         self._device = device or self.detect_device()
         # cache: model_name -> (model, tokenizer)
         self._loaded_models: dict[str, tuple[object, object]] = {}
+        self._load_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -56,6 +58,9 @@ class ModelManager:
 
     def load_model(self, model_name: str) -> tuple[object, object]:
         """Return a cached ``(model, tokenizer)`` pair, loading on demand.
+
+        Thread-safe: concurrent calls for the same model will block on the
+        lock and reuse the result of the first successful load.
 
         Args:
             model_name: HuggingFace model identifier or local path.
@@ -67,12 +72,17 @@ class ModelManager:
             agent_sec_cli.prompt_scanner.exceptions.ModelLoadError: if the
                 model cannot be loaded (missing deps, download failure, etc.).
         """
+        # Fast path: model already loaded (no lock needed for dict reads under GIL).
         if model_name in self._loaded_models:
             return self._loaded_models[model_name]
 
-        pair = self._do_load(model_name)
-        self._loaded_models[model_name] = pair
-        return pair
+        with self._load_lock:
+            # Double-check after acquiring the lock.
+            if model_name in self._loaded_models:
+                return self._loaded_models[model_name]
+            pair = self._do_load(model_name)
+            self._loaded_models[model_name] = pair
+            return pair
 
     def get_model(self, model_name: str) -> tuple[object, object] | None:
         """Return the cached ``(model, tokenizer)`` pair if already loaded."""
@@ -164,20 +174,13 @@ class ModelManager:
             "Downloading model '%s' via ModelScope (cached after first run).",
             model_name,
         )
-        import os  # noqa: PLC0415
 
-        cache_dir = os.path.expanduser(self._cache_dir)
-        already_cached = os.path.isdir(
-            os.path.join(cache_dir, model_name.replace("/", "---"))
-        ) or any(
-            model_name.split("/")[-1] in d
-            for d in (os.listdir(cache_dir) if os.path.isdir(cache_dir) else [])
-        )
+        cache_dir = Path(self._cache_dir).expanduser()
         try:
             _ms_logger = logging.getLogger("modelscope")
             _orig_level = _ms_logger.level
             _ms_logger.setLevel(logging.ERROR)
-            local_model_path = snapshot_download(model_name, cache_dir=cache_dir)
+            local_model_path = snapshot_download(model_name, cache_dir=str(cache_dir))
             _ms_logger.setLevel(_orig_level)
         except Exception as exc:
             raise ModelLoadError(

@@ -218,9 +218,20 @@ class PromptGuardClassifier:
 
     @staticmethod
     def _probs_to_result(probs: object) -> ClassifierResult:
-        """Convert a probability tensor row to a ``ClassifierResult``."""
-        # probs is a 1-D tensor of shape (num_labels,)
-        prob_list: list[float] = probs[0].tolist() if hasattr(probs, "__getitem__") and hasattr(probs[0], "tolist") else [float(p) for p in probs]  # type: ignore[index]
+        """Convert a probability tensor row to a ``ClassifierResult``.
+
+        Accepts both 2-D tensors of shape ``(1, num_labels)`` (from
+        :py:meth:`classify`) and 1-D tensors of shape ``(num_labels,)``
+        (from :py:meth:`classify_batch`).
+        """
+        # Normalize to 1-D so that both classify() and classify_batch() paths work.
+        if hasattr(probs, "dim") and probs.dim() == 2:  # type: ignore[union-attr]
+            probs = probs[0]  # type: ignore[index]
+        prob_list: list[float] = (
+            probs.tolist()  # type: ignore[union-attr]
+            if hasattr(probs, "tolist")
+            else [float(p) for p in probs]  # type: ignore[union-attr]
+        )
         prob_map = {label: prob_list[i] for i, label in enumerate(_LABELS)}
         best_idx = int(max(range(len(prob_list)), key=lambda i: prob_list[i]))
         return ClassifierResult(
