@@ -7,48 +7,30 @@
 // Move all mocks to the top
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import type React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Footer } from './Footer.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
+import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
-import { SettingsProvider } from '../contexts/SettingsContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js'; // Import the correct context
+import { CompactModeProvider } from '../contexts/CompactModeContext.js'; // 添加CompactModeProvider
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
-// Mock the useStatusLine hook to return lines array (as we modified it)
-vi.mock('../hooks/useStatusLine.js', () => ({
-  useStatusLine: () => ({ lines: [] }),
-}));
-
-// Mock Ink components to prevent rendering issues in tests
-vi.mock('ink', async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    Box: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    Text: ({
-      children,
-      color,
-    }: {
-      children: React.ReactNode;
-      color?: string;
-    }) => <span style={color ? { color } : {}}>{children}</span>,
-  };
-});
+vi.mock('../hooks/useStatusLine.js');
+const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
 
 // Mock all the sub-components that Footer uses
 vi.mock('./AutoAcceptIndicator.js', () => ({
-  AutoAcceptIndicator: () => <span>AutoAcceptIndicator</span>,
+  AutoAcceptIndicator: () => <Text>AutoAcceptIndicator</Text>,
 }));
 
 vi.mock('./ShellModeIndicator.js', () => ({
-  ShellModeIndicator: () => <span>ShellModeIndicator</span>,
+  ShellModeIndicator: () => <Text>ShellModeIndicator</Text>,
 }));
 
 vi.mock('./ContextUsageDisplay.js', () => ({
@@ -78,9 +60,9 @@ vi.mock('./ConsoleSummaryDisplay.js', () => ({
   ConsoleSummaryDisplay: ({ errorCount }: { errorCount: number }) =>
     (() => {
       if (errorCount > 0) {
-        return <span>{`Errors: ${errorCount}`}</span>;
+        return <Text>{`Errors: ${errorCount}`}</Text>;
       }
-      return <span />;
+      return <Text />;
     })(),
 }));
 
@@ -235,10 +217,11 @@ const createMockSettings = (): LoadedSettings =>
 
 const renderWithWidth = (width: number, uiState: UIState) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
+  const mockSettings = createMockSettings();
   return render(
-    <ConfigContext.Provider value={createMockConfig() as never}>
-      <VimModeProvider settings={createMockSettings()}>
-        <SettingsProvider value={createMockSettings()}>
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={createMockConfig() as never}>
+        <VimModeProvider settings={mockSettings}>
           <CompactModeProvider
             value={{
               compactMode: false,
@@ -251,9 +234,9 @@ const renderWithWidth = (width: number, uiState: UIState) => {
               <Footer />
             </UIStateContext.Provider>
           </CompactModeProvider>
-        </SettingsProvider>
-      </VimModeProvider>
-    </ConfigContext.Provider>,
+        </VimModeProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
@@ -261,6 +244,8 @@ describe('<Footer />', () => {
   beforeEach(() => {
     // Reset all mocks before each test
     vi.clearAllMocks();
+    // Mock status line to return empty array
+    useStatusLineMock.mockReturnValue({ lines: [] });
   });
 
   afterEach(() => {
