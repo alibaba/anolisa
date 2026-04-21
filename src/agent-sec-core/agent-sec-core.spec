@@ -20,7 +20,6 @@ BuildRequires:  make
 BuildRequires:  rust >= 1.70
 BuildRequires:  cargo
 BuildRequires:  python3-devel
-BuildRequires:  python3-pip
 BuildRequires:  nodejs
 BuildRequires:  npm
 
@@ -48,9 +47,15 @@ Built with maturin as a Rust native Python extension.
 
 %files -n agent-sec-cli
 %defattr(0644,root,root,0755)
-%attr(0755,root,root) %{_bindir}/agent-sec-cli
-%{python3_sitearch}/agent_sec_cli/
-%{python3_sitearch}/agent_sec_cli-*.dist-info/
+%attr(0755,root,root) /usr/bin/agent-sec-cli
+/opt/agent-sec/wheels/
+
+%post -n agent-sec-cli
+python3 -m venv /opt/agent-sec/venv
+/opt/agent-sec/venv/bin/pip install --no-cache-dir /opt/agent-sec/wheels/agent_sec_cli-*.whl
+
+%preun -n agent-sec-cli
+rm -rf /opt/agent-sec/venv 2>/dev/null || true
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook

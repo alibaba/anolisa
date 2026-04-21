@@ -57,6 +57,7 @@ build-all: build-sandbox build-cli build-openclaw-plugin ## Build all components
 PREFIX             ?= /usr/local
 SKILL_DIR          ?= /usr/share/anolisa/skills
 OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
+WHEEL_DIR          ?= /opt/agent-sec/wheels
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -72,9 +73,15 @@ install-tool: ## Install sign-skill.sh to PREFIX/bin
 install: install-all ## Install all components (alias for install-all)
 
 .PHONY: install-cli
-install-cli: ## Install agent-sec-cli wheel (supports DESTDIR for rpmbuild)
-	pip3 install --root=$(DESTDIR) --no-deps --no-cache-dir --prefix=/usr \
-	    agent-sec-cli/target/wheels/agent_sec_cli-*.whl
+install-cli: ## Install agent-sec-cli wheel (for dev/debug)
+	pip3 install agent-sec-cli/target/wheels/agent_sec_cli-*.whl
+
+.PHONY: install-cli-wheel
+install-cli-wheel: ## Ship agent-sec-cli wheel + wrapper
+	install -d -m 0755 $(DESTDIR)$(WHEEL_DIR)
+	cp agent-sec-cli/target/wheels/agent_sec_cli-*.whl $(DESTDIR)$(WHEEL_DIR)/
+	install -d -m 0755 $(DESTDIR)/usr/bin
+	install -p -m 0755 scripts/agent-sec-cli-wrapper.sh $(DESTDIR)/usr/bin/agent-sec-cli
 
 .PHONY: install-skills
 install-skills: ## Install skill files to SKILL_DIR
@@ -102,7 +109,7 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + code_scanner_hook)
 	cp -rp cosh_hooks/. $(DESTDIR)/usr/local/lib/anolisa/cosh_hooks/
 
 .PHONY: install-all
-install-all: install-cli install-cosh-hook install-openclaw-plugin install-skills ## Install all components (used by rpmbuild)
+install-all: install-cli-wheel install-cosh-hook install-openclaw-plugin install-skills ## Install all components (used by rpmbuild)
 
 .PHONY: help
 help: ## Show this help message
