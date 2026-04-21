@@ -12,7 +12,7 @@ use crate::event::Event;
 use crate::parser::http::{HttpParser, ParsedHttpMessage};
 use crate::parser::http2::Http2Parser;
 use crate::parser::proctrace::ProcTraceParser;
-use crate::parser::sse::SseParser;
+use crate::parser::sse::{SseParser, ParsedSseEvent};
 use crate::probes::proctrace::VariableEvent;
 use crate::probes::sslsniff::SslEvent;
 use std::rc::Rc;
@@ -50,6 +50,8 @@ impl Parser {
     pub fn parse_ssl_event(&self, ssl_event: Rc<SslEvent>) -> ParseResult {
         log::debug!("parse_ssl_event: length={}", ssl_event.buf_size());
 
+        let comm = ssl_event.comm.trim_end_matches('\0');
+
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {
             match self.http_parser.parse(ssl_event.clone()) {
@@ -74,6 +76,21 @@ impl Parser {
             if !frames.is_empty() {
                 return ParseResult {
                     messages: vec![ParsedMessage::Http2Frames(frames)],
+                };
+            }
+        }
+
+        // 2.5. Detect HTTP chunked transfer encoding end marker "0\r\n\r\n"
+        // This signals end of a chunked SSE stream (e.g., SysOM POP API)
+        // Synthesize a [DONE] event so the SSE aggregator can complete the stream
+        {
+            let buf_size = ssl_event.buf_size() as usize;
+            let buf = &ssl_event.buf[..buf_size];
+            if buf == b"0\r\n\r\n" {
+                return ParseResult {
+                    messages: vec![ParsedMessage::SseEvent(
+                        ParsedSseEvent::new_done_marker(Rc::clone(&ssl_event))
+                    )],
                 };
             }
         }
@@ -109,6 +126,8 @@ impl Parser {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
             Event::ProcMon(_) => ParseResult { messages: Vec::new() },
+            Event::FileWatch(_) => ParseResult { messages: Vec::new() },
+            Event::FileWrite(_) => ParseResult { messages: Vec::new() },
         }
     }
 

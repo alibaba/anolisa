@@ -37,6 +37,8 @@ pub struct ParsedSseEvent {
     data_len: usize,
     /// Original SslEvent (Rc to avoid cloning)
     source_event: Rc<SslEvent>,
+    /// Whether this is a synthetic "done" marker (e.g., from chunked end "0\r\n\r\n")
+    is_synthetic_done: bool,
 }
 
 impl ParsedSseEvent {
@@ -56,6 +58,21 @@ impl ParsedSseEvent {
             data_offset,
             data_len,
             source_event,
+            is_synthetic_done: false,
+        }
+    }
+
+    /// Create a synthetic [DONE] marker event
+    /// Used when HTTP chunked transfer encoding end marker "0\r\n\r\n" is detected
+    pub fn new_done_marker(source_event: Rc<SslEvent>) -> Self {
+        Self {
+            id: None,
+            event: None,
+            retry: None,
+            data_offset: 0,
+            data_len: 0,
+            source_event,
+            is_synthetic_done: true,
         }
     }
 
@@ -78,6 +95,9 @@ impl ParsedSseEvent {
 
     /// Check if this is a completion marker
     pub fn is_done(&self) -> bool {
+        if self.is_synthetic_done {
+            return true;
+        }
         let data = self.data();
         let text = String::from_utf8_lossy(data);
         let trimmed = text.trim();

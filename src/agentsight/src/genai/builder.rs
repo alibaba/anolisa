@@ -85,8 +85,11 @@ impl GenAIBuilder {
         // Need at least HttpRecord to build LLMCall
         let http = http_record?;
         
-        // Check if this is an LLM API call
-        if !self.is_llm_api_path(&http.path) && !http.is_sse {
+        // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
+        let path_match = self.is_llm_api_path(&http.path);
+        let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
+        let is_llm = path_match || body_match;
+        if !is_llm && !http.is_sse {
             return None;
         }
 
@@ -107,14 +110,17 @@ impl GenAIBuilder {
         });
 
         // Determine provider and model
-        let provider = token_record.as_ref()
-            .map(|t| t.provider.clone())
-            .or_else(|| self.extract_provider_from_path(&http.path))
+        // Priority: path-based (most specific) > body-based > parsed_message > token_record
+        let provider = self.extract_provider_from_path(&http.path)
+            .or_else(|| Self::extract_provider_from_body(&http.request_body))
+            .or_else(|| parsed_message.as_ref().map(|m| m.provider().to_string()))
+            .or_else(|| token_record.as_ref().map(|t| t.provider.clone()))
             .unwrap_or_else(|| "unknown".to_string());
 
-        let model = token_record.as_ref()
-            .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned())
-            .or_else(|| self.extract_model_from_message(&parsed_message))
+        // Model priority: parsed_message (most accurate) > token_record > body extraction
+        let model = self.extract_model_from_message(&parsed_message)
+            .or_else(|| token_record.as_ref()
+                .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned()))
             .or_else(|| Self::extract_model_from_body(&http.request_body, &http.response_body))
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -136,7 +142,7 @@ impl GenAIBuilder {
             error: None,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm),
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -160,6 +166,8 @@ impl GenAIBuilder {
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 } else if http.path.contains("/completions") {
                     meta.insert("operation_name".to_string(), "text_completion".to_string());
+                } else if http.path.contains("/api/v1/copilot/generate_copilot") {
+                    meta.insert("operation_name".to_string(), "chat".to_string());
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 meta.insert("conversation_id".to_string(), query_fp);
@@ -219,6 +227,51 @@ impl GenAIBuilder {
                         seed: None,
                         stop_sequences: req.stop_sequences.clone(),
                         stream: req.stream.unwrap_or(false),
+                        tools: None,
+                        raw_body: http.request_body.clone(),
+                    };
+                }
+            }
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                if let Some(req) = request.as_ref() {
+                    let msgs = req.params.messages.iter().map(|m| {
+                        let role = m.role.clone();
+                        let mut parts = Vec::new();
+                        if role == "tool" {
+                            let response_val = serde_json::from_str::<serde_json::Value>(&m.content)
+                                .unwrap_or_else(|_| serde_json::Value::String(m.content.clone()));
+                            parts.push(MessagePart::ToolCallResponse {
+                                id: m.tool_call_id.clone(),
+                                response: response_val,
+                            });
+                        } else {
+                            if !m.content.is_empty() {
+                                parts.push(MessagePart::Text { content: m.content.clone() });
+                            }
+                        }
+                        if let Some(ref tool_calls) = m.tool_calls {
+                            for tc in tool_calls {
+                                let arguments = serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok();
+                                parts.push(MessagePart::ToolCall {
+                                    id: Some(tc.id.clone()),
+                                    name: tc.function.name.clone(),
+                                    arguments,
+                                });
+                            }
+                        }
+                        InputMessage { role, parts, name: m.name.clone() }
+                    }).collect();
+                    return LLMRequest {
+                        messages: msgs,
+                        temperature: req.params.temperature,
+                        max_tokens: req.params.max_tokens,
+                        frequency_penalty: None,
+                        presence_penalty: None,
+                        top_p: req.params.top_p,
+                        top_k: None,
+                        seed: None,
+                        stop_sequences: None,
+                        stream: req.params.stream,
                         tools: None,
                         raw_body: http.request_body.clone(),
                     };
@@ -381,6 +434,47 @@ impl GenAIBuilder {
             _ => (vec![], None),
         };
 
+        // SysOM response handling
+        let (messages, finish_reason) = if messages.is_empty() {
+            match message {
+                Some(ParsedApiMessage::SysomMessage { response, .. }) => {
+                    response.as_ref().map(|resp| {
+                        let choice = resp.choices.first();
+                        let mut parts = Vec::new();
+                        if let Some(choice) = choice {
+                            if !choice.message.content.is_empty() {
+                                parts.push(MessagePart::Text { content: choice.message.content.clone() });
+                            }
+                            if let Some(ref tool_use) = choice.message.tool_use {
+                                for item in tool_use {
+                                    let arguments = serde_json::from_str::<serde_json::Value>(&item.function.arguments).ok();
+                                    parts.push(MessagePart::ToolCall {
+                                        id: Some(item.id.clone()),
+                                        name: item.function.name.clone(),
+                                        arguments,
+                                    });
+                                }
+                            }
+                        }
+                        let msgs = if parts.is_empty() {
+                            vec![]
+                        } else {
+                            vec![OutputMessage {
+                                role: "assistant".to_string(),
+                                parts,
+                                name: None,
+                                finish_reason: Some("stop".to_string()),
+                            }]
+                        };
+                        (msgs, Some("stop".to_string()))
+                    }).unwrap_or_else(|| (vec![], None))
+                }
+                _ => (messages, finish_reason),
+            }
+        } else {
+            (messages, finish_reason)
+        };
+
         // For SSE responses, extract from response_body when no parsed message
         let messages = if messages.is_empty() && http.is_sse {
             // No parsed response — reconstruct from SSE response body directly
@@ -445,7 +539,16 @@ impl GenAIBuilder {
         path.contains("/v1/completions") ||
         path.contains("/v1/messages") ||
         path.contains("/chat/completions") ||
-        path.contains("/completions")
+        path.contains("/completions") ||
+        path.contains("/api/v1/copilot/generate_copilot")
+    }
+
+    /// Check if request body contains SysOM POP API markers
+    /// SysOM uses path "/" with action in body (llmParamString field)
+    fn is_sysom_pop_request(request_body: &Option<String>) -> bool {
+        request_body.as_ref()
+            .map(|b| b.contains("llmParamString"))
+            .unwrap_or(false)
     }
 
     /// Extract provider from path
@@ -454,6 +557,17 @@ impl GenAIBuilder {
             Some("anthropic".to_string())
         } else if path.contains("/v1/chat/completions") || path.contains("/v1/completions") {
             Some("openai".to_string())
+        } else if path.contains("/api/v1/copilot/generate_copilot") {
+            Some("sysom".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Extract provider from request body (for POP API style requests)
+    fn extract_provider_from_body(request_body: &Option<String>) -> Option<String> {
+        if Self::is_sysom_pop_request(request_body) {
+            Some("sysom".to_string())
         } else {
             None
         }
@@ -468,6 +582,9 @@ impl GenAIBuilder {
             Some(ParsedApiMessage::AnthropicMessage { request, .. }) => {
                 request.as_ref().map(|r| r.model.clone())
             }
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                request.as_ref().map(|r| r.params.model.clone())
+            }
             _ => None,
         }
     }
@@ -476,13 +593,25 @@ impl GenAIBuilder {
     ///
     /// 优先从 request body 取（用户请求的 model），
     /// 如果没有则从 response body 取（SSE 响应中的 model）
+    /// 对于 SysOM 请求，需要从 llmParamString 内嵌 JSON 中提取 model
     fn extract_model_from_body(request_body: &Option<String>, response_body: &Option<String>) -> Option<String> {
         // 尝试从 request body 获取
         if let Some(body) = request_body {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                // 标准 OpenAI/Anthropic 格式
                 if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
                     if !model.is_empty() {
                         return Some(model.to_string());
+                    }
+                }
+                // SysOM 格式：model 嵌套在 llmParamString 中
+                if let Some(lps) = v.get("llmParamString").and_then(|v| v.as_str()) {
+                    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(lps) {
+                        if let Some(model) = inner.get("model").and_then(|m| m.as_str()) {
+                            if !model.is_empty() {
+                                return Some(model.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -613,11 +742,27 @@ impl GenAIBuilder {
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    fn resolve_agent_name(comm: &str) -> Option<String> {
+    fn resolve_agent_name(comm: &str, pid: u32) -> Option<String> {
+        // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
+        let cmdline_args = std::fs::read(format!("/proc/{}/cmdline", pid))
+            .ok()
+            .map(|data| {
+                data.split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let exe_path = std::fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let ctx = ProcessContext {
             comm: comm.to_string(),
-            cmdline_args: vec![],
-            exe_path: String::new(),
+            cmdline_args,
+            exe_path,
         };
         known_agents()
             .iter()

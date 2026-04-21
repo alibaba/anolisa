@@ -30,12 +30,13 @@ use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
 use crate::parser::Parser;
-use crate::probes::{Probes, ProbesPoller};
+use crate::probes::{Probes, ProbesPoller, FileWatchEvent, FileWriteEvent};
 use crate::storage::{
     SqliteConfig, Storage, StorageBackend, TimePeriod, TokenQuery, TokenQueryResult,
 };
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::tokenizer::LlmTokenizer;
+use crate::response_map::ResponseSessionMapper;
 
 /// Main AgentSight struct for tracing AI agent activity
 ///
@@ -69,6 +70,10 @@ pub struct AgentSight {
     running: Arc<AtomicBool>,
     /// Event counter
     event_count: u64,
+    /// File watch callback for .jsonl file open events
+    filewatch_callback: Option<Box<dyn Fn(FileWatchEvent) + Send + 'static>>,
+    /// ResponseId → SessionId mapper for FileWrite events
+    response_mapper: ResponseSessionMapper,
 }
 
 /// Result of processing an event
@@ -96,7 +101,7 @@ impl AgentSight {
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let mut probes =
-            Probes::new(&[], config.target_uid).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -194,6 +199,8 @@ impl AgentSight {
             _poller,
             running: Arc::new(AtomicBool::new(true)),
             event_count: 0,
+            filewatch_callback: None,
+            response_mapper: ResponseSessionMapper::new(),
         })
     }
 
@@ -268,6 +275,18 @@ impl AgentSight {
             return None;
         }
 
+        // Handle FileWatch events via callback (not through the pipeline)
+        if let Event::FileWatch(ref fw_event) = event {
+            self.handle_filewatch_event(fw_event);
+            return None;
+        }
+
+        // Handle FileWrite events via callback (not through the pipeline)
+        if let Event::FileWrite(ref fw_event) = event {
+            self.handle_filewrite_event(fw_event);
+            return None;
+        }
+
         // Parse the event
         let result = self.parser.parse_event(event);
 
@@ -276,7 +295,6 @@ impl AgentSight {
 
         // Analyze and store results
         for agg_result in &aggregated_results {
-            // Original analysis and storage pipeline
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events from analysis results (reuse extracted data)
@@ -326,6 +344,29 @@ impl AgentSight {
             }
         }
     }
+
+    /// Handle FileWatch event via registered callback
+    fn handle_filewatch_event(&self, event: &FileWatchEvent) {
+        log::debug!("FileWatch: pid={} file={}", event.pid, event.filename);
+        if let Some(ref cb) = self.filewatch_callback {
+            cb(event.clone());
+        }
+    }
+
+    /// Register a callback for file watch events (.jsonl file opens)
+    pub fn on_filewatch<F>(&mut self, callback: F)
+    where
+        F: Fn(FileWatchEvent) + Send + 'static,
+    {
+        self.filewatch_callback = Some(Box::new(callback));
+    }
+
+    /// Handle FileWrite event: extract responseId→sessionId mapping, then call callback
+    fn handle_filewrite_event(&mut self, event: &FileWriteEvent) {
+        log::debug!("FileWrite: pid={} file={} size={}", event.pid, event.filename, event.write_size);
+        self.response_mapper.process_filewrite(event);
+    }
+
 
     /// Run the event loop (blocking)
     pub fn run(&mut self) -> Result<u64> {

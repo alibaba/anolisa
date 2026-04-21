@@ -453,17 +453,9 @@ impl Analyzer {
         // }
 
         // 3. Message analysis - parse LLM API request/response bodies
-        // if let Some(msg_result) = self.extract_message_from_http(result) {
-        //     // 3.1 Compute prompt tokens if tokenizer is available
-        //     if let Some(ref tokenizer) = self.tokenizer {
-        //         if let Some(ref chat_template) = self.chat_template {
-        //             if let Some(prompt_tokens) = self.compute_prompt_tokens(&msg_result, tokenizer.as_ref(), chat_template.as_ref()) {
-        //                 results.push(AnalysisResult::PromptTokens(prompt_tokens));
-        //             }
-        //         }
-        //     }
-        //     results.push(msg_result);
-        // }
+        if let Some(msg_result) = self.extract_message_from_http(result) {
+            results.push(msg_result);
+        }
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {

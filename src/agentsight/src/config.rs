@@ -107,6 +107,8 @@ pub struct AgentsightConfig {
     pub target_uid: Option<u32>,
     /// Poll timeout for ring buffer polling (milliseconds)
     pub poll_timeout_ms: u64,
+    /// Enable file watch probe (monitors .jsonl file opens from traced processes)
+    pub enable_filewatch: bool,
 
     // --- HTTP/Aggregation Configuration ---
     /// LRU cache capacity for HTTP connections
@@ -160,6 +162,7 @@ impl Default for AgentsightConfig {
             // Probe defaults
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
+            enable_filewatch: false,
 
             // HTTP/Aggregation defaults
             connection_capacity: DEFAULT_CONNECTION_CAPACITY,
@@ -232,6 +235,12 @@ impl AgentsightConfig {
     /// Set target UID
     pub fn set_target_uid(mut self, uid: Option<u32>) -> Self {
         self.target_uid = uid;
+        self
+    }
+
+    /// Set enable_filewatch
+    pub fn set_enable_filewatch(mut self, enable: bool) -> Self {
+        self.enable_filewatch = enable;
         self
     }
 

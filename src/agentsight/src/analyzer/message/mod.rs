@@ -40,10 +40,12 @@
 
 mod anthropic;
 mod openai;
+pub mod sysom;
 pub mod types;
 
 pub use anthropic::AnthropicParser;
 pub use openai::OpenAIParser;
+pub use sysom::SysomParser;
 pub use types::*;
 
 use crate::parser::sse::ParsedSseEvent;
@@ -65,7 +67,7 @@ impl MessageParser {
     /// Automatically detects the LLM provider based on the request path:
     /// - Paths containing `/v1/messages` → Anthropic
     /// - Paths containing `/v1/chat/completions` or `/v1/completions` → OpenAI
-    ///
+    /// - Paths containing `/api/v1/copilot/generate_copilot` → Aliyun SysOM
     /// # Arguments
     /// * `path` - The HTTP request path (e.g., "/v1/chat/completions")
     /// * `request_body` - Optional JSON body from the HTTP request
@@ -109,6 +111,16 @@ impl MessageParser {
             // Return Some only if at least one was parsed
             if request.is_some() || response.is_some() {
                 return Some(ParsedApiMessage::OpenAICompletion { request, response });
+            }
+        }
+
+        // Try Aliyun SysOM (AK/SK auth mode)
+        if SysomParser::matches_path(path) {
+            let request = request_body.and_then(SysomParser::parse_request);
+            let response = response_body.and_then(SysomParser::parse_response);
+
+            if request.is_some() || response.is_some() {
+                return Some(ParsedApiMessage::SysomMessage { request, response });
             }
         }
 
@@ -170,6 +182,8 @@ impl MessageParser {
             Some("anthropic")
         } else if OpenAIParser::matches_path(path) {
             Some("openai")
+        } else if SysomParser::matches_path(path) {
+            Some("sysom")
         } else {
             None
         }
@@ -177,7 +191,9 @@ impl MessageParser {
 
     /// Check if a path matches any known LLM API endpoint
     pub fn is_llm_api_path(path: &str) -> bool {
-        AnthropicParser::matches_path(path) || OpenAIParser::matches_path(path)
+        AnthropicParser::matches_path(path)
+            || OpenAIParser::matches_path(path)
+            || SysomParser::matches_path(path)
     }
 }
 

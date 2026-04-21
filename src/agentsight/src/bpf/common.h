@@ -19,6 +19,8 @@ typedef enum {
     EVENT_SOURCE_PROC = 1,   // Process events (proctrace)
     EVENT_SOURCE_SSL  = 2,   // SSL/TLS traffic events (sslsniff)
     EVENT_SOURCE_PROCMON = 3, // Process monitor events (procmon)
+    EVENT_SOURCE_FILEWATCH = 4, // File watch events (filewatch)
+    EVENT_SOURCE_FILEWRITE = 5, // File write events (filewrite)
 } event_source_t;
 
 // Common event header - every ringbuffer event MUST start with this

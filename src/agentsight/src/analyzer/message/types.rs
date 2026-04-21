@@ -724,6 +724,13 @@ pub enum ParsedApiMessage {
         /// Parsed response body (if available)
         response: Option<AnthropicResponse>,
     },
+    /// Aliyun SysOM Copilot API message (AK/SK auth mode)
+    SysomMessage {
+        /// Parsed request body (decoded from llmParamString)
+        request: Option<super::sysom::SysomRequest>,
+        /// Parsed response body
+        response: Option<super::sysom::SysomResponse>,
+    },
 }
 
 impl ParsedApiMessage {
@@ -738,6 +745,9 @@ impl ParsedApiMessage {
                 .as_ref()
                 .map(|r| r.model.as_str())
                 .or_else(|| request.as_ref().map(|r| r.model.as_str())),
+            ParsedApiMessage::SysomMessage { request, .. } => {
+                request.as_ref().map(|r| r.params.model.as_str())
+            }
         }
     }
 
@@ -746,6 +756,7 @@ impl ParsedApiMessage {
         match self {
             ParsedApiMessage::OpenAICompletion { .. } => "openai",
             ParsedApiMessage::AnthropicMessage { .. } => "anthropic",
+            ParsedApiMessage::SysomMessage { .. } => "sysom",
         }
     }
 
@@ -757,6 +768,9 @@ impl ParsedApiMessage {
             }
             ParsedApiMessage::AnthropicMessage { request, .. } => {
                 request.as_ref().and_then(|r| r.stream)
+            }
+            ParsedApiMessage::SysomMessage { request, .. } => {
+                request.as_ref().map(|r| r.params.stream)
             }
         }
     }
