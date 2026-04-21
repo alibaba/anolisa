@@ -18,6 +18,10 @@ pub struct TraceCommand {
     #[structopt(long, default_value = "/tmp/agentsight.pid")]
     pub pid_file: String,
 
+    /// Enable file watch probe (monitors .jsonl file opens from traced processes)
+    #[structopt(long)]
+    pub enable_filewatch: bool,
+
     // --- SLS (Aliyun Log Service) Configuration ---
     /// SLS endpoint (e.g. cn-hangzhou.log.aliyuncs.com)
     #[structopt(long, env = "SLS_ENDPOINT")]
@@ -74,6 +78,7 @@ impl TraceCommand {
         // Build AgentSight config (empty target_pids means trace all processes)
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
+            .set_enable_filewatch(self.enable_filewatch)
             .set_sls_endpoint(self.sls_endpoint.clone())
             .set_sls_access_key(self.sls_access_key_id.clone(), self.sls_access_key_secret.clone())
             .set_sls_project(self.sls_project.clone())

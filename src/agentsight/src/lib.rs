@@ -82,6 +82,9 @@ pub use storage::{
 // Re-export unified entry point
 pub use unified::{AgentSight, ProcessResult};
 
+// Re-export file watch types
+pub use probes::FileWatchEvent;
+
 // Re-export discovery types
 pub use discovery::{AgentInfo, AgentMatcher, AgentScanner, DiscoveredAgent, ProcessContext, known_agents};
 

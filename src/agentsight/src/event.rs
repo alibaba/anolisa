@@ -1,6 +1,7 @@
 use crate::probes::proctrace::VariableEvent as ProcEvent;
 use crate::probes::sslsniff::SslEvent;
 use crate::probes::procmon::Event as ProcMonEvent;
+use crate::probes::filewatch::FileWatchEvent;
 
 /// Unified event type that can represent any probe event
 ///
@@ -10,6 +11,7 @@ pub enum Event {
     Ssl(SslEvent),
     Proc(ProcEvent),
     ProcMon(ProcMonEvent),
+    FileWatch(FileWatchEvent),
 }
 
 impl Event {
@@ -19,6 +21,7 @@ impl Event {
             Event::Ssl(_) => "Ssl",
             Event::Proc(_) => "Proc",
             Event::ProcMon(_) => "ProcMon",
+            Event::FileWatch(_) => "FileWatch",
         }
     }
 }
@@ -37,6 +40,11 @@ impl Event {
     /// Check if this is a procmon event
     pub fn is_procmon(&self) -> bool {
         matches!(self, Event::ProcMon(_))
+    }
+
+    /// Check if this is a file watch event
+    pub fn is_filewatch(&self) -> bool {
+        matches!(self, Event::FileWatch(_))
     }
 
     /// Get SSL event if this is one
@@ -59,6 +67,14 @@ impl Event {
     pub fn as_procmon(&self) -> Option<&ProcMonEvent> {
         match self {
             Event::ProcMon(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Get file watch event if this is one
+    pub fn as_filewatch(&self) -> Option<&FileWatchEvent> {
+        match self {
+            Event::FileWatch(e) => Some(e),
             _ => None,
         }
     }

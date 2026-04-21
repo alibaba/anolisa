@@ -19,6 +19,7 @@ use super::proctrace::{ProcTrace, VariableEvent, ProcEventHeader};
 use super::sslsniff::SslSniff;
 use super::sslsniff::bpf::probe_SSL_data_t as RawSslEvent;
 use super::procmon::{ProcMon, ProcMonEvent};
+use super::filewatch::{FileWatch, RawFileWatchEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -26,6 +27,7 @@ const POLL_TIMEOUT_MS: u64 = 100;
 const EVENT_SOURCE_PROC: u32 = 1;
 const EVENT_SOURCE_SSL: u32 = 2;
 const EVENT_SOURCE_PROCMON: u32 = 3;
+const EVENT_SOURCE_FILEWATCH: u32 = 4;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -41,6 +43,8 @@ pub struct Probes {
     sslsniff: SslSniff,
     /// Process monitor probe (reuses ring buffer)
     procmon: ProcMon,
+    /// File watch probe (reuses traced_processes map and ring buffer, optional)
+    filewatch: Option<FileWatch>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -54,7 +58,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -73,12 +77,23 @@ impl Probes {
         let procmon = ProcMon::new_with_rb(&rb_handle)
             .context("failed to create procmon")?;
 
+        // Optionally create filewatch - it reuses both the traced_processes map and ring buffer
+        let filewatch = if enable_filewatch {
+            let fw = FileWatch::new_with_maps(&map_handle, &rb_handle)
+                .context("failed to create filewatch")?;
+            Some(fw)
+        } else {
+            log::info!("FileWatch probe disabled");
+            None
+        };
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
         Ok(Self {
             proctrace,
             sslsniff,
             procmon,
+            filewatch,
             rb_handle,
             event_tx,
             event_rx,
@@ -91,6 +106,11 @@ impl Probes {
         self.procmon.attach()
             .context("failed to attach procmon")?;
         self.proctrace.attach().context("failed to attach proctrace")?;
+        // Attach filewatch for .jsonl file monitoring (if enabled)
+        if let Some(ref mut fw) = self.filewatch {
+            fw.attach()
+                .context("failed to attach filewatch")?;
+        }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
@@ -115,6 +135,7 @@ impl Probes {
         let proc_min_sz = mem::size_of::<ProcEventHeader>();
         let ssl_event_size = mem::size_of::<RawSslEvent>();
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
+        let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -153,6 +174,14 @@ impl Probes {
                         // Process monitor event
                         if data.len() >= procmon_event_size {
                             super::procmon::Event::from_bytes(data).map(Event::ProcMon)
+                        } else {
+                            None
+                        }
+                    }
+                    EVENT_SOURCE_FILEWATCH => {
+                        // File watch event
+                        if data.len() >= filewatch_event_size {
+                            super::filewatch::FileWatchEvent::from_bytes(data).map(Event::FileWatch)
                         } else {
                             None
                         }

@@ -109,6 +109,7 @@ impl Parser {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
             Event::ProcMon(_) => ParseResult { messages: Vec::new() },
+            Event::FileWatch(_) => ParseResult { messages: Vec::new() },
         }
     }
 

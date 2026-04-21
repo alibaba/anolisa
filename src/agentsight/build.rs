@@ -45,6 +45,10 @@ fn main() {
     // Generate procmon skeleton and bindings
     generate_skeleton(&mut out, "procmon");
     generate_header(&mut out, "procmon");
+
+    // Generate filewatch skeleton and bindings
+    generate_skeleton(&mut out, "filewatch");
+    generate_header(&mut out, "filewatch");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
