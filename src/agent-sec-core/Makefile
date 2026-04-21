@@ -37,10 +37,7 @@ build-sandbox: ## Build linux-sandbox binary
 
 .PHONY: build-cli
 build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
-	cd agent-sec-cli && uv run maturin build --release -i python3.11
-
-.PHONY: build-all
-build-all: build-sandbox build-cli ## Build all components
+	cd agent-sec-cli && uv run maturin build --release -i python3.11 --manylinux off
 
 .PHONY: setup
 setup: ## Install all dependencies (including dev), create .venv
@@ -51,7 +48,7 @@ build-openclaw-plugin: ## Build openclaw-plugin TypeScript sources
 	cd openclaw-plugin && npm install && npm run build
 
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin ## Build all components (used by rpmbuild)
 
 # =============================================================================
 # INSTALL
@@ -75,8 +72,9 @@ install-tool: ## Install sign-skill.sh to PREFIX/bin
 install: install-all ## Install all components (alias for install-all)
 
 .PHONY: install-cli
-install-cli: ## Install agent-sec-cli wheel
-	pip3 install agent-sec-cli/target/wheels/agent_sec_cli-*.whl
+install-cli: ## Install agent-sec-cli wheel (supports DESTDIR for rpmbuild)
+	pip3 install --root=$(DESTDIR) --no-deps --no-cache-dir --prefix=/usr \
+	    agent-sec-cli/target/wheels/agent_sec_cli-*.whl
 
 .PHONY: install-skills
 install-skills: ## Install skill files to SKILL_DIR
@@ -96,8 +94,15 @@ install-openclaw-plugin: ## Install openclaw-plugin to target directory
 	cp -r openclaw-plugin/scripts/* $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)/scripts/
 	chmod 0755 $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)/scripts/*.sh
 
+.PHONY: install-cosh-hook
+install-cosh-hook: ## Install cosh hooks (linux-sandbox + code_scanner_hook)
+	install -d -m 0755 $(DESTDIR)$(PREFIX)/bin
+	install -p -m 0755 linux-sandbox/target/release/linux-sandbox $(DESTDIR)$(PREFIX)/bin/
+	install -d -m 0755 $(DESTDIR)/usr/local/lib/anolisa/cosh_hooks
+	cp -rp cosh_hooks/. $(DESTDIR)/usr/local/lib/anolisa/cosh_hooks/
+
 .PHONY: install-all
-install-all: install-sandbox install-cli install-skills install-tool install-openclaw-plugin ## Install all components
+install-all: install-cli install-cosh-hook install-openclaw-plugin install-skills ## Install all components (used by rpmbuild)
 
 .PHONY: help
 help: ## Show this help message

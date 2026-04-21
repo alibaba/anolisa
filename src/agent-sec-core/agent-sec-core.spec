@@ -8,7 +8,7 @@
 Name:           agent-sec-core
 Version:        0.3.0
 Release:        %{anolis_release}%{?dist}
-Summary:        Agent Security Core Package
+Summary:        Agent Security Core Package (metapackage)
 
 License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
@@ -21,77 +21,108 @@ BuildRequires:  rust >= 1.70
 BuildRequires:  cargo
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
+BuildRequires:  nodejs
+BuildRequires:  npm
 
-# Runtime dependencies
-# asset-verify
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-Requires:       gnupg2 >= 2.0
-Requires:       jq
-Recommends:     python3-pgpy >= 0.5
-
-# sandbox
-Requires:       bubblewrap
-
-# seharden
-# Requires:       loongshield >= 1.1.1
-
+# Metapackage: pull all subpackages
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       agent-sec-cosh-hook = %{version}-%{release}
+Requires:       agent-sec-openclaw-hook = %{version}-%{release}
+Requires:       agent-sec-skills = %{version}-%{release}
 
 %description
 Agent-Sec-Core is an OS-level security baseline and hardening framework for AI Agents.
-It provides system hardening, sandbox isolation, and asset integrity verification,
-suitable for AI Agent platforms such as Agent OS and OpenClaw.
+This metapackage installs all agent-sec-core components including CLI, hooks, and skills.
 
+# =============================================================================
+# Subpackage 1: agent-sec-cli
+# =============================================================================
+%package -n agent-sec-cli
+Summary:        Agent Security CLI tool (Rust + Python native extension)
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-cli
+Agent-sec-cli provides security scanning and hardening CLI commands.
+Built with maturin as a Rust native Python extension.
+
+%files -n agent-sec-cli
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) %{_bindir}/agent-sec-cli
+%{python3_sitearch}/agent_sec_cli/
+%{python3_sitearch}/agent_sec_cli-*.dist-info/
+
+# =============================================================================
+# Subpackage 2: agent-sec-cosh-hook
+# =============================================================================
+%package -n agent-sec-cosh-hook
+Summary:        CoPilot Shell security hooks with linux-sandbox
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       bubblewrap
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-cosh-hook
+Provides code_scanner_hook and linux-sandbox for copilot-shell integration.
+The linux-sandbox binary provides secure sandboxed execution environments.
+
+%files -n agent-sec-cosh-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /usr/local/bin/linux-sandbox
+/usr/local/lib/anolisa/cosh_hooks/
+
+# =============================================================================
+# Subpackage 3: agent-sec-openclaw-hook
+# =============================================================================
+%package -n agent-sec-openclaw-hook
+Summary:        OpenClaw plugin for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       nodejs >= 18
+
+%description -n agent-sec-openclaw-hook
+OpenClaw IDE plugin providing agent security integration.
+Hooks into OpenClaw to perform code scanning before tool execution.
+
+%files -n agent-sec-openclaw-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+/opt/agent-sec/openclaw-plugin/
+
+# =============================================================================
+# Subpackage 4: agent-sec-skills
+# =============================================================================
+%package -n agent-sec-skills
+Summary:        Agent security skill definitions for copilot-shell
+Requires:       agent-sec-cli = %{version}-%{release}
+
+%description -n agent-sec-skills
+Skill reference files and documentation for copilot-shell integration.
+Includes agent-sec-core and code-scanner skill definitions.
+
+%files -n agent-sec-skills
+%defattr(0644,root,root,0755)
+%{_datadir}/anolisa/skills/
+
+# =============================================================================
+# Main package has no files (metapackage)
+# =============================================================================
+%files
+
+# =============================================================================
+# Build & Install
+# =============================================================================
 %prep
 %setup -q
 
 %build
-
-# Build linux-sandbox
-# Note: rust-toolchain.toml version compatibility is handled by rpm-build.sh
-make build-sandbox
-
-# Build agent-sec-cli wheel with maturin (Rust + Python)
-make build-cli
+make build-all
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -d -m 0755 %{buildroot}/usr/local/bin
-install -d -m 0755 $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/references
-
-# Install linux-sandbox binary
-install -p -m 0755 linux-sandbox/target/release/linux-sandbox %{buildroot}/usr/local/bin/
-
-# Install sign-skill.sh tool
-install -p -m 0755 tools/sign-skill.sh %{buildroot}/usr/local/bin/
-
-# Install agent-sec-cli wheel to system Python
-pip3 install --root=$RPM_BUILD_ROOT --no-deps --no-cache-dir --prefix=/usr \
-    agent-sec-cli/target/wheels/agent_sec_cli-*.whl
-
-# Install references files
-cp -rp skill/references/* $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/references/
-
-# Install documentation
-cp skill/SKILL.md $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core/
-
-# Set permissions for skill directory
-find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type d -exec chmod 0755 {} +
-find $RPM_BUILD_ROOT%{_datadir}/anolisa/skills/agent-sec-core -type f -exec chmod 0644 {} +
-
-%files
-%defattr(0644,root,root,0755)
-%attr(0755,root,root) /usr/local/bin/linux-sandbox
-%attr(0755,root,root) /usr/local/bin/sign-skill.sh
-# Python package installed via pip (site-packages + bin entry point)
-%{_bindir}/agent-sec-cli
-%{python3_sitearch}/agent_sec_cli/
-%{python3_sitearch}/agent_sec_cli-*.dist-info/
-# Skill references and documentation for copilot-shell
-%{_datadir}/anolisa/skills/agent-sec-core/
+make install-all DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
-* Mon Apr 14 2026 Xingdong Li <XingDong.Li@linux.alibaba.com> - 0.3.0-1
+* Tue Apr 14 2026 Xingdong Li <XingDong.Li@linux.alibaba.com> - 0.3.0-1
 - Switch agent-sec-cli build to maturin for Rust native extension support
 - Add python3-devel and python3-pip BuildRequires for maturin wheel building
 - Install agent-sec-cli as proper Python wheel with native .so extension

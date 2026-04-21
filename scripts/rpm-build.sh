@@ -198,14 +198,21 @@ build_agent_sec_core() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${pkg_version}"
-    mkdir -p "$pkg_dir"/{skill,linux-sandbox,tools,agent-sec-cli}
+    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh_hooks,openclaw-plugin}
 
-    cp -rp "${SEC_DIR}/skill/"* "$pkg_dir/skill/"
+    # skills: use cp -rp dir/. to include hidden files/directories
+    cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
     cp -rp "${SEC_DIR}/linux-sandbox/"* "$pkg_dir/linux-sandbox/"
     rm -f "$pkg_dir/linux-sandbox/rust-toolchain.toml"
-    cp "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
+    cp -rp "${SEC_DIR}/cosh_hooks/"* "$pkg_dir/cosh_hooks/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
+
+    # openclaw-plugin (exclude node_modules and dev artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='node_modules' \
+        --exclude='.tsbuildinfo' \
+        openclaw-plugin/ | tar -xf - -C "$pkg_dir/"
 
     # Include agent-sec-cli source for maturin wheel build
     # Exclude development artifacts (.venv, target, __pycache__, .egg-info, dist)

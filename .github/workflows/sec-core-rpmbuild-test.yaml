@@ -1,0 +1,63 @@
+name: sec-core-rpmbuild-test
+
+on:
+  schedule:
+    - cron: '0 14 * * *'  # 北京时间每天 22:00
+  pull_request:
+    branches:
+      - 'release/agent-sec-core/**'
+  workflow_dispatch:       # 支持手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  build-rpm:
+    name: Build agent-sec-core RPM
+    runs-on: ubuntu-22.04
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Configure mirrors and install dependencies
+        run: |
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          dnf install -y tar git rpm-build gcc make clang llvm \
+                         openssl-devel libseccomp-devel bubblewrap \
+                         python3-pip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build RPM
+        run: ./scripts/rpm-build.sh agent-sec-core
+
+      - name: List RPM contents
+        run: |
+          echo "=== RPM files built ==="
+          find scripts/rpmbuild/RPMS -name '*.rpm' | sort
+          echo ""
+          for rpm in scripts/rpmbuild/RPMS/**/*.rpm; do
+            echo "========================================"
+            echo ">>> $rpm"
+            echo "========================================"
+            rpm -qlvp "$rpm"
+            echo ""
+          done
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-core-rpms-${{ github.run_number }}-${{ github.sha }}
+          path: scripts/rpmbuild/RPMS/**/*.rpm
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
