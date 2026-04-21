@@ -30,12 +30,13 @@ use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
 use crate::parser::Parser;
-use crate::probes::{Probes, ProbesPoller, FileWatchEvent};
+use crate::probes::{Probes, ProbesPoller, FileWatchEvent, FileWriteEvent};
 use crate::storage::{
     SqliteConfig, Storage, StorageBackend, TimePeriod, TokenQuery, TokenQueryResult,
 };
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::tokenizer::LlmTokenizer;
+use crate::response_map::ResponseSessionMapper;
 
 /// Main AgentSight struct for tracing AI agent activity
 ///
@@ -71,6 +72,8 @@ pub struct AgentSight {
     event_count: u64,
     /// File watch callback for .jsonl file open events
     filewatch_callback: Option<Box<dyn Fn(FileWatchEvent) + Send + 'static>>,
+    /// ResponseId → SessionId mapper for FileWrite events
+    response_mapper: ResponseSessionMapper,
 }
 
 /// Result of processing an event
@@ -197,6 +200,7 @@ impl AgentSight {
             running: Arc::new(AtomicBool::new(true)),
             event_count: 0,
             filewatch_callback: None,
+            response_mapper: ResponseSessionMapper::new(),
         })
     }
 
@@ -277,6 +281,12 @@ impl AgentSight {
             return None;
         }
 
+        // Handle FileWrite events via callback (not through the pipeline)
+        if let Event::FileWrite(ref fw_event) = event {
+            self.handle_filewrite_event(fw_event);
+            return None;
+        }
+
         // Parse the event
         let result = self.parser.parse_event(event);
 
@@ -351,6 +361,13 @@ impl AgentSight {
     {
         self.filewatch_callback = Some(Box::new(callback));
     }
+
+    /// Handle FileWrite event: extract responseId→sessionId mapping, then call callback
+    fn handle_filewrite_event(&mut self, event: &FileWriteEvent) {
+        log::debug!("FileWrite: pid={} file={} size={}", event.pid, event.filename, event.write_size);
+        self.response_mapper.process_filewrite(event);
+    }
+
 
     /// Run the event loop (blocking)
     pub fn run(&mut self) -> Result<u64> {

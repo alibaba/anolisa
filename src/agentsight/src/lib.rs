@@ -40,6 +40,7 @@ pub mod health;
 pub mod tokenizer;
 pub mod genai;
 pub mod atif;
+pub mod response_map;
 #[cfg(feature = "server")]
 pub mod server;
 mod unified;
@@ -84,6 +85,9 @@ pub use unified::{AgentSight, ProcessResult};
 
 // Re-export file watch types
 pub use probes::FileWatchEvent;
+
+// Re-export response mapping
+pub use response_map::ResponseSessionMapper;
 
 // Re-export discovery types
 pub use discovery::{AgentInfo, AgentMatcher, AgentScanner, DiscoveredAgent, ProcessContext, known_agents};

@@ -110,6 +110,7 @@ impl Parser {
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
             Event::ProcMon(_) => ParseResult { messages: Vec::new() },
             Event::FileWatch(_) => ParseResult { messages: Vec::new() },
+            Event::FileWrite(_) => ParseResult { messages: Vec::new() },
         }
     }
 

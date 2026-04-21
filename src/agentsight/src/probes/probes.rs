@@ -20,6 +20,7 @@ use super::sslsniff::SslSniff;
 use super::sslsniff::bpf::probe_SSL_data_t as RawSslEvent;
 use super::procmon::{ProcMon, ProcMonEvent};
 use super::filewatch::{FileWatch, RawFileWatchEvent};
+use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -28,6 +29,7 @@ const EVENT_SOURCE_PROC: u32 = 1;
 const EVENT_SOURCE_SSL: u32 = 2;
 const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
+const EVENT_SOURCE_FILEWRITE: u32 = 5;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -45,6 +47,8 @@ pub struct Probes {
     procmon: ProcMon,
     /// File watch probe (reuses traced_processes map and ring buffer, optional)
     filewatch: Option<FileWatch>,
+    /// File write probe (reuses traced_processes map and ring buffer, always enabled)
+    filewrite: FileWriteProbe,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -87,6 +91,10 @@ impl Probes {
             None
         };
 
+        // Create filewrite - it reuses both the traced_processes map and ring buffer (always enabled)
+        let filewrite = FileWriteProbe::new_with_maps(&map_handle, &rb_handle)
+            .context("failed to create filewrite")?;
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
         Ok(Self {
@@ -94,6 +102,7 @@ impl Probes {
             sslsniff,
             procmon,
             filewatch,
+            filewrite,
             rb_handle,
             event_tx,
             event_rx,
@@ -111,6 +120,9 @@ impl Probes {
             fw.attach()
                 .context("failed to attach filewatch")?;
         }
+        // Attach filewrite for JSON write monitoring (always enabled)
+        self.filewrite.attach()
+            .context("failed to attach filewrite")?;
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
@@ -136,6 +148,7 @@ impl Probes {
         let ssl_event_size = mem::size_of::<RawSslEvent>();
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
+        let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -182,6 +195,14 @@ impl Probes {
                         // File watch event
                         if data.len() >= filewatch_event_size {
                             super::filewatch::FileWatchEvent::from_bytes(data).map(Event::FileWatch)
+                        } else {
+                            None
+                        }
+                    }
+                    EVENT_SOURCE_FILEWRITE => {
+                        // File write event (JSON content)
+                        if data.len() >= filewrite_event_size {
+                            super::filewrite::FileWriteEvent::from_bytes(data).map(Event::FileWrite)
                         } else {
                             None
                         }

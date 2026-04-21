@@ -49,6 +49,10 @@ fn main() {
     // Generate filewatch skeleton and bindings
     generate_skeleton(&mut out, "filewatch");
     generate_header(&mut out, "filewatch");
+
+    // Generate filewrite skeleton and bindings
+    generate_skeleton(&mut out, "filewrite");
+    generate_header(&mut out, "filewrite");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
