@@ -45,6 +45,7 @@ class SkillLedgerBackend(BaseBackend):
             NativeEd25519Backend,
         )
         from agent_sec_cli.skill_ledger.signing.key_manager import (
+            archive_current_public_key,
             ensure_keys_not_exist,
         )
 
@@ -52,6 +53,18 @@ class SkillLedgerBackend(BaseBackend):
             ensure_keys_not_exist(force=force)
         except Exception as exc:
             return ActionResult(success=False, error=str(exc), exit_code=1)
+
+        # Archive the old public key into the keyring so that existing
+        # signatures remain verifiable after key rotation.
+        if force:
+            try:
+                archive_current_public_key()
+            except OSError as exc:
+                return ActionResult(
+                    success=False,
+                    error=f"Failed to archive public key before rotation: {exc}",
+                    exit_code=1,
+                )
 
         backend = NativeEd25519Backend()
         try:

@@ -10,6 +10,7 @@ All key material and config files are isolated via ``XDG_DATA_HOME`` and
 Prerequisites: Python 3.11, uv
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -874,6 +875,323 @@ def test_certify_empty_skill_dir(ws: Workspace):
     assert "scanStatus" in out
 
 
+# ── Group 9: SKILL.md contract assertions ────────────────────────────────
+#
+# These tests verify that the exact CLI commands, flags, output fields, and
+# path conventions referenced in SKILL.md work as documented.  They form the
+# contract between the Skill definition (prompt) and the CLI implementation.
+
+
+def test_contract_help_available(ws: Workspace):
+    """Step 0.1: `agent-sec-cli skill-ledger --help` → exit 0."""
+    r = run_skill_ledger(["--help"], env_extra=ws.env())
+    assert r.returncode == 0, f"--help returned {r.returncode}: {r.stderr}"
+    assert (
+        "skill-ledger" in r.stdout.lower()
+    ), f"Expected 'skill-ledger' in help output: {r.stdout[:200]}"
+
+
+def test_contract_init_keys_empty_passphrase_env(ws: Workspace):
+    """Step 0.2: SKILL_LEDGER_PASSPHRASE=\"\" → passphrase-free init.
+
+    This is the exact invocation SKILL.md uses for first-time auto-init.
+    """
+    alt_data = ws.root / "contract_keys"
+    alt_data.mkdir()
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "SKILL_LEDGER_PASSPHRASE": "",  # empty string, NOT absent
+        }
+    )
+    r = run_skill_ledger(["init-keys"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert (
+        out.get("encrypted") is False
+    ), f"Empty passphrase should produce unencrypted keys, got {out}"
+
+    # Step 0.2 also checks: ls ~/.local/share/skill-ledger/key.pub
+    key_pub = Path(alt_data) / "skill-ledger" / "key.pub"
+    assert key_pub.exists(), f"key.pub not at expected path: {key_pub}"
+
+
+def test_contract_check_output_schema(ws: Workspace):
+    """Step 0.4: check output is JSON with `status` field for every outcome.
+
+    SKILL.md parses `status` from JSON output to build the triage table.
+    This test verifies the contract across all reachable statuses.
+    """
+    env = ws.env()
+
+    # status: none (fresh skill)
+    skill_none = make_skill(ws.skills_dir, "schema-none", {"a.txt": "a"})
+    r = run_skill_ledger(["check", str(skill_none)], env_extra=env)
+    out = parse_json_output(r.stdout)
+    assert "status" in out, f"Missing 'status' field for none: {out}"
+    assert out["status"] == "none"
+
+    # status: pass (after certify)
+    findings = write_findings_file(
+        ws.fixtures,
+        "schema-p.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill_none), "--findings", str(findings)], env_extra=env
+    )
+    r = run_skill_ledger(["check", str(skill_none)], env_extra=env)
+    out = parse_json_output(r.stdout)
+    assert "status" in out, f"Missing 'status' field for pass: {out}"
+    assert out["status"] == "pass"
+
+    # status: drifted (file changed) — also verify diff fields
+    (skill_none / "new.txt").write_text("new")
+    r = run_skill_ledger(["check", str(skill_none)], env_extra=env)
+    out = parse_json_output(r.stdout)
+    assert "status" in out, f"Missing 'status' field for drifted: {out}"
+    assert out["status"] == "drifted"
+    for diff_key in ("added", "removed", "modified"):
+        assert (
+            diff_key in out
+        ), f"drifted output missing '{diff_key}' — SKILL.md Step 0.4 needs this: {out}"
+
+
+def test_contract_certify_explicit_scanner_flags(ws: Workspace):
+    """Phase 2.1: certify with explicit --scanner and --scanner-version flags.
+
+    SKILL.md invocation:
+      agent-sec-cli skill-ledger certify <DIR> \\
+        --findings ... --scanner skill-vetter --scanner-version 0.1.0
+    """
+    skill = make_skill(ws.skills_dir, "contract-flags", {"run.sh": "echo hi"})
+    env = ws.env()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "flags.json",
+        [{"rule": "r1", "level": "pass", "message": "ok"}],
+    )
+    r = run_skill_ledger(
+        [
+            "certify",
+            str(skill),
+            "--findings",
+            str(findings),
+            "--scanner",
+            "skill-vetter",
+            "--scanner-version",
+            "0.1.0",
+        ],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out.get("scanStatus") == "pass"
+
+
+def test_contract_certify_output_fields(ws: Workspace):
+    """Phase 2.2: certify output JSON contains versionId and scanStatus.
+
+    SKILL.md parses exactly these two fields to build the final summary table.
+    """
+    skill = make_skill(ws.skills_dir, "contract-output", {"data.py": "x = 1"})
+    env = ws.env()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "out.json",
+        [{"rule": "r1", "level": "warn", "message": "caution"}],
+    )
+    r = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert (
+        "versionId" in out
+    ), f"Missing 'versionId' — SKILL.md Phase 2.2 needs this: {out}"
+    assert (
+        "scanStatus" in out
+    ), f"Missing 'scanStatus' — SKILL.md Phase 2.2 needs this: {out}"
+
+    # versionId format: v + 6 digits (e.g. v000001)
+    vid = out["versionId"]
+    assert len(vid) == 7, f"versionId length should be 7 (vNNNNNN), got '{vid}'"
+    assert vid[0] == "v", f"versionId should start with 'v', got '{vid}'"
+    assert vid[1:].isdigit(), f"versionId suffix should be digits, got '{vid}'"
+
+    # scanStatus must be one of the 4 documented values
+    assert out["scanStatus"] in (
+        "pass",
+        "warn",
+        "deny",
+        "none",
+    ), f"Unexpected scanStatus '{out['scanStatus']}' — SKILL.md documents pass/warn/deny/none"
+
+
+def test_contract_manifest_path(ws: Workspace):
+    """Phase 2.3: after certify, manifest exists at <SKILL_DIR>/.skill-meta/latest.json."""
+    skill = make_skill(ws.skills_dir, "contract-path", {"f.txt": "content"})
+    env = ws.env()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "path.json",
+        [{"rule": "r1", "level": "pass", "message": "ok"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)],
+        env_extra=env,
+    )
+
+    latest = skill / ".skill-meta" / "latest.json"
+    assert latest.exists(), (
+        f"Manifest not at expected path — SKILL.md Phase 2.3 references "
+        f"<SKILL_DIR>/.skill-meta/latest.json: {list(skill.rglob('*'))}"
+    )
+
+    # Verify it's valid JSON with expected fields
+    data = json.loads(latest.read_text())
+    assert "versionId" in data
+    assert "fileHashes" in data
+    assert "scanStatus" in data
+    assert "signature" in data
+
+
+def test_contract_check_status_values_complete(ws: Workspace):
+    """SKILL.md Step 0.4 triage table lists 6 statuses. Verify all are reachable.
+
+    Statuses: none, pass, drifted, warn, deny, tampered.
+    """
+    env = ws.env()
+    observed: set[str] = set()
+
+    # none
+    s = make_skill(ws.skills_dir, "sv-none", {"x.txt": "x"})
+    r = run_skill_ledger(["check", str(s)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    # pass
+    fp = write_findings_file(
+        ws.fixtures,
+        "sv-pass.json",
+        [{"rule": "r", "level": "pass", "message": "ok"}],
+    )
+    run_skill_ledger(["certify", str(s), "--findings", str(fp)], env_extra=env)
+    r = run_skill_ledger(["check", str(s)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    # drifted
+    (s / "x.txt").write_text("changed")
+    r = run_skill_ledger(["check", str(s)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    # warn
+    sw = make_skill(ws.skills_dir, "sv-warn", {"w.txt": "w"})
+    fpw = write_findings_file(
+        ws.fixtures,
+        "sv-warn.json",
+        [{"rule": "r", "level": "warn", "message": "w"}],
+    )
+    run_skill_ledger(["certify", str(sw), "--findings", str(fpw)], env_extra=env)
+    r = run_skill_ledger(["check", str(sw)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    # deny
+    sd = make_skill(ws.skills_dir, "sv-deny", {"d.txt": "d"})
+    fpd = write_findings_file(
+        ws.fixtures,
+        "sv-deny.json",
+        [{"rule": "r", "level": "deny", "message": "d"}],
+    )
+    run_skill_ledger(["certify", str(sd), "--findings", str(fpd)], env_extra=env)
+    r = run_skill_ledger(["check", str(sd)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    # tampered
+    st = make_skill(ws.skills_dir, "sv-tamper", {"t.txt": "t"})
+    fpt = write_findings_file(
+        ws.fixtures,
+        "sv-t.json",
+        [{"rule": "r", "level": "pass", "message": "ok"}],
+    )
+    run_skill_ledger(["certify", str(st), "--findings", str(fpt)], env_extra=env)
+    latest = st / ".skill-meta" / "latest.json"
+    data = json.loads(latest.read_text())
+    data["scanStatus"] = "deny"  # tamper without re-hashing
+    latest.write_text(json.dumps(data))
+    r = run_skill_ledger(["check", str(st)], env_extra=env)
+    observed.add(parse_json_output(r.stdout)["status"])
+
+    expected = {"none", "pass", "drifted", "warn", "deny", "tampered"}
+    assert observed == expected, (
+        f"Not all SKILL.md triage statuses are reachable.\n"
+        f"  Expected: {expected}\n  Observed: {observed}\n"
+        f"  Missing:  {expected - observed}"
+    )
+
+
+# ── Group 10: Key rotation ────────────────────────────────────────────────
+
+
+def test_key_rotation_old_sigs_verifiable(ws: Workspace):
+    """After init-keys --force, old signatures must still pass `check`.
+
+    The old public key should be archived into the keyring so that
+    `verify()` can fall back to it for manifests signed with the
+    previous key.
+    """
+    env = ws.env()
+
+    # --- Sign a skill with the *original* key ---
+    s = make_skill(ws.skills_dir, "rotate-test", {"a.txt": "a"})
+    fp = write_findings_file(
+        ws.fixtures,
+        "rotate.json",
+        [{"rule": "r", "level": "pass", "message": "ok"}],
+    )
+    r = run_skill_ledger(["certify", str(s), "--findings", str(fp)], env_extra=env)
+    assert r.returncode == 0, f"certify failed: {r.stderr}"
+
+    # Capture the old key fingerprint from the public key file
+    pub_path = Path(env["XDG_DATA_HOME"]) / "skill-ledger" / "key.pub"
+    old_fp = "sha256:" + hashlib.sha256(pub_path.read_bytes()).hexdigest()
+
+    # check passes with original key
+    r = run_skill_ledger(["check", str(s)], env_extra=env)
+    out = parse_json_output(r.stdout)
+    assert out["status"] == "pass", f"Expected pass before rotation, got {out}"
+
+    # --- Rotate the key ---
+    r = run_skill_ledger(["init-keys", "--force"], env_extra=env)
+    assert r.returncode == 0, f"init-keys --force failed: {r.stderr}"
+    new_fp = parse_json_output(r.stdout)["fingerprint"]
+    assert new_fp != old_fp, (
+        f"Key rotation must produce a different fingerprint: "
+        f"old={old_fp}, new={new_fp}"
+    )
+    assert new_fp.startswith("sha256:"), f"Fingerprint format unexpected: {new_fp}"
+
+    # --- Old manifest must still verify via keyring fallback ---
+    r = run_skill_ledger(["check", str(s)], env_extra=env)
+    out = parse_json_output(r.stdout)
+    # The skill files haven't changed, so status should NOT be tampered.
+    # It may be 'pass' (keyring verified) or 'drifted' if something else
+    # changed, but it must NOT be 'tampered'.
+    assert out["status"] != "tampered", (
+        f"Old signature should still verify after key rotation, "
+        f"but got status={out['status']}. Keyring archival may be broken."
+    )
+    # Specifically expect 'pass' since files are unchanged:
+    assert out["status"] == "pass", (
+        f"Expected 'pass' for unchanged skill after key rotation, "
+        f"got '{out['status']}'"
+    )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 
@@ -984,6 +1302,42 @@ def main():
         test("set-policy stub", lambda: test_set_policy_stub(ws))
         test("rotate-keys stub", lambda: test_rotate_keys_stub(ws))
         test("Certify: empty skill dir", lambda: test_certify_empty_skill_dir(ws))
+
+        # Group 9: SKILL.md contract assertions
+        test(
+            "Contract: --help available",
+            lambda: test_contract_help_available(ws),
+        )
+        test(
+            "Contract: empty passphrase env → unencrypted",
+            lambda: test_contract_init_keys_empty_passphrase_env(ws),
+        )
+        test(
+            "Contract: check output always has status",
+            lambda: test_contract_check_output_schema(ws),
+        )
+        test(
+            "Contract: certify --scanner --scanner-version flags",
+            lambda: test_contract_certify_explicit_scanner_flags(ws),
+        )
+        test(
+            "Contract: certify output has versionId + scanStatus",
+            lambda: test_contract_certify_output_fields(ws),
+        )
+        test(
+            "Contract: manifest at .skill-meta/latest.json",
+            lambda: test_contract_manifest_path(ws),
+        )
+        test(
+            "Contract: all 6 triage statuses reachable",
+            lambda: test_contract_check_status_values_complete(ws),
+        )
+
+        # Group 10: Key rotation
+        test(
+            "Key rotation: old signatures still verifiable",
+            lambda: test_key_rotation_old_sigs_verifiable(ws),
+        )
 
     finally:
         ws.cleanup()

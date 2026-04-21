@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import logging
 import os
 
 from agent_sec_cli.skill_ledger.errors import (
@@ -31,6 +32,8 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Key encryption constants (design doc §1)
@@ -140,6 +143,12 @@ class NativeEd25519Backend(SigningBackend):
         else:
             key_bytes = raw_private  # raw 32-byte seed
             encrypted = False
+            logger.warning(
+                "Private key is stored WITHOUT passphrase encryption. "
+                "Key file security relies on filesystem permissions (mode 0600). "
+                "Run 'agent-sec-cli skill-ledger init-keys --force --passphrase' "
+                "to add passphrase protection."
+            )
 
         enc_path = write_key_enc(key_bytes)
         pub_path = write_key_pub(raw_public)

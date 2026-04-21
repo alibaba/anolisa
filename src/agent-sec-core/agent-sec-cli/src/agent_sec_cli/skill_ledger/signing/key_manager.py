@@ -1,6 +1,7 @@
 """Key file I/O, XDG path resolution, and passphrase management."""
 
 import getpass
+import hashlib
 import os
 from pathlib import Path
 
@@ -91,6 +92,35 @@ def read_key_pub() -> bytes:
     if not path.is_file():
         raise KeyNotFoundError(str(path))
     return path.read_bytes()
+
+
+def archive_current_public_key() -> Path | None:
+    """Copy the current ``key.pub`` into the keyring directory.
+
+    The archived file is named ``<sha256-fingerprint>.pub`` so that
+    :func:`load_keyring_public_keys` can find it during signature
+    verification after a key rotation (``init-keys --force``).
+
+    Returns the keyring path written, or ``None`` if no public key exists
+    to archive.
+    """
+    pub = key_pub_path()
+    if not pub.is_file():
+        return None
+
+    raw_public = pub.read_bytes()
+    fp_hex = hashlib.sha256(raw_public).hexdigest()
+    dest_name = f"{fp_hex}.pub"
+
+    kdir = keyring_dir()
+    dest = kdir / dest_name
+    if dest.is_file():
+        return dest  # already archived (idempotent)
+
+    kdir.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw_public)
+    dest.chmod(0o644)
+    return dest
 
 
 def load_keyring_public_keys() -> list[bytes]:
