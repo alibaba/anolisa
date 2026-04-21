@@ -3,8 +3,7 @@ import { testCapability } from "./test-harness.js";
 import { toolGate } from "../src/capabilities/tool-gate.js";
 import { codeScan } from "../src/capabilities/code-scan.js";
 import { inboundFilter } from "../src/capabilities/inbound-filter.js";
-import { promptAnalyzer } from "../src/capabilities/prompt-analyzer.js";
-import { promptGuard } from "../src/capabilities/prompt-guard.js";
+import { promptScan } from "../src/capabilities/prompt-scan.js";
 import { llmAudit } from "../src/capabilities/llm-audit.js";
 
 // 每个 hook 的 mock 事件（字段与真实类型一致）
@@ -57,7 +56,7 @@ const mockCtx: Record<string, Record<string, unknown>> = {
   },
 };
 
-const caps = [toolGate, codeScan, inboundFilter, promptAnalyzer, promptGuard, llmAudit];
+const caps = [toolGate, codeScan, inboundFilter, promptScan, llmAudit];
 
 console.log("=== Agent-Sec Smoke Test ===");
 console.log(`Mode: ${process.env.AGENT_SEC_LIVE ? "LIVE (real CLI)" : "MOCK (no CLI needed)"}\n`);

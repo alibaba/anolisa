@@ -4,16 +4,14 @@ import type { SecurityCapability } from "./types.js";
 import { toolGate } from "./capabilities/tool-gate.js";
 import { codeScan } from "./capabilities/code-scan.js";
 import { inboundFilter } from "./capabilities/inbound-filter.js";
-import { promptAnalyzer } from "./capabilities/prompt-analyzer.js";
-import { promptGuard } from "./capabilities/prompt-guard.js";
+import { promptScan } from "./capabilities/prompt-scan.js";
 import { llmAudit } from "./capabilities/llm-audit.js";
 
 const capabilities: SecurityCapability[] = [
   toolGate,
   codeScan,
   inboundFilter,
-  promptAnalyzer,
-  promptGuard,
+  promptScan,
   llmAudit,
 ];
 
