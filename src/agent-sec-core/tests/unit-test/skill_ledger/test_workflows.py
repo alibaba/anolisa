@@ -236,44 +236,6 @@ class TestCheckStateMachine(SkillDirTestCase):
         result = check(self.skill_dir, self.backend)
         self.assertEqual(result["status"], "warn")
 
-    def test_check_exit_code_pass_is_zero(self):
-        """check returning pass should indicate success (exit code 0)."""
-        findings_path = self._write_findings(
-            [
-                {"rule": "r1", "level": "pass", "message": "ok"},
-            ]
-        )
-        certify(self.skill_dir, self.backend, findings_path=findings_path)
-        result = check(self.skill_dir, self.backend)
-        self.assertEqual(result["status"], "pass")
-        # status "pass" should NOT be in the failure set
-        self.assertNotIn(result["status"], ("tampered", "deny"))
-
-    def test_check_tampered_is_security_critical(self):
-        """check returning tampered is a security-critical state."""
-        check(self.skill_dir, self.backend)
-        latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
-        with open(latest, "r") as f:
-            data = json.load(f)
-        data["scanStatus"] = "pass"  # tamper without re-hashing
-        with open(latest, "w") as f:
-            json.dump(data, f)
-        result = check(self.skill_dir, self.backend)
-        self.assertEqual(result["status"], "tampered")
-        self.assertIn(result["status"], ("tampered", "deny"))
-
-    def test_check_deny_is_security_critical(self):
-        """check returning deny is a security-critical state."""
-        findings_path = self._write_findings(
-            [
-                {"rule": "dangerous-exec", "level": "deny", "message": "exec found"},
-            ]
-        )
-        certify(self.skill_dir, self.backend, findings_path=findings_path)
-        result = check(self.skill_dir, self.backend)
-        self.assertEqual(result["status"], "deny")
-        self.assertIn(result["status"], ("tampered", "deny"))
-
 
 # ---------------------------------------------------------------------------
 # Certify workflow

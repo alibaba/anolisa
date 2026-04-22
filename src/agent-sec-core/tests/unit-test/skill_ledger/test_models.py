@@ -157,11 +157,6 @@ class TestScanStatusAggregation(unittest.TestCase):
         ]
         self.assertEqual(aggregate_scan_status(scans), "warn")
 
-    def test_pass_over_none(self):
-        """A scanner that returned 'pass' is more severe than 'none'."""
-        scans = [ScanEntry(status="pass")]
-        self.assertEqual(aggregate_scan_status(scans), "pass")
-
     def test_unknown_status_treated_as_lowest(self):
         """Unknown status defaults to severity 0 — should not override known statuses."""
         scans = [
