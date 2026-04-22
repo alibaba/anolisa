@@ -54,14 +54,8 @@ export const promptScan: SecurityCapability = {
         }
 
         if (verdict === "warn") {
-          api.logger.info(`[prompt-scan] ⚠️ WARN — requiring user approval`);
-          return {
-            requireApproval: {
-              title: "Prompt Scanner Security Warning",
-              description: msg,
-              severity: "warning" as const,
-            },
-          };
+          api.logger.info(`[prompt-scan] ⚠️ WARN — passing user prompt with warning`);
+          return { handled: false, text: `[Security Warning] ${msg}` };
         }
 
         return undefined;
