@@ -54,7 +54,9 @@ export const Footer: React.FC = () => {
 
   // Hide "? for shortcuts" when a custom status line is active (it already
   // occupies the top row, so the hint is redundant). Matches upstream behavior.
-  const suppressHint = !!statusLineLines;
+  // Also hide when there's text in the input box (original behavior)
+  const suppressHint =
+    !!statusLineLines || (uiState.buffer?.text?.length ?? 0) > 0;
 
   // Left bottom row: high-priority messages > approval mode > hint.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
