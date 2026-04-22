@@ -24,7 +24,7 @@ See each component's README for detailed documentation.
 
 ```bash
 # Install all components via RPM
-sudo yum install copilot-shell agent-sec-core agentsight tokenless anolisa-skills
+sudo yum install copilot-shell agent-sec-core agentsight tokenless os-skills
 
 # Launch Copilot Shell
 cosh

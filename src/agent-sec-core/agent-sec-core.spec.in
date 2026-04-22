@@ -6,7 +6,7 @@
 %undefine __brp_mangle_shebangs
 
 Name:           agent-sec-core
-Version:        0.0.8
+Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        Agent Security Core Package
 

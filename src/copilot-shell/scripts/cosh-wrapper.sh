@@ -1,9 +1,8 @@
 #!/bin/bash
 # copilot-shell wrapper — locates Node.js and launches cli.js
-# @@LIBDIR@@ and @@DATADIR@@ are replaced at install time by `make install`.
+# @@LIBDIR@@ is replaced at install time by `make install`.
 
 LIBDIR="@@LIBDIR@@"
-export COSH_DATA_DIR="@@DATADIR@@"
 
 # ── Resolve Node.js when not already in PATH (e.g. nvm-managed installs) ──
 if ! command -v node >/dev/null 2>&1; then

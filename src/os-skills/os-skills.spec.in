@@ -1,6 +1,6 @@
 %undefine __brp_mangle_shebangs
 
-Name:           anolisa-skills
+Name:           os-skills
 Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        OS Skill for ANOLISA Agentic OS

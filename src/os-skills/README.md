@@ -109,7 +109,7 @@ Or install from a local path:
 ### RPM
 
 ```bash
-sudo yum install anolisa-skills
+sudo yum install os-skills
 ```
 
 Skills are installed to `/usr/share/anolisa/skills/` and auto-discovered by Copilot Shell.

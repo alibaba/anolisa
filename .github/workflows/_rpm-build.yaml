@@ -1,0 +1,156 @@
+name: RPM Build (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: "Component to build (copilot-shell, agent-sec-core, agentsight, os-skills)"
+        required: true
+        type: string
+      version:
+        description: "Version string (e.g. 1.0.0 or 1.0.0~nightly.15.abc1234)"
+        required: true
+        type: string
+      arch:
+        description: "Target architecture (amd64 or arm64)"
+        required: true
+        type: string
+      source-artifact:
+        description: "Name of the source archive artifact to download"
+        required: true
+        type: string
+      vendor-artifact:
+        description: "Name of the vendor archive artifact to download (leave empty if not needed)"
+        required: false
+        type: string
+        default: ""
+      artifact-suffix:
+        description: "Suffix for the output RPM artifact name"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-rpm:
+    name: "Build"
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Fix repo mirror
+        run: sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y rpm-build rpmdevtools dnf-plugins-core tar gzip \
+            make gcc gcc-c++ findutils sed coreutils
+
+          # Component-specific dependencies
+          case "${{ inputs.component }}" in
+            copilot-shell)
+              dnf install -y nodejs npm
+              ;;
+            agent-sec-core)
+              dnf install -y rust cargo openssl-devel
+              ;;
+            agentsight)
+              dnf install -y rust cargo clang-devel elfutils-libelf-devel zlib-devel
+              ;;
+            os-skills)
+              # noarch, no extra build deps
+              ;;
+          esac
+
+      - name: Setup rpmbuild tree
+        run: rpmdev-setuptree
+
+      - name: Download source archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.source-artifact }}
+          path: /tmp/sources/
+
+      - name: Download vendor archive
+        if: inputs.vendor-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.vendor-artifact }}
+          path: /tmp/vendor/
+
+      - name: Prepare source and spec
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ inputs.version }}"
+          COMPONENT="${{ inputs.component }}"
+
+          # Find the source tarball
+          SOURCE_TAR=$(find /tmp/sources/ -name "*.tar.gz" | head -1)
+          if [ -z "$SOURCE_TAR" ]; then
+            echo "ERROR: No source tarball found"
+            exit 1
+          fi
+
+          # Rename tarball to match RPM spec Source0: %{name}-%{version}.tar.gz
+          # (strip artifact suffix like .nightly from the filename)
+          EXPECTED_TAR="${COMPONENT}-${VERSION}.tar.gz"
+          cp "$SOURCE_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_TAR}"
+
+          # Copy vendor tarball if present
+          if [ -d "/tmp/vendor/" ]; then
+            VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1)
+            if [ -n "$VENDOR_TAR" ]; then
+              cp "$VENDOR_TAR" ~/rpmbuild/SOURCES/
+            fi
+          fi
+
+          # Extract source to get .spec.in
+          EXTRACT_DIR=$(mktemp -d)
+          tar -xzf "$SOURCE_TAR" -C "$EXTRACT_DIR"
+
+          # Find and process spec template
+          SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
+          if [ -n "$SPEC_IN" ]; then
+            SPEC_OUT="${SPEC_IN%.in}"
+            sed "s/@VERSION@/${VERSION}/g" "$SPEC_IN" > "$SPEC_OUT"
+            SPEC_FILE="$SPEC_OUT"
+          else
+            # Fallback: look for plain .spec
+            SPEC_FILE=$(find "$EXTRACT_DIR" -name "*.spec" | head -1)
+          fi
+
+          if [ -z "$SPEC_FILE" ]; then
+            echo "ERROR: No spec file found"
+            exit 1
+          fi
+
+          cp "$SPEC_FILE" ~/rpmbuild/SPECS/
+          echo "SPEC_BASENAME=$(basename "$SPEC_FILE")" >> $GITHUB_ENV
+          echo "EXTRACT_DIR=${EXTRACT_DIR}" >> $GITHUB_ENV
+
+      - name: Build RPM
+        run: |
+          rpmbuild -bb --nodeps \
+            --define "_topdir $HOME/rpmbuild" \
+            ~/rpmbuild/SPECS/${SPEC_BASENAME}
+
+      - name: Collect RPM artifacts
+        run: |
+          ARCH="${{ inputs.arch }}"
+          RPM_ARCH="$([[ "$ARCH" == "amd64" ]] && echo "x86_64" || echo "aarch64")"
+
+          mkdir -p /tmp/rpm-output/
+
+          # Collect built RPMs (both arch-specific and noarch)
+          find ~/rpmbuild/RPMS/ -name "*.rpm" -exec cp {} /tmp/rpm-output/ \;
+
+          echo "Built RPMs:"
+          ls -la /tmp/rpm-output/
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ inputs.component }}-${{ inputs.arch }}${{ inputs.artifact-suffix }}
+          path: /tmp/rpm-output/*.rpm
+          retention-days: 7
+          if-no-files-found: error

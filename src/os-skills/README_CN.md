@@ -106,7 +106,7 @@ Markdown 内容，包含使用说明、前置条件和示例。
 ### RPM 安装
 
 ```bash
-sudo yum install anolisa-skills
+sudo yum install os-skills
 ```
 
 技能安装到 `/usr/share/anolisa/skills/`，由 Copilot Shell 自动发现。

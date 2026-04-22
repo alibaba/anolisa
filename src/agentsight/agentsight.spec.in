@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           agentsight
-Version:        0.2.0
+Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        eBPF-based AI Agent Observability Tool
 
