@@ -15,13 +15,7 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
-BuildRequires:  gcc
 BuildRequires:  make
-BuildRequires:  rust >= 1.70
-BuildRequires:  cargo
-BuildRequires:  python3-devel
-BuildRequires:  nodejs
-BuildRequires:  npm
 
 # Metapackage: pull all subpackages
 Requires:       agent-sec-cli = %{version}-%{release}
@@ -40,6 +34,9 @@ This metapackage installs all agent-sec-core components including CLI, hooks, an
 Summary:        Agent Security CLI tool (Rust + Python native extension)
 Requires:       python3 >= 3.11
 Requires:       python3 < 3.12
+Requires:       gnupg2 >= 2.0
+Requires:       loongshield >= 1.2.0
+Recommends:     python3-pgpy >= 0.5
 
 %description -n agent-sec-cli
 Agent-sec-cli provides security scanning and hardening CLI commands.
@@ -48,14 +45,7 @@ Built with maturin as a Rust native Python extension.
 %files -n agent-sec-cli
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
-/opt/agent-sec/wheels/
-
-%post -n agent-sec-cli
-python3 -m venv /opt/agent-sec/venv
-/opt/agent-sec/venv/bin/pip install --no-cache-dir /opt/agent-sec/wheels/agent_sec_cli-*.whl
-
-%preun -n agent-sec-cli
-rm -rf /opt/agent-sec/venv 2>/dev/null || true
+/usr/lib64/python3.11/site-packages/*
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook
@@ -121,10 +111,12 @@ Includes agent-sec-core and code-scanner skill definitions.
 
 %build
 make build-all
+make download-deps
+make stage-cli
 
 %install
 rm -rf $RPM_BUILD_ROOT
-make install-all DESTDIR=$RPM_BUILD_ROOT
+make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
 * Tue Apr 14 2026 Xingdong Li <XingDong.Li@linux.alibaba.com> - 0.3.0-1

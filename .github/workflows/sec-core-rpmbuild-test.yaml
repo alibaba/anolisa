@@ -1,6 +1,7 @@
 name: sec-core-rpmbuild-test
 
 on:
+  push:
   schedule:
     - cron: '0 14 * * *'  # 北京时间每天 22:00
   pull_request:
@@ -51,7 +52,13 @@ jobs:
             echo "========================================"
             echo ">>> $rpm"
             echo "========================================"
-            rpm -qlvp "$rpm"
+            if [[ "$rpm" == *agent-sec-cli* ]]; then
+              rpm -qip "$rpm"
+              echo "--- Top-level packages in site-packages ---"
+              rpm -qlp "$rpm" | grep site-packages/ | awk -F'site-packages/' '{print $2}' | awk -F'/' '{print $1}' | sort -u
+            else
+              rpm -qlvp "$rpm"
+            fi
             echo ""
           done
 
@@ -62,8 +69,7 @@ jobs:
 
       - name: Verify all Python imports
         run: |
-          VENV_PYTHON=/opt/agent-sec/venv/bin/python
-          SITE_PKG=$($VENV_PYTHON -c "import agent_sec_cli, pathlib; print(pathlib.Path(agent_sec_cli.__file__).parent)")
+          SITE_PKG=$(python3 -c "import agent_sec_cli, pathlib; print(pathlib.Path(agent_sec_cli.__file__).parent)")
           echo "Package location: $SITE_PKG"
 
           FAILED=0
@@ -75,7 +81,7 @@ jobs:
             # Skip __init__.py → use parent module name
             mod=${mod/.__init__/}
             echo -n "Importing $mod ... "
-            if $VENV_PYTHON -c "import $mod" 2>&1; then
+            if python3 -c "import $mod" 2>&1; then
               echo "OK"
             else
               echo "FAILED"
