@@ -16,11 +16,10 @@ export const ContextUsageDisplay = ({
   terminalWidth: number;
   contextWindowSize: number;
 }) => {
-  if (promptTokenCount === 0) {
-    return null;
-  }
-
-  const percentage = promptTokenCount / contextWindowSize;
+  // Calculate percentage regardless of whether promptTokenCount is 0
+  const percentage = contextWindowSize
+    ? promptTokenCount / contextWindowSize
+    : 0;
   const percentageUsed = (percentage * 100).toFixed(1);
 
   const label = terminalWidth < 100 ? '% used' : '% context used';

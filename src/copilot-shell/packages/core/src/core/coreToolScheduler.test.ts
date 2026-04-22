@@ -2157,6 +2157,321 @@ describe('CoreToolScheduler Sequential Execution', () => {
     expect(call2?.status).toBe('cancelled');
     expect(call3?.status).toBe('cancelled');
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Regression: Bug 1 — ask + ProceedAlways must NOT batch-approve other
+  //   pending hookForceAsk calls in the same scheduling round.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('ask + ProceedAlways should NOT auto-approve other hookForceAsk-pending calls in the same batch', async () => {
+    // A tool with NO native confirmation requirement (shouldConfirmExecute
+    // returns false).  The hook turns every call into a mandatory ask dialog.
+    const executeFn = vi.fn().mockResolvedValue({
+      llmContent: 'done',
+      returnDisplay: 'done',
+    });
+    const noConfirmTool = new MockTool({
+      name: 'hookAskTool',
+      execute: executeFn,
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    // Hook always returns an 'ask' decision
+    const hookAskOutput = {
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => true,
+      systemMessage: 'Please verify this operation',
+      getModifiedToolInput: () => null,
+      getEffectiveReason: () => '',
+    };
+    const mockHookSystemAsk = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(hookAskOutput),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const toolRegistryAsk = {
+      getTool: () => noConfirmTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => noConfirmTool,
+      getToolByDisplayName: () => noConfirmTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsCompleteAsk = vi.fn();
+    const onToolCallsUpdateAsk = vi.fn();
+
+    const mockConfigAsk = {
+      getSessionId: () => 'test-session-ask',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistryAsk,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true, // prevent auto-denial of approval prompts
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSystemAsk,
+    } as unknown as Config;
+
+    const pendingAskConfirmations: Array<
+      (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>
+    > = [];
+
+    const schedulerAsk = new CoreToolScheduler({
+      config: mockConfigAsk,
+      onAllToolCallsComplete: onAllToolCallsCompleteAsk,
+      onToolCallsUpdate: (toolCalls) => {
+        onToolCallsUpdateAsk(toolCalls);
+        toolCalls.forEach((call) => {
+          if (call.status === 'awaiting_approval') {
+            const waitingCall = call as WaitingToolCall;
+            const alreadyCaptured = pendingAskConfirmations.find(
+              (h) => h === waitingCall.confirmationDetails.onConfirm,
+            );
+            if (!alreadyCaptured) {
+              pendingAskConfirmations.push(
+                waitingCall.confirmationDetails.onConfirm,
+              );
+            }
+          }
+        });
+      },
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortControllerAsk = new AbortController();
+    const askRequests = [
+      {
+        callId: 'hook-ask-1',
+        name: 'hookAskTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'p-ask-1',
+      },
+      {
+        callId: 'hook-ask-2',
+        name: 'hookAskTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'p-ask-2',
+      },
+    ];
+
+    await schedulerAsk.schedule(askRequests, abortControllerAsk.signal);
+
+    // Both calls must be in awaiting_approval because the hook forced ask.
+    await vi.waitFor(() => {
+      const latestCalls = onToolCallsUpdateAsk.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[];
+      expect(
+        latestCalls?.filter((c) => c.status === 'awaiting_approval').length,
+      ).toBe(2);
+    });
+
+    expect(pendingAskConfirmations.length).toBe(2);
+
+    // Approve the first call with ProceedAlways.
+    await pendingAskConfirmations[0](ToolConfirmationOutcome.ProceedAlways);
+
+    // ── Key regression assertion ──────────────────────────────────────────
+    // The second hookForceAsk call must remain awaiting_approval.
+    // autoApproveCompatiblePendingTools must NOT silently promote it,
+    // because the hook wants to gate every invocation individually.
+    await vi.waitFor(() => {
+      const latestCalls = onToolCallsUpdateAsk.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[];
+      const secondCall = latestCalls?.find(
+        (c) => c.request.callId === 'hook-ask-2',
+      );
+      expect(secondCall?.status).toBe('awaiting_approval');
+    });
+
+    // Confirm the second call individually so the test can finish cleanly.
+    await pendingAskConfirmations[1](ToolConfirmationOutcome.ProceedOnce);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsCompleteAsk).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsCompleteAsk.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Regression: Bug 2 — hookForceAsk must AUGMENT native confirmationDetails
+  //   (preserve type + original onConfirm side-effects), not replace them
+  //   with a bare info dialog.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('hookForceAsk should augment native confirmationDetails, preserving original onConfirm side-effects', async () => {
+    let approvalMode = ApprovalMode.DEFAULT;
+
+    // Hook always returns 'ask'
+    const hookAugmentOutput = {
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => true,
+      systemMessage: 'Hook inspection required',
+      getModifiedToolInput: () => null,
+      getEffectiveReason: () => '',
+    };
+    const mockHookSystemAugment = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(hookAugmentOutput),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    // TestApprovalTool provides a native 'edit'-type confirmation whose
+    // onConfirm calls config.setApprovalMode(AUTO_EDIT) on ProceedAlways.
+    // toolRegistryAugment is declared first so it can be referenced directly
+    // inside the mockConfigAugment literal, avoiding a post-assignment cast.
+    // eslint-disable-next-line prefer-const
+    let testToolAugment: TestApprovalTool;
+    const toolRegistryAugment = {
+      getTool: () => testToolAugment,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => testToolAugment,
+      getToolByDisplayName: () => testToolAugment,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfigAugment = {
+      getSessionId: () => 'test-session-augment',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => approvalMode,
+      setApprovalMode: (mode: ApprovalMode) => {
+        approvalMode = mode;
+      },
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistryAugment,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true, // prevent auto-denial of approval prompts
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSystemAugment,
+    } as unknown as Config;
+
+    testToolAugment = new TestApprovalTool(mockConfigAugment);
+
+    const onAllToolCallsCompleteAugment = vi.fn();
+    const onToolCallsUpdateAugment = vi.fn();
+    let capturedWaitingCall: WaitingToolCall | undefined;
+
+    const schedulerAugment = new CoreToolScheduler({
+      config: mockConfigAugment,
+      onAllToolCallsComplete: onAllToolCallsCompleteAugment,
+      onToolCallsUpdate: (toolCalls) => {
+        onToolCallsUpdateAugment(toolCalls);
+        if (!capturedWaitingCall) {
+          capturedWaitingCall = toolCalls.find(
+            (c) => c.status === 'awaiting_approval',
+          ) as WaitingToolCall | undefined;
+        }
+      },
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortControllerAugment = new AbortController();
+    await schedulerAugment.schedule(
+      [
+        {
+          callId: 'augment-1',
+          name: 'testApprovalTool',
+          args: { id: 'augment-test' },
+          isClientInitiated: false,
+          prompt_id: 'p-augment',
+        },
+      ],
+      abortControllerAugment.signal,
+    );
+
+    // Wait for the tool to enter awaiting_approval
+    await vi.waitFor(() => {
+      expect(capturedWaitingCall).toBeDefined();
+    });
+
+    // ── Key regression assertions ─────────────────────────────────────────
+    // 1. Confirmation type must still be 'edit' — NOT replaced with 'info'.
+    //    This proves the original confirmationDetails were augmented, not
+    //    discarded, so the IDE diff path and edit semantics remain intact.
+    expect(capturedWaitingCall!.confirmationDetails.type).toBe('edit');
+
+    // 2. The hook warning must appear in the title alongside the native title.
+    expect(capturedWaitingCall!.confirmationDetails.title).toContain(
+      'Confirm Test Tool augment-test',
+    );
+    expect(capturedWaitingCall!.confirmationDetails.title).toContain(
+      'Hook inspection required',
+    );
+
+    // Trigger ProceedAlways through the wrapped onConfirm stored in the call.
+    await capturedWaitingCall!.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+
+    // 3. The original tool onConfirm side-effect must have run:
+    //    TestApprovalTool.onConfirm sets config.setApprovalMode(AUTO_EDIT)
+    //    on ProceedAlways — if it was replaced by an empty onConfirm this
+    //    would remain DEFAULT.
+    expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
+
+    // 4. Execution should complete successfully.
+    await vi.waitFor(() => {
+      expect(onAllToolCallsCompleteAugment).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsCompleteAugment.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls[0].status).toBe('success');
+    });
+  });
 });
 
 describe('truncateAndSaveToFile', () => {

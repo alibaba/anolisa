@@ -197,6 +197,7 @@ const distPackageJson = {
     'LICENSE',
     'locales',
     'hooks',
+    'examples',
   ],
   config: rootPackageJson.config,
   dependencies: {},

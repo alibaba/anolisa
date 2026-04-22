@@ -125,6 +125,13 @@ export type WaitingToolCall = {
   tool: AnyDeclarativeTool;
   invocation: AnyToolInvocation;
   confirmationDetails: ToolCallConfirmationDetails;
+  /**
+   * True when this call was forced into awaiting_approval by a hook 'ask'
+   * decision (regardless of whether the tool itself requires confirmation).
+   * Used by autoApproveCompatiblePendingTools to prevent batch silent
+   * approval of calls that the hook explicitly wants to gate one-by-one.
+   */
+  hookForceAsk?: boolean;
   startTime?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -411,6 +418,7 @@ export class CoreToolScheduler {
     targetCallId: string,
     status: 'awaiting_approval',
     confirmationDetails: ToolCallConfirmationDetails,
+    hookForceAsk?: boolean,
   ): void;
   private setStatusInternal(
     targetCallId: string,
@@ -430,6 +438,7 @@ export class CoreToolScheduler {
     targetCallId: string,
     newStatus: Status,
     auxiliaryData?: unknown,
+    hookForceAsk?: boolean,
   ): void {
     this.toolCalls = this.toolCalls.map((currentCall) => {
       if (
@@ -482,6 +491,7 @@ export class CoreToolScheduler {
             tool: toolInstance,
             status: 'awaiting_approval',
             confirmationDetails: auxiliaryData as ToolCallConfirmationDetails,
+            hookForceAsk,
             startTime: existingStartTime,
             outcome,
             invocation,
@@ -818,6 +828,8 @@ export class CoreToolScheduler {
 
         // Fire PreToolUse hook BEFORE confirmation — allows hooks to
         // modify/block the command before the user sees the approval dialog.
+        let hookForceAsk = false;
+        let hookAskMessage: string | undefined;
         if (this.config.getEnableHooks()) {
           const hookSystem = this.config.getHookSystem();
           if (hookSystem) {
@@ -846,6 +858,12 @@ export class CoreToolScheduler {
                   continue;
                 }
 
+                // Ask: force user confirmation regardless of YOLO/allowlist
+                if (hookOutput.isAskDecision()) {
+                  hookForceAsk = true;
+                  hookAskMessage = hookOutput.systemMessage;
+                }
+
                 // Modify: replace tool_input and rebuild invocation
                 const modifiedInput = hookOutput.getModifiedToolInput();
                 if (modifiedInput) {
@@ -871,8 +889,13 @@ export class CoreToolScheduler {
                   }
                 }
 
-                // Emit systemMessage notification to UI
-                if (hookOutput.systemMessage && this.outputUpdateHandler) {
+                // Emit systemMessage notification to UI (only for non-ask decisions;
+                // for ask decisions the message is shown in the confirmation dialog)
+                if (
+                  hookOutput.systemMessage &&
+                  !hookForceAsk &&
+                  this.outputUpdateHandler
+                ) {
                   this.outputUpdateHandler(
                     reqInfo.callId,
                     hookOutput.systemMessage + '\n',
@@ -901,7 +924,44 @@ export class CoreToolScheduler {
           const confirmationDetails =
             await invocation.shouldConfirmExecute(signal);
 
-          if (!confirmationDetails) {
+          // If hook requested 'ask', ensure the user always sees a confirmation
+          // dialog — regardless of YOLO/allowlist.
+          //
+          // When the tool already has its own confirmation details (e.g. exec/edit)
+          // we AUGMENT the existing dialog by appending the hook warning to the
+          // title, so the tool's original onConfirm side-effects (IDE diff result
+          // back-fill, allowlist update, AUTO_EDIT mode) are preserved.
+          //
+          // When the tool has NO native confirmation we synthesize an info dialog.
+          // In that case we use an empty onConfirm intentionally: ProceedAlways
+          // must NOT add the command to the allowlist — the hook wants to be
+          // consulted on every future invocation.
+          let effectiveConfirmationDetails:
+            | ToolCallConfirmationDetails
+            | false = confirmationDetails;
+          if (hookForceAsk) {
+            const askPrompt =
+              hookAskMessage ||
+              'A hook has requested confirmation before executing this tool.';
+            if (confirmationDetails) {
+              // Augment: spread original details to preserve type discriminant
+              // and onConfirm; only override the title to surface the hook msg.
+              effectiveConfirmationDetails = {
+                ...confirmationDetails,
+                title: `${confirmationDetails.title} — ⚠️ Hook: ${askPrompt}`,
+              } as ToolCallConfirmationDetails;
+            } else {
+              // No native confirmation: synthesize a minimal info dialog.
+              effectiveConfirmationDetails = {
+                type: 'info',
+                title: 'Hook Requires Confirmation',
+                prompt: askPrompt,
+                onConfirm: async () => {},
+              };
+            }
+          }
+
+          if (!effectiveConfirmationDetails) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -916,7 +976,7 @@ export class CoreToolScheduler {
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
 
           if (isPlanMode && !isExitPlanModeTool) {
-            if (confirmationDetails) {
+            if (effectiveConfirmationDetails) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
                 responseParts: convertToFunctionResponse(
@@ -932,8 +992,10 @@ export class CoreToolScheduler {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
           } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
+            // hookForceAsk overrides YOLO/allowlist — hook explicitly requested user confirmation
+            !hookForceAsk &&
+            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
+              doesToolInvocationMatch(toolCall.tool, invocation, allowedTools))
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
@@ -968,21 +1030,23 @@ export class CoreToolScheduler {
 
             // Allow IDE to resolve confirmation
             if (
-              confirmationDetails.type === 'edit' &&
-              confirmationDetails.ideConfirmation
+              effectiveConfirmationDetails &&
+              effectiveConfirmationDetails.type === 'edit' &&
+              effectiveConfirmationDetails.ideConfirmation
             ) {
-              confirmationDetails.ideConfirmation.then((resolution) => {
+              const ideDetails = effectiveConfirmationDetails;
+              ideDetails.ideConfirmation!.then((resolution) => {
                 if (resolution.status === 'accepted') {
                   this.handleConfirmationResponse(
                     reqInfo.callId,
-                    confirmationDetails.onConfirm,
+                    ideDetails.onConfirm,
                     ToolConfirmationOutcome.ProceedOnce,
                     signal,
                   );
                 } else {
                   this.handleConfirmationResponse(
                     reqInfo.callId,
-                    confirmationDetails.onConfirm,
+                    ideDetails.onConfirm,
                     ToolConfirmationOutcome.Cancel,
                     signal,
                   );
@@ -990,9 +1054,11 @@ export class CoreToolScheduler {
               });
             }
 
-            const originalOnConfirm = confirmationDetails.onConfirm;
+            const activeDetails =
+              effectiveConfirmationDetails as ToolCallConfirmationDetails;
+            const originalOnConfirm = activeDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
-              ...confirmationDetails,
+              ...activeDetails,
               onConfirm: (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
@@ -1009,6 +1075,7 @@ export class CoreToolScheduler {
               reqInfo.callId,
               'awaiting_approval',
               wrappedConfirmationDetails,
+              hookForceAsk,
             );
           }
         } catch (error) {
@@ -1639,6 +1706,14 @@ export class CoreToolScheduler {
     ) as WaitingToolCall[];
 
     for (const pendingTool of pendingTools) {
+      // Never silently approve a tool that was forced into awaiting_approval by
+      // a hook 'ask' decision — the hook explicitly requested per-invocation
+      // confirmation.  Each such call must be presented to the user individually
+      // so the hook warning is never silently skipped within a batch.
+      if (pendingTool.hookForceAsk) {
+        continue;
+      }
+
       try {
         const stillNeedsConfirmation =
           await pendingTool.invocation.shouldConfirmExecute(signal);

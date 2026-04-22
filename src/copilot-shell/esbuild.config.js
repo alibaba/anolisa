@@ -13,6 +13,7 @@ import {
   mkdirSync,
   readdirSync,
   copyFileSync,
+  cpSync,
   existsSync,
 } from 'node:fs';
 
@@ -100,6 +101,32 @@ esbuild
           copyFileSync(
             path.join(hooksSource, file),
             path.join(hooksTarget, file),
+          );
+        }
+      }
+    }
+
+    // Copy extension examples into dist/examples/ so extensions new command works at runtime
+    const examplesSource = path.resolve(
+      __dirname,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'extensions',
+      'examples',
+    );
+    const examplesTarget = path.resolve(__dirname, 'dist', 'examples');
+    if (existsSync(examplesSource)) {
+      mkdirSync(examplesTarget, { recursive: true });
+      for (const entry of readdirSync(examplesSource, {
+        withFileTypes: true,
+      })) {
+        if (entry.isDirectory()) {
+          cpSync(
+            path.join(examplesSource, entry.name),
+            path.join(examplesTarget, entry.name),
+            { recursive: true },
           );
         }
       }

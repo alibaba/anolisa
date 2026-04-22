@@ -67,6 +67,9 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
+    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_VERBOSE_MODE]: (key: Key) => key.ctrl && key.name === 'o',
   };
 
   // Test data for each command with positive and negative test cases
@@ -251,6 +254,16 @@ describe('keyMatchers', () => {
       command: Command.SHOW_MORE_LINES,
       positive: [createKey('s', { ctrl: true })],
       negative: [createKey('s'), createKey('l', { ctrl: true })],
+    },
+    {
+      command: Command.RETRY_LAST,
+      positive: [createKey('y', { ctrl: true })],
+      negative: [createKey('y'), createKey('z', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_COMPACT_MODE,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('p', { ctrl: true })],
     },
 
     // Shell commands

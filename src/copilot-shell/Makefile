@@ -68,6 +68,10 @@ install: dist/package.json
 		install -d "$(DESTDIR)$(DATADIR)/hooks"; \
 		cp -pr hooks/* "$(DESTDIR)$(DATADIR)/hooks/"; \
 	fi
+	@if [ -d dist/examples ]; then \
+		install -d "$(DESTDIR)$(LIBDIR)/examples"; \
+		cp -pr dist/examples/* "$(DESTDIR)$(LIBDIR)/examples/"; \
+	fi
 	# -- vendor binaries (current platform only) --
 	@if [ -n "$(VENDOR_ARCH)" ] && [ -n "$(VENDOR_PLATFORM)" ] && [ -d "dist/$(VENDOR_RG_DIR)" ]; then \
 		install -d "$(DESTDIR)$(LIBDIR)/$(VENDOR_RG_DIR)"; \

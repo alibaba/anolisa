@@ -51,6 +51,9 @@ export enum Command {
   QUIT = 'quit',
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
+  RETRY_LAST = 'retryLast',
+  TOGGLE_VERBOSE_MODE = 'toggleVerboseMode',
+  TOGGLE_COMPACT_MODE = 'toggleCompactMode',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -87,6 +90,16 @@ export interface KeyBinding {
 export type KeyBindingConfig = {
   readonly [C in Command]: readonly KeyBinding[];
 };
+
+export interface KeyMatch {
+  key: string;
+  ctrl?: boolean;
+  shift?: boolean;
+  meta?: boolean;
+  command?: boolean;
+  sequence?: string;
+  paste?: boolean;
+}
 
 /**
  * Default key binding configuration
@@ -162,6 +175,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.QUIT]: [{ key: 'c', ctrl: true }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
+  [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
+  [Command.TOGGLE_VERBOSE_MODE]: [{ key: 'o', ctrl: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],
@@ -173,4 +188,5 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
 };

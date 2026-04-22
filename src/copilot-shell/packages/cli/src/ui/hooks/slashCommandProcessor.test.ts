@@ -87,6 +87,10 @@ vi.mock('../../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
 }));
 
+vi.mock('./useKeypress.js', () => ({
+  useKeypress: vi.fn(),
+}));
+
 function createTestCommand(
   overrides: Partial<SlashCommand>,
   kind: CommandKind = CommandKind.BUILT_IN,

@@ -131,6 +131,7 @@ export class HookAggregator {
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
     let hasBlock = false;
+    let hasAsk = false;
     let hasContinueFalse = false;
     let stopReason: string | undefined;
     const otherHookSpecificFields: Record<string, unknown> = {};
@@ -139,6 +140,11 @@ export class HookAggregator {
       // Check for blocking decisions
       if (output.decision === 'block' || output.decision === 'deny') {
         hasBlock = true;
+      } else if (output.decision === 'ask') {
+        // ask decision is only tracked if no blocking decision found yet
+        if (!hasBlock) {
+          hasAsk = true;
+        }
       }
 
       // Collect reasons
@@ -178,6 +184,8 @@ export class HookAggregator {
     // Set merged decision
     if (hasBlock) {
       merged.decision = 'block';
+    } else if (hasAsk) {
+      merged.decision = 'ask';
     } else if (outputs.some((o) => o.decision === 'allow')) {
       merged.decision = 'allow';
     }

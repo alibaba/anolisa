@@ -1348,6 +1348,11 @@ export default {
   'Press Enter or wait 2s to continue': '按 Enter 或等待 2 秒继续',
   '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
     '↑↓ 或 j/k 导航 · 1/2/3 选择 · Enter 确认 · Esc 取消',
+  "Set up Copilot Shell's status line UI": '设置 Copilot Shell 的状态栏 UI',
+  'Toggle compact mode': '切换紧凑模式',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)':
+    '隐藏工具输出和思考过程，获得更清晰的视图（通过 Ctrl+O 切换）',
+  verbose: '详细',
   // 导出命令
   'Export current session message history to a file':
     '将当前会话消息历史导出到文件',
