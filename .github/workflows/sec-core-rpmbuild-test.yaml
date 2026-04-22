@@ -55,6 +55,40 @@ jobs:
             echo ""
           done
 
+      - name: Test RPM installation
+        run: |
+          rpm -ivh scripts/rpmbuild/RPMS/**/*.rpm
+          agent-sec-cli --help
+
+      - name: Verify all Python imports
+        run: |
+          VENV_PYTHON=/opt/agent-sec/venv/bin/python
+          SITE_PKG=$($VENV_PYTHON -c "import agent_sec_cli, pathlib; print(pathlib.Path(agent_sec_cli.__file__).parent)")
+          echo "Package location: $SITE_PKG"
+
+          FAILED=0
+          while IFS= read -r pyfile; do
+            # Convert file path to module name
+            rel=${pyfile#"$SITE_PKG/"}
+            mod="agent_sec_cli.${rel%.py}"
+            mod=${mod//\//.}
+            # Skip __init__.py → use parent module name
+            mod=${mod/.__init__/}
+            echo -n "Importing $mod ... "
+            if $VENV_PYTHON -c "import $mod" 2>&1; then
+              echo "OK"
+            else
+              echo "FAILED"
+              FAILED=$((FAILED + 1))
+            fi
+          done < <(find "$SITE_PKG" -name '*.py' -not -name '__pycache__' | sort)
+
+          if [ $FAILED -ne 0 ]; then
+            echo "ERROR: $FAILED module(s) failed to import"
+            exit 1
+          fi
+          echo "All modules imported successfully"
+
       - name: Upload RPM artifacts
         uses: actions/upload-artifact@v4
         with:
