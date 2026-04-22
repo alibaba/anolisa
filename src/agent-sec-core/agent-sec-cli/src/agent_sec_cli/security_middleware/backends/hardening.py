@@ -17,7 +17,15 @@ from agent_sec_cli.security_middleware.result import ActionResult
 DEFAULT_HARDEN_CONFIG = "agentos_baseline"
 _DEFAULT_HARDEN_MODE = "scan"
 _FALLBACK_LOONGSHIELD_PATHS = ("/usr/sbin/loongshield",)
-_MISSING_LOONGSHIELD_ERROR = "loongshield not found. Install it or add it to PATH."
+_MISSING_LOONGSHIELD_ERROR = (
+    "The `loongshield` command is required for `agent-sec-cli harden`, "
+    "but it was not found.\n"
+    "On ALinux 4 Operating System, you can usually install it from the default yum "
+    "repository with:\n"
+    "  sudo yum install -y loongshield\n"
+    "If it is already installed, please make sure the `loongshield` binary is "
+    "available in PATH."
+)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _RULE_STATUS_RE = re.compile(
