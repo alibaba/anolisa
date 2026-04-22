@@ -303,6 +303,18 @@ async function installAction(context: CommandContext, args: string) {
     );
     // FIXME: refresh command controlled by ui for now, cannot be auto refreshed by extensionManager
     context.ui.reloadCommands();
+    // Hook rebuild is best-effort: failure must not make install appear to fail.
+    try {
+      const hookSystem = context.services.config?.getHookSystem?.();
+      if (hookSystem && extension.hooks) {
+        await hookSystem.initialize();
+      }
+    } catch (hookErr) {
+      console.warn(
+        '[extensions] hook re-initialization failed after install:',
+        hookErr,
+      );
+    }
   } catch (error) {
     context.ui.addItem(
       {
@@ -357,6 +369,29 @@ async function uninstallAction(context: CommandContext, args: string) {
       Date.now(),
     );
     context.ui.reloadCommands();
+    // Cache refresh is unconditional: keeps disk state consistent even when the
+    // hook system is unavailable. Hook rebuild is best-effort afterwards.
+    // Each step has its own catch so the warn message accurately identifies the
+    // failing step and does not mask a refreshCache error as a hook-init error.
+    try {
+      await extensionManager.refreshCache();
+    } catch (cacheErr) {
+      console.warn(
+        '[extensions] cache refresh failed after uninstall:',
+        cacheErr,
+      );
+    }
+    try {
+      const hookSystem = context.services.config?.getHookSystem?.();
+      if (hookSystem) {
+        await hookSystem.initialize();
+      }
+    } catch (hookErr) {
+      console.warn(
+        '[extensions] hook re-initialization failed after uninstall:',
+        hookErr,
+      );
+    }
   } catch (error) {
     context.ui.addItem(
       {

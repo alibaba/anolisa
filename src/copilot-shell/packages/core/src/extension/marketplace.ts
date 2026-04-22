@@ -94,6 +94,10 @@ function parseSourceAndPluginName(source: string): {
  */
 function isOwnerRepoFormat(source: string): boolean {
   // owner/repo format: word/word, no slashes before, no protocol
+  // Exclude local paths starting with . (e.g. ./foo) or / (e.g. /usr/foo)
+  if (source.startsWith('.') || source.startsWith('/')) {
+    return false;
+  }
   const ownerRepoRegex = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
   return ownerRepoRegex.test(source);
 }

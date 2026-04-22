@@ -499,6 +499,111 @@ describe('extensionsCommand', () => {
         expect.any(Number),
       );
     });
+
+    it('should call hookSystem.initialize() after installing an extension with hooks', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+        hooks: { PreToolUse: [{ matcher: 'run_shell_command', hooks: [] }] },
+      });
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await installAction(ctx, 'https://github.com/test/extension');
+
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" installed successfully.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should NOT call hookSystem.initialize() when installed extension has no hooks', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      // extension with no hooks field
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+      });
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await installAction(ctx, 'https://github.com/test/extension');
+
+      expect(mockHookInitialize).not.toHaveBeenCalled();
+    });
+
+    it('should still report install success when hookSystem.initialize() throws', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+        hooks: { PreToolUse: [{ matcher: 'run_shell_command', hooks: [] }] },
+      });
+      const mockHookInitialize = vi
+        .fn()
+        .mockRejectedValue(new Error('hook init failed'));
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await installAction(ctx, 'https://github.com/test/extension');
+
+      // Install success message must still appear
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" installed successfully.',
+        },
+        expect.any(Number),
+      );
+      // No error message about the install itself
+      expect(ctx.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.ERROR }),
+        expect.any(Number),
+      );
+    });
   });
 
   describe('uninstall', () => {
@@ -516,6 +621,11 @@ describe('extensionsCommand', () => {
       vi.resetAllMocks();
       realMockExtensionManager = Object.create(ExtensionManager.prototype);
       realMockExtensionManager.uninstallExtension = mockUninstallExtension;
+      // refreshCache is now called unconditionally after uninstall; mock it here
+      // so tests don't hit the real filesystem.
+      realMockExtensionManager.refreshCache = vi
+        .fn()
+        .mockResolvedValue(undefined);
 
       mockContext = createMockCommandContext({
         services: {
@@ -579,6 +689,127 @@ describe('extensionsCommand', () => {
         {
           type: MessageType.ERROR,
           text: 'Failed to uninstall extension "nonexistent-extension": Extension not found.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should call refreshCache() then hookSystem.initialize() after uninstall', async () => {
+      mockUninstallExtension.mockResolvedValue(undefined);
+      const mockRefreshCacheFn = vi.fn().mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      realMockExtensionManager.refreshCache = mockRefreshCacheFn;
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await uninstallAction(ctx, 'test-extension');
+
+      expect(mockRefreshCacheFn).toHaveBeenCalledOnce();
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+      // refreshCache must be called before initialize so system extensions re-enter cache first
+      expect(mockRefreshCacheFn.mock.invocationCallOrder[0]).toBeLessThan(
+        mockHookInitialize.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('should call refreshCache + hookSystem.initialize() even when user extension had no hooks', async () => {
+      // Regression: user extension with no hooks is uninstalled, but a same-named
+      // system extension may have hooks that should immediately become active.
+      mockUninstallExtension.mockResolvedValue(undefined);
+      const mockRefreshCacheFn = vi.fn().mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      realMockExtensionManager.refreshCache = mockRefreshCacheFn;
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await uninstallAction(ctx, 'no-hooks-extension');
+
+      // Must still run both even though user extension had no hooks
+      expect(mockRefreshCacheFn).toHaveBeenCalledOnce();
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+    });
+
+    it('should still report uninstall success when hookSystem.initialize() throws', async () => {
+      mockUninstallExtension.mockResolvedValue(undefined);
+      const mockRefreshCacheFn = vi.fn().mockResolvedValue(undefined);
+      const mockHookInitialize = vi
+        .fn()
+        .mockRejectedValue(new Error('hook reinit failed'));
+      realMockExtensionManager.refreshCache = mockRefreshCacheFn;
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await uninstallAction(ctx, 'test-extension');
+
+      // Uninstall success message must still appear
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" uninstalled successfully.',
+        },
+        expect.any(Number),
+      );
+      // No error message about the uninstall itself
+      expect(ctx.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.ERROR }),
+        expect.any(Number),
+      );
+    });
+
+    it('should still call refreshCache() even when getHookSystem() returns undefined', async () => {
+      // Locks the fix: refreshCache must run unconditionally regardless of
+      // whether the hook system is available, so the cache stays consistent
+      // with disk after an uninstall (e.g. system extension re-enters cache).
+      mockUninstallExtension.mockResolvedValue(undefined);
+      const mockRefreshCacheFn = vi.fn().mockResolvedValue(undefined);
+      realMockExtensionManager.refreshCache = mockRefreshCacheFn;
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            // No getHookSystem — simulates hook system unavailable
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await uninstallAction(ctx, 'test-extension');
+
+      expect(mockRefreshCacheFn).toHaveBeenCalledOnce();
+      // Uninstall success should still be reported
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" uninstalled successfully.',
         },
         expect.any(Number),
       );

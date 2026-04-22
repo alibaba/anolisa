@@ -66,6 +66,8 @@ import {
 } from '../telemetry/types.js';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import type { HookDefinition } from '../hooks/types.js';
+import type { HookEventName } from '../hooks/types.js';
 
 // ============================================================================
 // Types and Interfaces
@@ -94,6 +96,7 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionConfig {
@@ -106,6 +109,7 @@ export interface ExtensionConfig {
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionUpdateInfo {
@@ -521,15 +525,32 @@ export class ExtensionManager {
     fs.writeFileSync(this.configFilePath, JSON.stringify(config, null, 2));
   }
 
+  /** System-level extensions directory (RPM/deb installs). */
+  static readonly SYSTEM_EXTENSIONS_DIR = '/usr/share/anolisa/extensions';
+
   /**
    * Refreshes the extension cache from disk.
+   * Scans system-level dir first (lower priority), then user-level dir
+   * (higher priority, same-name entries overwrite system ones).
    */
   async refreshCache(): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
-    const extensions = await this.loadExtensionsFromDir(os.homedir());
-    extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
-    });
+
+    // 1. System-level extensions (RPM/deb installed, lower priority)
+    if (fs.existsSync(ExtensionManager.SYSTEM_EXTENSIONS_DIR)) {
+      const systemExts = await this.loadExtensionsFromDirectPath(
+        ExtensionManager.SYSTEM_EXTENSIONS_DIR,
+      );
+      for (const ext of systemExts) {
+        this.extensionCache.set(ext.name, ext);
+      }
+    }
+
+    // 2. User-level extensions (cosh extensions install, overrides system)
+    const userExts = await this.loadExtensionsFromDir(os.homedir());
+    for (const ext of userExts) {
+      this.extensionCache.set(ext.name, ext);
+    }
   }
 
   getLoadedExtensions(): Extension[] {
@@ -574,6 +595,43 @@ export class ExtensionManager {
     }
 
     return null;
+  }
+
+  /**
+   * Loads extensions by directly scanning subdirectories of the given path.
+   * Unlike loadExtensionsFromDir(), this does NOT append .copilot-shell/extensions/
+   * and is intended for system-level paths like /usr/share/anolisa/extensions.
+   */
+  async loadExtensionsFromDirectPath(dir: string): Promise<Extension[]> {
+    let subdirs: string[];
+    try {
+      subdirs = fs.readdirSync(dir);
+    } catch {
+      return [];
+    }
+
+    const extensions: Extension[] = [];
+    for (const subdir of subdirs) {
+      const extensionDir = path.join(dir, subdir);
+      let stat: fs.Stats | undefined;
+      try {
+        stat =
+          fs.statSync(extensionDir, { throwIfNoEntry: false }) ?? undefined;
+      } catch {
+        // EACCES or other permission errors – skip this entry gracefully
+        continue;
+      }
+      if (!stat?.isDirectory()) continue;
+
+      const extension = await this.loadExtension({
+        extensionDir,
+        workspaceDir: this.workspaceDir,
+      });
+      if (extension != null) {
+        extensions.push(extension);
+      }
+    }
+    return extensions;
   }
 
   async loadExtensionsFromDir(dir: string): Promise<Extension[]> {
@@ -636,6 +694,7 @@ export class ExtensionManager {
         config,
         settings: config.settings,
         contextFiles: [],
+        hooks: config.hooks,
       };
 
       if (config.mcpServers) {
