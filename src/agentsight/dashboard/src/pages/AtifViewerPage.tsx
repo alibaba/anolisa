@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
 } from '../types';
-import { fetchAtifByTrace, fetchAtifBySession } from '../utils/apiClient';
+import { fetchAtifByTrace, fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -338,8 +338,8 @@ export const AtifViewerPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Input state
-  const [queryType, setQueryType] = useState<'trace' | 'session'>(
-    (searchParams.get('type') as 'trace' | 'session') || 'trace'
+  const [queryType, setQueryType] = useState<'trace' | 'session' | 'conversation'>(
+    (searchParams.get('type') as 'trace' | 'session' | 'conversation') || 'trace'
   );
   const [queryId, setQueryId] = useState(searchParams.get('id') || '');
 
@@ -362,7 +362,7 @@ export const AtifViewerPage: React.FC = () => {
   }, []);
 
   // Load data
-  const handleLoad = useCallback(async (type?: 'trace' | 'session', id?: string) => {
+  const handleLoad = useCallback(async (type?: 'trace' | 'session' | 'conversation', id?: string) => {
     const t = type ?? queryType;
     const i = id ?? queryId;
     if (!i.trim()) return;
@@ -374,9 +374,14 @@ export const AtifViewerPage: React.FC = () => {
     setExpandedSections(new Set());
 
     try {
-      const data = t === 'trace'
-        ? await fetchAtifByTrace(i.trim())
-        : await fetchAtifBySession(i.trim());
+      let data: AtifDocument;
+      if (t === 'trace') {
+        data = await fetchAtifByTrace(i.trim());
+      } else if (t === 'conversation') {
+        data = await fetchAtifByConversation(i.trim());
+      } else {
+        data = await fetchAtifBySession(i.trim());
+      }
       setDoc(data);
     } catch (e: any) {
       setError(e.message ?? '加载失败');
@@ -387,7 +392,7 @@ export const AtifViewerPage: React.FC = () => {
 
   // Auto-load from URL on mount
   useEffect(() => {
-    const urlType = searchParams.get('type') as 'trace' | 'session' | null;
+    const urlType = searchParams.get('type') as 'trace' | 'session' | 'conversation' | null;
     const urlId = searchParams.get('id');
     if (urlType && urlId) {
       setQueryType(urlType);
@@ -488,7 +493,7 @@ export const AtifViewerPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Type toggle */}
           <div className="flex gap-1">
-            {(['trace', 'session'] as const).map(t => (
+            {(['trace', 'conversation', 'session'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => setQueryType(t)}
@@ -498,7 +503,7 @@ export const AtifViewerPage: React.FC = () => {
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                按 {t === 'trace' ? 'Trace' : 'Session'}
+                按 {t === 'trace' ? 'Trace' : t === 'conversation' ? 'Conversation' : 'Session'}
               </button>
             ))}
           </div>
@@ -510,7 +515,7 @@ export const AtifViewerPage: React.FC = () => {
               value={queryId}
               onChange={e => setQueryId(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleLoad(); }}
-              placeholder={queryType === 'trace' ? '输入 Trace ID...' : '输入 Session ID...'}
+              placeholder={queryType === 'trace' ? '输入 Trace ID...' : queryType === 'conversation' ? '输入 Conversation ID...' : '输入 Session ID...'}
               className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
             />
           </div>

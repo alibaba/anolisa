@@ -75,7 +75,7 @@ pub struct AgentTokenSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
-    pub trace_count: i64,
+    pub conversation_count: i64,
     pub first_seen_ns: i64,
     pub last_seen_ns: i64,
     pub total_input_tokens: i64,
@@ -84,17 +84,18 @@ pub struct SessionSummary {
     pub agent_name: Option<String>,
 }
 
-/// Summary of a single trace_id within a session
+/// Summary of a single conversation (user query) within a session
 #[derive(Debug, serde::Serialize)]
 pub struct TraceSummary {
     pub trace_id: String,
+    pub conversation_id: String,
     pub call_count: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub start_ns: i64,
     pub end_ns: Option<i64>,
     pub model: Option<String>,
-    /// The first user_query string recorded in this trace (best-effort)
+    /// The first user_query string recorded in this conversation (best-effort)
     pub user_query: Option<String>,
 }
 
@@ -123,10 +124,14 @@ pub struct TraceEventDetail {
     /// Raw full event JSON stored at write time — used as fallback when
     /// output_messages is NULL (e.g. SSE streams that weren't fully parsed)
     pub event_json: Option<String>,
-    /// Trace ID (conversation_id) — needed for session-level ATIF export
-    /// to group events by trace.
+    /// Trace ID (LLM API response_id) — needed for session-level ATIF export
+    /// to identify individual LLM calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Conversation ID (user query fingerprint) — groups multiple LLM calls
+    /// triggered by the same user query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     /// Cache read tokens — maps to ATIF cached_tokens
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<i64>,
@@ -182,6 +187,7 @@ impl GenAISqliteStore {
                 event_type TEXT NOT NULL,
                 call_id TEXT,
                 trace_id TEXT,
+                conversation_id TEXT,
                 session_id TEXT,
                 instance TEXT,
                 start_timestamp_ns INTEGER NOT NULL,
@@ -227,6 +233,7 @@ impl GenAISqliteStore {
 
             CREATE INDEX IF NOT EXISTS idx_genai_session_id ON genai_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_genai_trace_id ON genai_events(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_genai_conversation_id ON genai_events(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_genai_instance ON genai_events(instance);
             CREATE INDEX IF NOT EXISTS idx_genai_start_timestamp ON genai_events(start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid ON genai_events(pid);
@@ -236,9 +243,14 @@ impl GenAISqliteStore {
             -- Composite indexes for common query patterns
             CREATE INDEX IF NOT EXISTS idx_genai_session_timestamp ON genai_events(session_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_trace_timestamp ON genai_events(trace_id, start_timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_genai_conversation_timestamp ON genai_events(conversation_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid_timestamp ON genai_events(pid, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns);",
         )?;
+
+        // Migration: add conversation_id column for existing databases
+        let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+
         Ok(())
     }
 
@@ -253,7 +265,7 @@ impl GenAISqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT session_id,
-                    COUNT(DISTINCT trace_id) AS trace_count,
+                    COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
                     MAX(start_timestamp_ns)  AS last_seen_ns,
                     COALESCE(SUM(input_tokens), 0)  AS total_input,
@@ -270,7 +282,7 @@ impl GenAISqliteStore {
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {
             Ok(SessionSummary {
                 session_id: row.get(0)?,
-                trace_count: row.get(1)?,
+                conversation_count: row.get(1)?,
                 first_seen_ns: row.get(2)?,
                 last_seen_ns: row.get(3)?,
                 total_input_tokens: row.get(4)?,
@@ -286,14 +298,14 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// List all trace IDs under a given session, with aggregated token stats.
+    /// List all conversations under a given session, with aggregated token stats.
     pub fn list_traces_by_session(
         &self,
         session_id: &str,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trace_id,
+            "SELECT conversation_id,
                     COUNT(*)                        AS call_count,
                     COALESCE(SUM(input_tokens), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -304,13 +316,15 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id = ?1
-               AND trace_id IS NOT NULL
-             GROUP BY trace_id
+               AND conversation_id IS NOT NULL
+             GROUP BY conversation_id
              ORDER BY start_ns ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
+            let cid: String = row.get(0)?;
             Ok(TraceSummary {
-                trace_id: row.get(0)?,
+                trace_id: cid.clone(),
+                conversation_id: cid,
                 call_count: row.get(1)?,
                 total_input_tokens: row.get(2)?,
                 total_output_tokens: row.get(3)?,
@@ -516,7 +530,7 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Fetch all LLM call events for a given trace ID.
+    /// Fetch all LLM call events for a given trace ID (response_id).
     pub fn get_trace_events(
         &self,
         trace_id: &str,
@@ -530,7 +544,7 @@ impl GenAISqliteStore {
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
                     agent_name, process_name, pid, user_query, event_json,
-                    trace_id, cache_read_tokens
+                    trace_id, cache_read_tokens, conversation_id
              FROM genai_events
              WHERE trace_id = ?1
                AND event_type = 'llm_call'
@@ -556,6 +570,57 @@ impl GenAISqliteStore {
                 event_json: row.get(15)?,
                 trace_id: row.get(16)?,
                 cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Fetch all LLM call events for a given conversation ID (user query fingerprint).
+    pub fn get_events_by_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
+                    model,
+                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    COALESCE(output_tokens, 0) AS output_tokens,
+                    COALESCE(total_tokens, 0)  AS total_tokens,
+                    input_messages, output_messages, system_instructions,
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens, conversation_id
+             FROM genai_events
+             WHERE conversation_id = ?1
+               AND event_type = 'llm_call'
+             ORDER BY start_timestamp_ns ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            Ok(TraceEventDetail {
+                id: row.get(0)?,
+                call_id: row.get(1)?,
+                start_timestamp_ns: row.get(2)?,
+                end_timestamp_ns: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                total_tokens: row.get(7)?,
+                input_messages: row.get(8)?,
+                output_messages: row.get(9)?,
+                system_instructions: row.get(10)?,
+                agent_name: row.get(11)?,
+                process_name: row.get(12)?,
+                pid: row.get(13)?,
+                user_query: row.get(14)?,
+                event_json: row.get(15)?,
+                trace_id: row.get(16)?,
+                cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
             })
         })?;
         let mut result = Vec::new();
@@ -579,7 +644,7 @@ impl GenAISqliteStore {
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
                     agent_name, process_name, pid, user_query, event_json,
-                    trace_id, cache_read_tokens
+                    trace_id, cache_read_tokens, conversation_id
              FROM genai_events
              WHERE session_id = ?1
                AND event_type = 'llm_call'
@@ -605,6 +670,7 @@ impl GenAISqliteStore {
                 event_json: row.get(15)?,
                 trace_id: row.get(16)?,
                 cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
             })
         })?;
         let mut result = Vec::new();
@@ -710,7 +776,7 @@ impl GenAISqliteStore {
 
                 conn.execute(
                     "INSERT INTO genai_events (
-                        event_type, call_id, trace_id, session_id, instance,
+                        event_type, call_id, trace_id, conversation_id, session_id, instance,
                         start_timestamp_ns, end_timestamp_ns, duration_ns, pid, process_name, agent_name,
                         operation_name, provider, model, request_model, response_model,
                         temperature, max_tokens, top_p, frequency_penalty, presence_penalty,
@@ -721,14 +787,15 @@ impl GenAISqliteStore {
                         user_query, http_method, http_path, status_code,
                         is_sse, sse_event_count, event_json
                     ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                        ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                        ?32, ?33, ?34, ?35, ?36, ?37, ?38
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                        ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                        ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39
                     )",
                     params![
                         "llm_call",
                         call.call_id,
+                        call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
                         call.metadata.get("session_id"),
                         instance,

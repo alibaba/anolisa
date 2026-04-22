@@ -23,7 +23,7 @@ const API_BASE: string = (() => {
 
 export interface SessionSummary {
   session_id: string;
-  trace_count: number;
+  conversation_count: number;
   first_seen_ns: number;
   last_seen_ns: number;
   total_input_tokens: number;
@@ -34,13 +34,14 @@ export interface SessionSummary {
 
 export interface TraceSummary {
   trace_id: string;
+  conversation_id: string;
   call_count: number;
   total_input_tokens: number;
   total_output_tokens: number;
   start_ns: number;
   end_ns: number | null;
   model: string | null;
-  /** First user_query recorded in this trace (best-effort) */
+  /** First user_query recorded in this conversation (best-effort) */
   user_query: string | null;
 }
 
@@ -66,6 +67,8 @@ export interface TraceEventDetail {
   user_query: string | null;
   /** Raw full event JSON — fallback when output_messages is null */
   event_json: string | null;
+  /** Conversation ID (user query fingerprint) */
+  conversation_id: string | null;
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -111,6 +114,15 @@ export async function fetchTraces(sessionId: string): Promise<TraceSummary[]> {
 export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetail[]> {
   return apiFetch<TraceEventDetail[]>(
     `${API_BASE}/api/traces/${encodeURIComponent(traceId)}`
+  );
+}
+
+/**
+ * Fetch detailed LLM call events for a conversation (user query).
+ */
+export async function fetchConversationDetail(conversationId: string): Promise<TraceEventDetail[]> {
+  return apiFetch<TraceEventDetail[]>(
+    `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}`
   );
 }
 
@@ -185,6 +197,15 @@ export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
 export async function fetchAtifBySession(sessionId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
     `${API_BASE}/api/export/atif/session/${encodeURIComponent(sessionId)}`
+  );
+}
+
+/**
+ * Export a conversation (all LLM calls for a user query) as an ATIF v1.6 trajectory document.
+ */
+export async function fetchAtifByConversation(conversationId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/export/atif/conversation/${encodeURIComponent(conversationId)}`
   );
 }
 

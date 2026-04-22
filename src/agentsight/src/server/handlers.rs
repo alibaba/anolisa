@@ -65,7 +65,7 @@ pub async fn list_sessions(
 
 /// GET /api/sessions/{session_id}/traces
 ///
-/// Returns all trace IDs belonging to a session with token stats.
+/// Returns all conversations belonging to a session with token stats.
 #[get("/api/sessions/{session_id}/traces")]
 pub async fn list_traces_by_session(
     data: web::Data<AppState>,
@@ -98,6 +98,28 @@ pub async fn get_trace_detail(
 
     match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => match store.get_trace_events(&trace_id) {
+            Ok(events) => HttpResponse::Ok().json(events),
+            Err(e) => HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()})),
+        },
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/conversations/{conversation_id}
+///
+/// Returns detailed LLM call events for a conversation (user query).
+#[get("/api/conversations/{conversation_id}")]
+pub async fn get_conversation_events(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let db_path = &data.storage_path;
+    let conversation_id = path.into_inner();
+
+    match GenAISqliteStore::new_with_path(db_path) {
+        Ok(store) => match store.get_events_by_conversation(&conversation_id) {
             Ok(events) => HttpResponse::Ok().json(events),
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
@@ -455,6 +477,45 @@ pub async fn export_atif_session(
     }
 
     match crate::atif::convert_session_to_atif(&session_id, events) {
+        Ok(doc) => HttpResponse::Ok().json(doc),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/export/atif/conversation/{conversation_id}
+///
+/// Exports all LLM calls for a conversation as an ATIF v1.6 trajectory document.
+#[get("/api/export/atif/conversation/{conversation_id}")]
+pub async fn export_atif_conversation(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let db_path = &data.storage_path;
+    let conversation_id = path.into_inner();
+
+    let store = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    let events = match store.get_events_by_conversation(&conversation_id) {
+        Ok(e) => e,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
+    };
+
+    if events.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "conversation not found"}));
+    }
+
+    match crate::atif::convert_trace_to_atif(&conversation_id, events) {
         Ok(doc) => HttpResponse::Ok().json(doc),
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": e.to_string()})),

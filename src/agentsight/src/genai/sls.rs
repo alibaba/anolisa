@@ -214,7 +214,11 @@ impl SlsUploader {
                     }
 
                     // ── OTel GenAI Recommended ──
-                    log.add_content_kv("gen_ai.response.id", &call.call_id);
+                    if let Some(rid) = call.metadata.get("response_id") {
+                        log.add_content_kv("gen_ai.response.id", rid);
+                    } else {
+                        log.add_content_kv("gen_ai.response.id", &call.call_id);
+                    }
                     log.add_content_kv("gen_ai.response.model", &call.model);
                     // finish_reason is now inside OutputMessage, extract from first output
                     if let Some(reason) = call.response.messages.first().and_then(|m| m.finish_reason.as_ref()) {
@@ -321,6 +325,7 @@ impl SlsUploader {
                     }
                     if let Some(cid) = call.metadata.get("conversation_id") {
                         log.add_content_kv("traceId", cid);
+                        log.add_content_kv("gen_ai.conversation.id", cid);
                     }
                     if let Some(uq) = call.metadata.get("user_query") {
                         log.add_content_kv("agentsight.user_query", uq);

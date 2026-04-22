@@ -233,7 +233,7 @@ fn group_by_trace<'a>(
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (i, event) in events.iter().enumerate() {
-        let tid = event.trace_id.clone().unwrap_or_default();
+        let tid = event.conversation_id.clone().unwrap_or_default();
         if !groups.contains_key(&tid) {
             order.push(tid.clone());
         }

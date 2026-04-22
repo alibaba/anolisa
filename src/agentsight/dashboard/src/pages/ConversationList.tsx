@@ -345,7 +345,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
       <tr className="bg-blue-50 border-t border-blue-100">
         <td colSpan={8} className="px-4 lg:px-8 py-2">
           <div className="grid grid-cols-8 text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
-            <div className="col-span-2 w-[220px]">Trace ID</div>
+            <div className="col-span-2 w-[220px]">Conversation ID</div>
             <div className="col-span-2 w-[200px]">用户请求</div>
             <div className="w-[110px]">输入 Token</div>
             <div className="w-[110px]">输出 Token</div>
@@ -364,19 +364,19 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
       )}
 
       {pageTraces.map((tr) => (
-        <tr key={tr.trace_id} className="bg-blue-50 hover:bg-blue-100 transition-colors">
+        <tr key={tr.conversation_id} className="bg-blue-50 hover:bg-blue-100 transition-colors">
           <td colSpan={8} className="px-4 lg:px-8 py-2">
             <div className="grid grid-cols-8 items-center text-sm min-w-[800px]">
-              {/* Col 1: Trace ID */}
+              {/* Col 1: Conversation ID */}
               <div className="col-span-2 min-w-0 pr-2 w-[220px]">
                 <div className="flex items-center gap-1">
                   <span
                     className="font-mono text-xs text-blue-600 block truncate"
-                    title={tr.trace_id}
+                    title={tr.conversation_id}
                   >
-                    {shortId(tr.trace_id, 18)}
+                    {shortId(tr.conversation_id, 18)}
                   </span>
-                  <CopyButton text={tr.trace_id} />
+                  <CopyButton text={tr.conversation_id} />
                 </div>
               </div>
               {/* Col 2: User query */}
@@ -401,7 +401,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
               <div className="text-xs text-gray-500 w-[150px]">{nsToDate(tr.start_ns)}</div>
               <div className="text-right w-[80px]">
                 <button
-                  onClick={() => navigate(`/atif?type=trace&id=${encodeURIComponent(tr.trace_id)}`)}
+                  onClick={() => navigate(`/atif?type=conversation&id=${encodeURIComponent(tr.conversation_id)}`)}
                   className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors"
                 >
                   详情
@@ -979,7 +979,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                         Model
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
-                        Traces
+                        对话数
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
                         输入 Token
@@ -1048,7 +1048,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                             )}
                           </td>
                           <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">
-                            {sess.trace_count}
+                            {sess.conversation_count}
                           </td>
                           <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-blue-600">
                             {fmtTokens(sess.total_input_tokens)}

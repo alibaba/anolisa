@@ -168,6 +168,10 @@ impl GenAIBuilder {
         let session_id = mapper_session.clone()
             .unwrap_or_else(|| Self::compute_session_id(&request));
 
+        // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
+        let response_id = Self::extract_response_id(&parsed_message, &http)
+            .unwrap_or_else(|| call_id.clone());
+
         Some(LLMCall {
             call_id,
             start_timestamp_ns: http.timestamp_ns,
@@ -210,6 +214,8 @@ impl GenAIBuilder {
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 meta.insert("conversation_id".to_string(), query_fp);
+                // response_id: LLM API 返回的响应 ID，用作 trace_id
+                meta.insert("response_id".to_string(), response_id);
                 // user_query: 用户实际输入的原文
                 if let Some(ref q) = user_query {
                     meta.insert("user_query".to_string(), q.clone());
@@ -676,6 +682,53 @@ impl GenAIBuilder {
                 }
             }
         }
+        None
+    }
+
+    /// Extract the LLM API response ID from parsed message or SSE body.
+    ///
+    /// Priority:
+    /// 1. ParsedApiMessage response.id (OpenAI / Anthropic)
+    /// 2. SSE response body first chunk "id" field
+    /// 3. None (caller should fall back to call_id)
+    fn extract_response_id(parsed_message: &Option<ParsedApiMessage>, http: &HttpRecord) -> Option<String> {
+        // 1. Try parsed message response.id
+        if let Some(msg) = parsed_message {
+            match msg {
+                ParsedApiMessage::OpenAICompletion { response: Some(resp), .. } => {
+                    if !resp.id.is_empty() {
+                        return Some(resp.id.clone());
+                    }
+                }
+                ParsedApiMessage::AnthropicMessage { response: Some(resp), .. } => {
+                    if !resp.id.is_empty() {
+                        return Some(resp.id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. SSE fallback: parse first JSON object from response_body for "id" field
+        if http.is_sse {
+            if let Some(ref body) = http.response_body {
+                // SSE body contains lines like "data: {...}" — find first JSON with "id"
+                for line in body.lines() {
+                    let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
+                    if json_str.is_empty() || json_str == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                            if !id.is_empty() {
+                                return Some(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
