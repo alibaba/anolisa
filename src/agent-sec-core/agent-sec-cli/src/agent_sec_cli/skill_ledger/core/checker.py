@@ -10,9 +10,11 @@ Implements ``agent-sec-cli skill-ledger check <skill_dir>``:
 6. Check scanStatus → ``deny`` / ``warn`` / ``none`` / ``pass``
 """
 
+import logging
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.skill_ledger.config import remember_skill_dir
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
@@ -31,6 +33,8 @@ from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
+
+logger = logging.getLogger(__name__)
 
 
 def _auto_create_manifest(
@@ -101,6 +105,14 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
 
     Returns a JSON-serialisable dict with at minimum ``{"status": "<status>"}``.
     """
+    # Auto-remember: append to skillDirs if not already covered (best-effort)
+    try:
+        remember_skill_dir(Path(skill_dir))
+    except Exception:
+        logger.debug(
+            "auto-remember failed for %s, continuing", skill_dir, exc_info=True
+        )
+
     # Step 1: Load latest.json
     # If the file exists but is malformed/corrupted, treat as tampered.
     try:

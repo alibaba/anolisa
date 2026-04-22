@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.skill_ledger.config import remember_skill_dir
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
@@ -195,6 +196,14 @@ def certify(
 
     Returns a JSON-serialisable result dict.
     """
+    # Auto-remember: append to skillDirs if not already covered (best-effort)
+    try:
+        remember_skill_dir(Path(skill_dir))
+    except Exception:
+        logger.debug(
+            "auto-remember failed for %s, continuing", skill_dir, exc_info=True
+        )
+
     skill_name = Path(skill_dir).name
     current_hashes = compute_file_hashes(skill_dir)
     registry = ScannerRegistry.from_config()
