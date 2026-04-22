@@ -863,6 +863,14 @@ def test_rotate_keys_stub(ws: Workspace):
     assert "coming soon" in r.stdout.lower()
 
 
+def test_list_scanners(ws: Workspace):
+    """list-scanners → exit 0, prints header and at least skill-vetter."""
+    r = run_skill_ledger(["list-scanners"], env_extra=ws.env())
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    assert "NAME" in r.stdout, f"Expected header row in output:\n{r.stdout}"
+    assert "skill-vetter" in r.stdout, f"Expected skill-vetter in output:\n{r.stdout}"
+
+
 def test_certify_empty_skill_dir(ws: Workspace):
     """Certify a skill dir with no files → still succeeds (empty fileHashes)."""
     skill = ws.skills_dir / "empty-skill"
@@ -962,7 +970,10 @@ def test_contract_certify_explicit_scanner_flags(ws: Workspace):
 
     SKILL.md invocation:
       agent-sec-cli skill-ledger certify <DIR> \\
-        --findings ... --scanner skill-vetter --scanner-version 0.1.0
+        --findings ... --scanner skill-vetter
+
+    --scanner-version is optional (defaults to 'unknown' if omitted).
+    This test verifies that explicit values are accepted.
     """
     skill = make_skill(ws.skills_dir, "contract-flags", {"run.sh": "echo hi"})
     env = ws.env()
@@ -1301,6 +1312,7 @@ def main():
         # Group 8: stubs & edge cases
         test("set-policy stub", lambda: test_set_policy_stub(ws))
         test("rotate-keys stub", lambda: test_rotate_keys_stub(ws))
+        test("list-scanners", lambda: test_list_scanners(ws))
         test("Certify: empty skill dir", lambda: test_certify_empty_skill_dir(ws))
 
         # Group 9: SKILL.md contract assertions

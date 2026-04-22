@@ -115,7 +115,7 @@ class SkillLedgerBackend(BaseBackend):
         all_skills: bool = False,
         findings: str | None = None,
         scanner: str = "skill-vetter",
-        scanner_version: str = "0.1.0",
+        scanner_version: str | None = None,
         scanner_names: list[str] | None = None,
         **kw: Any,
     ) -> ActionResult:

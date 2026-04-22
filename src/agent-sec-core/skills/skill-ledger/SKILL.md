@@ -240,8 +240,7 @@ cat /tmp/skill-vetter-findings-<SKILL_NAME>.json | python3 -c "import json,sys; 
 ```bash
 agent-sec-cli skill-ledger certify <SKILL_DIR> \
   --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json \
-  --scanner skill-vetter \
-  --scanner-version 0.1.0
+  --scanner skill-vetter
 ```
 
 > 当 Scanner Registry 中有多个 `skill` 类型扫描器时，对每个扫描器分别调用 `certify --findings <对应 findings> --scanner <对应 scanner>`。`certify` 会自动合并同一 Skill 的多个 scanner 条目到 `scans[]` 数组。

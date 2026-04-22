@@ -103,12 +103,12 @@ def _determine_scan_status(findings: list[NormalizedFinding]) -> str:
 def _build_scan_entry(
     normalized: list[NormalizedFinding],
     scanner: str,
-    scanner_version: str,
+    scanner_version: str | None,
 ) -> ScanEntry:
     """Construct a :class:`ScanEntry` from normalised findings."""
     return ScanEntry(
         scanner=scanner,
-        version=scanner_version,
+        version=scanner_version or "unknown",
         status=_determine_scan_status(normalized),
         findings=[f.to_findings_dict() for f in normalized],
         scannedAt=utc_now_iso(),
@@ -181,7 +181,7 @@ def certify(
     backend: SigningBackend,
     findings_path: str | None = None,
     scanner: str = "skill-vetter",
-    scanner_version: str = "0.1.0",
+    scanner_version: str | None = None,
     scanner_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute the full certify workflow for a single skill directory.
@@ -262,7 +262,7 @@ def certify_batch(
     backend: SigningBackend,
     findings_path: str | None = None,
     scanner: str = "skill-vetter",
-    scanner_version: str = "0.1.0",
+    scanner_version: str | None = None,
     scanner_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Certify multiple skill directories (``--all`` mode).
