@@ -11,6 +11,20 @@ from typing import Any
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
+from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
+from agent_sec_cli.skill_ledger.core.auditor import audit
+from agent_sec_cli.skill_ledger.core.certifier import certify, certify_batch
+from agent_sec_cli.skill_ledger.core.checker import check
+from agent_sec_cli.skill_ledger.core.version_chain import (
+    list_version_ids,
+    load_latest_manifest,
+)
+from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
+from agent_sec_cli.skill_ledger.signing.ed25519 import NativeEd25519Backend
+from agent_sec_cli.skill_ledger.signing.key_manager import (
+    archive_current_public_key,
+    ensure_keys_not_exist,
+)
 
 
 class SkillLedgerBackend(BaseBackend):
@@ -41,14 +55,6 @@ class SkillLedgerBackend(BaseBackend):
         passphrase: str | None = None,
         **kw: Any,
     ) -> ActionResult:
-        from agent_sec_cli.skill_ledger.signing.ed25519 import (
-            NativeEd25519Backend,
-        )
-        from agent_sec_cli.skill_ledger.signing.key_manager import (
-            archive_current_public_key,
-            ensure_keys_not_exist,
-        )
-
         try:
             ensure_keys_not_exist(force=force)
         except Exception as exc:
@@ -81,11 +87,6 @@ class SkillLedgerBackend(BaseBackend):
     def _do_check(
         self, ctx: RequestContext, *, skill_dir: str, **kw: Any
     ) -> ActionResult:
-        from agent_sec_cli.skill_ledger.core.checker import check
-        from agent_sec_cli.skill_ledger.signing.ed25519 import (
-            NativeEd25519Backend,
-        )
-
         backend = NativeEd25519Backend()
         try:
             result = check(skill_dir, backend)
@@ -119,20 +120,10 @@ class SkillLedgerBackend(BaseBackend):
         scanner_names: list[str] | None = None,
         **kw: Any,
     ) -> ActionResult:
-        from agent_sec_cli.skill_ledger.core.certifier import (
-            certify,
-            certify_batch,
-        )
-        from agent_sec_cli.skill_ledger.signing.ed25519 import (
-            NativeEd25519Backend,
-        )
-
         backend = NativeEd25519Backend()
 
         try:
             if all_skills:
-                from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
-
                 dirs = resolve_skill_dirs()
                 if not dirs:
                     return ActionResult(
@@ -180,15 +171,6 @@ class SkillLedgerBackend(BaseBackend):
     def _do_status(
         self, ctx: RequestContext, *, skill_dir: str, **kw: Any
     ) -> ActionResult:
-        from agent_sec_cli.skill_ledger.core.checker import check
-        from agent_sec_cli.skill_ledger.core.version_chain import (
-            list_version_ids,
-            load_latest_manifest,
-        )
-        from agent_sec_cli.skill_ledger.signing.ed25519 import (
-            NativeEd25519Backend,
-        )
-
         backend = NativeEd25519Backend()
 
         try:
@@ -239,11 +221,6 @@ class SkillLedgerBackend(BaseBackend):
         verify_snapshots: bool = False,
         **kw: Any,
     ) -> ActionResult:
-        from agent_sec_cli.skill_ledger.core.auditor import audit
-        from agent_sec_cli.skill_ledger.signing.ed25519 import (
-            NativeEd25519Backend,
-        )
-
         backend = NativeEd25519Backend()
 
         try:
@@ -256,4 +233,40 @@ class SkillLedgerBackend(BaseBackend):
             stdout=json.dumps(result, ensure_ascii=False) + "\n",
             data={"command": "audit", **result},
             exit_code=0 if result["valid"] else 1,
+        )
+
+    def _do_list_scanners(self, ctx: RequestContext, **kw: Any) -> ActionResult:
+        registry = ScannerRegistry.from_config()
+        scanners = registry.list_scanners(enabled_only=False)
+
+        if not scanners:
+            return ActionResult(
+                success=True,
+                stdout="No scanners registered.\n",
+                data={"command": "list-scanners", "scanners": []},
+            )
+
+        lines = [
+            f"{'NAME':<20} {'TYPE':<10} {'PARSER':<18} {'ENABLED':<8} DESCRIPTION",
+        ]
+        scanner_data = []
+        for s in scanners:
+            lines.append(
+                f"{s.name:<20} {s.type:<10} {s.parser:<18} "
+                f"{'yes' if s.enabled else 'no':<8} {s.description}"
+            )
+            scanner_data.append(
+                {
+                    "name": s.name,
+                    "type": s.type,
+                    "parser": s.parser,
+                    "enabled": s.enabled,
+                    "description": s.description,
+                }
+            )
+
+        return ActionResult(
+            success=True,
+            stdout="\n".join(lines) + "\n",
+            data={"command": "list-scanners", "scanners": scanner_data},
         )

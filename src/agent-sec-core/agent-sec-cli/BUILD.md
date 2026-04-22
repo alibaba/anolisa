@@ -103,7 +103,7 @@ The package uses modern Python packaging with `pyproject.toml`:
 ### Dependencies
 
 **Runtime:**
-- gnupg >= 2.0
+- System `gpg` / `gnupg2` binary >= 2.0
 
 **Optional:**
 - pgpy >= 0.5 (faster PGP verification)

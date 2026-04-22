@@ -255,21 +255,8 @@ def cmd_list_scanners() -> None:
 
     Use this to discover valid values for the --scanner flag in certify.
     """
-    from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
-
-    registry = ScannerRegistry.from_config()
-    scanners = registry.list_scanners(enabled_only=False)
-    if not scanners:
-        typer.echo("No scanners registered.")
-        raise typer.Exit(code=0)
-
-    typer.echo(f"{'NAME':<20} {'TYPE':<10} {'PARSER':<18} {'ENABLED':<8} DESCRIPTION")
-    for s in scanners:
-        typer.echo(
-            f"{s.name:<20} {s.type:<10} {s.parser:<18} "
-            f"{'yes' if s.enabled else 'no':<8} {s.description}"
-        )
-    raise typer.Exit(code=0)
+    result = invoke("skill_ledger", command="list-scanners")
+    _forward(result)
 
 
 # ---------------------------------------------------------------------------

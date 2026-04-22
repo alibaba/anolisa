@@ -28,7 +28,6 @@ classifiers = [
 
 dependencies = [
     "cryptography>=42.0",
-    "gnupg>=2.0",
     "modelscope>=1.10",
     "pydantic>=2.0",
     "pyyaml>=6.0",

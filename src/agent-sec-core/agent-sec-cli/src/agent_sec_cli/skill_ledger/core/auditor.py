@@ -8,7 +8,6 @@ Implements ``agent-sec-cli skill-ledger audit <skill_dir> [--verify-snapshots]``
 4. Optionally verify snapshot file hashes
 """
 
-from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.skill_ledger.core.file_hasher import (
