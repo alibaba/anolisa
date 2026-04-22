@@ -760,6 +760,21 @@ impl ParsedApiMessage {
         }
     }
 
+    /// Get the LLM response ID (e.g., "chatcmpl-xxx" for OpenAI, "msg_xxx" for Anthropic)
+    pub fn response_id(&self) -> Option<&str> {
+        match self {
+            ParsedApiMessage::OpenAICompletion { response, .. } => {
+                response.as_ref().map(|r| r.id.as_str())
+            }
+            ParsedApiMessage::AnthropicMessage { response, .. } => {
+                response.as_ref().map(|r| r.id.as_str())
+            }
+            ParsedApiMessage::SysomMessage { response, .. } => {
+                response.as_ref().and_then(|r| r.id.as_deref())
+            }
+        }
+    }
+
     /// Check if streaming was requested
     pub fn is_streaming(&self) -> Option<bool> {
         match self {

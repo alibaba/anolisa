@@ -149,6 +149,10 @@ pub struct SysomResponseMessage {
 /// Parsed SysOM API response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponse {
+    /// Response ID (from DashScope backend, e.g. "chatcmpl-xxx")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Response choices
     pub choices: Vec<SysomResponseChoice>,
 }
@@ -220,9 +224,13 @@ impl SysomParser {
     fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<SysomResponse> {
         let mut last_content = String::new();
         let mut last_tool_use: Option<Vec<SysomToolUseItem>> = None;
+        let mut last_id: Option<String> = None;
 
         for chunk in chunks {
             if let Ok(resp) = serde_json::from_value::<SysomResponse>(chunk.clone()) {
+                if resp.id.is_some() {
+                    last_id = resp.id;
+                }
                 if let Some(choice) = resp.choices.into_iter().next() {
                     if !choice.message.content.is_empty() {
                         last_content = choice.message.content;
@@ -239,6 +247,7 @@ impl SysomParser {
         }
 
         Some(SysomResponse {
+            id: last_id,
             choices: vec![SysomResponseChoice {
                 message: SysomResponseMessage {
                     content: last_content,

@@ -29,6 +29,8 @@ use crate::config::{self, AgentsightConfig};
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
+use crate::genai::builder::BuildOutput;
+use crate::genai::semantic::GenAISemanticEvent;
 use crate::parser::Parser;
 use crate::probes::{Probes, ProbesPoller, FileWatchEvent, FileWriteEvent};
 use crate::storage::{
@@ -74,7 +76,21 @@ pub struct AgentSight {
     filewatch_callback: Option<Box<dyn Fn(FileWatchEvent) + Send + 'static>>,
     /// ResponseId → SessionId mapper for FileWrite events
     response_mapper: ResponseSessionMapper,
+    /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
+    pending_genai: Vec<PendingGenAI>,
 }
+
+/// GenAI events waiting for session_id resolution via ResponseSessionMapper.
+/// If the mapper lookup succeeds within the timeout, session_id metadata is updated
+/// before export. Otherwise, the events are exported with the hash-based fallback.
+struct PendingGenAI {
+    events: Vec<GenAISemanticEvent>,
+    response_id: String,
+    created_at: std::time::Instant,
+}
+
+/// Maximum time to wait for ResponseSessionMapper to resolve a session_id
+const PENDING_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Result of processing an event
 #[derive(Debug)]
@@ -201,6 +217,7 @@ impl AgentSight {
             event_count: 0,
             filewatch_callback: None,
             response_mapper: ResponseSessionMapper::new(),
+            pending_genai: Vec::new(),
         })
     }
 
@@ -284,6 +301,8 @@ impl AgentSight {
         // Handle FileWrite events via callback (not through the pipeline)
         if let Event::FileWrite(ref fw_event) = event {
             self.handle_filewrite_event(fw_event);
+            // After mapper is updated, try to resolve any pending GenAI events
+            self.resolve_pending_genai();
             return None;
         }
 
@@ -298,13 +317,20 @@ impl AgentSight {
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events from analysis results (reuse extracted data)
-            let genai_events = self.genai_builder.build(&analysis_results);
+            let output = self.genai_builder.build(&analysis_results, &self.response_mapper);
 
-            // Export GenAI semantic events to all registered exporters
-            if !genai_events.is_empty() {
-                for exporter in &self.genai_exporters {
-                    exporter.export(&genai_events);
-                    log::debug!("Exported {} GenAI events via '{}'", genai_events.len(), exporter.name());
+            if !output.events.is_empty() {
+                if output.pending_response_id.is_some() {
+                    // Session_id not yet resolved — queue for deferred resolution
+                    self.pending_genai.push(PendingGenAI {
+                        events: output.events,
+                        response_id: output.pending_response_id.unwrap(),
+                        created_at: std::time::Instant::now(),
+                    });
+                    log::debug!("GenAI events queued for deferred session_id resolution");
+                } else {
+                    // Session_id resolved (or no response_id) — export immediately
+                    self.export_genai_events(&output.events);
                 }
             }
             
@@ -377,10 +403,14 @@ impl AgentSight {
             if let Some(result) = self.try_process() {
                 log::trace!("[Event {}] Processed", result.event_count);
             } else {
-                // No event available, sleep briefly
+                // No event available — flush any timed-out pending GenAI events
+                self.flush_expired_pending_genai();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+
+        // On shutdown, flush all remaining pending events with fallback session_id
+        self.flush_all_pending_genai();
 
         Ok(self.event_count)
     }
@@ -389,6 +419,105 @@ impl AgentSight {
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         // poller will be dropped automatically when AgentSight is dropped
+    }
+
+    /// Export GenAI events to all registered exporters
+    fn export_genai_events(&self, events: &[GenAISemanticEvent]) {
+        for exporter in &self.genai_exporters {
+            exporter.export(events);
+            log::debug!("Exported {} GenAI events via '{}'", events.len(), exporter.name());
+        }
+    }
+
+    /// Try to resolve pending GenAI events whose session_id can now be looked up.
+    /// Called after FileWrite events update the ResponseSessionMapper.
+    fn resolve_pending_genai(&mut self) {
+        if self.pending_genai.is_empty() {
+            return;
+        }
+
+        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
+        let mut still_pending = Vec::new();
+        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
+
+        for mut pending in pending_items {
+            if let Some(session_id) = self.response_mapper
+                .get_session_by_response_id(&pending.response_id)
+                .map(|s| s.to_string())
+            {
+                // Resolved — update session_id in all event metadata
+                log::debug!(
+                    "Deferred session_id resolved: response_id={} → session_id={}",
+                    pending.response_id, session_id
+                );
+                for event in &mut pending.events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        call.metadata.insert("session_id".to_string(), session_id.clone());
+                    }
+                }
+                to_export.push(pending.events);
+            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                // Timed out — export with fallback session_id
+                log::debug!(
+                    "Deferred session_id timed out for response_id={}, using fallback",
+                    pending.response_id
+                );
+                to_export.push(pending.events);
+            } else {
+                // Still waiting
+                still_pending.push(pending);
+            }
+        }
+
+        self.pending_genai = still_pending;
+
+        for events in &to_export {
+            self.export_genai_events(events);
+        }
+    }
+
+    /// Flush any pending GenAI events that have exceeded the timeout.
+    /// Called during idle periods of the event loop.
+    fn flush_expired_pending_genai(&mut self) {
+        if self.pending_genai.is_empty() {
+            return;
+        }
+
+        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
+        let mut still_pending = Vec::new();
+        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
+
+        for pending in pending_items {
+            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id expired for response_id={}, using fallback",
+                    pending.response_id
+                );
+                to_export.push(pending.events);
+            } else {
+                still_pending.push(pending);
+            }
+        }
+
+        self.pending_genai = still_pending;
+
+        for events in &to_export {
+            self.export_genai_events(events);
+        }
+    }
+
+    /// Flush all remaining pending GenAI events (on shutdown).
+    fn flush_all_pending_genai(&mut self) {
+        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
+        for pending in &pending_items {
+            log::debug!(
+                "Flushing pending GenAI event on shutdown: response_id={}",
+                pending.response_id
+            );
+        }
+        for pending in pending_items {
+            self.export_genai_events(&pending.events);
+        }
     }
 
     /// Get reference to aggregator

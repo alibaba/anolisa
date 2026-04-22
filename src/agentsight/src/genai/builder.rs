@@ -9,6 +9,7 @@ use crate::analyzer::{
 use crate::analyzer::message::types::OpenAIChatMessage;
 use crate::discovery::matcher::{ProcessContext, AgentMatcher};
 use crate::discovery::registry::known_agents;
+use crate::response_map::ResponseSessionMapper;
 use super::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
     InputMessage, OutputMessage, MessagePart, TokenUsage,
@@ -17,6 +18,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Sha256, Digest};
+
+/// Output from `GenAIBuilder::build()`, containing built events and deferred resolution info.
+pub struct BuildOutput {
+    /// Built GenAI semantic events (ready to export, may have fallback session_id)
+    pub events: Vec<GenAISemanticEvent>,
+    /// If set, the session_id was NOT resolved from the ResponseSessionMapper and
+    /// the caller should retry the lookup later using this response ID.
+    /// When the lookup succeeds, update the `session_id` metadata of all events.
+    pub pending_response_id: Option<String>,
+}
 
 /// Builder that constructs GenAI semantic events from AnalysisResult
 pub struct GenAIBuilder {
@@ -50,22 +61,43 @@ impl GenAIBuilder {
     ///
     /// This method reuses already-extracted data (Token, Message, HttpRecord)
     /// to construct higher-level GenAI semantic events without redundant parsing.
-    pub fn build(&self, results: &[AnalysisResult]) -> Vec<GenAISemanticEvent> {
+    ///
+    /// Returns a `BuildOutput` containing the events and an optional `pending_response_id`
+    /// when the session_id could not be resolved from the ResponseSessionMapper (the event
+    /// uses a hash-based fallback and the caller should retry later).
+    pub fn build(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper) -> BuildOutput {
         let mut events = Vec::new();
+        let mut pending_response_id = None;
 
         // Group related results by building LLMCall from multiple sources
         // TokenRecord + HttpRecord + ParsedApiMessage -> LLMCall
-        if let Some(llm_call) = self.build_llm_call(results) {
+        let parsed_message = results.iter().find_map(|r| match r {
+            AnalysisResult::Message(m) => Some(m.clone()),
+            _ => None,
+        });
+
+        // Check if the response ID exists but mapper didn't resolve it
+        let response_id = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
+        let mapper_hit = response_id.as_deref()
+            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .is_some();
+
+        if let Some(llm_call) = self.build_llm_call(results, response_mapper) {
             events.push(GenAISemanticEvent::LLMCall(llm_call));
         }
 
-        events
+        // If response_id exists but mapper didn't have it, mark as pending
+        if !events.is_empty() && response_id.is_some() && !mapper_hit {
+            pending_response_id = response_id;
+        }
+
+        BuildOutput { events, pending_response_id }
     }
 
     /// Build LLMCall from analysis results
     ///
     /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    fn build_llm_call(&self, results: &[AnalysisResult]) -> Option<LLMCall> {
+    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
             AnalysisResult::Token(t) => Some(t.clone()),
@@ -127,7 +159,14 @@ impl GenAIBuilder {
         // 在 request move 之前提取用户查询、fingerprint 和 session_id
         let query_fp = Self::compute_user_query_fingerprint(&request);
         let user_query = Self::extract_last_user_query(&request);
-        let session_id = Self::compute_session_id(&request);
+        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
+        // fallback 到基于首条 user message 的 hash 计算
+        let response_id_val = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
+        let mapper_session = response_id_val.as_deref()
+            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .map(|s| s.to_string());
+        let session_id = mapper_session.clone()
+            .unwrap_or_else(|| Self::compute_session_id(&request));
 
         Some(LLMCall {
             call_id,
