@@ -174,20 +174,32 @@ build_agent_sec_core() {
     log "Building RPM: agent-sec-core"
     log "=========================================="
 
-    local spec_file="${SEC_DIR}/agent-sec-core.spec"
-    if [ ! -f "$spec_file" ]; then
-        err "Spec file not found: $spec_file"
+    local spec_in="${SEC_DIR}/agent-sec-core.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
         return 1
     fi
 
-    local pkg_name pkg_version
-    pkg_name=$(parse_spec_name "$spec_file")
-    pkg_version=$(parse_spec_version "$spec_file")
-    local tarball_name="${pkg_name}-${pkg_version}.tar.gz"
+    # Version from env or Cargo.toml
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${SEC_DIR}/linux-sandbox/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        version="0.0.1"
+        warn "No version specified for agent-sec-core, using default: ${version}"
+    fi
 
-    # Step 1: Copy spec to SPECS
-    log "Step 1/3: Preparing spec file..."
-    cp "$spec_file" "${BUILD_DIR}/SPECS/"
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    # Step 1: Process spec template
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
 
     # Step 2: Create source tarball
     # Note: rust-toolchain.toml is intentionally excluded from the tarball.
@@ -197,7 +209,7 @@ build_agent_sec_core() {
     log "Step 2/3: Creating source tarball ${tarball_name}..."
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${pkg_version}"
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"/{skill,linux-sandbox,tools}
 
     cp -rp "${SEC_DIR}/skill/"* "$pkg_dir/skill/"
@@ -207,14 +219,14 @@ build_agent_sec_core() {
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
 
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${pkg_version}"
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
     # Step 3: rpmbuild (--nodeps: BuildRequires are handled by yum-builddep in CI)
     log "Step 3/3: Running rpmbuild..."
     "$RPMBUILD" -ba --nodeps \
         --define "_topdir ${BUILD_DIR}" \
-        "${BUILD_DIR}/SPECS/agent-sec-core.spec"
+        "$spec_file"
 
     ok "agent-sec-core RPM built successfully"
 }
@@ -290,16 +302,28 @@ build_agentsight() {
     log "Building RPM: agentsight"
     log "=========================================="
 
-    local spec_file="${SIGHT_DIR}/agentsight.spec"
-    if [ ! -f "$spec_file" ]; then
-        err "Spec file not found: $spec_file"
+    local spec_in="${SIGHT_DIR}/agentsight.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
         return 1
     fi
 
-    local pkg_name pkg_version
-    pkg_name=$(parse_spec_name "$spec_file")
-    pkg_version=$(parse_spec_version "$spec_file")
-    local tarball_name="${pkg_name}-${pkg_version}.tar.gz"
+    # Version from env or Cargo.toml
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${SIGHT_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        version="0.0.1"
+        warn "No version specified for agentsight, using default: ${version}"
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
 
     log "Step 1/3: Building agentsight..."
     if ! command -v clang &>/dev/null; then
@@ -311,12 +335,14 @@ build_agentsight() {
         cargo build --release
     )
 
+    # Step 2: Process spec template and create tarball
     log "Step 2/3: Preparing spec and source tarball..."
-    cp "$spec_file" "${BUILD_DIR}/SPECS/"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${pkg_version}"
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
     # Copy relevant files
@@ -325,13 +351,13 @@ build_agentsight() {
     [ -f "${SIGHT_DIR}/README_CN.md" ] && cp "${SIGHT_DIR}/README_CN.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
 
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${pkg_version}"
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
     log "Step 3/3: Running rpmbuild..."
     "$RPMBUILD" -ba --nodeps \
         --define "_topdir ${BUILD_DIR}" \
-        "${BUILD_DIR}/SPECS/agentsight.spec"
+        "$spec_file"
 
     ok "agentsight RPM built successfully"
 }
