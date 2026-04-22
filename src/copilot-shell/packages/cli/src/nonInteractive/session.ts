@@ -431,7 +431,8 @@ class Session {
       console.error('[Session] Interrupt requested');
     }
     this.abortController.abort();
-    this.abortController = new AbortController();
+    // Do not create a new AbortController to prevent listener leaks.
+    // Subsequent queries will check signal.aborted and fail immediately.
   }
 
   private setupSignalHandlers(): void {

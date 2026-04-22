@@ -118,6 +118,20 @@ export class SubAgentTracker {
     eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
     eventEmitter.on(SubAgentEventType.STREAM_TEXT, onStreamText);
 
+    // Add abortSignal Listener
+    const onAbort = () => {
+      // Clean all listeners
+      eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
+      eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
+      eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+      eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
+      eventEmitter.off(SubAgentEventType.STREAM_TEXT, onStreamText);
+      // Clean up any remaining state
+      this.toolStates.clear();
+    };
+
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+
     return [
       () => {
         eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
@@ -125,6 +139,7 @@ export class SubAgentTracker {
         eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
         eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
         eventEmitter.off(SubAgentEventType.STREAM_TEXT, onStreamText);
+        abortSignal.removeEventListener('abort', onAbort);
         // Clean up any remaining states
         this.toolStates.clear();
       },

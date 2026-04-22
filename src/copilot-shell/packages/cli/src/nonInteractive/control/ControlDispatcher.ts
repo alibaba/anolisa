@@ -77,6 +77,8 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   private pendingOutgoingRequests: Map<string, PendingOutgoingRequest> =
     new Map();
 
+  private abortHandler: (() => void) | null = null;
+
   constructor(context: IControlContext) {
     this.context = context;
 
@@ -99,9 +101,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     // this.hookController = new HookController(context, this, 'HookController');
 
     // Listen for main abort signal
-    this.context.abortSignal.addEventListener('abort', () => {
+    this.abortHandler = () => {
       this.shutdown();
-    });
+    };
+    this.context.abortSignal.addEventListener('abort', this.abortHandler);
   }
 
   /**
@@ -243,6 +246,12 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   shutdown(): void {
     if (this.context.debugMode) {
       console.error('[ControlDispatcher] Shutting down');
+    }
+
+    // Remove abort listener to prevent memory leak
+    if (this.abortHandler) {
+      this.context.abortSignal.removeEventListener('abort', this.abortHandler);
+      this.abortHandler = null;
     }
 
     // Cancel all incoming requests
