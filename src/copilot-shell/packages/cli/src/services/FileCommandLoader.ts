@@ -11,7 +11,7 @@ import toml from '@iarna/toml';
 import { glob } from 'glob';
 import { z } from 'zod';
 import type { Config } from '@copilot-shell/core';
-import { EXTENSIONS_CONFIG_FILENAME, Storage } from '@copilot-shell/core';
+import { findExtensionConfigFilename, Storage } from '@copilot-shell/core';
 import type { ICommandLoader } from './types.js';
 import {
   parseMarkdownCommand,
@@ -26,19 +26,36 @@ import type { SlashCommand } from '../ui/commands/types.js';
 interface CommandDirectory {
   path: string;
   extensionName?: string;
+  /** Root path of the owning extension, used for variable substitution in `run` commands. */
+  extensionPath?: string;
 }
 
 /**
  * Defines the Zod schema for a command definition file. This serves as the
  * single source of truth for both validation and type inference.
+ *
+ * Supports two modes:
+ *   - `prompt`: send a prompt to the model (can include !{...} shell injection)
+ *   - `run`: execute a shell command directly, stream output to UI, no model involved
  */
-const TomlCommandDefSchema = z.object({
-  prompt: z.string({
-    required_error: "The 'prompt' field is required.",
-    invalid_type_error: "The 'prompt' field must be a string.",
-  }),
-  description: z.string().optional(),
-});
+const TomlCommandDefSchema = z
+  .object({
+    prompt: z
+      .string({
+        invalid_type_error: "The 'prompt' field must be a string.",
+      })
+      .optional(),
+    run: z
+      .string({
+        invalid_type_error: "The 'run' field must be a string.",
+      })
+      .optional(),
+    description: z.string().optional(),
+    show_command: z.boolean().optional(),
+  })
+  .refine((data) => data.prompt != null || data.run != null, {
+    message: "Either 'prompt' or 'run' field is required.",
+  });
 
 /**
  * Discovers and loads custom slash commands from .toml files in both the
@@ -105,6 +122,7 @@ export class FileCommandLoader implements ICommandLoader {
             path.join(dirInfo.path, file),
             dirInfo.path,
             dirInfo.extensionName,
+            dirInfo.extensionPath,
           ),
         );
 
@@ -172,6 +190,7 @@ export class FileCommandLoader implements ICommandLoader {
           dirs.push({
             path: cmdPath,
             extensionName: ext.name,
+            extensionPath: ext.path,
           });
         }
       }
@@ -188,9 +207,10 @@ export class FileCommandLoader implements ICommandLoader {
     path: string;
     name: string;
   }): string[] {
-    // Try to get extension config
+    // Try to get extension config — prefer cosh-extension.json, fall back to qwen-extension.json
     try {
-      const configPath = path.join(ext.path, EXTENSIONS_CONFIG_FILENAME);
+      const configFilename = findExtensionConfigFilename(ext.path);
+      const configPath = path.join(ext.path, configFilename);
       if (fsSync.existsSync(configPath)) {
         const configContent = fsSync.readFileSync(configPath, 'utf-8');
         const config = JSON.parse(configContent);
@@ -241,6 +261,7 @@ export class FileCommandLoader implements ICommandLoader {
     filePath: string,
     baseDir: string,
     extensionName?: string,
+    extensionPath?: string,
   ): Promise<SlashCommand | null> {
     let fileContent: string;
     try {
@@ -283,6 +304,7 @@ export class FileCommandLoader implements ICommandLoader {
       validDef,
       extensionName,
       '.toml',
+      extensionPath,
     );
   }
 

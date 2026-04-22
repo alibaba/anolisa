@@ -9,7 +9,17 @@
  * objects from parsed command definitions (TOML or Markdown).
  */
 
+import { spawn as _nodeSpawn } from 'node:child_process';
 import path from 'node:path';
+import { hydrateString } from '@copilot-shell/core';
+
+/**
+ * Thin wrapper around spawn, exported so unit tests can substitute a fake
+ * without relying on ESM built-in module mocking (which is unreliable in
+ * jsdom environment).
+ * @internal Do not use outside of command-factory and its tests.
+ */
+export const _spawnImpl = { fn: _nodeSpawn };
 import type {
   CommandContext,
   SlashCommand,
@@ -33,8 +43,16 @@ import {
 import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 
 export interface CommandDefinition {
-  prompt: string;
+  /** Prompt to send to the model. Required if `run` is absent. */
+  prompt?: string;
+  /** Shell command to execute directly without involving the model. */
+  run?: string;
   description?: string;
+  /**
+   * When true, prepends `$ <command>` to the output.
+   * Defaults to false — output is shown without the raw command header.
+   */
+  show_command?: boolean;
 }
 
 /**
@@ -54,6 +72,7 @@ export function createSlashCommandFromDefinition(
   definition: CommandDefinition,
   extensionName: string | undefined,
   fileExtension: string,
+  extensionPath?: string,
 ): SlashCommand {
   const relativePathWithExt = path.relative(baseDir, filePath);
   const relativePath = relativePathWithExt.substring(
@@ -76,13 +95,110 @@ export function createSlashCommandFromDefinition(
   }
 
   const processors: IPromptProcessor[] = [];
-  const usesArgs = definition.prompt.includes(SHORTHAND_ARGS_PLACEHOLDER);
-  const usesShellInjection = definition.prompt.includes(
-    SHELL_INJECTION_TRIGGER,
-  );
-  const usesAtFileInjection = definition.prompt.includes(
-    AT_FILE_INJECTION_TRIGGER,
-  );
+
+  // ── Shell-only mode: `run` field executes directly, no model ──────────────
+  if (definition.run != null) {
+    // Apply ${extensionPath} and other variables if the command comes from an extension.
+    const shellCmd =
+      extensionPath != null
+        ? hydrateString(definition.run, {
+            extensionPath,
+            CLAUDE_PLUGIN_ROOT: extensionPath,
+            workspacePath: process.cwd(),
+            '/': path.sep,
+            pathSeparator: path.sep,
+          })
+        : definition.run;
+    const showCommand = definition.show_command ?? false;
+    return {
+      name: baseCommandName,
+      description,
+      kind: CommandKind.FILE,
+      extensionName,
+      action: async (): Promise<SlashCommandActionReturn> => {
+        /** Maximum bytes collected from stdout+stderr before truncation. */
+        const OUTPUT_CAP_BYTES = 512 * 1024; // 512 KiB
+        /** Kill process after this many milliseconds. */
+        const TIMEOUT_MS = 30_000;
+
+        const result = await new Promise<{
+          output: string;
+          code: number | null;
+          timedOut: boolean;
+          spawnError?: boolean;
+        }>((resolve) => {
+          let totalBytes = 0;
+          let truncated = false;
+          const proc = _spawnImpl.fn('sh', ['-c', shellCmd], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+
+          const timer = setTimeout(() => {
+            proc.kill();
+            resolve({ output: chunks.join(''), code: null, timedOut: true });
+          }, TIMEOUT_MS);
+
+          const chunks: string[] = [];
+
+          const collect = (d: Buffer) => {
+            if (truncated) return;
+            const remaining = OUTPUT_CAP_BYTES - totalBytes;
+            if (d.length >= remaining) {
+              chunks.push(d.subarray(0, remaining).toString());
+              chunks.push(
+                `\n[output truncated at ${OUTPUT_CAP_BYTES / 1024} KiB]`,
+              );
+              truncated = true;
+              proc.stdout.destroy();
+              proc.stderr.destroy();
+            } else {
+              totalBytes += d.length;
+              chunks.push(d.toString());
+            }
+          };
+
+          proc.stdout.on('data', collect);
+          proc.stderr.on('data', collect);
+
+          proc.on('error', (err) => {
+            clearTimeout(timer);
+            resolve({
+              output: `[failed to start process: ${err.message}]`,
+              code: null,
+              timedOut: false,
+              spawnError: true,
+            });
+          });
+
+          proc.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ output: chunks.join(''), code, timedOut: false });
+          });
+        });
+
+        const suffix = result.timedOut
+          ? `\n[process killed after ${TIMEOUT_MS / 1000}s timeout]`
+          : result.code !== 0 && result.code !== null
+            ? `\n[exited with code ${result.code}]`
+            : '';
+        const isError =
+          result.timedOut ||
+          result.spawnError === true ||
+          (result.code !== 0 && result.code !== null);
+        return {
+          type: 'message',
+          messageType: isError ? 'error' : 'info',
+          content: `${showCommand ? `$ ${shellCmd.trim()}\n` : ''}${result.output}${suffix}`,
+        };
+      },
+    };
+  }
+
+  // ── Prompt mode: send to model ────────────────────────────────────────────
+  const promptText = definition.prompt!;
+  const usesArgs = promptText.includes(SHORTHAND_ARGS_PLACEHOLDER);
+  const usesShellInjection = promptText.includes(SHELL_INJECTION_TRIGGER);
+  const usesAtFileInjection = promptText.includes(AT_FILE_INJECTION_TRIGGER);
 
   // 1. @-File Injection (Security First).
   // This runs first to ensure we're not executing shell commands that
@@ -118,14 +234,12 @@ export function createSlashCommandFromDefinition(
         );
         return {
           type: 'submit_prompt',
-          content: [{ text: definition.prompt }], // Fallback to unprocessed prompt
+          content: [{ text: promptText }], // Fallback to unprocessed prompt
         };
       }
 
       try {
-        let processedContent: PromptPipelineContent = [
-          { text: definition.prompt },
-        ];
+        let processedContent: PromptPipelineContent = [{ text: promptText }];
         for (const processor of processors) {
           processedContent = await processor.process(processedContent, context);
         }
