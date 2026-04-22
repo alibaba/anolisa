@@ -87,13 +87,11 @@ export const Footer: React.FC = () => {
     rightItems.push({
       key: 'context',
       node: (
-        <Text color={theme.text.accent}>
-          <ContextUsageDisplay
-            promptTokenCount={promptTokenCount}
-            terminalWidth={terminalWidth}
-            contextWindowSize={contextWindowSize}
-          />
-        </Text>
+        <ContextUsageDisplay
+          promptTokenCount={promptTokenCount}
+          terminalWidth={terminalWidth}
+          contextWindowSize={contextWindowSize}
+        />
       ),
     });
   }
@@ -174,7 +172,7 @@ export const Footer: React.FC = () => {
               ))}
             </>
           )}
-        <Text wrap="truncate">{leftBottomContent}</Text>
+        {leftBottomContent && <Box>{leftBottomContent}</Box>}
       </Box>
 
       {/* Right Section — never compressed */}
