@@ -512,6 +512,15 @@ async function disableAction(context: CommandContext, args: string) {
     );
     context.ui.reloadCommands();
   }
+  // Re-initialize the hook system so disabled extensions' hooks are removed
+  // from the registry. HookRegistry.initialize() clears entries before
+  // reloading, so calling it again is idempotent and safe.
+  // Best-effort: hook registry failure must not surface as a disable failure.
+  try {
+    await context.services.config?.getHookSystem()?.initialize();
+  } catch (e) {
+    console.warn('Hook registry re-initialization failed after disable:', e);
+  }
 }
 
 async function enableAction(context: CommandContext, args: string) {
@@ -532,6 +541,14 @@ async function enableAction(context: CommandContext, args: string) {
       Date.now(),
     );
     context.ui.reloadCommands();
+  }
+  // Re-initialize the hook system so newly enabled extensions' hooks are
+  // reflected in the registry immediately.
+  // Best-effort: hook registry failure must not surface as an enable failure.
+  try {
+    await context.services.config?.getHookSystem()?.initialize();
+  } catch (e) {
+    console.warn('Hook registry re-initialization failed after enable:', e);
   }
 }
 

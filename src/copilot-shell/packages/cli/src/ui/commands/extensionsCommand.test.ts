@@ -910,6 +910,120 @@ describe('extensionsCommand', () => {
         expect.any(Number),
       );
     });
+
+    it('should call hookSystem.initialize() after disabling an extension', async () => {
+      mockDisableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions disable', name: 'disable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await disableAction(ctx, 'test-extension --scope=user');
+
+      expect(mockDisableExtension).toHaveBeenCalledWith(
+        'test-extension',
+        'User',
+      );
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+    });
+
+    it('should disable extension even when hookSystem is not available', async () => {
+      mockDisableExtension.mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions disable', name: 'disable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => undefined, // no hook system
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      // Must not throw when hookSystem is unavailable
+      await expect(
+        disableAction(ctx, 'test-extension --scope=user'),
+      ).resolves.not.toThrow();
+      expect(mockDisableExtension).toHaveBeenCalledWith(
+        'test-extension',
+        'User',
+      );
+    });
+
+    it('should call hookSystem.initialize() exactly once when disabling --all', async () => {
+      mockGetLoadedExtensions.mockReturnValue([
+        { name: 'ext-a', isActive: true },
+        { name: 'ext-b', isActive: true },
+        { name: 'ext-c', isActive: false }, // inactive — skipped by --all
+      ]);
+      mockDisableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions disable', name: 'disable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await disableAction(ctx, '--all --scope=user');
+
+      // Only active extensions should be disabled
+      expect(mockDisableExtension).toHaveBeenCalledTimes(2);
+      // Hook system must be re-initialized exactly once after the whole batch
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+    });
+
+    it('should still report disable success when hookSystem.initialize() throws', async () => {
+      mockDisableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi
+        .fn()
+        .mockRejectedValue(new Error('hook init failed'));
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions disable', name: 'disable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      // Must not surface a failure to the user
+      await expect(
+        disableAction(ctx, 'test-extension --scope=user'),
+      ).resolves.not.toThrow();
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" disabled for scope "User"',
+        },
+        expect.any(Number),
+      );
+      expect(ctx.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.ERROR }),
+        expect.any(Number),
+      );
+    });
   });
 
   describe('enable', () => {
@@ -1003,6 +1117,120 @@ describe('extensionsCommand', () => {
           type: MessageType.ERROR,
           text: 'Unsupported scope "invalid", should be one of "user" or "workspace"',
         },
+        expect.any(Number),
+      );
+    });
+
+    it('should call hookSystem.initialize() after enabling an extension', async () => {
+      mockEnableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions enable', name: 'enable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await enableAction(ctx, 'test-extension --scope=user');
+
+      expect(mockEnableExtension).toHaveBeenCalledWith(
+        'test-extension',
+        'User',
+      );
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+    });
+
+    it('should enable extension even when hookSystem is not available', async () => {
+      mockEnableExtension.mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions enable', name: 'enable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => undefined, // no hook system
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      // Must not throw when hookSystem is unavailable
+      await expect(
+        enableAction(ctx, 'test-extension --scope=user'),
+      ).resolves.not.toThrow();
+      expect(mockEnableExtension).toHaveBeenCalledWith(
+        'test-extension',
+        'User',
+      );
+    });
+
+    it('should call hookSystem.initialize() exactly once when enabling --all', async () => {
+      mockGetLoadedExtensions.mockReturnValue([
+        { name: 'ext-a', isActive: false },
+        { name: 'ext-b', isActive: false },
+        { name: 'ext-c', isActive: true }, // already active — skipped by --all
+      ]);
+      mockEnableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi.fn().mockResolvedValue(undefined);
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions enable', name: 'enable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      await enableAction(ctx, '--all --scope=user');
+
+      // Only inactive extensions should be enabled
+      expect(mockEnableExtension).toHaveBeenCalledTimes(2);
+      // Hook system must be re-initialized exactly once after the whole batch
+      expect(mockHookInitialize).toHaveBeenCalledOnce();
+    });
+
+    it('should still report enable success when hookSystem.initialize() throws', async () => {
+      mockEnableExtension.mockResolvedValue(undefined);
+      const mockHookInitialize = vi
+        .fn()
+        .mockRejectedValue(new Error('hook init failed'));
+      const ctx = createMockCommandContext({
+        invocation: { raw: '/extensions enable', name: 'enable', args: '' },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+            getHookSystem: () => ({ initialize: mockHookInitialize }),
+          },
+        },
+        ui: { dispatchExtensionStateUpdate: vi.fn() },
+      });
+
+      // Must not surface a failure to the user
+      await expect(
+        enableAction(ctx, 'test-extension --scope=user'),
+      ).resolves.not.toThrow();
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension "test-extension" enabled for scope "User"',
+        },
+        expect.any(Number),
+      );
+      expect(ctx.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.ERROR }),
         expect.any(Number),
       );
     });
