@@ -181,6 +181,8 @@ impl GenAISqliteStore {
     /// Initialize database tables
     fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
+
+        // Step 1: Create table (for new databases)
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS genai_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,9 +231,17 @@ impl GenAISqliteStore {
                 -- Full event as JSON (fallback)
                 event_json TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+            );",
+        )?;
 
-            CREATE INDEX IF NOT EXISTS idx_genai_session_id ON genai_events(session_id);
+        // Step 2: Migration — add conversation_id column for existing databases
+        // that were created before conversation_id was added to the schema.
+        // Must run BEFORE index creation to avoid "no such column" errors.
+        let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+
+        // Step 3: Create indexes (safe now that conversation_id column exists)
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_genai_session_id ON genai_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_genai_trace_id ON genai_events(trace_id);
             CREATE INDEX IF NOT EXISTS idx_genai_conversation_id ON genai_events(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_genai_instance ON genai_events(instance);
@@ -247,9 +257,6 @@ impl GenAISqliteStore {
             CREATE INDEX IF NOT EXISTS idx_genai_pid_timestamp ON genai_events(pid, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns);",
         )?;
-
-        // Migration: add conversation_id column for existing databases
-        let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
 
         Ok(())
     }

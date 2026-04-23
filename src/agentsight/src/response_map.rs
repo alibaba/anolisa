@@ -23,9 +23,10 @@ use crate::probes::FileWriteEvent;
 /// Maximum number of responseId → sessionId entries kept in memory.
 const MAX_RESPONSE_MAP_ENTRIES: usize = 10_000;
 
-/// Regex to match `responseId":"<value>"` in raw text.
+/// Regex to match `responseId":"<value>"` or `response_id":"<value>"` in raw text.
+/// Supports both camelCase (used by some agents) and snake_case (used by cosh).
 static RESPONSE_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"responseId":"([^"]+)"#).unwrap());
+    Lazy::new(|| Regex::new(r#"(?:responseId|response_id)":"([^"]+)"#).unwrap());
 
 /// Processes FileWrite events to build an in-memory responseId → sessionId mapping.
 /// Uses an LRU cache to bound memory usage.
@@ -119,8 +120,8 @@ impl ResponseSessionMapper {
         }
     }
 
-    /// Extract "responseId" value from a single JSONL line using regex.
-    /// Matches patterns like `responseId":"chatcmpl-xxxx"`.
+    /// Extract "responseId" or "response_id" value from a single JSONL line using regex.
+    /// Matches patterns like `responseId":"chatcmpl-xxxx"` or `response_id":"chatcmpl-xxxx"`.
     fn extract_response_id(line: &str) -> Option<String> {
         RESPONSE_ID_RE
             .captures(line)
@@ -172,6 +173,17 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_response_id_snake_case() {
+        // cosh writes response_id in snake_case
+        let line = r#"{"response_id":"chatcmpl-f2748a8e-85d0-9058-b28f-c70e6f5fd590","model":"qwen-plus"}"#;
+        let id = ResponseSessionMapper::extract_response_id(line);
+        assert_eq!(
+            id.as_deref(),
+            Some("chatcmpl-f2748a8e-85d0-9058-b28f-c70e6f5fd590")
+        );
+    }
+
+    #[test]
     fn test_extract_response_id_missing() {
         let line = r#"{"other":"data"}"#;
         assert!(ResponseSessionMapper::extract_response_id(line).is_none());
@@ -215,5 +227,29 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
         assert!(mapper.get_session_by_response_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_process_and_query_snake_case() {
+        // cosh writes response_id (snake_case) in ui_telemetry records
+        let mut mapper = ResponseSessionMapper::new();
+        let event = FileWriteEvent {
+            pid: 5678,
+            tid: 5678,
+            uid: 1000,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "node".to_string(),
+            filename: "a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl".to_string(),
+            buf: br#"{"type":"system","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"event.name":"api_response","response_id":"chatcmpl-f2748a8e-85d0-9058-b28f-c70e6f5fd590","model":"qwen-plus"}}}
+"#
+            .to_vec(),
+        };
+        mapper.process_filewrite(&event);
+
+        assert_eq!(
+            mapper.get_session_by_response_id("chatcmpl-f2748a8e-85d0-9058-b28f-c70e6f5fd590"),
+            Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        );
     }
 }
