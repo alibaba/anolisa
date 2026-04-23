@@ -118,6 +118,7 @@ agent-sec-core/
 │   │   ├── asset_verify/      # Skill signature + hash verification
 │   │   ├── code_scanner/      # Code security scanning engine
 │   │   ├── sandbox/           # Sandbox policy generation
+│   │   ├── skill_ledger/      # Ed25519 integrity ledger (check/certify/status)
 │   │   ├── security_events/   # JSONL event logging
 │   │   └── security_middleware/ # Middleware layer + backends
 │   ├── dev-tools/             # Developer guides for extending backends
@@ -242,6 +243,39 @@ agent-sec-cli verify
 ```
 
 For the complete guide (manual key management, custom skills, CI/CD, troubleshooting), see **[Skill Signing Guide](tools/SIGNING_GUIDE.md)**.
+
+## Skill Ledger
+
+Ed25519-based integrity ledger for skill directories. Tracks file hashes, version chains, and scan results in `.skill-meta/` manifests — all managed via the `agent-sec-cli skill-ledger` subcommand.
+
+### Key Commands
+
+| Command | Description |
+|---------|-------------|
+| `init-keys` | Generate Ed25519 signing keypair |
+| `check <dir>` | Detect drift / tampering against the manifest |
+| `certify <dir>` | Run scanner, sign, and seal the manifest |
+| `status` | System-wide health overview (keys, config, aggregate integrity) |
+| `audit <dir>` | Show version history and signature chain |
+| `check --all` / `certify --all` | Batch mode across all registered skill dirs |
+
+### Quick Example
+
+```bash
+# Generate signing keys (one-time)
+agent-sec-cli skill-ledger init-keys
+
+# Check integrity (creates unsigned baseline on first run)
+agent-sec-cli skill-ledger check /path/to/skill
+
+# Certify after review
+agent-sec-cli skill-ledger certify /path/to/skill
+
+# System health overview
+agent-sec-cli skill-ledger status
+```
+
+Design doc: [`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · User guide: [`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
 
 ## Audit Log
 

@@ -5,7 +5,6 @@ unified :class:`ActionResult`.
 """
 
 import json
-from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
@@ -14,11 +13,8 @@ from agent_sec_cli.security_middleware.result import ActionResult
 from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
 from agent_sec_cli.skill_ledger.core.auditor import audit
 from agent_sec_cli.skill_ledger.core.certifier import certify, certify_batch
-from agent_sec_cli.skill_ledger.core.checker import check
-from agent_sec_cli.skill_ledger.core.version_chain import (
-    list_version_ids,
-    load_latest_manifest,
-)
+from agent_sec_cli.skill_ledger.core.checker import check, check_batch
+from agent_sec_cli.skill_ledger.core.status import ledger_status
 from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
 from agent_sec_cli.skill_ledger.signing.ed25519 import NativeEd25519Backend
 from agent_sec_cli.skill_ledger.signing.key_manager import (
@@ -78,18 +74,59 @@ class SkillLedgerBackend(BaseBackend):
         except Exception as exc:
             return ActionResult(success=False, error=str(exc), exit_code=1)
 
+        data = {"command": "init-keys", **result}
         return ActionResult(
             success=True,
-            stdout=json.dumps(result, ensure_ascii=False) + "\n",
-            data={"command": "init-keys", **result},
+            stdout=json.dumps(data, ensure_ascii=False) + "\n",
+            data=data,
         )
 
     def _do_check(
-        self, ctx: RequestContext, *, skill_dir: str, **kw: Any
+        self,
+        ctx: RequestContext,
+        *,
+        skill_dir: str | None = None,
+        all_skills: bool = False,
+        **kw: Any,
     ) -> ActionResult:
         backend = NativeEd25519Backend()
+
         try:
-            result = check(skill_dir, backend)
+            if all_skills:
+                dirs = resolve_skill_dirs()
+                if not dirs:
+                    return ActionResult(
+                        success=False,
+                        error="No skill directories found in config.json",
+                        exit_code=1,
+                    )
+                results = check_batch(dirs, backend)
+                has_critical = any(
+                    r.get("status") in ("tampered", "deny", "error") for r in results
+                )
+                data = {"command": "check", "results": results}
+                return ActionResult(
+                    success=not has_critical,
+                    stdout=json.dumps({"results": results}, ensure_ascii=False) + "\n",
+                    data=data,
+                    exit_code=1 if has_critical else 0,
+                )
+            else:
+                if skill_dir is None:
+                    return ActionResult(
+                        success=False,
+                        error="skill_dir is required (or use --all)",
+                        exit_code=1,
+                    )
+                result = check(skill_dir, backend)
+                status = result.get("status", "")
+                is_critical = status in ("tampered", "deny")
+                return ActionResult(
+                    success=not is_critical,
+                    stdout=json.dumps(result, ensure_ascii=False) + "\n",
+                    data={"command": "check", **result},
+                    exit_code=1 if is_critical else 0,
+                )
         except Exception as exc:
             error_data = {"status": "error", "error": str(exc)}
             return ActionResult(
@@ -98,15 +135,6 @@ class SkillLedgerBackend(BaseBackend):
                 data={"command": "check", **error_data},
                 exit_code=1,
             )
-
-        status = result.get("status", "")
-        is_critical = status in ("tampered", "deny")
-        return ActionResult(
-            success=not is_critical,
-            stdout=json.dumps(result, ensure_ascii=False) + "\n",
-            data={"command": "check", **result},
-            exit_code=1 if is_critical else 0,
-        )
 
     def _do_certify(
         self,
@@ -124,6 +152,12 @@ class SkillLedgerBackend(BaseBackend):
 
         try:
             if all_skills:
+                if findings:
+                    return ActionResult(
+                        success=False,
+                        error="--all and --findings are incompatible",
+                        exit_code=1,
+                    )
                 dirs = resolve_skill_dirs()
                 if not dirs:
                     return ActionResult(
@@ -139,11 +173,13 @@ class SkillLedgerBackend(BaseBackend):
                     scanner_version=scanner_version,
                     scanner_names=scanner_names,
                 )
+                has_error = any(r.get("status") == "error" for r in results)
                 data = {"command": "certify", "results": results}
                 return ActionResult(
-                    success=True,
+                    success=not has_error,
                     stdout=json.dumps({"results": results}, ensure_ascii=False) + "\n",
                     data=data,
+                    exit_code=1 if has_error else 0,
                 )
             else:
                 if skill_dir is None:
@@ -169,52 +205,24 @@ class SkillLedgerBackend(BaseBackend):
             return ActionResult(success=False, error=str(exc), exit_code=1)
 
     def _do_status(
-        self, ctx: RequestContext, *, skill_dir: str, **kw: Any
+        self,
+        ctx: RequestContext,
+        *,
+        verbose: bool = False,
+        **kw: Any,
     ) -> ActionResult:
         backend = NativeEd25519Backend()
 
         try:
-            result = check(skill_dir, backend)
+            result = ledger_status(backend, verbose=verbose)
+            data = {"command": "status", **result}
+            return ActionResult(
+                success=True,
+                stdout=json.dumps(data, ensure_ascii=False) + "\n",
+                data=data,
+            )
         except Exception as exc:
             return ActionResult(success=False, error=str(exc), exit_code=1)
-
-        status = result.get("status", "unknown")
-        skill_name = Path(skill_dir).name
-
-        lines = [
-            f"Skill:      {skill_name}",
-            f"Directory:  {skill_dir}",
-            f"Status:     {status}",
-        ]
-
-        try:
-            manifest = load_latest_manifest(skill_dir)
-        except Exception:
-            manifest = None
-        if manifest is not None:
-            lines.append(f"Version:    {manifest.versionId}")
-            lines.append(f"scanStatus: {manifest.scanStatus}")
-            lines.append(f"Policy:     {manifest.policy}")
-            lines.append(f"Scans:      {len(manifest.scans)}")
-            lines.append(f"Files:      {len(manifest.fileHashes)}")
-            if manifest.signature is not None:
-                lines.append(f"Signed by:  {manifest.signature.keyFingerprint}")
-
-        versions = list_version_ids(skill_dir)
-        lines.append(f"Versions:   {len(versions)}")
-
-        if status == "drifted":
-            lines.append(f"  Added:    {result.get('added', [])}")
-            lines.append(f"  Removed:  {result.get('removed', [])}")
-            lines.append(f"  Modified: {result.get('modified', [])}")
-        elif status == "tampered":
-            lines.append(f"  Reason:   {result.get('reason', '')}")
-
-        return ActionResult(
-            success=True,
-            stdout="\n".join(lines) + "\n",
-            data={"command": "status", **result},
-        )
 
     def _do_audit(
         self,
@@ -242,22 +250,8 @@ class SkillLedgerBackend(BaseBackend):
         registry = ScannerRegistry.from_config()
         scanners = registry.list_scanners(enabled_only=False)
 
-        if not scanners:
-            return ActionResult(
-                success=True,
-                stdout="No scanners registered.\n",
-                data={"command": "list-scanners", "scanners": []},
-            )
-
-        lines = [
-            f"{'NAME':<20} {'TYPE':<10} {'PARSER':<18} {'ENABLED':<8} DESCRIPTION",
-        ]
         scanner_data = []
         for s in scanners:
-            lines.append(
-                f"{s.name:<20} {s.type:<10} {s.parser:<18} "
-                f"{'yes' if s.enabled else 'no':<8} {s.description}"
-            )
             scanner_data.append(
                 {
                     "name": s.name,
@@ -268,8 +262,9 @@ class SkillLedgerBackend(BaseBackend):
                 }
             )
 
+        data = {"command": "list-scanners", "scanners": scanner_data}
         return ActionResult(
             success=True,
-            stdout="\n".join(lines) + "\n",
-            data={"command": "list-scanners", "scanners": scanner_data},
+            stdout=json.dumps(data, ensure_ascii=False) + "\n",
+            data=data,
         )

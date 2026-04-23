@@ -85,11 +85,27 @@ agent-sec-cli skill-ledger certify /path/to/your-skill \
 }
 ```
 
-### 4. 查看可读状态
+### 4. 查看整体安全状况
 
 ```bash
-agent-sec-cli skill-ledger status /path/to/your-skill
+# 查看 skill-ledger 系统整体状况（密钥、配置、所有 Skill 健康度）
+agent-sec-cli skill-ledger status
+
+# 包含每个 Skill 的详细状态
+agent-sec-cli skill-ledger status --verbose
 ```
+
+`status` 输出 JSON，包含三个区块：
+
+| 区块 | 说明 |
+|------|------|
+| `keys` | 签名密钥状态（是否初始化、指纹、是否加密、归档密钥数） |
+| `config` | 配置摘要（skillDirs 模式数、已注册扫描器） |
+| `skills` | 聚合健康度（已发现 Skill 数、各状态计数、整体 health 标签） |
+
+`health` 标签含义：`healthy`（全部 pass）、`unscanned`（全部 none）、`attention`（存在 drifted/warn）、`critical`（存在 deny/tampered/error）、`empty`（无已注册 Skill）。
+
+使用 `--verbose` 时会额外输出 `results` 数组，包含每个 Skill 的详细检查结果。
 
 ### 5. 审计完整版本链
 
@@ -279,7 +295,8 @@ agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 | `agent-sec-cli skill-ledger init-keys` | 生成签名密钥对 |
 | `agent-sec-cli skill-ledger check <dir>` | 检查完整性状态（JSON 输出） |
 | `agent-sec-cli skill-ledger certify <dir> --findings <file>` | 将扫描结果签名写入 manifest |
-| `agent-sec-cli skill-ledger status <dir>` | 可读状态展示 |
+| `agent-sec-cli skill-ledger status` | 查看整体安全状况（密钥、配置、Skill 健康度） |
+| `agent-sec-cli skill-ledger status --verbose` | 查看整体安全状况（含每个 Skill 详细结果） |
 | `agent-sec-cli skill-ledger audit <dir>` | 深度验证版本链 |
 | `agent-sec-cli skill-ledger list-scanners` | 查看已注册的扫描器列表 |
 | `agent-sec-cli skill-ledger init-keys --force` | 轮换密钥（归档旧密钥） |

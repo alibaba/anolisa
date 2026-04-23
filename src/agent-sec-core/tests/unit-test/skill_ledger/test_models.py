@@ -33,6 +33,7 @@ class TestManifestHashDeterminism(unittest.TestCase):
             fileHashes={"run.sh": "sha256:aaa", "SKILL.md": "sha256:bbb"},
             scanStatus="pass",
             createdAt="2026-01-01T00:00:00+00:00",
+            updatedAt="2026-01-01T00:00:00+00:00",
         )
         defaults.update(overrides)
         return SignedManifest(**defaults)
@@ -106,6 +107,7 @@ class TestManifestSerializationRoundtrip(unittest.TestCase):
             scanStatus="warn",
             policy="warning",
             createdAt="2026-01-01T00:00:00+00:00",
+            updatedAt="2026-01-01T00:05:00+00:00",
             manifestHash="sha256:hash123",
             previousManifestSignature="prevsig",
             signature=ManifestSignature(
@@ -122,6 +124,7 @@ class TestManifestSerializationRoundtrip(unittest.TestCase):
         self.assertEqual(original.previousVersionId, restored.previousVersionId)
         self.assertEqual(original.fileHashes, restored.fileHashes)
         self.assertEqual(original.scanStatus, restored.scanStatus)
+        self.assertEqual(original.updatedAt, restored.updatedAt)
         self.assertEqual(original.signature.value, restored.signature.value)
         self.assertEqual(len(original.scans), len(restored.scans))
         self.assertEqual(original.scans[0].scanner, restored.scans[0].scanner)

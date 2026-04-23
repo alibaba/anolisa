@@ -41,14 +41,6 @@ def keys_exist() -> bool:
     return key_enc_path().is_file() and key_pub_path().is_file()
 
 
-def ensure_keys_exist() -> None:
-    """Raise :class:`KeyNotFoundError` if keys are missing."""
-    if not key_enc_path().is_file():
-        raise KeyNotFoundError(str(key_enc_path()))
-    if not key_pub_path().is_file():
-        raise KeyNotFoundError(str(key_pub_path()))
-
-
 def ensure_keys_not_exist(force: bool = False) -> None:
     """Raise :class:`KeyAlreadyExistsError` unless *force* is ``True``."""
     if keys_exist() and not force:
@@ -157,9 +149,12 @@ def get_passphrase(
     if _cached_passphrase is not None:
         return _cached_passphrase
 
-    # Try environment variable (for CI / non-interactive)
+    # Try environment variable (for CI / non-interactive).
+    # Use ``is not None`` so that an explicit empty string (e.g.
+    # SKILL_LEDGER_PASSPHRASE="") is accepted as a valid value instead
+    # of falling through to the interactive prompt.
     env_pass = os.environ.get("SKILL_LEDGER_PASSPHRASE")
-    if env_pass:
+    if env_pass is not None:
         _cached_passphrase = env_pass
         return _cached_passphrase
 

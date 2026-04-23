@@ -118,6 +118,7 @@ agent-sec-core/
 │   │   ├── asset_verify/      # Skill 签名 + 哈希校验
 │   │   ├── code_scanner/      # 代码安全扫描引擎
 │   │   ├── sandbox/           # 沙箱策略生成
+│   │   ├── skill_ledger/      # Ed25519 完整性账本（check/certify/status）
 │   │   ├── security_events/   # JSONL 事件日志
 │   │   └── security_middleware/ # 中间层 + 后端实现
 │   ├── dev-tools/             # 后端扩展开发指南
@@ -242,6 +243,39 @@ agent-sec-cli verify
 ```
 
 完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_CN.md)**。
+
+## Skill Ledger
+
+基于 Ed25519 的 Skill 目录完整性账本。在 `.skill-meta/` 中记录文件哈希、版本链和扫描结果，通过 `agent-sec-cli skill-ledger` 子命令统一管理。
+
+### 核心命令
+
+| 命令 | 说明 |
+|------|------|
+| `init-keys` | 生成 Ed25519 签名密钥对 |
+| `check <dir>` | 检测 Skill 文件是否漂移或被篡改 |
+| `certify <dir>` | 运行扫描器、签名并封存清单 |
+| `status` | 系统级健康概览（密钥、配置、聚合完整性） |
+| `audit <dir>` | 查看版本历史与签名链 |
+| `check --all` / `certify --all` | 对所有已注册 Skill 目录批量执行 |
+
+### 快速示例
+
+```bash
+# 生成签名密钥（一次性）
+agent-sec-cli skill-ledger init-keys
+
+# 检查完整性（首次运行自动创建无签名基线）
+agent-sec-cli skill-ledger check /path/to/skill
+
+# 审查通过后认证
+agent-sec-cli skill-ledger certify /path/to/skill
+
+# 系统健康概览
+agent-sec-cli skill-ledger status
+```
+
+设计文档：[`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · 用户指南：[`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
 
 ## 审计日志
 

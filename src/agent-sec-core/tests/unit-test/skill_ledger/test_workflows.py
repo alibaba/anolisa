@@ -21,7 +21,7 @@ import unittest
 
 from agent_sec_cli.skill_ledger.core.auditor import audit
 from agent_sec_cli.skill_ledger.core.certifier import certify
-from agent_sec_cli.skill_ledger.core.checker import check
+from agent_sec_cli.skill_ledger.core.checker import check, check_batch
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
@@ -141,9 +141,17 @@ class TestCheckStateMachine(SkillDirTestCase):
         # .skill-meta/latest.json should now exist
         latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
         self.assertTrue(os.path.isfile(latest))
+        # Enriched metadata must be present
+        self.assertEqual(result["skillName"], "test-skill")
+        self.assertIn("versionId", result)
+        self.assertIn("createdAt", result)
+        self.assertIn("updatedAt", result)
+        self.assertIn("fileCount", result)
+        self.assertIn("manifestHash", result)
+        self.assertIsInstance(result["fileCount"], int)
 
     def test_unchanged_after_certify_pass(self):
-        """certify with all-pass findings → check returns pass."""
+        """certify with all-pass findings → check returns pass with enriched metadata."""
         findings_path = self._write_findings(
             [
                 {"rule": "r1", "level": "pass", "message": "ok"},
@@ -152,6 +160,11 @@ class TestCheckStateMachine(SkillDirTestCase):
         certify(self.skill_dir, self.backend, findings_path=findings_path)
         result = check(self.skill_dir, self.backend)
         self.assertEqual(result["status"], "pass")
+        # Enriched metadata present for pass status
+        self.assertEqual(result["skillName"], "test-skill")
+        self.assertIn("versionId", result)
+        self.assertIn("manifestHash", result)
+        self.assertTrue(result["manifestHash"].startswith("sha256:"))
 
     def test_drifted_after_file_change(self):
         """Modifying a skill file → check returns drifted."""
@@ -181,7 +194,7 @@ class TestCheckStateMachine(SkillDirTestCase):
 
     def test_tampered_manifest_hash(self):
         """Directly editing the manifest JSON → tampered (hash mismatch)."""
-        check(self.skill_dir, self.backend)  # creates signed manifest
+        check(self.skill_dir, self.backend)  # creates unsigned baseline manifest
         latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
         with open(latest, "r") as f:
             data = json.load(f)
@@ -194,7 +207,11 @@ class TestCheckStateMachine(SkillDirTestCase):
 
     def test_tampered_wrong_key_signature(self):
         """Signing with a different key → tampered (signature mismatch)."""
-        check(self.skill_dir, self.backend)
+        # certify first to create a signed manifest (auto-create is unsigned)
+        findings_path = self._write_findings(
+            [{"rule": "r1", "level": "pass", "message": "ok"}]
+        )
+        certify(self.skill_dir, self.backend, findings_path=findings_path)
         # Re-sign the manifest with a different key
         other_backend = InMemoryEd25519Backend()
         latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
@@ -238,6 +255,48 @@ class TestCheckStateMachine(SkillDirTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Check batch
+# ---------------------------------------------------------------------------
+
+
+class TestCheckBatch(SkillDirTestCase):
+    """Tests for check_batch() — batch checking multiple skill directories."""
+
+    def test_batch_returns_one_result_per_skill(self):
+        """check_batch returns one result per input directory."""
+        # Create two skill directories
+        skill_dir2 = os.path.join(self.tmpdir, "skill-two")
+        os.makedirs(skill_dir2)
+        with open(os.path.join(skill_dir2, "SKILL.md"), "w") as f:
+            f.write("# Skill Two\n")
+        with open(os.path.join(skill_dir2, "main.py"), "w") as f:
+            f.write("print('hello')\n")
+
+        from pathlib import Path
+
+        dirs = [Path(self.skill_dir), Path(skill_dir2)]
+        results = check_batch(dirs, self.backend)
+        self.assertEqual(len(results), 2)
+        for r in results:
+            self.assertIn("status", r)
+            self.assertIn("skillName", r)
+
+    def test_batch_handles_per_skill_error(self):
+        """If one skill dir is invalid, its result has status=error."""
+        from pathlib import Path
+
+        bad_dir = Path(self.tmpdir) / "nonexistent-skill"
+        dirs = [Path(self.skill_dir), bad_dir]
+        results = check_batch(dirs, self.backend)
+        self.assertEqual(len(results), 2)
+        # First should succeed
+        self.assertNotEqual(results[0].get("status"), "error")
+        # Second should be error
+        self.assertEqual(results[1]["status"], "error")
+        self.assertIn("error", results[1])
+
+
+# ---------------------------------------------------------------------------
 # Certify workflow
 # ---------------------------------------------------------------------------
 
@@ -246,7 +305,7 @@ class TestCertifyWorkflow(SkillDirTestCase):
     """Tests for the certify command — manifest creation and scan merging."""
 
     def test_certify_creates_version_and_snapshot(self):
-        """First certify → creates v000001 manifest + snapshot."""
+        """First certify → creates v000001 manifest + snapshot with enriched output."""
         findings_path = self._write_findings(
             [
                 {"rule": "r1", "level": "pass", "message": "clean"},
@@ -256,6 +315,13 @@ class TestCertifyWorkflow(SkillDirTestCase):
         self.assertEqual(result["versionId"], "v000001")
         self.assertTrue(result["newVersion"])
         self.assertEqual(result["scanStatus"], "pass")
+        # Enriched fields present in certify output
+        self.assertEqual(result["skillName"], "test-skill")
+        self.assertIn("createdAt", result)
+        self.assertIn("updatedAt", result)
+        self.assertIsInstance(result["fileCount"], int)
+        self.assertIn("manifestHash", result)
+        self.assertTrue(result["manifestHash"].startswith("sha256:"))
         # Version file and snapshot should exist
         v_file = os.path.join(self.skill_dir, ".skill-meta", "versions", "v000001.json")
         v_snap = os.path.join(
