@@ -85,7 +85,7 @@ console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/home/user/.openclaw/skills/github/SKILL.md" },
   });
   assert(result === undefined, "absolute path → returns undefined (allow)");
@@ -94,7 +94,7 @@ console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { path: "/opt/skills/my-tool/SKILL.md" },
   });
   assert(result === undefined, "'path' param (alt name) → returns undefined");
@@ -103,7 +103,7 @@ console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
   const { logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "SKILL.md" },
   });
   assert(logs.some((l) => l.includes("[skill-ledger]")), "bare 'SKILL.md' → handler proceeds");
@@ -111,7 +111,7 @@ console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
   const { logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "  /skills/github/SKILL.md  " },
   });
   assert(logs.some((l) => l.includes("[skill-ledger]")), "whitespace-padded path → handler proceeds (trimmed)");
@@ -119,7 +119,7 @@ console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
   const { logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/deeply/nested/dir/structure/skill-name/SKILL.md" },
   });
   assert(logs.some((l) => l.includes("[skill-ledger]")), "deeply nested path → handler proceeds");
@@ -157,16 +157,16 @@ console.log("\n[3] Negative filtering (should skip → no logs)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/home/user/project/README.md" },
   });
-  assert(result === undefined, "read_file + README.md → returns undefined");
-  assert(logs.length === 0, "read_file + README.md → no logs (skipped)");
+  assert(result === undefined, "read + README.md → returns undefined");
+  assert(logs.length === 0, "read + README.md → no logs (skipped)");
 }
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/skills/SKILL.md.bak" },
   });
   assert(result === undefined, "SKILL.md.bak → returns undefined");
@@ -175,7 +175,7 @@ console.log("\n[3] Negative filtering (should skip → no logs)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/skills/SKILL.markdown" },
   });
   assert(result === undefined, "SKILL.markdown → returns undefined");
@@ -184,25 +184,25 @@ console.log("\n[3] Negative filtering (should skip → no logs)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: {},
   });
-  assert(result === undefined, "read_file + no path param → returns undefined");
-  assert(logs.length === 0, "read_file + no path param → no logs (skipped)");
+  assert(result === undefined, "read + no path param → returns undefined");
+  assert(logs.length === 0, "read + no path param → no logs (skipped)");
 }
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "" },
   });
-  assert(result === undefined, "read_file + empty path → returns undefined");
-  assert(logs.length === 0, "read_file + empty path → no logs (skipped)");
+  assert(result === undefined, "read + empty path → returns undefined");
+  assert(logs.length === 0, "read + empty path → no logs (skipped)");
 }
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "   " },
   });
   assert(result === undefined, "whitespace-only path → returns undefined");
@@ -211,7 +211,7 @@ console.log("\n[3] Negative filtering (should skip → no logs)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: 42 },
   });
   assert(result === undefined, "non-string file_path (number) → returns undefined");
@@ -223,7 +223,7 @@ console.log("\n[4] Fail-open (CLI unavailable → warn + allow)");
 
 {
   const { result, logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/skills/test/SKILL.md" },
   });
   assert(result === undefined, "CLI failure → returns undefined (never blocks)");
@@ -252,15 +252,15 @@ console.log("\n[5] Malformed event resilience");
 }
 
 {
-  // read_file but params is missing → event.params[x] throws → caught by outer try-catch
-  const { result, logs } = await fire({ toolName: "read_file" });
+  // read but params is missing → event.params[x] throws → caught by outer try-catch
+  const { result, logs } = await fire({ toolName: "read" });
   assert(result === undefined, "missing params property → returns undefined (fail-open catch)");
   assert(logs.some((l) => l.includes("[WARN]")), "missing params → emits WARN from catch block");
 }
 
 {
   // params is null → event.params[x] throws → caught
-  const { result, logs } = await fire({ toolName: "read_file", params: null });
+  const { result, logs } = await fire({ toolName: "read", params: null });
   assert(result === undefined, "params: null → returns undefined (fail-open catch)");
   assert(logs.some((l) => l.includes("[WARN]")), "params: null → emits WARN from catch block");
 }
@@ -271,7 +271,7 @@ console.log("\n[6] Path param priority (file_path before path)");
 {
   // When both file_path and path are present, file_path should win
   const { logs } = await fire({
-    toolName: "read_file",
+    toolName: "read",
     params: {
       file_path: "/skills/alpha/SKILL.md",
       path: "/skills/beta/SKILL.md",

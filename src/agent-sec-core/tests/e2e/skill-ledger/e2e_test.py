@@ -872,15 +872,13 @@ def test_list_scanners(ws: Workspace):
 
 
 def test_certify_empty_skill_dir(ws: Workspace):
-    """Certify a skill dir with no files → still succeeds (empty fileHashes)."""
+    """Certify a skill dir with no SKILL.md → exit 1, status=error."""
     skill = ws.skills_dir / "empty-skill"
     skill.mkdir(parents=True, exist_ok=True)
     env = ws.env()
 
     r = run_skill_ledger(["certify", str(skill)], env_extra=env)
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    out = parse_json_output(r.stdout)
-    assert "scanStatus" in out
+    assert r.returncode == 1, f"expected exit 1 for empty dir, got {r.returncode}"
 
 
 # ── Group 9: SKILL.md contract assertions ────────────────────────────────

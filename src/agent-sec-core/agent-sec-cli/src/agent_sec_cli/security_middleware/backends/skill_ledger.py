@@ -187,7 +187,10 @@ class SkillLedgerBackend(BaseBackend):
             f"Status:     {status}",
         ]
 
-        manifest = load_latest_manifest(skill_dir)
+        try:
+            manifest = load_latest_manifest(skill_dir)
+        except Exception:
+            manifest = None
         if manifest is not None:
             lines.append(f"Version:    {manifest.versionId}")
             lines.append(f"scanStatus: {manifest.scanStatus}")

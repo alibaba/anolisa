@@ -33,6 +33,7 @@ from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
+from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,9 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
 
     Returns a JSON-serialisable dict with at minimum ``{"status": "<status>"}``.
     """
+    # Step 0: Validate skill directory
+    validate_skill_dir(skill_dir)
+
     # Auto-remember: append to skillDirs if not already covered (best-effort)
     try:
         remember_skill_dir(Path(skill_dir))

@@ -6,7 +6,7 @@ import { skillLedger } from "../src/capabilities/skill-ledger.js";
 
 // 每个 hook 的 mock 事件（字段与真实类型一致）
 // Note: before_tool_call has two entries — one for exec-based tools (code-scan)
-// and one for read_file-based tools (skill-ledger). The shared mock uses "exec" for
+// and one for read-based tools (skill-ledger). The shared mock uses "exec" for
 // code-scan / prompt-scan. skill-ledger uses its own dedicated mock events below.
 const mockEvents: Record<string, Record<string, unknown>> = {
   before_tool_call: {
@@ -35,11 +35,11 @@ const mockCtx: Record<string, Record<string, unknown>> = {
 
 const caps = [codeScan, promptScan];
 
-// skill-ledger needs a dedicated mock with read_file + SKILL.md path
+// skill-ledger needs a dedicated mock with read + SKILL.md path
 const skillLedgerMockEvents: Record<string, Record<string, unknown>> = {
   ...mockEvents,
   before_tool_call: {
-    toolName: "read_file",
+    toolName: "read",
     params: { file_path: "/home/user/.openclaw/skills/github/SKILL.md" },
     runId: "run-002",
     toolCallId: "tc-002",
@@ -48,7 +48,7 @@ const skillLedgerMockEvents: Record<string, Record<string, unknown>> = {
 const skillLedgerMockCtx: Record<string, Record<string, unknown>> = {
   ...mockCtx,
   before_tool_call: {
-    sessionKey: "sk-001", runId: "run-002", toolName: "read_file", toolCallId: "tc-002",
+    sessionKey: "sk-001", runId: "run-002", toolName: "read", toolCallId: "tc-002",
   },
 };
 

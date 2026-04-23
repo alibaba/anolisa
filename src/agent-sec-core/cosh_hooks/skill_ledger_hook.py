@@ -60,6 +60,7 @@ _WARNING_MESSAGES = {
     "warn": "\u26a0\ufe0f Skill '{name}' has low-risk findings \u2014 review recommended",
     "drifted": "\u26a0\ufe0f Skill '{name}' content has changed since last scan",
     "none": "\u26a0\ufe0f Skill '{name}' has not been security-scanned yet",
+    "error": "\u26a0\ufe0f Skill '{name}' check failed \u2014 invalid path or missing SKILL.md",
     "deny": (
         "\U0001f6a8 Skill '{name}' has high-risk findings"
         " \u2014 immediate review recommended"

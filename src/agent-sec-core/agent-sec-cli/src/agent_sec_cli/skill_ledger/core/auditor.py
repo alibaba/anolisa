@@ -22,6 +22,7 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
 )
 from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
+from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
 
 def audit(
@@ -33,6 +34,9 @@ def audit(
 
     Returns ``{"valid": bool, "versions_checked": int, "errors": [...]}``.
     """
+    # Validate skill directory before any work
+    validate_skill_dir(skill_dir)
+
     errors: list[dict[str, Any]] = []
     version_ids = list_version_ids(skill_dir)
 

@@ -44,7 +44,7 @@ from agent_sec_cli.skill_ledger.models.scan import (
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
 from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import utc_now_iso
+from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,9 @@ def certify(
 
     Returns a JSON-serialisable result dict.
     """
+    # Validate skill directory before any work
+    validate_skill_dir(skill_dir)
+
     # Auto-remember: append to skillDirs if not already covered (best-effort)
     try:
         remember_skill_dir(Path(skill_dir))

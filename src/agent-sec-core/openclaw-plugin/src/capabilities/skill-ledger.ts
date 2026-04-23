@@ -17,7 +17,7 @@ type CheckResult = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const READ_TOOL_NAMES = ["read_file"];
+const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
 
