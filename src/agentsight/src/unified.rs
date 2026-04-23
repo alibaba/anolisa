@@ -94,13 +94,6 @@ struct PendingGenAI {
 /// Maximum time to wait for ResponseSessionMapper to resolve a session_id
 const PENDING_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Result of processing an event
-#[derive(Debug)]
-pub struct ProcessResult {
-    /// Number of events processed so far
-    pub event_count: u64,
-}
-
 impl AgentSight {
     /// Create a new AgentSight instance from configuration
     ///
@@ -279,7 +272,7 @@ impl AgentSight {
 
     /// Try to receive and process the next event (non-blocking)
     /// Returns None if no event is available
-    pub fn try_process(&mut self) -> Option<ProcessResult> {
+    pub fn try_process(&mut self) -> Option<u64> {
         if !self.running.load(Ordering::SeqCst) {
             return None;
         }
@@ -356,9 +349,7 @@ impl AgentSight {
             }
         }
 
-        Some(ProcessResult {
-            event_count: self.event_count,
-        })
+        Some(self.event_count)
     }
 
     /// Handle ProcMon event for agent lifecycle tracking
@@ -413,7 +404,7 @@ impl AgentSight {
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
             if let Some(result) = self.try_process() {
-                log::trace!("[Event {}] Processed", result.event_count);
+                log::trace!("[Event {}] Processed", result);
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();

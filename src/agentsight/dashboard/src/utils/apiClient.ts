@@ -182,6 +182,70 @@ export async function fetchTimeseries(
 
 import type { AtifDocument, AgentHealthResponse } from '../types';
 
+// ─── Token Savings types ─────────────────────────────────────────────────────
+
+export interface DiffLine {
+  type: 'add' | 'remove' | 'context';
+  content: string;
+}
+
+export interface OptimizationItem {
+  id: string;
+  category: 'tool_output' | 'mcp_response';
+  title: string;
+  before_tokens: number;
+  after_tokens: number;
+  saved_tokens: number;
+  before_summary: string;
+  after_summary: string;
+  diff_lines: DiffLine[];
+}
+
+export interface SessionSavings {
+  session_id: string;
+  agent_name: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  saved_tokens: number;
+  savings_rate: number;
+  tool_saved: number;
+  mcp_saved: number;
+  optimization_items: OptimizationItem[];
+}
+
+export interface SavingsSummary {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  total_saved_tokens: number;
+  savings_rate: number;
+  total_tool_saved: number;
+  total_mcp_saved: number;
+}
+
+export interface TokenSavingsResponse {
+  stats_available: boolean;
+  summary: SavingsSummary;
+  sessions: SessionSavings[];
+}
+
+/**
+ * Fetch token savings data within a nanosecond time range.
+ */
+export async function fetchTokenSavings(
+  startNs: number,
+  endNs: number,
+  agentName?: string,
+): Promise<TokenSavingsResponse> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+  });
+  if (agentName) params.set('agent_name', agentName);
+  return apiFetch<TokenSavingsResponse>(`${API_BASE}/api/token-savings?${params.toString()}`);
+}
+
 /**
  * Export a single trace as an ATIF v1.6 trajectory document.
  */

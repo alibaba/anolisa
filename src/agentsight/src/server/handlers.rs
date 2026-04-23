@@ -7,6 +7,7 @@ use super::AppState;
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::{GenAISqliteStore};
 use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket};
+use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Prometheus helpers ───────────────────────────────────────────────────────
 
@@ -520,4 +521,237 @@ pub async fn export_atif_conversation(
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+// ─── Token Savings endpoint ─────────────────────────────────────────────────
+
+/// Query parameters for /api/token-savings
+#[derive(Debug, Deserialize)]
+pub struct TokenSavingsQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub agent_name: Option<String>,
+}
+
+/// Overall savings summary
+#[derive(Debug, Serialize)]
+pub struct SavingsSummary {
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_tokens: i64,
+    pub total_saved_tokens: i64,
+    pub savings_rate: f64,
+    pub total_tool_saved: i64,
+    pub total_mcp_saved: i64,
+}
+
+/// A single optimization item within a session
+#[derive(Debug, Serialize)]
+pub struct OptimizationItemDto {
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub before_tokens: i64,
+    pub after_tokens: i64,
+    pub saved_tokens: i64,
+    pub before_summary: String,
+    pub after_summary: String,
+    pub diff_lines: Vec<DiffLineDto>,
+}
+
+/// A single diff line
+#[derive(Debug, Serialize)]
+pub struct DiffLineDto {
+    #[serde(rename = "type")]
+    pub line_type: String,
+    pub content: String,
+}
+
+/// Per-session savings data
+#[derive(Debug, Serialize)]
+pub struct SessionSavingsDto {
+    pub session_id: String,
+    pub agent_name: String,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_tokens: i64,
+    pub saved_tokens: i64,
+    pub savings_rate: f64,
+    pub tool_saved: i64,
+    pub mcp_saved: i64,
+    pub optimization_items: Vec<OptimizationItemDto>,
+}
+
+/// Full response for /api/token-savings
+#[derive(Debug, Serialize)]
+pub struct TokenSavingsResponse {
+    pub stats_available: bool,
+    pub summary: SavingsSummary,
+    pub sessions: Vec<SessionSavingsDto>,
+}
+
+/// Parse a unified-diff-style text into DiffLine entries.
+fn parse_diff_text(text: &str) -> Vec<DiffLineDto> {
+    text.lines()
+        .map(|line| {
+            if let Some(content) = line.strip_prefix('+') {
+                DiffLineDto { line_type: "add".into(), content: content.to_string() }
+            } else if let Some(content) = line.strip_prefix('-') {
+                DiffLineDto { line_type: "remove".into(), content: content.to_string() }
+            } else {
+                DiffLineDto { line_type: "context".into(), content: line.to_string() }
+            }
+        })
+        .collect()
+}
+
+/// Map stats.db operation field to frontend category.
+fn map_operation_to_category(operation: &str) -> &str {
+    match operation {
+        "compress-response" => "mcp_response",
+        "rewrite-command" => "tool_output",
+        _ => "tool_output",
+    }
+}
+
+/// Map operation to a human-readable title.
+fn map_operation_to_title(operation: &str) -> &str {
+    match operation {
+        "compress-response" => "MCP\u{54cd}\u{5e94}\u{538b}\u{7f29}",
+        "rewrite-command" => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
+        _ => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
+    }
+}
+
+/// GET /api/token-savings?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
+///
+/// Returns token savings data by cross-referencing genai_events.db
+/// with the external ~/.tokenless/stats.db.
+#[get("/api/token-savings")]
+pub async fn get_token_savings(
+    data: web::Data<AppState>,
+    query: web::Query<TokenSavingsQuery>,
+) -> impl Responder {
+    let db_path = &data.storage_path;
+    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let agent_name = query.agent_name.as_deref();
+
+    // Step 1: Query sessions from genai_events.db
+    let sessions = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(store) => match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
+            Ok(s) => s,
+            Err(e) => return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()})),
+        },
+        Err(e) => return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    };
+
+    // Step 2: Open stats.db (read-only, graceful if absent)
+    let stats_path = tokenless::default_stats_path();
+    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
+    let stats_available = stats_store.is_some();
+
+    // Step 3: Batch-query optimization records by session_id
+    let stats_by_session = if let Some(ref store) = stats_store {
+        let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        let rows = store.get_stats_by_session_ids(&session_ids);
+        TokenlessStatsStore::group_by_session(rows)
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Step 4: Build response
+    let mut resp_sessions = Vec::with_capacity(sessions.len());
+    let mut grand_input: i64 = 0;
+    let mut grand_output: i64 = 0;
+    let mut grand_saved: i64 = 0;
+    let mut grand_tool_saved: i64 = 0;
+    let mut grand_mcp_saved: i64 = 0;
+
+    for session in &sessions {
+        let total_tokens = session.total_input_tokens + session.total_output_tokens;
+        let mut session_saved: i64 = 0;
+        let mut session_tool_saved: i64 = 0;
+        let mut session_mcp_saved: i64 = 0;
+        let mut items = Vec::new();
+
+        if let Some(stat_rows) = stats_by_session.get(&session.session_id) {
+            for row in stat_rows {
+                let saved = row.before_tokens - row.after_tokens;
+                let category = map_operation_to_category(&row.operation);
+                let title = map_operation_to_title(&row.operation);
+
+                if category == "mcp_response" {
+                    session_mcp_saved += saved;
+                } else {
+                    session_tool_saved += saved;
+                }
+                session_saved += saved;
+
+                let diff_lines = row.diff_text.as_deref()
+                    .map(parse_diff_text)
+                    .unwrap_or_default();
+
+                items.push(OptimizationItemDto {
+                    id: row.tool_call_id.clone(),
+                    category: category.to_string(),
+                    title: title.to_string(),
+                    before_tokens: row.before_tokens,
+                    after_tokens: row.after_tokens,
+                    saved_tokens: saved,
+                    before_summary: format!("\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens", row.before_tokens),
+                    after_summary: format!("\u{4f18}\u{5316}\u{540e} {} tokens", row.after_tokens),
+                    diff_lines,
+                });
+            }
+        }
+
+        let savings_rate = if total_tokens > 0 {
+            session_saved as f64 / total_tokens as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        grand_input += session.total_input_tokens;
+        grand_output += session.total_output_tokens;
+        grand_saved += session_saved;
+        grand_tool_saved += session_tool_saved;
+        grand_mcp_saved += session_mcp_saved;
+
+        resp_sessions.push(SessionSavingsDto {
+            session_id: session.session_id.clone(),
+            agent_name: session.agent_name.clone().unwrap_or_default(),
+            total_input_tokens: session.total_input_tokens,
+            total_output_tokens: session.total_output_tokens,
+            total_tokens,
+            saved_tokens: session_saved,
+            savings_rate,
+            tool_saved: session_tool_saved,
+            mcp_saved: session_mcp_saved,
+            optimization_items: items,
+        });
+    }
+
+    let grand_total = grand_input + grand_output;
+    let grand_rate = if grand_total > 0 {
+        grand_saved as f64 / grand_total as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    HttpResponse::Ok().json(TokenSavingsResponse {
+        stats_available,
+        summary: SavingsSummary {
+            total_input_tokens: grand_input,
+            total_output_tokens: grand_output,
+            total_tokens: grand_total,
+            total_saved_tokens: grand_saved,
+            savings_rate: grand_rate,
+            total_tool_saved: grand_tool_saved,
+            total_mcp_saved: grand_mcp_saved,
+        },
+        sessions: resp_sessions,
+    })
 }

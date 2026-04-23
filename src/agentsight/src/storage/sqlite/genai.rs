@@ -84,6 +84,15 @@ pub struct SessionSummary {
     pub agent_name: Option<String>,
 }
 
+/// Session summary for the Token Savings page
+#[derive(Debug, serde::Serialize)]
+pub struct SavingsSessionSummary {
+    pub session_id: String,
+    pub agent_name: Option<String>,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+}
+
 /// Summary of a single conversation (user query) within a session
 #[derive(Debug, serde::Serialize)]
 pub struct TraceSummary {
@@ -298,6 +307,67 @@ impl GenAISqliteStore {
                 agent_name: row.get(7)?,
             })
         })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// List sessions for the Token Savings page.
+    ///
+    /// Independent from `list_sessions()` to avoid affecting existing functionality.
+    /// Supports optional agent_name filtering directly in SQL.
+    pub fn list_sessions_for_savings(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        agent_name: Option<&str>,
+    ) -> Result<Vec<SavingsSessionSummary>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+
+        let sql = if agent_name.is_some() {
+            "SELECT session_id,
+                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(output_tokens), 0)  AS total_output
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND session_id IS NOT NULL
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND agent_name = ?3
+             GROUP BY session_id
+             ORDER BY MAX(start_timestamp_ns) DESC"
+        } else {
+            "SELECT session_id,
+                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(output_tokens), 0)  AS total_output
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND session_id IS NOT NULL
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+             GROUP BY session_id
+             ORDER BY MAX(start_timestamp_ns) DESC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<SavingsSessionSummary> {
+            Ok(SavingsSessionSummary {
+                session_id: row.get(0)?,
+                agent_name: row.get(1)?,
+                total_input_tokens: row.get(2)?,
+                total_output_tokens: row.get(3)?,
+            })
+        };
+
+        let rows = if let Some(name) = agent_name {
+            stmt.query_map(params![start_ns, end_ns, name], map_row)?
+        } else {
+            stmt.query_map(params![start_ns, end_ns], map_row)?
+        };
+
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);

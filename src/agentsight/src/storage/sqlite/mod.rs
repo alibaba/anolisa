@@ -13,6 +13,7 @@ pub mod genai;
 pub mod http;
 pub mod token;
 pub mod token_consumption;
+pub mod tokenless;
 
 // Re-export audit storage
 pub use audit::{AuditStore, SqliteStore};
@@ -38,3 +39,6 @@ pub use genai::GenAISqliteStore;
 
 // Re-export connection utilities
 pub use connection::{create_connection, default_base_path};
+
+// Re-export tokenless stats storage
+pub use tokenless::TokenlessStatsStore;

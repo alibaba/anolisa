@@ -4,6 +4,7 @@ import { NavBar } from './components/NavBar';
 import { AgentHealthSidebar } from './components/AgentHealthSidebar';
 import { ConversationList } from './pages/ConversationList';
 import { AtifViewerPage } from './pages/AtifViewerPage';
+import { TokenSavingsPage } from './pages/TokenSavingsPage';
 
 const App: React.FC = () => {
   return (
@@ -14,6 +15,7 @@ const App: React.FC = () => {
           <main className="flex-1 overflow-auto">
             <Routes>
               <Route path="/" element={<ConversationList />} />
+              <Route path="/savings" element={<TokenSavingsPage />} />
               <Route path="/atif" element={<AtifViewerPage />} />
             </Routes>
           </main>

@@ -133,6 +133,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .service(handlers::get_agent_health)
             .service(handlers::delete_agent_health)
             .service(handlers::restart_agent_health)
+            .service(handlers::get_token_savings)
             // Frontend static files (catch-all, must be last)
             .service(serve_frontend)
     })
