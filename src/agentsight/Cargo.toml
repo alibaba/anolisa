@@ -95,3 +95,4 @@ hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40db
 libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
 cc = "1.1.31"
+cbindgen = "0.27"

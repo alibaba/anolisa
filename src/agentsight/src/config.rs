@@ -54,14 +54,46 @@ pub fn hf_home() -> PathBuf {
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_verbose(v: bool) {
-    VERBOSE.store(v, Ordering::SeqCst);
-    if std::env::var("RUST_LOG").is_err() {
-        let level = if v { "debug" } else { "warn" };
-        unsafe {
-            std::env::set_var("RUST_LOG", level);
+    init_logging(v, None);
+}
+
+/// Initialize logging with optional file output.
+///
+/// * `verbose` — true = debug level, false = warn level (unless `RUST_LOG` is set)
+/// * `log_path` — if `Some`, log output is appended to this file; otherwise stderr
+pub fn init_logging(verbose: bool, log_path: Option<&str>) {
+    VERBOSE.store(verbose, Ordering::SeqCst);
+
+    let level = if verbose {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Warn
+    };
+
+    let mut builder = env_logger::Builder::new();
+
+    // Respect RUST_LOG if set, otherwise use verbose-based level.
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        builder.parse_filters(&rust_log);
+    } else {
+        builder.filter_level(level);
+    }
+
+    // Direct output to file if log_path is provided.
+    if let Some(path) = log_path {
+        use std::fs::OpenOptions;
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => {
+                builder.target(env_logger::Target::Pipe(Box::new(file)));
+            }
+            Err(e) => {
+                eprintln!("agentsight: failed to open log file {:?}: {}", path, e);
+            }
         }
     }
-    env_logger::init();
+
+    // init() may fail if called twice; that's fine.
+    let _ = builder.try_init();
 }
 
 pub fn verbose() -> bool {
@@ -127,6 +159,8 @@ pub struct AgentsightConfig {
     // --- Logging Configuration ---
     /// Enable verbose logging
     pub verbose: bool,
+    /// Log file path (None = stderr)
+    pub log_path: Option<String>,
 
     // --- SLS (Aliyun Log Service) Configuration ---
     /// SLS endpoint (e.g. "cn-hangzhou.log.aliyuncs.com")
@@ -176,6 +210,7 @@ impl Default for AgentsightConfig {
 
             // Logging defaults
             verbose: false,
+            log_path: None,
 
             // SLS defaults (read from env vars)
             sls_endpoint: std::env::var("SLS_ENDPOINT").ok(),
@@ -252,7 +287,7 @@ impl AgentsightConfig {
 
     /// Apply verbose setting to the global state
     pub fn apply_verbose(&self) {
-        set_verbose(self.verbose);
+        init_logging(self.verbose, self.log_path.as_deref());
     }
 
     /// Check if SLS configuration is complete

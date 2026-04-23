@@ -3,8 +3,8 @@ use std::env;
 use std::path::PathBuf;
 
 fn generate_skeleton(out: &mut PathBuf, name: &str) {
-    let c_path = format!("src/bpf/{}.bpf.c", name);
-    let rs_name = format!("{}.skel.rs", name);
+    let c_path = format!("src/bpf/{name}.bpf.c");
+    let rs_name = format!("{name}.skel.rs");
     out.push(&rs_name);
     SkeletonBuilder::new()
         .source(&c_path)
@@ -16,8 +16,8 @@ fn generate_skeleton(out: &mut PathBuf, name: &str) {
 }
 
 fn generate_header(out: &mut PathBuf, name: &str) {
-    let header_path = format!("src/bpf/{}.h", name);
-    let rs_name = format!("{}.rs", name);
+    let header_path = format!("src/bpf/{name}.h");
+    let rs_name = format!("{name}.rs");
 
     out.push(&rs_name);
     let bindings = bindgen::Builder::default()
@@ -67,4 +67,15 @@ fn main() {
             .expect("Failed to create frontend-dist directory");
     }
     println!("cargo:rerun-if-changed=frontend-dist");
+
+    // Generate C header from src/ffi.rs via cbindgen
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let header_path = PathBuf::from(&crate_dir).join("include").join("agentsight.h");
+    std::fs::create_dir_all(header_path.parent().unwrap())
+        .expect("Failed to create include/ directory");
+    cbindgen::generate(&crate_dir)
+        .expect("cbindgen failed to generate C header")
+        .write_to_file(&header_path);
+    println!("cargo:rerun-if-changed=src/ffi.rs");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
 }
