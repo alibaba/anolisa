@@ -301,8 +301,27 @@ async function installAction(context: CommandContext, args: string) {
       },
       Date.now(),
     );
-    // FIXME: refresh command controlled by ui for now, cannot be auto refreshed by extensionManager
-    context.ui.reloadCommands();
+    // Full cache refresh pipeline: reload extensions from disk first so that
+    // the newly installed extension's skills/agents and commands are picked up,
+    // then refresh skill and subagent caches so /skills and /agents reflect the
+    // change immediately without requiring a restart.
+    try {
+      // Step 1: Reload extension cache from disk (ensures the new extension
+      // and its skills/agents are present with the correct isActive state).
+      await extensionManager.refreshCache();
+
+      // Step 2: Propagate into skill and subagent caches.
+      const config = context.services.config;
+      if (config) {
+        await config.getSkillManager()?.refreshCache();
+        await config.getSubagentManager().refreshCache();
+      }
+    } catch (cacheErr) {
+      console.warn(
+        '[extensions] skill/subagent cache refresh failed after install:',
+        cacheErr,
+      );
+    }
     // Hook rebuild is best-effort: failure must not make install appear to fail.
     try {
       const hookSystem = context.services.config?.getHookSystem?.();
@@ -315,6 +334,11 @@ async function installAction(context: CommandContext, args: string) {
         hookErr,
       );
     }
+    // Reload commands AFTER all async cache operations complete, so the
+    // FileCommandLoader sees a fully-populated extensionCache rather than
+    // a partially-rebuilt one (refreshCache() clears then repopulates).
+    // FIXME: refresh command controlled by ui for now, cannot be auto refreshed by extensionManager
+    context.ui.reloadCommands();
   } catch (error) {
     context.ui.addItem(
       {
@@ -368,7 +392,6 @@ async function uninstallAction(context: CommandContext, args: string) {
       },
       Date.now(),
     );
-    context.ui.reloadCommands();
     // Cache refresh is unconditional: keeps disk state consistent even when the
     // hook system is unavailable. Hook rebuild is best-effort afterwards.
     // Each step has its own catch so the warn message accurately identifies the
@@ -392,6 +415,8 @@ async function uninstallAction(context: CommandContext, args: string) {
         hookErr,
       );
     }
+    // Reload commands AFTER all async cache operations complete.
+    context.ui.reloadCommands();
   } catch (error) {
     context.ui.addItem(
       {

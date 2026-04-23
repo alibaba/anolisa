@@ -115,7 +115,12 @@ export function createSlashCommandFromDefinition(
       description,
       kind: CommandKind.FILE,
       extensionName,
-      action: async (): Promise<SlashCommandActionReturn> => {
+      action: async (
+        _context: CommandContext,
+        args: string,
+      ): Promise<SlashCommandActionReturn> => {
+        // Substitute {{args}} with the actual user input at execution time.
+        const resolvedCmd = shellCmd.replace(/\{\{args\}\}/g, args.trim());
         /** Maximum bytes collected from stdout+stderr before truncation. */
         const OUTPUT_CAP_BYTES = 512 * 1024; // 512 KiB
         /** Kill process after this many milliseconds. */
@@ -129,7 +134,7 @@ export function createSlashCommandFromDefinition(
         }>((resolve) => {
           let totalBytes = 0;
           let truncated = false;
-          const proc = _spawnImpl.fn('sh', ['-c', shellCmd], {
+          const proc = _spawnImpl.fn('sh', ['-c', resolvedCmd], {
             stdio: ['ignore', 'pipe', 'pipe'],
           });
 
@@ -188,7 +193,7 @@ export function createSlashCommandFromDefinition(
         return {
           type: 'message',
           messageType: isError ? 'error' : 'info',
-          content: `${showCommand ? `$ ${shellCmd.trim()}\n` : ''}${result.output}${suffix}`,
+          content: `${showCommand ? `$ ${resolvedCmd.trim()}\n` : ''}${result.output}${suffix}`,
         };
       },
     };

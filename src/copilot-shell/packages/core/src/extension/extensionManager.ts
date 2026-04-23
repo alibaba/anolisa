@@ -231,11 +231,20 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
+    const tomlFiles = await glob('**/*.toml', {
+      ...globOptions,
+      cwd: dir,
+    });
+
+    const allFiles = [...mdFiles, ...tomlFiles];
+
+    const commandNames = allFiles.map((file) => {
       const relativePathWithExt = path.relative(dir, path.join(dir, file));
+      // Strip both .md and .toml extensions
+      const extLength = file.endsWith('.toml') ? 5 : 3;
       const relativePath = relativePathWithExt.substring(
         0,
-        relativePathWithExt.length - 3,
+        relativePathWithExt.length - extLength,
       );
       const commandName = relativePath
         .split(path.sep)
@@ -426,7 +435,16 @@ export class ExtensionManager {
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
     logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
     extension.isActive = true;
-    await this.refreshTools();
+    // refreshTools is best-effort: a failure here must NOT roll back the
+    // already-persisted enabled state, nor fail the install/enable command.
+    try {
+      await this.refreshTools();
+    } catch (refreshErr) {
+      console.warn(
+        `[ExtensionManager] refreshTools failed after enabling "${name}" (extension is enabled, cache may be stale):`,
+        refreshErr,
+      );
+    }
   }
 
   /**
@@ -456,7 +474,16 @@ export class ExtensionManager {
     this.disableByPath(name, true, scopePath);
     logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
     extension.isActive = false;
-    await this.refreshTools();
+    // refreshTools is best-effort: a failure here must NOT roll back the
+    // already-persisted disabled state, nor fail the disable command.
+    try {
+      await this.refreshTools();
+    } catch (refreshErr) {
+      console.warn(
+        `[ExtensionManager] refreshTools failed after disabling "${name}" (extension is disabled, cache may be stale):`,
+        refreshErr,
+      );
+    }
   }
 
   /**
@@ -1037,7 +1064,10 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
+          await this.enableExtension(
+            newExtensionConfig.name,
+            SettingScope.User,
+          );
         }
       } finally {
         if (tempDir) {
@@ -1291,9 +1321,9 @@ export class ExtensionManager {
     // refresh mcp servers
     this.config.getToolRegistry().restartMcpServers();
     // refresh skills
-    this.config.getSkillManager()?.refreshCache();
+    await this.config.getSkillManager()?.refreshCache();
     // refresh subagents
-    this.config.getSubagentManager().refreshCache();
+    await this.config.getSubagentManager().refreshCache();
     // refresh context files
     this.config.refreshHierarchicalMemory();
   }
@@ -1301,7 +1331,7 @@ export class ExtensionManager {
   async refreshTools(): Promise<void> {
     if (!this.config) return;
     // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    this.refreshMemory();
+    await this.refreshMemory();
   }
 }
 

@@ -43,7 +43,8 @@ describe('yaml-parser', () => {
       const result = parse(yaml);
       expect(result).toEqual({
         name: 'test',
-        description: 'line one\nline two',
+        // Per YAML spec, literal block scalar clips to a single trailing newline
+        description: 'line one\nline two\n',
         other: 'value',
       });
     });
@@ -53,8 +54,8 @@ describe('yaml-parser', () => {
         'name: test\ndescription: >\n  line one\n  line two\nother: value';
       const result = parse(yaml);
       expect(result['name']).toBe('test');
-      // Folded: single newline becomes space
-      expect(result['description']).toBe('line one line two');
+      // Per YAML spec, folded scalar folds newlines to spaces and clips to a single trailing newline
+      expect(result['description']).toBe('line one line two\n');
       expect(result['other']).toBe('value');
     });
 
@@ -63,7 +64,8 @@ describe('yaml-parser', () => {
       const result = parse(yaml);
       expect(result).toEqual({
         name: 'test',
-        description: 'hello\nworld',
+        // Per YAML spec, literal block scalar clips to a single trailing newline
+        description: 'hello\nworld\n',
       });
     });
 

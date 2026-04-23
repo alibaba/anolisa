@@ -429,6 +429,77 @@ describe('extension tests', () => {
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
     });
+
+    it('enableExtension should succeed even when refreshTools throws (refresh is best-effort)', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+      expect(manager.isEnabled('ext1')).toBe(false);
+
+      // Simulate a flaky refresh chain (e.g. MCP restart / skill cache failure)
+      const refreshSpy = vi
+        .spyOn(manager, 'refreshTools')
+        .mockRejectedValueOnce(new Error('simulated MCP restart failure'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // enableExtension must NOT throw even though refreshTools fails
+      await expect(
+        manager.enableExtension('ext1', SettingScope.User),
+      ).resolves.not.toThrow();
+
+      // Extension must be enabled on disk despite the refresh failure
+      expect(manager.isEnabled('ext1')).toBe(true);
+
+      // A warning must be emitted so the failure is observable
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('refreshTools failed after enabling "ext1"'),
+        expect.any(Error),
+      );
+
+      refreshSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('disableExtension should succeed even when refreshTools throws (refresh is best-effort)', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.isEnabled('ext1')).toBe(true);
+
+      // Simulate a flaky refresh chain
+      const refreshSpy = vi
+        .spyOn(manager, 'refreshTools')
+        .mockRejectedValueOnce(new Error('simulated MCP restart failure'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // disableExtension must NOT throw even though refreshTools fails
+      await expect(
+        manager.disableExtension('ext1', SettingScope.User),
+      ).resolves.not.toThrow();
+
+      // Extension must be disabled on disk despite the refresh failure
+      expect(manager.isEnabled('ext1')).toBe(false);
+
+      // A warning must be emitted so the failure is observable
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('refreshTools failed after disabling "ext1"'),
+        expect.any(Error),
+      );
+
+      refreshSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
   });
 
   describe('validateExtensionOverrides', () => {
