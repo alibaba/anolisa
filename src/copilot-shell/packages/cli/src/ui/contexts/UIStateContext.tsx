@@ -17,6 +17,7 @@ import type {
   StreamingState,
   SettingInputRequest,
   PluginChoiceRequest,
+  SkillDefinition,
 } from '../types.js';
 import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -26,6 +27,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  SkillLevel,
 } from '@copilot-shell/core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -132,6 +134,10 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skills dialog
+  isSkillsDialogOpen: boolean;
+  skillsByLevel: Record<SkillLevel, SkillDefinition[]>;
+  isSkillsLoading: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
 }

@@ -43,6 +43,10 @@ export interface DialogCloseOptions {
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   handleWelcomeBackClose: () => void;
+
+  // Skills dialog
+  isSkillsDialogOpen: boolean;
+  closeSkillsDialog: () => void;
 }
 
 /**
@@ -87,6 +91,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.showWelcomeBackDialog) {
       // WelcomeBack has its own close handler
       options.handleWelcomeBackClose();
+      return true;
+    }
+
+    if (options.isSkillsDialogOpen) {
+      options.closeSkillsDialog();
       return true;
     }
 

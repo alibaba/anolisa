@@ -51,6 +51,7 @@ import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { ModelSwitchDialog } from './ModelSwitchDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { SkillsDialog } from './SkillsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import {
   readOpenClawConfig,
@@ -567,6 +568,21 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillsDialogOpen) {
+    return (
+      <SkillsDialog
+        skillsByLevel={uiState.skillsByLevel}
+        onToggle={uiActions.toggleSkillDisabled}
+        onInvoke={(skillName) => {
+          uiActions.closeSkillsDialog();
+          uiActions.handleFinalSubmit(`/skills ${skillName}`);
+        }}
+        onClose={uiActions.closeSkillsDialog}
+        isLoading={uiState.isSkillsLoading}
       />
     );
   }

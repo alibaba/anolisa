@@ -155,6 +155,14 @@ export interface ListSkillsOptions {
 
   /** Include remote skills in listing */
   includeRemote?: boolean;
+
+  /**
+   * Exclude disabled skills from the result.
+   * When true, disabled skills are skipped AND not added to the dedup set,
+   * allowing a lower-priority enabled instance of the same skill to surface
+   * (priority fallback).
+   */
+  excludeDisabled?: boolean;
 }
 
 /**

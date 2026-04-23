@@ -24,6 +24,7 @@ import {
   RemoteSkillRegistry,
   remoteEntryToSkillConfig,
 } from './remote-skill-registry.js';
+import { SkillsStateManager } from './skills-state.js';
 
 const COPILOT_CONFIG_DIR = '.copilot-shell';
 const SKILLS_CONFIG_DIR = 'skills';
@@ -41,6 +42,7 @@ export class SkillManager {
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
   private remoteRegistry: RemoteSkillRegistry | null = null;
+  private readonly skillsStateManager = new SkillsStateManager();
 
   constructor(private readonly config: Config) {
     // Initialize remote registry if configured
@@ -88,6 +90,14 @@ export class SkillManager {
   }
 
   /**
+   * Publicly signals that the effective skill set has changed
+   * (e.g. after toggling a skill's disabled state).
+   */
+  notifySkillsChanged(): void {
+    this.notifyChangeListeners();
+  }
+
+  /**
    * Gets any parse errors that occurred during skill loading.
    * @returns Map of skill paths to their parse errors.
    */
@@ -117,6 +127,11 @@ export class SkillManager {
       await this.refreshCache();
     }
 
+    // Pre-load disabled state once when excludeDisabled is requested
+    const disabledByLevel = options.excludeDisabled
+      ? await this.skillsStateManager.getDisabledSkillsByLevel()
+      : null;
+
     // Collect skills from each level (project takes precedence over user over extension over system)
     for (const level of levelsToCheck) {
       const levelSkills = this.skillsCache?.get(level) || [];
@@ -124,6 +139,12 @@ export class SkillManager {
       for (const skill of levelSkills) {
         // Skip if we've already seen this name (precedence: project > user > extension)
         if (seenNames.has(skill.name)) {
+          continue;
+        }
+
+        // When excludeDisabled is set: skip disabled skills WITHOUT adding to
+        // seenNames, so a lower-priority enabled instance can still surface.
+        if (disabledByLevel && disabledByLevel[level]?.includes(skill.name)) {
           continue;
         }
 
@@ -179,44 +200,45 @@ export class SkillManager {
    *
    * @param name - Name of the skill to load
    * @param level - Optional level to limit search to
+   * @param options - Additional options
    * @returns SkillConfig or null if not found
    */
   async loadSkill(
     name: string,
     level?: SkillLevel,
+    options?: { excludeDisabled?: boolean },
   ): Promise<SkillConfig | null> {
     if (level) {
-      return this.findSkillByNameAtLevel(name, level);
+      const skill = await this.findSkillByNameAtLevel(name, level);
+      if (skill && options?.excludeDisabled) {
+        const disabled = await this.skillsStateManager.isDisabled(name, level);
+        if (disabled) {
+          return null;
+        }
+      }
+      return skill;
     }
 
-    // Try project level first (highest priority)
-    const projectSkill = await this.findSkillByNameAtLevel(name, 'project');
-    if (projectSkill) {
-      return projectSkill;
-    }
+    const levelsInOrder: SkillLevel[] = [
+      'project',
+      'custom',
+      'user',
+      'extension',
+      'system',
+    ];
 
-    // Try custom level (user-defined paths from settings)
-    const customSkill = await this.findSkillByNameAtLevel(name, 'custom');
-    if (customSkill) {
-      return customSkill;
-    }
-
-    // Try user level
-    const userSkill = await this.findSkillByNameAtLevel(name, 'user');
-    if (userSkill) {
-      return userSkill;
-    }
-
-    // Try extension level
-    const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
-    if (extensionSkill) {
-      return extensionSkill;
-    }
-
-    // Try system level
-    const systemSkill = await this.findSkillByNameAtLevel(name, 'system');
-    if (systemSkill) {
-      return systemSkill;
+    for (const lvl of levelsInOrder) {
+      const skill = await this.findSkillByNameAtLevel(name, lvl);
+      if (skill) {
+        // When excludeDisabled, skip disabled levels (continue searching lower priority)
+        if (options?.excludeDisabled) {
+          const disabled = await this.skillsStateManager.isDisabled(name, lvl);
+          if (disabled) {
+            continue;
+          }
+        }
+        return skill;
+      }
     }
 
     // Fall back to remote
@@ -262,6 +284,13 @@ export class SkillManager {
    */
   getRemoteRegistry(): RemoteSkillRegistry | null {
     return this.remoteRegistry;
+  }
+
+  /**
+   * Get the skills state manager instance for enable/disable persistence.
+   */
+  getSkillsStateManager(): SkillsStateManager {
+    return this.skillsStateManager;
   }
 
   /**

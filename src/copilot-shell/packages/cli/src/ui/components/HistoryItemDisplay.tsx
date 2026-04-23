@@ -30,7 +30,6 @@ import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
 import { ExtensionsList } from './views/ExtensionsList.js';
 import { getMCPServerStatus } from '@copilot-shell/core';
-import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 
@@ -169,9 +168,6 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           tools={itemForDisplay.tools}
           showDescriptions={itemForDisplay.showDescriptions}
         />
-      )}
-      {itemForDisplay.type === 'skills_list' && (
-        <SkillsList skills={itemForDisplay.skills} />
       )}
       {itemForDisplay.type === 'mcp_status' && (
         <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />

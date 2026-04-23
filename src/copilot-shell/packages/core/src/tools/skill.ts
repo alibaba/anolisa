@@ -69,8 +69,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   async refreshSkills(): Promise<void> {
     try {
       // Include remote skills in the listing so agent knows about them
+      // Exclude disabled skills so they are hidden from the LLM
       this.availableSkills = await this.skillManager.listSkills({
         includeRemote: true,
+        excludeDisabled: true,
       });
       this.updateDescriptionAndSchema();
     } catch (error) {

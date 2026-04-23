@@ -106,6 +106,7 @@ import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
 import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useSkillsDialog } from './hooks/useSkillsDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import {
   requestConsentInteractive,
@@ -544,6 +545,14 @@ export const AppContainer = (props: AppContainerProps) => {
     openAgentsManagerDialog,
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
+  const {
+    isSkillsDialogOpen,
+    openSkillsDialog,
+    closeSkillsDialog,
+    skillsByLevel,
+    toggleSkillDisabled,
+    isLoading: isSkillsLoading,
+  } = useSkillsDialog(config.getSkillManager() ?? undefined);
 
   // Vision model auto-switch dialog state (must be before slashCommandActions)
   const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
@@ -579,6 +588,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsDialog,
       openResumeDialog,
     }),
     [
@@ -595,6 +605,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsDialog,
       openResumeDialog,
     ],
   );
@@ -1171,6 +1182,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isSkillsDialogOpen,
+    closeSkillsDialog,
   });
 
   const handleExit = useCallback(
@@ -1427,6 +1440,7 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
+    isSkillsDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen;
 
@@ -1539,6 +1553,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills dialog
+      isSkillsDialogOpen,
+      skillsByLevel,
+      isSkillsLoading,
       // Feedback dialog
       isFeedbackDialogOpen,
     }),
@@ -1635,6 +1653,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills dialog
+      isSkillsDialogOpen,
+      skillsByLevel,
+      isSkillsLoading,
       // Feedback dialog
       isFeedbackDialogOpen,
     ],
@@ -1675,6 +1697,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills dialog
+      openSkillsDialog,
+      closeSkillsDialog,
+      toggleSkillDisabled,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1717,6 +1743,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills dialog
+      openSkillsDialog,
+      closeSkillsDialog,
+      toggleSkillDisabled,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,

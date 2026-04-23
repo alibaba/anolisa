@@ -28,7 +28,15 @@ export const DefaultAppLayout: React.FC = () => {
         {!uiState.isResumeDialogOpen && <Notifications />}
 
         {uiState.dialogsVisible ? (
-          <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
+          <Box
+            marginX={2}
+            flexDirection="column"
+            width={
+              uiState.isSkillsDialogOpen
+                ? terminalWidth - 4
+                : uiState.mainAreaWidth
+            }
+          >
             <DialogManager
               terminalWidth={uiState.terminalWidth}
               addItem={uiState.historyManager.addItem}

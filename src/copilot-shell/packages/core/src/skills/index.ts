@@ -36,6 +36,9 @@ export { SkillError } from './types.js';
 // Main management class
 export { SkillManager } from './skill-manager.js';
 
+// Skills state manager for enable/disable persistence
+export { SkillsStateManager, type SkillsState } from './skills-state.js';
+
 // Remote skill registry
 export {
   RemoteSkillRegistry,

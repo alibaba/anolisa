@@ -144,6 +144,10 @@ export class Storage {
     return '/usr/share/anolisa/skills';
   }
 
+  static getSkillsStatePath(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'skills-state.json');
+  }
+
   getGlobalRemoteSkillsDir(): string {
     return path.join(Storage.getGlobalQwenDir(), 'remote-skills');
   }
