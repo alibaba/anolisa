@@ -14,7 +14,9 @@ def validate_skill_dir(skill_dir: str) -> None:
 
     Raises :class:`ValueError` on any validation failure.  Callers higher in
     the stack (the middleware backend) catch generic ``Exception`` and convert
-    to ``{"status": "error", ...}``, exit 1.
+    to ``{"status": "error", ...}``, exit 1.  When invoking core functions
+    directly (outside the middleware), the caller is responsible for catching
+    ``ValueError``.
     """
     if not os.path.isdir(skill_dir):
         raise ValueError(
