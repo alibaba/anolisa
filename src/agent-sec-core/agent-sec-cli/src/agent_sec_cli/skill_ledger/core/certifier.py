@@ -258,6 +258,7 @@ def certify(
     # Short-circuit: nothing changed — avoid re-signing and overwriting
     # Otherwise re-sign and persist (manifestHash recomputed each time)
     if scan_entries or new_version_created:
+        manifest.updatedAt = utc_now_iso()
         _sign_manifest(manifest, backend)
         save_manifest(skill_dir, manifest, write_version=True)
 
@@ -266,6 +267,10 @@ def certify(
         "scanStatus": manifest.scanStatus,
         "newVersion": new_version_created,
         "skillName": skill_name,
+        "createdAt": manifest.createdAt,
+        "updatedAt": manifest.updatedAt,
+        "fileCount": len(manifest.fileHashes),
+        "manifestHash": manifest.manifestHash,
     }
 
 
@@ -279,30 +284,19 @@ def certify_batch(
 ) -> list[dict[str, Any]]:
     """Certify multiple skill directories (``--all`` mode).
 
-    .. note::
-
-       *findings_path* applies only to the **first** skill directory when
-       set, because findings are scanner results for a specific skill.
-       For the remaining directories auto-invoke mode is used.
+    Designed for auto-invoke mode (no external findings).  The CLI layer
+    rejects ``--all`` combined with ``--findings`` because findings are
+    inherently per-skill.
 
     Returns a list of per-skill result dicts.
     """
-    if findings_path and len(skill_dirs) > 1:
-        logger.warning(
-            "--findings applies to the first skill only; "
-            "remaining %d skills will use auto-invoke mode",
-            len(skill_dirs) - 1,
-        )
-
     results: list[dict[str, Any]] = []
-    for idx, skill_dir in enumerate(skill_dirs):
-        # Only apply external findings to the first skill
-        effective_findings = findings_path if idx == 0 else None
+    for skill_dir in skill_dirs:
         try:
             result = certify(
                 str(skill_dir),
                 backend,
-                findings_path=effective_findings,
+                findings_path=findings_path,
                 scanner=scanner,
                 scanner_version=scanner_version,
                 scanner_names=scanner_names,
@@ -312,6 +306,7 @@ def certify_batch(
             results.append(
                 {
                     "skillName": skill_dir.name,
+                    "status": "error",
                     "error": str(exc),
                 }
             )

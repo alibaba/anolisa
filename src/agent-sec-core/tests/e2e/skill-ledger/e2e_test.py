@@ -80,8 +80,23 @@ def parse_json_output(stdout: str) -> dict:
     raise ValueError(f"No JSON found in stdout:\n{stdout}")
 
 
+def extract_fingerprint(stdout: str) -> str:
+    """Extract the fingerprint from init-keys JSON output."""
+    out = parse_json_output(stdout)
+    fp = out.get("fingerprint", "")
+    if not fp:
+        raise ValueError(f"No 'fingerprint' field in JSON output:\n{stdout}")
+    return fp
+
+
 def make_skill(parent: Path, name: str, files: dict[str, str]) -> Path:
-    """Create a fake skill directory with the given files."""
+    """Create a fake skill directory with the given files.
+
+    A minimal ``SKILL.md`` is added automatically unless *files* already
+    contains one — ``validate_skill_dir`` requires it.
+    """
+    if "SKILL.md" not in files:
+        files = {"SKILL.md": f"# {name}\nTest skill.\n", **files}
     skill_dir = parent / name
     for rel, content in files.items():
         p = skill_dir / rel
@@ -155,25 +170,25 @@ class Workspace:
 
 
 def test_init_keys_no_passphrase(ws: Workspace):
-    """init-keys without passphrase → exit 0, encrypted: false."""
+    """init-keys without passphrase → exit 0, JSON output, unencrypted."""
     r = run_skill_ledger(["init-keys"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
-    assert out.get("encrypted") is False, f"expected encrypted=false, got {out}"
-    assert out.get("fingerprint", "").startswith("sha256:"), f"bad fingerprint: {out}"
+    assert out.get("encrypted") is False, f"expected unencrypted, got {out}"
+    fp = out.get("fingerprint", "")
+    assert fp.startswith("sha256:"), f"bad fingerprint: {fp}"
 
 
-def test_init_keys_json_structure(ws: Workspace):
-    """JSON output must contain all 4 expected fields."""
+def test_init_keys_output_structure(ws: Workspace):
+    """JSON output must contain key paths and fingerprint."""
     # Keys already exist from test_init_keys_no_passphrase — re-gen with --force
     r = run_skill_ledger(["init-keys", "--force"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
-    for key in ("fingerprint", "publicKeyPath", "privateKeyPath", "encrypted"):
-        assert key in out, f"Missing field '{key}' in output: {out}"
-    assert len(out["fingerprint"]) > 10
-    assert len(out["publicKeyPath"]) > 0
-    assert len(out["privateKeyPath"]) > 0
+    for fld in ("publicKeyPath", "privateKeyPath", "fingerprint", "encrypted"):
+        assert fld in out, f"Missing '{fld}' in JSON output: {out}"
+    fp = out["fingerprint"]
+    assert len(fp) > 10
 
 
 def test_init_keys_reject_duplicate(ws: Workspace):
@@ -199,18 +214,18 @@ def test_init_keys_force_overwrite(ws: Workspace):
     env = ws.env({"XDG_DATA_HOME": str(alt_data)})
     r1 = run_skill_ledger(["init-keys"], env_extra=env)
     assert r1.returncode == 0
-    fp1 = parse_json_output(r1.stdout)["fingerprint"]
+    fp1 = extract_fingerprint(r1.stdout)
 
     r2 = run_skill_ledger(["init-keys", "--force"], env_extra=env)
     assert r2.returncode == 0, f"exit {r2.returncode}: {r2.stderr}"
-    fp2 = parse_json_output(r2.stdout)["fingerprint"]
+    fp2 = extract_fingerprint(r2.stdout)
 
     # New key pair → almost certainly different fingerprint
     assert fp1 != fp2, f"Fingerprint should change after --force: {fp1}"
 
 
 def test_init_keys_with_passphrase_env(ws: Workspace):
-    """SKILL_LEDGER_PASSPHRASE env var → encrypted: true."""
+    """SKILL_LEDGER_PASSPHRASE env var → encrypted output."""
     alt_data = ws.root / "pass_data"
     alt_data.mkdir()
     env = ws.env(
@@ -624,7 +639,7 @@ def test_certify_no_skill_dir_no_all(ws: Workspace):
 
 
 def test_certify_all_multiple_skills(ws: Workspace):
-    """--all certifies all skills from config.json skillDirs."""
+    """--all certifies all skills from config.json skillDirs (auto-invoke mode)."""
     env = ws.env()
 
     # Create skills
@@ -639,21 +654,35 @@ def test_certify_all_multiple_skills(ws: Workspace):
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
 
-    findings = write_findings_file(
-        ws.fixtures,
-        "all-pass.json",
-        [
-            {"rule": "ok", "level": "pass", "message": "pass"},
-        ],
-    )
+    # --all without --findings (auto-invoke mode, no-op in v1 but should succeed)
     r = run_skill_ledger(
-        ["certify", "--all", "--findings", str(findings)],
+        ["certify", "--all"],
         env_extra=env,
     )
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     assert "results" in out, f"Expected 'results' key: {out}"
     assert len(out["results"]) == 3, f"Expected 3 results, got {len(out['results'])}"
+
+
+def test_certify_all_rejects_findings(ws: Workspace):
+    """--all + --findings are incompatible → exit 1."""
+    env = ws.env()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "all-reject.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    r = run_skill_ledger(
+        ["certify", "--all", "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    combined = r.stdout + r.stderr
+    assert (
+        "incompatible" in combined.lower()
+    ), f"Expected 'incompatible' message: {combined}"
 
 
 def test_certify_all_no_skill_dirs(ws: Workspace):
@@ -672,6 +701,103 @@ def test_certify_all_no_skill_dirs(ws: Workspace):
     assert (
         "no skill directories" in combined.lower()
     ), f"Expected no-dirs message: {combined}"
+
+
+# ── Group 5b: check --all ──────────────────────────────────────────────
+
+
+def test_check_all_multiple_skills(ws: Workspace):
+    """check --all returns enriched results for all registered skills."""
+    env = ws.env()
+
+    # Create skills
+    batch_root = ws.root / "check_batch_skills"
+    batch_root.mkdir()
+    for name in ("ca-skill-a", "ca-skill-b"):
+        make_skill(batch_root, name, {"main.py": f"# {name}\n"})
+
+    # Write config.json with skillDirs glob
+    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {"skillDirs": [str(batch_root / "*")]}
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    r = run_skill_ledger(["check", "--all"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert "results" in out, f"Expected 'results' key: {out}"
+    assert len(out["results"]) == 2, f"Expected 2 results, got {len(out['results'])}"
+
+    # Each result should have enriched metadata
+    for result in out["results"]:
+        assert "status" in result, f"Missing 'status': {result}"
+        assert "skillName" in result, f"Missing 'skillName': {result}"
+        assert "versionId" in result, f"Missing 'versionId': {result}"
+
+
+def test_check_all_no_skill_dirs(ws: Workspace):
+    """check --all with empty skillDirs → exit 1."""
+    env = ws.env()
+
+    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {"skillDirs": []}
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    r = run_skill_ledger(["check", "--all"], env_extra=env)
+    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    combined = r.stdout + r.stderr
+    assert (
+        "no skill directories" in combined.lower()
+    ), f"Expected no-dirs message: {combined}"
+
+
+def test_check_no_skill_dir_no_all(ws: Workspace):
+    """check without skill_dir and without --all → exit 1."""
+    env = ws.env()
+    r = run_skill_ledger(["check"], env_extra=env)
+    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    combined = r.stdout + r.stderr
+    assert (
+        "required" in combined.lower() or "skill_dir" in combined.lower()
+    ), f"Expected error about missing skill_dir: {combined}"
+
+
+def test_status_overview_multiple_skills(ws: Workspace):
+    """status returns ledger-wide overview with keys, config, skills breakdown."""
+    env = ws.env()
+
+    batch_root = ws.root / "status_batch_skills"
+    batch_root.mkdir()
+    for name in ("sa-skill-1", "sa-skill-2"):
+        make_skill(batch_root, name, {"run.sh": f"echo {name}\n"})
+
+    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {"skillDirs": [str(batch_root / "*")]}
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    r = run_skill_ledger(["status"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["command"] == "status"
+
+    # keys section
+    assert "keys" in out, f"Missing 'keys' section: {out}"
+    assert out["keys"]["initialized"] is True
+
+    # config section
+    assert "config" in out, f"Missing 'config' section: {out}"
+    assert out["config"]["customized"] is True
+
+    # skills section with breakdown
+    skills = out["skills"]
+    assert skills["discovered"] == 2, f"Expected 2 discovered, got {skills}"
+    assert skills["breakdown"]["none"] == 2
+    assert skills["health"] == "unscanned"
+
+    # no results by default (requires --verbose)
+    assert "results" not in out, f"results should not appear without --verbose: {out}"
 
 
 # ── Group 6: audit command ────────────────────────────────────────────────
@@ -781,65 +907,114 @@ def test_audit_verify_snapshots(ws: Workspace):
 # ── Group 7: status command ───────────────────────────────────────────────
 
 
-def test_status_human_readable_output(ws: Workspace):
-    """status shows human-readable info after certify."""
-    skill = make_skill(ws.skills_dir, "status-show", {"m.txt": "main"})
+def test_status_overview_schema(ws: Workspace):
+    """status outputs overview JSON with keys, config, skills sections."""
     env = ws.env()
 
-    findings = write_findings_file(
-        ws.fixtures,
-        "status-p.json",
-        [
-            {"rule": "ok", "level": "pass", "message": "pass"},
-        ],
-    )
-    run_skill_ledger(
-        ["certify", str(skill), "--findings", str(findings)], env_extra=env
-    )
-
-    r = run_skill_ledger(["status", str(skill)], env_extra=env)
+    r = run_skill_ledger(["status"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
 
-    output = r.stdout
-    for label in ("Skill:", "Status:", "scanStatus:", "Version:", "Signed by:"):
-        assert label in output, f"Missing '{label}' in status output:\n{output}"
+    out = parse_json_output(r.stdout)
+    assert out["command"] == "status"
 
+    # Top-level sections must be present
+    for section in ("keys", "config", "skills"):
+        assert section in out, f"Missing '{section}' in status output: {out}"
 
-def test_status_drifted_shows_details(ws: Workspace):
-    """status after file modification shows added/removed/modified details."""
-    skill = make_skill(
-        ws.skills_dir,
-        "status-drift",
-        {
-            "orig.txt": "original",
-            "removeme.txt": "to be removed",
-        },
+    # keys section schema
+    keys = out["keys"]
+    for fld in (
+        "initialized",
+        "fingerprint",
+        "publicKeyPath",
+        "encrypted",
+        "keyringSize",
+    ):
+        assert fld in keys, f"Missing keys.{fld}: {keys}"
+    assert keys["initialized"] is True
+
+    # config section schema
+    cfg = out["config"]
+    for fld in ("configPath", "customized", "skillDirPatterns", "registeredScanners"):
+        assert fld in cfg, f"Missing config.{fld}: {cfg}"
+
+    # skills section schema — no skills registered → empty
+    skills = out["skills"]
+    for fld in ("discovered", "breakdown", "health"):
+        assert fld in skills, f"Missing skills.{fld}: {skills}"
+    assert skills["health"] in (
+        "empty",
+        "healthy",
+        "unscanned",
+        "attention",
+        "critical",
     )
+
+
+def test_status_verbose_includes_results(ws: Workspace):
+    """status --verbose includes per-skill results array."""
     env = ws.env()
 
+    batch_root = ws.root / "status_verbose_skills"
+    batch_root.mkdir()
+    make_skill(batch_root, "sv-skill", {"a.txt": "a"})
+
+    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {"skillDirs": [str(batch_root / "*")]}
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    r = run_skill_ledger(["status", "--verbose"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert "results" in out, f"--verbose should include results: {out}"
+    assert len(out["results"]) == 1
+    assert out["results"][0]["skillName"] == "sv-skill"
+
+
+def test_status_health_derivation(ws: Workspace):
+    """status health reflects the worst status across all skills."""
+    env = ws.env()
+
+    batch_root = ws.root / "status_health_skills"
+    batch_root.mkdir()
+    # Two skills: one will be pass, one will be drifted
+    skill_a = make_skill(batch_root, "health-pass", {"a.txt": "a"})
+    skill_b = make_skill(batch_root, "health-drift", {"b.txt": "b"})
+
+    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {"skillDirs": [str(batch_root / "*")]}
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    # Certify both so they are signed
     findings = write_findings_file(
         ws.fixtures,
-        "status-d.json",
-        [
-            {"rule": "ok", "level": "pass", "message": "pass"},
-        ],
+        "health-p.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
     )
     run_skill_ledger(
-        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+        ["certify", str(skill_a), "--findings", str(findings)], env_extra=env
+    )
+    run_skill_ledger(
+        ["certify", str(skill_b), "--findings", str(findings)], env_extra=env
     )
 
-    # Cause drift: add, remove, modify
-    (skill / "new.txt").write_text("new")
-    (skill / "removeme.txt").unlink()
-    (skill / "orig.txt").write_text("MODIFIED")
+    # Cause drift on skill_b
+    (skill_b / "b.txt").write_text("MODIFIED")
 
-    r = run_skill_ledger(["status", str(skill)], env_extra=env)
+    r = run_skill_ledger(["status"], env_extra=env)
     assert r.returncode == 0
-    output = r.stdout
-    assert "drifted" in output.lower(), f"Expected 'drifted' in output:\n{output}"
-    assert "Added:" in output, f"Expected 'Added:' in output:\n{output}"
-    assert "Removed:" in output, f"Expected 'Removed:' in output:\n{output}"
-    assert "Modified:" in output, f"Expected 'Modified:' in output:\n{output}"
+    out = parse_json_output(r.stdout)
+
+    skills = out["skills"]
+    assert skills["discovered"] == 2
+    assert skills["breakdown"]["pass"] == 1
+    assert skills["breakdown"]["drifted"] == 1
+    assert (
+        skills["health"] == "attention"
+    ), f"Expected attention, got {skills['health']}"
 
 
 # ── Group 8: stubs & edge cases ───────────────────────────────────────────
@@ -864,11 +1039,13 @@ def test_rotate_keys_stub(ws: Workspace):
 
 
 def test_list_scanners(ws: Workspace):
-    """list-scanners → exit 0, prints header and at least skill-vetter."""
+    """list-scanners → exit 0, JSON with scanners array including skill-vetter."""
     r = run_skill_ledger(["list-scanners"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "NAME" in r.stdout, f"Expected header row in output:\n{r.stdout}"
-    assert "skill-vetter" in r.stdout, f"Expected skill-vetter in output:\n{r.stdout}"
+    out = parse_json_output(r.stdout)
+    assert "scanners" in out, f"Expected 'scanners' key in JSON output: {out}"
+    names = [s["name"] for s in out["scanners"]]
+    assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
 
 
 def test_certify_empty_skill_dir(ws: Workspace):
@@ -915,7 +1092,7 @@ def test_contract_init_keys_empty_passphrase_env(ws: Workspace):
     out = parse_json_output(r.stdout)
     assert (
         out.get("encrypted") is False
-    ), f"Empty passphrase should produce unencrypted keys, got {out}"
+    ), f"Empty passphrase should produce unencrypted keys, got: {out}"
 
     # Step 0.2 also checks: ls ~/.local/share/skill-ledger/key.pub
     key_pub = Path(alt_data) / "skill-ledger" / "key.pub"
@@ -923,9 +1100,9 @@ def test_contract_init_keys_empty_passphrase_env(ws: Workspace):
 
 
 def test_contract_check_output_schema(ws: Workspace):
-    """Step 0.4: check output is JSON with `status` field for every outcome.
+    """Step 0.4: check output is JSON with `status` and enriched metadata fields.
 
-    SKILL.md parses `status` from JSON output to build the triage table.
+    SKILL.md parses `status` plus enriched fields from JSON output.
     This test verifies the contract across all reachable statuses.
     """
     env = ws.env()
@@ -936,6 +1113,16 @@ def test_contract_check_output_schema(ws: Workspace):
     out = parse_json_output(r.stdout)
     assert "status" in out, f"Missing 'status' field for none: {out}"
     assert out["status"] == "none"
+    # Enriched metadata must be present even for auto-created manifests
+    for fld in (
+        "skillName",
+        "versionId",
+        "createdAt",
+        "updatedAt",
+        "fileCount",
+        "manifestHash",
+    ):
+        assert fld in out, f"Missing enriched field '{fld}' for none: {out}"
 
     # status: pass (after certify)
     findings = write_findings_file(
@@ -950,6 +1137,15 @@ def test_contract_check_output_schema(ws: Workspace):
     out = parse_json_output(r.stdout)
     assert "status" in out, f"Missing 'status' field for pass: {out}"
     assert out["status"] == "pass"
+    for fld in (
+        "skillName",
+        "versionId",
+        "createdAt",
+        "updatedAt",
+        "fileCount",
+        "manifestHash",
+    ):
+        assert fld in out, f"Missing enriched field '{fld}' for pass: {out}"
 
     # status: drifted (file changed) — also verify diff fields
     (skill_none / "new.txt").write_text("new")
@@ -960,7 +1156,16 @@ def test_contract_check_output_schema(ws: Workspace):
     for diff_key in ("added", "removed", "modified"):
         assert (
             diff_key in out
-        ), f"drifted output missing '{diff_key}' — SKILL.md Step 0.4 needs this: {out}"
+        ), f"drifted output missing '{diff_key}' — SKILL.md Step 1.4 needs this: {out}"
+    for fld in (
+        "skillName",
+        "versionId",
+        "createdAt",
+        "updatedAt",
+        "fileCount",
+        "manifestHash",
+    ):
+        assert fld in out, f"Missing enriched field '{fld}' for drifted: {out}"
 
 
 def test_contract_certify_explicit_scanner_flags(ws: Workspace):
@@ -1000,9 +1205,9 @@ def test_contract_certify_explicit_scanner_flags(ws: Workspace):
 
 
 def test_contract_certify_output_fields(ws: Workspace):
-    """Phase 2.2: certify output JSON contains versionId and scanStatus.
+    """Phase 2.2: certify output JSON contains versionId, scanStatus, and enriched fields.
 
-    SKILL.md parses exactly these two fields to build the final summary table.
+    SKILL.md Phase 3.2 parses these fields to build the final summary table.
     """
     skill = make_skill(ws.skills_dir, "contract-output", {"data.py": "x = 1"})
     env = ws.env()
@@ -1019,12 +1224,17 @@ def test_contract_certify_output_fields(ws: Workspace):
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
 
+    # Core fields
     assert (
         "versionId" in out
-    ), f"Missing 'versionId' — SKILL.md Phase 2.2 needs this: {out}"
+    ), f"Missing 'versionId' — SKILL.md Phase 3.2 needs this: {out}"
     assert (
         "scanStatus" in out
-    ), f"Missing 'scanStatus' — SKILL.md Phase 2.2 needs this: {out}"
+    ), f"Missing 'scanStatus' — SKILL.md Phase 3.2 needs this: {out}"
+
+    # Enriched fields
+    for fld in ("skillName", "createdAt", "updatedAt", "fileCount", "manifestHash"):
+        assert fld in out, f"Missing enriched field '{fld}' in certify output: {out}"
 
     # versionId format: v + 6 digits (e.g. v000001)
     vid = out["versionId"]
@@ -1177,7 +1387,7 @@ def test_key_rotation_old_sigs_verifiable(ws: Workspace):
     # --- Rotate the key ---
     r = run_skill_ledger(["init-keys", "--force"], env_extra=env)
     assert r.returncode == 0, f"init-keys --force failed: {r.stderr}"
-    new_fp = parse_json_output(r.stdout)["fingerprint"]
+    new_fp = extract_fingerprint(r.stdout)
     assert new_fp != old_fp, (
         f"Key rotation must produce a different fingerprint: "
         f"old={old_fp}, new={new_fp}"
@@ -1224,7 +1434,7 @@ def main():
 
         # Group 1: init-keys (run first — all subsequent tests need keys)
         test("init-keys: no passphrase", lambda: test_init_keys_no_passphrase(ws))
-        test("init-keys: JSON structure", lambda: test_init_keys_json_structure(ws))
+        test("init-keys: output structure", lambda: test_init_keys_output_structure(ws))
         test("init-keys: reject duplicate", lambda: test_init_keys_reject_duplicate(ws))
         test("init-keys: --force overwrite", lambda: test_init_keys_force_overwrite(ws))
         test(
@@ -1290,7 +1500,26 @@ def main():
             "Certify --all: multiple skills",
             lambda: test_certify_all_multiple_skills(ws),
         )
+        test(
+            "Certify --all: rejects --findings",
+            lambda: test_certify_all_rejects_findings(ws),
+        )
         test("Certify --all: no skill dirs", lambda: test_certify_all_no_skill_dirs(ws))
+
+        # Group 5b: check --all
+        test(
+            "Check --all: multiple skills",
+            lambda: test_check_all_multiple_skills(ws),
+        )
+        test("Check --all: no skill dirs", lambda: test_check_all_no_skill_dirs(ws))
+        test(
+            "Check: no skill_dir no --all",
+            lambda: test_check_no_skill_dir_no_all(ws),
+        )
+        test(
+            "Status: overview with multiple skills",
+            lambda: test_status_overview_multiple_skills(ws),
+        )
 
         # Group 6: audit
         test("Audit: valid chain", lambda: test_audit_valid_chain(ws))
@@ -1302,10 +1531,17 @@ def main():
 
         # Group 7: status
         test(
-            "Status: human-readable output",
-            lambda: test_status_human_readable_output(ws),
+            "Status: overview schema",
+            lambda: test_status_overview_schema(ws),
         )
-        test("Status: drifted details", lambda: test_status_drifted_shows_details(ws))
+        test(
+            "Status: --verbose includes results",
+            lambda: test_status_verbose_includes_results(ws),
+        )
+        test(
+            "Status: health derivation",
+            lambda: test_status_health_derivation(ws),
+        )
 
         # Group 8: stubs & edge cases
         test("set-policy stub", lambda: test_set_policy_stub(ws))

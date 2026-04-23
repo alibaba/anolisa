@@ -10,6 +10,12 @@ import { callAgentSecCli } from "../utils.js";
 
 type CheckResult = {
   status: string;
+  skillName?: string;
+  versionId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  fileCount?: number;
+  manifestHash?: string;
   [key: string]: unknown;
 };
 
@@ -172,7 +178,12 @@ export const skillLedger: SecurityCapability = {
           }
         }
 
-        // Always allow — warning only, never block
+        // Always allow — warning only, never block.
+        //
+        // TODO: When non-pass, display a user-visible warning while still
+        // allowing execution (matching the cosh hook's "allow + reason"
+        // semantics).  Use `requireApproval` with `severity: "warning"` to
+        // surface the message, similar to code-scan's warn path.
         return undefined;
       } catch (err) {
         // Fail-open: uncaught errors must never block tool calls

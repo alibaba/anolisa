@@ -20,7 +20,7 @@ app = typer.Typer(
         "  1. init-keys  Generate signing key pair (one-time setup)\n"
         "  2. check      Verify a skill's integrity status\n"
         "  3. certify    Record scan findings and sign the manifest\n"
-        "  4. status     View a human-readable summary\n"
+        "  4. status     Show overall ledger health overview\n"
         "  5. audit      Deep-verify the full version history\n\n"
         "Integrity statuses:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
@@ -75,20 +75,27 @@ def cmd_init_keys(
 
     By default, no passphrase is required — safe for non-interactive use.
     """
-    # Resolve passphrase: env-var > --passphrase flag > None
+    # Resolve passphrase: --passphrase flag gates all passphrase logic.
+    # Without --passphrase, keys are always generated unencrypted regardless
+    # of whether SKILL_LEDGER_PASSPHRASE is set in the environment.
+    # With --passphrase, the env var serves as a non-interactive substitute
+    # for the interactive prompt (useful for CI).
     passphrase: str | None = None
-    env_pass = os.environ.get("SKILL_LEDGER_PASSPHRASE")
-    if env_pass:
-        passphrase = env_pass
-    elif use_passphrase:
-        passphrase = getpass.getpass("Enter passphrase for new signing key: ")
-        confirm = getpass.getpass("Confirm passphrase: ")
-        if passphrase != confirm:
-            typer.echo("Error: passphrases do not match", err=True)
-            raise typer.Exit(code=1)
-        if not passphrase:
-            typer.echo("Error: passphrase cannot be empty", err=True)
-            raise typer.Exit(code=1)
+    if use_passphrase:
+        env_pass = os.environ.get("SKILL_LEDGER_PASSPHRASE")
+        if env_pass is not None:
+            # Use ``is not None`` so that SKILL_LEDGER_PASSPHRASE="" is
+            # accepted (treated as "no passphrase" — unencrypted keys).
+            passphrase = env_pass if env_pass else None
+        else:
+            passphrase = getpass.getpass("Enter passphrase for new signing key: ")
+            confirm = getpass.getpass("Confirm passphrase: ")
+            if passphrase != confirm:
+                typer.echo("Error: passphrases do not match", err=True)
+                raise typer.Exit(code=1)
+            if not passphrase:
+                typer.echo("Error: passphrase cannot be empty", err=True)
+                raise typer.Exit(code=1)
 
     result = invoke(
         "skill_ledger", command="init-keys", force=force, passphrase=passphrase
@@ -103,7 +110,14 @@ def cmd_init_keys(
 
 @app.command("check")
 def cmd_check(
-    skill_dir: str = typer.Argument(..., help="Path to the skill directory to check"),
+    skill_dir: Optional[str] = typer.Argument(
+        None, help="Path to the skill directory to check (omit when using --all)"
+    ),
+    all_skills: bool = typer.Option(
+        False,
+        "--all",
+        help="Check every registered skill at once.",
+    ),
 ) -> None:
     """Check a skill's integrity and output its security status as JSON.
 
@@ -116,8 +130,25 @@ def cmd_check(
       warn      Signature valid, but scan found low-risk issues
       deny      Signature valid, but scan found high-risk issues
       tampered  Manifest signature verification failed — possible forgery
+
+    Use --all to check every registered skill and receive a JSON array of
+    enriched results. Skills are registered in
+    ~/.config/skill-ledger/config.json skillDirs (paths and globs expanded
+    automatically by the CLI).
     """
-    result = invoke("skill_ledger", command="check", skill_dir=skill_dir)
+    if all_skills and skill_dir is not None:
+        typer.echo(
+            "Error: --all and skill_dir are mutually exclusive.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    result = invoke(
+        "skill_ledger",
+        command="check",
+        skill_dir=skill_dir,
+        all_skills=all_skills,
+    )
     _forward(result)
 
 
@@ -154,7 +185,7 @@ def cmd_certify(
     all_skills: bool = typer.Option(
         False,
         "--all",
-        help="Certify every skill listed in ~/.config/skill-ledger/config.json skillDirs",
+        help="Certify every registered skill (auto-invoke mode only; incompatible with --findings).",
     ),
 ) -> None:
     """Record scan findings into a signed manifest for a skill.
@@ -172,8 +203,32 @@ def cmd_certify(
       2. Normalize findings and merge into the manifest scans[]
       3. Aggregate scanStatus (pass / warn / deny)
       4. Re-sign and write to .skill-meta/latest.json
+
+    Use --all to certify every registered skill at once. Skills are
+    registered in ~/.config/skill-ledger/config.json skillDirs (paths and
+    globs expanded automatically by the CLI).
     """
     scanner_names = [s.strip() for s in scanners.split(",")] if scanners else None
+
+    # --all and skill_dir are mutually exclusive.
+    if all_skills and skill_dir is not None:
+        typer.echo(
+            "Error: --all and skill_dir are mutually exclusive.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # --all + --findings is semantically invalid: findings are per-skill.
+    # In batch mode, use auto-invoke scanners or certify each skill individually.
+    if all_skills and findings:
+        typer.echo(
+            "Error: --all and --findings are incompatible. "
+            "Findings are per-skill; certify each skill individually with its own "
+            "--findings file, or use --all without --findings for auto-invoke mode.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     result = invoke(
         "skill_ledger",
         command="certify",
@@ -194,15 +249,32 @@ def cmd_certify(
 
 @app.command("status")
 def cmd_status(
-    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Include per-skill results array in the output.",
+    ),
 ) -> None:
-    """Display a human-readable summary of a skill's security state.
+    """Show an overview of the skill-ledger system health.
 
-    Shows the current integrity status, version ID, scan results, and
-    file-change details in a readable format. Useful for quick inspection
-    without parsing JSON (unlike 'check', which outputs machine-readable JSON).
+    Reports signing key infrastructure, configuration state, and
+    aggregate integrity status across all registered skills.
+
+    Output is a single JSON object with three sections:
+
+      keys     Signing key status (initialized, fingerprint, encrypted)
+      config   Configuration summary (skillDirs, scanners)
+      skills   Aggregate health (discovered count, per-status breakdown)
+
+    Use --verbose to include the full per-skill results array.
+    For per-skill integrity checks use the 'check' command instead.
     """
-    result = invoke("skill_ledger", command="status", skill_dir=skill_dir)
+    result = invoke(
+        "skill_ledger",
+        command="status",
+        verbose=verbose,
+    )
     _forward(result)
 
 

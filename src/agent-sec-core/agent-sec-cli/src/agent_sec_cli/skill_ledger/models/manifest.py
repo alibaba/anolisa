@@ -40,6 +40,7 @@ class SignedManifest(BaseModel):
     policy: str = "warning"  # warning | allow | block
 
     createdAt: str = Field(default_factory=utc_now_iso)
+    updatedAt: str = Field(default_factory=utc_now_iso)
 
     # ── Anti-tamper fields ──────────────────────────────────────
     manifestHash: str = ""
