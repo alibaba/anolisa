@@ -56,6 +56,25 @@ enum Commands {
     /// View and export statistics
     #[command(subcommand)]
     Stats(StatsCommands),
+    /// Encode JSON to TOON format
+    CompressToon {
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Agent ID for stats
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Session ID for grouping
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Tool use ID
+        #[arg(long)]
+        tool_use_id: Option<String>,
+    },
+    /// Decode TOON format back to JSON
+    DecompressToon {
+        #[arg(short, long)]
+        file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,6 +307,86 @@ fn run() -> Result<(), (String, i32)> {
                         .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
                     println!("Stats recording disabled.");
                 }
+            }
+        }
+        Commands::CompressToon {
+            file,
+            agent_id,
+            session_id,
+            tool_use_id,
+        } => {
+            let input = read_input(&file).map_err(|e| (e, 2))?;
+            let mut child = std::process::Command::new("toon")
+                .arg("-e")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| (format!("Failed to spawn toon: {}", e), 2))?;
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(input.as_bytes())
+                    .map_err(|e| (format!("Failed to write to toon stdin: {}", e), 2))?;
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| (format!("Failed to wait for toon: {}", e), 2))?;
+            if !out.status.success() {
+                return Err((
+                    format!(
+                        "toon encode failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    2,
+                ));
+            }
+            let output = String::from_utf8_lossy(&out.stdout);
+            let output = output.trim_end();
+            if !output.is_empty() {
+                println!("{}", output);
+            }
+            // Auto-record stats
+            record_compression_stats(
+                OperationType::CompressToon,
+                agent_id,
+                session_id,
+                tool_use_id,
+                input,
+                output.to_string(),
+            );
+        }
+        Commands::DecompressToon { file } => {
+            let input = read_input(&file).map_err(|e| (e, 2))?;
+            let mut child = std::process::Command::new("toon")
+                .arg("-d")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| (format!("Failed to spawn toon: {}", e), 2))?;
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(input.as_bytes())
+                    .map_err(|e| (format!("Failed to write to toon stdin: {}", e), 2))?;
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| (format!("Failed to wait for toon: {}", e), 2))?;
+            if !out.status.success() {
+                return Err((
+                    format!(
+                        "toon decode failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    2,
+                ));
+            }
+            let output = String::from_utf8_lossy(&out.stdout);
+            let output = output.trim_end();
+            if !output.is_empty() {
+                println!("{}", output);
             }
         }
     }

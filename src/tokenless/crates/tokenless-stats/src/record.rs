@@ -17,6 +17,8 @@ pub enum OperationType {
     CompressResponse,
     /// Command rewriting (RTK, PreToolUse hook)
     RewriteCommand,
+    /// TOON format compression (PostToolUse hook)
+    CompressToon,
 }
 
 impl OperationType {
@@ -25,20 +27,22 @@ impl OperationType {
             OperationType::CompressSchema => "compress-schema",
             OperationType::CompressResponse => "compress-response",
             OperationType::RewriteCommand => "rewrite-command",
+            OperationType::CompressToon => "compress-toon",
         }
     }
 }
 
 impl FromStr for OperationType {
-    type Err = std::convert::Infallible;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "compress-schema" => OperationType::CompressSchema,
-            "compress-response" => OperationType::CompressResponse,
-            "rewrite-command" => OperationType::RewriteCommand,
-            _ => OperationType::CompressSchema,
-        })
+        match s {
+            "compress-schema" => Ok(OperationType::CompressSchema),
+            "compress-response" => Ok(OperationType::CompressResponse),
+            "rewrite-command" => Ok(OperationType::RewriteCommand),
+            "compress-toon" => Ok(OperationType::CompressToon),
+            other => Err(format!("unknown operation type: {}", other)),
+        }
     }
 }
 
@@ -67,10 +71,14 @@ pub struct StatsRecord {
     pub after_chars: usize,
     /// Tokens after compression (estimated)
     pub after_tokens: usize,
-    /// Text content before compression
+    /// Original text content (for diff export)
     pub before_text: Option<String>,
-    /// Text content after compression
+    /// Compressed/rewritten text content (for diff export)
     pub after_text: Option<String>,
+    /// Original command output (for rewrite-command output comparison)
+    pub before_output: Option<String>,
+    /// Rewritten command output (for rewrite-command output comparison)
+    pub after_output: Option<String>,
 }
 
 impl StatsRecord {
@@ -97,6 +105,8 @@ impl StatsRecord {
             after_tokens,
             before_text: None,
             after_text: None,
+            before_output: None,
+            after_output: None,
         }
     }
 
@@ -130,6 +140,20 @@ impl StatsRecord {
         self
     }
 
+    /// Set before/after text for diff export
+    pub fn with_text(mut self, before: String, after: String) -> Self {
+        self.before_text = Some(before);
+        self.after_text = Some(after);
+        self
+    }
+
+    /// Set before/after command output for output comparison
+    pub fn with_output(mut self, before: String, after: String) -> Self {
+        self.before_output = Some(before);
+        self.after_output = Some(after);
+        self
+    }
+
     /// Characters saved by compression
     pub fn chars_saved(&self) -> usize {
         self.before_chars.saturating_sub(self.after_chars)
@@ -160,14 +184,19 @@ impl StatsRecord {
 
     /// Get a formatted summary line for list output
     pub fn format_summary_line(&self) -> String {
+        let pid = self
+            .source_pid
+            .map(|p| format!(" pid:{}", p))
+            .unwrap_or_default();
         let session = self.session_id.as_deref().unwrap_or("-");
         let tool = self.tool_use_id.as_deref().unwrap_or("-");
 
         format!(
-            "[ID:{}] {} | {} | Session:{} | Tool:{} | Chars:{}→{}(-{}) | Tokens:{}→{}(-{:.0}%)",
+            "[ID:{}] {} | {}{} | Session:{} | Tool:{} | Chars:{}→{}(-{}) | Tokens:{}→{}(-{:.0}%)",
             self.id,
             self.timestamp.format("%Y-%m-%d %H:%M:%S"),
             self.agent_id,
+            pid,
             session,
             tool,
             self.before_chars,
@@ -187,17 +216,22 @@ mod tests {
     #[test]
     fn test_operation_type_from_str() {
         assert_eq!(
-            "compress-schema".parse::<OperationType>().unwrap(),
+            OperationType::from_str("compress-schema").unwrap(),
             OperationType::CompressSchema
         );
         assert_eq!(
-            "compress-response".parse::<OperationType>().unwrap(),
+            OperationType::from_str("compress-response").unwrap(),
             OperationType::CompressResponse
         );
         assert_eq!(
-            "rewrite-command".parse::<OperationType>().unwrap(),
+            OperationType::from_str("rewrite-command").unwrap(),
             OperationType::RewriteCommand
         );
+        assert_eq!(
+            OperationType::from_str("compress-toon").unwrap(),
+            OperationType::CompressToon
+        );
+        assert!(OperationType::from_str("unknown").is_err());
     }
 
     #[test]
@@ -218,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_with_diff_text() {
+    fn test_record_with_text() {
         let record = StatsRecord::new(
             OperationType::CompressSchema,
             "copilot-shell".to_string(),
@@ -227,8 +261,7 @@ mod tests {
             10,
             3,
         )
-        .with_before_text("original text here".to_string())
-        .with_after_text("compressed".to_string());
+        .with_text("original text here".to_string(), "compressed".to_string());
 
         assert!(record.before_text.is_some());
         assert!(record.after_text.is_some());
@@ -258,19 +291,17 @@ mod tests {
     fn test_format_summary_line_with_pid() {
         let record = StatsRecord::new(
             OperationType::CompressSchema,
-            "copilot-shell(12345)".to_string(),
+            "copilot-shell".to_string(),
             1000,
             400,
             500,
             200,
         )
-        .with_session_id("session-123");
+        .with_session_id("session-123")
+        .with_source_pid(12345);
 
         let line = record.format_summary_line();
-        assert!(line.contains("copilot-shell(12345)"));
-        assert!(
-            !line.contains("pid:"),
-            "PID should be inline in agent_id, not separate"
-        );
+        assert!(line.contains("copilot-shell"));
+        assert!(line.contains("pid:12345"));
     }
 }

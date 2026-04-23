@@ -5,6 +5,7 @@
 Token-Less combines two complementary strategies to minimize LLM token consumption:
 
 - **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
+- **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon` binary, reducing token usage by 15-40% for structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 
 Two integration paths are available:
@@ -18,9 +19,10 @@ Two integration paths are available:
 |---|---|---|
 | Schema compression | ~57% | Compresses OpenAI Function Calling tool schemas |
 | Response compression | ~26–78% | Compresses API / tool responses (varies by content type) |
+| TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ⏳ |
-| copilot-shell hooks | — | Command rewriting ✅, Response compression ✅, Schema compression ⏳ |
+| copilot-shell hooks | — | Command rewriting ✅, Response compression ✅, TOON compression ✅, Schema compression ⏳ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Architecture
@@ -32,6 +34,7 @@ Token-Less/
 ├── openclaw/                  # Unified OpenClaw plugin (TypeScript delegate)
 ├── hooks/copilot-shell/       # copilot-shell hooks (rewrite + compression)
 ├── third_party/rtk/           # RTK submodule (command rewriting engine)
+├── third_party/toon/          # TOON submodule (JSON to TOON encoding)
 ├── Makefile                   # Unified build system
 └── scripts/install.sh         # One-step installer
 ```
@@ -87,6 +90,21 @@ tokenless compress-response -f response.json
 curl -s https://api.example.com/data | tokenless compress-response
 ```
 
+### compress-toon / decompress-toon
+
+Encode JSON to TOON format (or decode back to JSON):
+
+```bash
+# Encode JSON to TOON
+echo '{"name":"Alice","age":30}' | tokenless compress-toon
+# name: Alice
+# age: 30
+
+# Decode TOON back to JSON
+echo 'name: Alice\nage: 30' | tokenless decompress-toon
+# {"name":"Alice","age":30}
+```
+
 ## copilot-shell Hooks
 
 Three copilot-shell hooks provide token optimization at different stages:
@@ -95,6 +113,7 @@ Three copilot-shell hooks provide token optimization at different stages:
 |------|-------|--------|--------|
 | Command rewriting | PreToolUse | ✅ Available | 60–90% |
 | Response compression | PostToolUse | ✅ Available | ~26% |
+| TOON context compression | PostToolUse | ✅ Available | 15–40% |
 | Schema compression | BeforeModel | ⏳ Placeholder (waiting for anolisa protocol extension) | ~57% |
 
 ### Install
@@ -183,9 +202,10 @@ Options in `openclaw.plugin.json`:
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` (release mode) |
+| `make build` | Build `tokenless` + `rtk` + `toon` (release mode) |
 | `make build-tokenless` | Build `tokenless` only |
 | `make build-rtk` | Build `rtk` only |
+| `make build-toon` | Build `toon` only |
 | `make install` | Build and install binaries to `INSTALL_DIR` |
 | `make test` | Run all tests |
 | `make lint` | Run clippy checks |
@@ -211,14 +231,15 @@ make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
 | `crates/tokenless-cli/` | CLI binary wrapping the schema library (`tokenless` command) |
 | `openclaw/` | OpenClaw plugin — TypeScript delegate calling `tokenless` and `rtk` |
-| `hooks/copilot-shell/` | copilot-shell hooks — command rewriting, response & schema compression |
+| `hooks/copilot-shell/` | copilot-shell hooks — command rewriting, response, TOON & schema compression |
 | `third_party/rtk/` | RTK git submodule — command rewriting engine (70+ commands) |
+| `third_party/toon/` | TOON git submodule — JSON to TOON format encoding |
 | `scripts/install.sh` | One-step build + install + plugin deployment script |
 | `Makefile` | Unified build system for the entire workspace |
 
 ## Prerequisites
 
-- **Rust** toolchain (stable) — install via [rustup](https://rustup.rs)
+- **Rust** toolchain >= 1.88 — required by toon submodule (darling, image, time crates). Install via [rustup](https://rustup.rs)
 - **Git** — for submodule management
 
 ## License

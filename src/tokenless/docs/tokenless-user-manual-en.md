@@ -1,6 +1,6 @@
 # Token-Less User Manual
 
-> LLM token optimization toolkit — Schema/Response Compression + Command Rewriting
+> LLM token optimization toolkit — Schema/Response Compression + Command Rewriting + TOON Format
 
 **Version**: 0.1.0  
 **Source**: https://code.alibaba-inc.com/Agentic-OS/Token-Less  
@@ -37,7 +37,7 @@
 
 ## 1. Overview
 
-**Token-Less** is an LLM token optimization toolkit that significantly reduces token consumption through **Schema/Response Compression** and **Command Rewriting** strategies.
+**Token-Less** is an LLM token optimization toolkit that significantly reduces token consumption through **Schema/Response Compression**, **Command Rewriting**, and **TOON Format** strategies.
 
 ### 1.1 Core Value Proposition
 
@@ -46,6 +46,7 @@
 | Schema Compression | ~57% | Compresses OpenAI Function Calling tool definitions |
 | Response Compression | ~26–78% | Compresses API/tool responses (varies by content) |
 | Command Rewriting | 60–90% | Filters CLI command output via RTK |
+| TOON Format | 30–60% | Lossless JSON→binary format, best for structured/tabular data |
 
 ### 1.2 Supported Integrations
 
@@ -60,9 +61,11 @@
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: tokenless command
+├── crates/tokenless-stats/    # Stats recording library (SQLite)
 ├── openclaw/                  # OpenClaw plugin (TypeScript)
 ├── hooks/copilot-shell/       # Copilot Shell Hooks
 ├── third_party/rtk/           # RTK submodule (command rewriting engine)
+├── third_party/toon/          # TOON submodule (binary JSON codec)
 ├── Makefile                   # Unified build system
 ├── scripts/install.sh         # One-step installation script
 └── docs/                      # Documentation
@@ -147,6 +150,51 @@ Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI comman
 | `go test ./...` | `rtk test` | ~75% |
 | `python -m pytest` | `rtk test` | ~85% |
 
+### 2.4 TOON Compression (TOON Format)
+
+TOON (Token-Oriented Object Notation) is a **lossless binary JSON codec** that eliminates JSON syntax overhead — quotes, commas, colons, and braces — while preserving all data intact. It is particularly effective for structured and tabular data where syntax overhead dominates content.
+
+**Source Location**: Integrated via `third_party/toon/` submodule, invoked as a subprocess from the CLI.
+
+#### How TOON Works
+
+TOON replaces JSON's text-based syntax with a compact binary encoding:
+
+| JSON Element | JSON Syntax | TOON Encoding | Savings |
+|-------------|-------------|---------------|---------|
+| Object keys | `"name":` (quotes + colon) | Length-prefixed bytes | ~60-80% on key-heavy objects |
+| String values | `"value"` (quotes) | Length-prefixed raw bytes | ~10-20% |
+| Array separators | `, ` (commas + spaces) | Implicit element boundaries | 100% |
+| Structural braces | `{}`, `[]` | Implicit from type tags | 100% |
+| Numbers/booleans | Text representation | Compact binary encoding | ~30-50% |
+
+#### Compression Effectiveness by Data Type
+
+| Data Type | Typical TOON Savings | Example |
+|-----------|---------------------|---------|
+| Tabular/array data | 40-60% | `[{"id":1,"name":"A"},...]` (44% observed) |
+| Simple flat objects | 10-20% | `{"name":"Alice","age":30}` (15% observed) |
+| Nested schema definitions | 5-15% | Function calling tool schemas |
+
+#### TOON vs Response Compression
+
+| Aspect | Response Compression | TOON Compression |
+|--------|---------------------|-----------------|
+| Strategy | Lossy (truncation, field deletion) | Lossless (full data preservation) |
+| Best for | Verbose API responses, debug-heavy output | Structured tabular data, API results |
+| Data integrity | May drop fields/truncate strings | Round-trip safe (encode→decode) |
+| Sequential use | Applied first in the pipeline | Applied second (after response compression) |
+
+#### Sequential Compression Pipeline
+
+In the Copilot Shell PostToolUse hook, response compression and TOON are applied **sequentially**:
+
+```
+Tool Response → ResponseCompressor (lossy) → TOON Encode (lossless) → Final Output
+```
+
+This two-stage pipeline maximizes savings: response compression strips verbose/debug content, then TOON eliminates the remaining JSON syntax overhead.
+
 ---
 
 ## 3. System Requirements
@@ -157,7 +205,9 @@ Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI comman
 | Git | Any | Submodule management | Build time only |
 | jq | Any | Hook script JSON processing | Yes |
 | rtk | >= 0.28.0 | Command rewriting | Optional |
+| toon | >= 0.1.0 | TOON format compression | Optional |
 | tokenless | >= 0.1.0 | Schema/Response compression | Optional |
+| sqlite3 | Any | Stats database | Optional |
 
 **Note**: Rust and Git are only required for source compilation. RPM package installation does not require these dependencies.
 
@@ -323,6 +373,32 @@ tokenless compress-response -f response.json
 curl -s https://api.example.com/data | tokenless compress-response
 ```
 
+#### compress-toon
+
+```bash
+# Encode JSON to TOON format from file
+tokenless compress-toon -f data.json
+
+# Encode from stdin
+cat data.json | tokenless compress-toon
+
+# With stats tracking metadata
+tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
+```
+
+#### decompress-toon
+
+```bash
+# Decode TOON format back to JSON from file
+tokenless decompress-toon -f data.toon
+
+# Decode from stdin
+cat data.toon | tokenless decompress-toon
+
+# Round-trip verification
+tokenless compress-toon -f data.json | tokenless decompress-toon | jq .
+```
+
 ### 5.2 Post-Installation Auto-Configuration (RPM)
 
 After RPM installation, the installation script automatically detects and configures installed platforms.
@@ -372,7 +448,7 @@ Hook script locations depend on the installation method:
 | Script | Function | Hook Event |
 |--------|----------|------------|
 | `tokenless-rewrite.sh` | Command rewriting | PreToolUse |
-| `tokenless-compress-response.sh` | Response compression | PostToolUse |
+| `tokenless-compress-response.sh` | Response + TOON compression pipeline | PostToolUse |
 | `tokenless-compress-schema.sh` | Schema compression | BeforeModel |
 
 #### 5.3.2 Configure settings.json
@@ -485,7 +561,9 @@ copilot-shell triggers PreToolUse
 ```
 copilot-shell triggers PostToolUse 
   → Hook reads tool_response 
-  → Calls tokenless compress-response 
+  → Step 1: tokenless compress-response (lossy — removes debug, nulls, truncates)
+  → Step 2: tokenless compress-toon (lossless — eliminates JSON syntax overhead)
+  → Both steps are fail-open: failures at any stage pass original content through
   → Returns compressed content as additionalContext
 ```
 
@@ -510,6 +588,8 @@ Edit `openclaw.plugin.json`:
   "rtk_enabled": true,
   "schema_compression_enabled": true,
   "response_compression_enabled": true,
+  "toon_compression_enabled": false,
+  "skip_tools": [],
   "verbose": false
 }
 ```
@@ -519,6 +599,8 @@ Edit `openclaw.plugin.json`:
 | `rtk_enabled` | `true` | Enable RTK command rewriting |
 | `schema_compression_enabled` | `true` | Enable tool schema compression |
 | `response_compression_enabled` | `true` | Enable tool response compression |
+| `toon_compression_enabled` | `false` | Enable TOON format compression (sequential after response compression) |
+| `skip_tools` | `[]` | Tool names to skip during compression (e.g. `["Read","Glob"]`) |
 | `verbose` | `false` | Output detailed logs |
 
 #### 5.4.2 Integration Details
@@ -534,6 +616,7 @@ Edit `openclaw.plugin.json`:
 | Command rewriting | `before_tool_call` | Rewrite `exec` commands to RTK equivalents |
 | Schema compression | `before_tool_register` | Compress tool schemas |
 | Response compression | `tool_result_persist` | Compress tool responses |
+| TOON compression | `tool_result_persist` | Sequential TOON encoding (if enabled) |
 
 ---
 
@@ -638,6 +721,18 @@ tokenless compress-response -f test.json
 
 # Compress schema
 echo '[{"name":"Shell","description":"Run shell commands","parameters":{"type":"object"}}]' | tokenless compress-schema
+
+# TOON encode
+echo '{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}' | tokenless compress-toon
+
+# TOON round-trip verification
+echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
+
+# Verify compression via stats database
+tokenless compress-toon -f large_data.json --agent-id test
+tokenless stats list              # List recent compression records
+tokenless stats show <record-id>  # Show before/after text for a record
+tokenless stats summary           # Aggregate savings across all operations
 ```
 
 ### 6.3 Verify Installation
@@ -674,6 +769,8 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 | Response not compressed | Responses < 200 bytes are skipped (not worth compressing) |
 | Schema compression not active | Waiting for anolisa protocol to add `tools` to LLMRequest |
 | JSON parse error | Validate JSON format with `jq . < settings.json` |
+| TOON encode fails | Ensure `toon` binary is in PATH; only JSON input is supported |
+| TOON stats not recorded | Verify `TOKENLESS_STATS_ENABLED` is not set to `0` or `false` |
 
 ### 7.2 OpenClaw Plugin
 
@@ -682,6 +779,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 | Plugin not loaded | Check plugin path: `~/.openclaw/plugins/tokenless-openclaw/` |
 | RTK not working | Ensure `rtk` is in `$PATH`, check `rtk_enabled` configuration |
 | Compression not working | Check `response_compression_enabled` configuration |
+| TOON compression not working | Check `toon_compression_enabled` configuration, ensure `toon` binary in PATH |
 | Timeout | Plugin timeout is 2-3 seconds, complex operations may timeout and skip |
 
 ### 7.3 General Issues
@@ -711,8 +809,10 @@ jq --version
 | `make build` | Build tokenless + rtk |
 | `make build-tokenless` | Build tokenless only |
 | `make build-rtk` | Build rtk only |
+| `make build-toon` | Build TOON codec from submodule |
 | `make install` | Install binaries to INSTALL_DIR |
 | `make test` | Run tests |
+| `make test-toon` | Run TOON-specific tests |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
@@ -729,9 +829,18 @@ jq --version
 | Core compression algorithm | `crates/tokenless-schema/src/response_compressor.rs` |
 | Schema compression | `crates/tokenless-schema/src/schema_compressor.rs` |
 | CLI subcommand | `crates/tokenless-cli/src/main.rs` |
+| Stats recorder (SQLite) | `crates/tokenless-stats/src/recorder.rs` |
+| Stats record types | `crates/tokenless-stats/src/record.rs` |
 | OpenClaw plugin | `openclaw/index.ts` |
-| Copilot Hook | `hooks/copilot-shell/tokenless-*.sh` |
+| OpenClaw plugin config | `openclaw/openclaw.plugin.json` |
+| Copilot Hook — rewrite | `hooks/copilot-shell/tokenless-rewrite.sh` |
+| Copilot Hook — compress response | `hooks/copilot-shell/tokenless-compress-response.sh` |
+| Copilot Hook — compress schema | `hooks/copilot-shell/tokenless-compress-schema.sh` |
+| TOON codec (submodule) | `third_party/toon/` |
+| Stats database (default) | `~/.tokenless/stats.db` |
 | Integration tests | `crates/tokenless-schema/tests/integration_test.rs` |
+| TOON E2E tests | `tests/test-toon-full.sh` |
+| Full test suite | `tests/run-all-tests.sh` |
 
 ### 8.3 Fail-Open Design
 
@@ -763,5 +872,5 @@ All integration paths use **fail-open** strategy:
 ---
 
 **License**: MIT
-**Document Version**: 1.1
-**Last Updated**: 2026-04-13
+**Document Version**: 1.2
+**Last Updated**: 2026-04-25

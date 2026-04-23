@@ -767,17 +767,21 @@ build_tokenless() {
         cargo build --release --workspace
         # Build rtk from submodule
         cargo build --release --manifest-path third_party/rtk/Cargo.toml
+        # Build toon from submodule
+        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
     fi
 
     local bin="target/release/tokenless"
     local rtk_bin="third_party/rtk/target/release/rtk"
-    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]]; then
-        ARTIFACT_NAMES+=("tokenless" "rtk")
-        ARTIFACT_PATHS+=("src/tokenless/$bin" "src/tokenless/$rtk_bin")
-        ok "tokenless and rtk built successfully"
+    local toon_bin="third_party/toon/target/release/toon"
+    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]] && [[ -f "$toon_bin" ]]; then
+        ARTIFACT_NAMES+=("tokenless" "rtk" "toon")
+        ARTIFACT_PATHS+=("src/tokenless/$bin" "src/tokenless/$rtk_bin" "src/tokenless/$toon_bin")
+        ok "tokenless, rtk, and toon built successfully"
     else
         [[ -f "$bin" ]] || warn "Expected artifact $bin not found"
         [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
+        [[ -f "$toon_bin" ]] || warn "Expected artifact $toon_bin not found"
     fi
 }
 
@@ -832,16 +836,17 @@ install_tokenless() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "Installing tokenless and rtk binaries..."
+    info "Installing tokenless, rtk, and toon binaries..."
     if [[ -f Makefile ]] && grep -q 'install' Makefile; then
         make install
     else
-        # Install both binaries
+        # Install all three binaries
         install -d -m 0755 /usr/local/bin
         install -p -m 0755 target/release/tokenless /usr/local/bin/
         install -p -m 0755 third_party/rtk/target/release/rtk /usr/local/bin/
+        install -p -m 0755 third_party/toon/target/release/toon /usr/local/bin/
     fi
-    ok "tokenless and rtk installed to /usr/local/bin/"
+    ok "tokenless, rtk, and toon installed to /usr/local/bin/"
 }
 
 do_install() {

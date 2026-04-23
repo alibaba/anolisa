@@ -403,8 +403,14 @@ build_tokenless() {
         cd "$TOKEN_DIR"
         if [ ! -d "third_party/rtk/.git" ]; then
             log "Initializing git submodules..."
-            git submodule update --init --recursive
+            git submodule update --init
         fi
+        # Build tokenless
+        cargo build --release --workspace
+        # Build rtk from submodule
+        cargo build --release --manifest-path third_party/rtk/Cargo.toml
+        # Build toon from submodule
+        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
     )
 
     log "Step 2/3: Creating source tarball ${tarball_name}..."

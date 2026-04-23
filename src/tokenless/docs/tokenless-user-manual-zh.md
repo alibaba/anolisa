@@ -1,6 +1,6 @@
 # Token-Less 用户使用手册
 
-> LLM token optimization toolkit — Schema/Response 压缩 + 命令重写
+> LLM token optimization toolkit — Schema/Response 压缩 + 命令重写 + TOON 格式
 
 **版本**：0.1.0
 **源码**：https://code.alibaba-inc.com/Agentic-OS/Token-Less
@@ -37,7 +37,7 @@
 
 ## 1. 产品概述
 
-**Token-Less** 是一款 LLM token 优化工具包，通过 **Schema/响应压缩** 和 **命令重写** 两种策略，显著降低 LLM token 消耗。
+**Token-Less** 是一款 LLM token 优化工具包，通过 **Schema/响应压缩**、**命令重写**和 **TOON 格式**三种策略，显著降低 LLM token 消耗。
 
 ### 1.1 核心价值
 
@@ -46,6 +46,7 @@
 | Schema 压缩 | ~57% | 压缩 OpenAI Function Calling 工具定义 |
 | 响应压缩 | ~26–78% | 压缩 API/工具响应（因内容而异） |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 命令输出 |
+| TOON 格式 | 30–60% | 无损 JSON→二进制格式压缩，适合结构化/表格数据 |
 
 ### 1.2 支持的集成方式
 
@@ -60,9 +61,11 @@
 Token-Less/
 ├── crates/tokenless-schema/   # 核心库：SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI 二进制：tokenless 命令
+├── crates/tokenless-stats/    # 统计记录库（SQLite）
 ├── openclaw/                  # OpenClaw 插件（TypeScript）
 ├── hooks/copilot-shell/       # Copilot Shell Hooks
 ├── third_party/rtk/           # RTK 子模块（命令重写引擎）
+├── third_party/toon/          # TOON 子模块（二进制 JSON 编解码器）
 ├── Makefile                   # 统一构建系统
 ├── scripts/install.sh         # 一键安装脚本
 └── docs/                      # 文档
@@ -147,6 +150,51 @@ Token-Less/
 | `go test ./...` | `rtk test` | ~75% |
 | `python -m pytest` | `rtk test` | ~85% |
 
+### 2.4 TOON 压缩 (TOON 格式)
+
+TOON（Token-Oriented Object Notation）是一种**无损二进制 JSON 编解码器**，通过消除 JSON 语法开销（引号、逗号、冒号、花括号）来减少 token 消耗，同时完整保留所有数据。对于结构化数据和表格数据效果尤为显著。
+
+**源码位置**：通过 `third_party/toon/` 子模块集成，由 CLI 作为子进程调用。
+
+#### TOON 工作原理
+
+TOON 将 JSON 的文本语法替换为紧凑的二进制编码：
+
+| JSON 元素 | JSON 语法 | TOON 编码 | 节省效果 |
+|-----------|-----------|----------|---------|
+| 对象键名 | `"name":`（引号+冒号） | 长度前缀的原始字节 | 键名密集对象约 60-80% |
+| 字符串值 | `"value"`（引号） | 长度前缀的原始字节 | 约 10-20% |
+| 数组分隔符 | `, `（逗号+空格） | 隐式元素边界 | 100% |
+| 结构花括号 | `{}`, `[]` | 通过类型标记隐式表示 | 100% |
+| 数字/布尔 | 文本表示 | 紧凑的二进制编码 | 约 30-50% |
+
+#### 不同数据类型的压缩效果
+
+| 数据类型 | 典型 TOON 节省 | 示例 |
+|---------|---------------|------|
+| 表格/数组数据 | 40-60% | `[{"id":1,"name":"A"},...]`（实测 44%） |
+| 简单扁平对象 | 10-20% | `{"name":"Alice","age":30}`（实测 15%） |
+| 嵌套 schema 定义 | 5-15% | 函数调用工具 schema |
+
+#### TOON vs 响应压缩
+
+| 方面 | 响应压缩 | TOON 压缩 |
+|------|---------|----------|
+| 策略 | 有损（截断、字段删除） | 无损（完整数据保留） |
+| 最佳场景 | 冗长的 API 响应、含 debug 字段的输出 | 结构化表格数据、API 结果 |
+| 数据完整性 | 可能删除字段或截断字符串 | 完全可往返（编码→解码） |
+| 链式使用 | 流水线中先执行 | 流水线中后执行（响应压缩之后） |
+
+#### 链式压缩流水线
+
+在 Copilot Shell PostToolUse hook 中，响应压缩和 TOON 压缩**顺序执行**：
+
+```
+工具响应 → ResponseCompressor（有损） → TOON 编码（无损） → 最终输出
+```
+
+这种两阶段流水线最大化节省效果：响应压缩先剥离冗余内容和调试字段，TOON 再消除剩余的 JSON 语法开销。
+
 ---
 
 ## 3. 系统要求
@@ -157,7 +205,9 @@ Token-Less/
 | Git | 任意 | 子模块管理 | 构建时需要 |
 | jq | 任意 | Hook 脚本 JSON 处理 | 是 |
 | rtk | >= 0.28.0 | 命令重写 | 可选 |
+| toon | >= 0.1.0 | TOON 格式压缩 | 可选 |
 | tokenless | >= 0.1.0 | Schema/响应压缩 | 可选 |
+| sqlite3 | 任意 | 统计数据库 | 可选 |
 
 **注意**：Rust 和 Git 仅在源码编译时需要，使用 RPM 包安装无需这些依赖。
 
@@ -323,6 +373,32 @@ tokenless compress-response -f response.json
 curl -s https://api.example.com/data | tokenless compress-response
 ```
 
+#### compress-toon
+
+```bash
+# 将 JSON 编码为 TOON 格式（从文件）
+tokenless compress-toon -f data.json
+
+# 从 stdin 编码
+cat data.json | tokenless compress-toon
+
+# 附带统计追踪信息
+tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
+```
+
+#### decompress-toon
+
+```bash
+# 将 TOON 格式解码回 JSON（从文件）
+tokenless decompress-toon -f data.toon
+
+# 从 stdin 解码
+cat data.toon | tokenless decompress-toon
+
+# 往返验证
+tokenless compress-toon -f data.json | tokenless decompress-toon | jq .
+```
+
 ### 5.2 RPM 安装后的自动化配置 {#52-rpm-安装后的自动化配置}
 
 RPM 包安装后，安装脚本会自动检测并配置已安装的平台。
@@ -372,7 +448,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 | 脚本 | 功能 | Hook 事件 |
 |------|------|----------|
 | `tokenless-rewrite.sh` | 命令重写 | PreToolUse |
-| `tokenless-compress-response.sh` | 响应压缩 | PostToolUse |
+| `tokenless-compress-response.sh` | 响应压缩 + TOON 压缩流水线 | PostToolUse |
 | `tokenless-compress-schema.sh` | Schema 压缩 | BeforeModel |
 
 #### 5.3.2 配置 settings.json
@@ -485,7 +561,9 @@ copilot-shell 触发 PreToolUse
 ```
 copilot-shell 触发 PostToolUse 
   → Hook 读取 tool_response 
-  → 调用 tokenless compress-response 
+  → 第 1 步：tokenless compress-response（有损 — 移除 debug、null 字段，截断过长内容）
+  → 第 2 步：tokenless compress-toon（无损 — 消除 JSON 语法开销）
+  → 两步均采用 fail-open 策略：任何一步失败都会透传原始内容
   → 返回压缩后的内容作为 additionalContext
 ```
 
@@ -510,6 +588,8 @@ copilot-shell 触发 BeforeModel
   "rtk_enabled": true,
   "schema_compression_enabled": true,
   "response_compression_enabled": true,
+  "toon_compression_enabled": false,
+  "skip_tools": [],
   "verbose": false
 }
 ```
@@ -519,6 +599,8 @@ copilot-shell 触发 BeforeModel
 | `rtk_enabled` | `true` | 启用 RTK 命令重写 |
 | `schema_compression_enabled` | `true` | 启用工具 Schema 压缩 |
 | `response_compression_enabled` | `true` | 启用工具响应压缩 |
+| `toon_compression_enabled` | `false` | 启用 TOON 格式压缩（在响应压缩之后顺序执行） |
+| `skip_tools` | `[]` | 压缩时跳过的工具名称列表（如 `["Read","Glob"]`） |
 | `verbose` | `false` | 输出详细日志 |
 
 #### 5.4.2 集成细节
@@ -534,6 +616,7 @@ copilot-shell 触发 BeforeModel
 | Command rewriting | `before_tool_call` | 重写 `exec` 命令为 RTK 等效命令 |
 | Schema compression | `before_tool_register` | 压缩工具 Schema |
 | Response compression | `tool_result_persist` | 压缩工具响应 |
+| TOON compression | `tool_result_persist` | 顺序执行 TOON 编码（需启用） |
 
 ---
 
@@ -638,6 +721,18 @@ tokenless compress-response -f test.json
 
 # 压缩 Schema
 echo '[{"name":"Shell","description":"Run shell commands","parameters":{"type":"object"}}]' | tokenless compress-schema
+
+# TOON 编码
+echo '{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}' | tokenless compress-toon
+
+# TOON 往返验证
+echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
+
+# 通过统计数据库验证压缩效果
+tokenless compress-toon -f large_data.json --agent-id test
+tokenless stats list              # 列出最近的压缩记录
+tokenless stats show <记录ID>     # 查看某条记录的压缩前后文本
+tokenless stats summary           # 查看所有操作的汇总节省数据
 ```
 
 ### 6.3 验证安装
@@ -674,6 +769,8 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 | 响应未压缩 | 响应 < 200 字节时跳过压缩（不值得） |
 | Schema 压缩未激活 | 等待 anolisa 协议添加 `tools` 到 LLMRequest |
 | JSON 解析错误 | 使用 `jq . < settings.json` 验证 JSON 格式 |
+| TOON 编码失败 | 确认 `toon` 二进制在 PATH 中；仅支持 JSON 输入 |
+| TOON 统计未记录 | 确认 `TOKENLESS_STATS_ENABLED` 未设置为 `0` 或 `false` |
 
 ### 7.2 OpenClaw 插件
 
@@ -682,6 +779,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 | 插件未加载 | 检查插件路径：`~/.openclaw/plugins/tokenless-openclaw/` |
 | RTK 未生效 | 确认 `rtk` 在 `$PATH` 中，检查 `rtk_enabled` 配置 |
 | 压缩未生效 | 检查 `response_compression_enabled` 配置 |
+| TOON 压缩未生效 | 检查 `toon_compression_enabled` 配置，确认 `toon` 二进制在 PATH 中 |
 | 超时 | 插件超时设置为 2-3 秒，复杂操作可能超时跳过 |
 
 ### 7.3 通用问题
@@ -711,8 +809,10 @@ jq --version
 | `make build` | 编译 tokenless + rtk |
 | `make build-tokenless` | 仅编译 tokenless |
 | `make build-rtk` | 仅编译 rtk |
+| `make build-toon` | 从子模块编译 TOON 编解码器 |
 | `make install` | 安装二进制到 INSTALL_DIR |
 | `make test` | 运行测试 |
+| `make test-toon` | 运行 TOON 专项测试 |
 | `make lint` | 运行 clippy 检查 |
 | `make fmt` | 格式化代码 |
 | `make clean` | 清理构建产物 |
@@ -729,9 +829,18 @@ jq --version
 | 核心压缩算法 | `crates/tokenless-schema/src/response_compressor.rs` |
 | Schema 压缩 | `crates/tokenless-schema/src/schema_compressor.rs` |
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
+| 统计记录器（SQLite） | `crates/tokenless-stats/src/recorder.rs` |
+| 统计记录类型 | `crates/tokenless-stats/src/record.rs` |
 | OpenClaw 插件 | `openclaw/index.ts` |
-| Copilot Hook | `hooks/copilot-shell/tokenless-*.sh` |
+| OpenClaw 插件配置 | `openclaw/openclaw.plugin.json` |
+| Copilot Hook — 命令重写 | `hooks/copilot-shell/tokenless-rewrite.sh` |
+| Copilot Hook — 响应压缩 | `hooks/copilot-shell/tokenless-compress-response.sh` |
+| Copilot Hook — Schema 压缩 | `hooks/copilot-shell/tokenless-compress-schema.sh` |
+| TOON 编解码器（子模块） | `third_party/toon/` |
+| 统计数据库（默认） | `~/.tokenless/stats.db` |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
+| TOON 端到端测试 | `tests/test-toon-full.sh` |
+| 全量测试套件 | `tests/run-all-tests.sh` |
 
 ### 8.3 Fail-Open 设计
 
@@ -763,5 +872,5 @@ jq --version
 ---
 
 **许可证**：MIT
-**文档版本**：1.1
-**最后更新**：2026-04-13
+**文档版本**：1.2
+**最后更新**：2026-04-25

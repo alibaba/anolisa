@@ -6,6 +6,7 @@ use crate::record::{OperationType, StatsRecord};
 use chrono::DateTime;
 use rusqlite::Connection;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 /// Result type for stats operations
@@ -52,7 +53,9 @@ impl StatsRecorder {
                 after_chars INTEGER NOT NULL,
                 after_tokens INTEGER NOT NULL,
                 before_text TEXT,
-                after_text TEXT
+                after_text TEXT,
+                before_output TEXT,
+                after_output TEXT
             )",
             [],
         )?;
@@ -93,8 +96,9 @@ impl StatsRecorder {
             "INSERT INTO stats (
                 timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                 before_chars, before_tokens, after_chars, after_tokens,
-                before_text, after_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                before_text, after_text,
+                before_output, after_output
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
                 record.operation.as_str(),
@@ -108,6 +112,8 @@ impl StatsRecorder {
                 record.after_tokens,
                 record.before_text,
                 record.after_text,
+                record.before_output,
+                record.after_output,
             ],
         )?;
 
@@ -128,14 +134,14 @@ impl StatsRecorder {
             Some(n) => format!(
                 "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                         before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text
+                        before_text, after_text, before_output, after_output
                  FROM stats ORDER BY timestamp DESC LIMIT {}",
                 n
             ),
             None => String::from(
                 "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                         before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text
+                        before_text, after_text, before_output, after_output
                  FROM stats ORDER BY timestamp DESC",
             ),
         };
@@ -163,7 +169,7 @@ impl StatsRecorder {
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                     before_chars, before_tokens, after_chars, after_tokens,
-                    before_text, after_text
+                    before_text, after_text, before_output, after_output
              FROM stats WHERE id = ?",
         )?;
 
@@ -212,9 +218,7 @@ impl StatsRecorder {
             timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
                 .map(|dt| dt.with_timezone(&chrono::Local))
                 .unwrap_or_else(|_| chrono::Local::now()),
-            operation: row
-                .get::<_, String>(2)?
-                .parse()
+            operation: OperationType::from_str(&row.get::<_, String>(2)?)
                 .unwrap_or(OperationType::CompressSchema),
             agent_id,
             source_pid: row.get(4)?,
@@ -226,6 +230,8 @@ impl StatsRecorder {
             after_tokens: row.get(10)?,
             before_text: row.get(11)?,
             after_text: row.get(12)?,
+            before_output: row.get(13)?,
+            after_output: row.get(14)?,
         })
     }
 }

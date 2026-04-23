@@ -1,3 +1,6 @@
 [submodule "src/tokenless/third_party/rtk"]
 	path = src/tokenless/third_party/rtk
 	url = https://github.com/rtk-ai/rtk.git
+[submodule "src/tokenless/third_party/toon"]
+	path = src/tokenless/third_party/toon
+	url = https://github.com/toon-format/toon-rust.git

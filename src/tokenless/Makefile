@@ -1,12 +1,13 @@
 # Token-Less Unified Build System
-# Builds both tokenless (schema compression) and rtk (command rewriting)
+# Builds tokenless (schema/response compression), rtk (command rewriting), and toon (JSON encoding)
 
 INSTALL_DIR ?= /usr/share/tokenless/bin
 OPENCLAW_DIR ?= /usr/share/tokenless/openclaw
 COPILOT_SHELL_HOOK_DIR ?= /usr/share/tokenless/hooks/copilot-shell
 RTK_DIR := third_party/rtk
+TOON_DIR := third_party/toon
 
-.PHONY: build build-tokenless build-rtk install test lint clean dist \
+.PHONY: build build-tokenless build-rtk build-toon install test lint clean \
         openclaw-install openclaw-uninstall \
         copilot-shell-install copilot-shell-uninstall setup help
 
@@ -14,7 +15,7 @@ RTK_DIR := third_party/rtk
 all: build
 
 # Build both projects
-build: build-tokenless build-rtk
+build: build-tokenless build-rtk build-toon
 
 build-tokenless:
 	@echo "==> Building tokenless..."
@@ -24,16 +25,21 @@ build-rtk:
 	@echo "==> Building rtk..."
 	cargo build --release --manifest-path $(RTK_DIR)/Cargo.toml
 
+build-toon:
+	@echo "==> Building toon..."
+	cargo build --release --manifest-path $(TOON_DIR)/Cargo.toml --features cli
+
 # Install binaries
 install: build
 	@echo "==> Installing binaries to $(INSTALL_DIR)..."
 	@mkdir -p $(INSTALL_DIR)
 	cp target/release/tokenless $(INSTALL_DIR)/
 	cp $(RTK_DIR)/target/release/rtk $(INSTALL_DIR)/
-	@echo "==> Installed tokenless and rtk to $(INSTALL_DIR)"
+	cp $(TOON_DIR)/target/release/toon $(INSTALL_DIR)/
+	@echo "==> Installed tokenless, rtk, and toon to $(INSTALL_DIR)"
 
 # Run tests
-test: test-tokenless test-rtk
+test: test-tokenless test-rtk test-toon
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -42,6 +48,10 @@ test-tokenless:
 test-rtk:
 	@echo "==> Testing rtk build..."
 	cargo check --manifest-path $(RTK_DIR)/Cargo.toml
+
+test-toon:
+	@echo "==> Testing toon build..."
+	cargo check --manifest-path $(TOON_DIR)/Cargo.toml
 
 # Lint
 lint:
@@ -58,6 +68,7 @@ clean:
 	@echo "==> Cleaning..."
 	cargo clean
 	cargo clean --manifest-path $(RTK_DIR)/Cargo.toml
+	cargo clean --manifest-path $(TOON_DIR)/Cargo.toml
 
 # Create source tarball (excludes build artifacts)
 dist: clean
@@ -129,6 +140,7 @@ setup: install openclaw-install copilot-shell-install
 	@echo "  Token-Less setup complete!"
 	@echo "  - tokenless: $(INSTALL_DIR)/tokenless"
 	@echo "  - rtk:       $(INSTALL_DIR)/rtk"
+	@echo "  - toon:      $(INSTALL_DIR)/toon"
 	@echo "  - OpenClaw:  $(OPENCLAW_DIR)/"
 	@echo "  - Hooks:     $(COPILOT_SHELL_HOOK_DIR)/tokenless-*.sh"
 	@echo "============================================"
@@ -136,15 +148,17 @@ setup: install openclaw-install copilot-shell-install
 	@echo "Verify installation:"
 	@echo "  tokenless --version"
 	@echo "  rtk --version"
+	@echo "  toon --version"
 
 # Help
 help:
 	@echo "Token-Less Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build             Build tokenless + rtk (release mode)"
+	@echo "  build             Build tokenless + rtk + toon (release mode)"
 	@echo "  build-tokenless   Build tokenless only"
 	@echo "  build-rtk         Build rtk only"
+	@echo "  build-toon        Build toon only"
 	@echo "  install           Install binaries to INSTALL_DIR (default: /usr/share/tokenless/bin)"
 	@echo "  test              Run all tests"
 	@echo "  lint              Run clippy checks"

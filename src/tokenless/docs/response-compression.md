@@ -57,7 +57,7 @@ execFileSync("tokenless", ["compress-response"], { input: JSON, timeout: 3s })
 
 **RTK 跳过逻辑**：当 RTK 启用且可用时，`exec` 工具的结果已经过 RTK 优化，不再二次压缩。
 
-### 路径 2：copilot-shell hook（`PostToolUse` 事件）
+### 路径 2：copilot-shell hook（`PostToolUse` 事件）— 含 TOON 流水线
 
 ```
 工具执行完成
@@ -68,10 +68,27 @@ copilot-shell 触发 PostToolUse 事件，stdin 传入 JSON
    ↓
 检查：长度 < 200 字节 → 跳过（太短不值得压缩）
    ↓
-echo "$TOOL_RESPONSE" | tokenless compress-response
+检查：是否为内容检索工具（Read/Glob/list_directory 等）→ 跳过
+   ↓
+检查：是否为 skill 文件（YAML 头标记）→ 跳过
+   ↓
+Step 1：echo "$TOOL_RESPONSE" | tokenless compress-response（有损压缩）
+   ↓
+Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
+   ↓
+两步均采用 fail-open 策略，任何一步失败都透传上一步结果
    ↓
 返回 { suppressOutput: true, hookSpecificOutput: { additionalContext: compressed } }
 ```
+
+**流水线说明**：copilot-shell 的 PostToolUse hook 中实现了一个**两阶段链式压缩流水线**：
+
+1. **第一阶段 — 响应压缩（有损）**：`ResponseCompressor` 移除 debug 字段、null 值、空值，截断过长字符串和数组。
+2. **第二阶段 — TOON 编码（无损）**：将第一阶段输出的 JSON 通过 `toon -e` 编码为紧凑的二进制 TOON 格式，消除 JSON 语法开销（引号、逗号、冒号、花括号）。
+
+两个阶段各自独立，任一步骤失败都不影响原始结果的透传（fail-open）。
+
+**TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
 
 ### 路径 3：CLI 直接使用
 
@@ -243,9 +260,60 @@ curl -s https://api.example.com/data | tokenless compress-response
 
 | 用途 | 文件路径 |
 |------|--------|
-| 核心压缩算法 | `crates/tokenless-schema/src/response_compressor.rs` |
+| 核心压缩算法（ResponseCompressor） | `crates/tokenless-schema/src/response_compressor.rs` |
+| Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
 | 公开 API | `crates/tokenless-schema/src/lib.rs` |
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
+| 统计记录器（SQLite WAL） | `crates/tokenless-stats/src/recorder.rs` |
+| 统计记录类型及操作枚举 | `crates/tokenless-stats/src/record.rs` |
 | OpenClaw 插件 | `openclaw/index.ts`（第 161-186 行） |
-| copilot-shell hook | `hooks/copilot-shell/tokenless-compress-response.sh` |
+| OpenClaw 插件配置 | `openclaw/openclaw.plugin.json` |
+| copilot-shell hook（响应+TOON 流水线） | `hooks/copilot-shell/tokenless-compress-response.sh` |
+| TOON 编解码器（子模块） | `third_party/toon/` |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
+| TOON E2E 测试 | `tests/test-toon-full.sh` |
+| 全量测试套件 | `tests/run-all-tests.sh` |
+
+## 九、TOON 压缩与统计验证
+
+### 9.1 TOON 压缩 CLI
+
+```bash
+# TOON 编码（JSON → 紧凑二进制文本格式）
+echo '{"users":[{"id":1,"name":"Alice"}]}' | tokenless compress-toon
+
+# TOON 解码（往返验证）
+echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
+
+# 附带统计追踪（自动记录到 SQLite 数据库）
+tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
+```
+
+### 9.2 通过统计数据库验证压缩效果
+
+Tokenless 自动将每次压缩操作记录到 `~/.tokenless/stats.db`（SQLite WAL 模式）。四种操作类型均被追踪：`compress-schema`、`compress-response`、`rewrite-command`、`compress-toon`。
+
+```bash
+# 查看统计状态
+tokenless stats status
+
+# 列出最近 20 条记录
+tokenless stats list
+
+# 查看某条记录的压缩前后文本对比
+tokenless stats show <id>
+
+# 查看汇总统计（按操作类型分组）
+tokenless stats summary
+```
+
+统计启用条件：`TOKENLESS_STATS_ENABLED` 环境变量未设为 `0`/`false`，或通过 `tokenless stats enable` 启用。
+
+### 9.3 压缩效果说明
+
+| 数据类型 | 响应压缩 | 响应压缩+TOON | 说明 |
+|---------|---------|--------------|------|
+| 含 debug/trace 的 API 响应 | ~78% | ~82-85% | 响应压缩移除冗余字段后，TOON 消除剩余 JSON 语法 |
+| 表格数据 `[{...}]` | ~5-10% | ~40-60% | 响应压缩对表格效果有限，TOON 效果显著（实测 44%） |
+| 简单扁平对象 | ~0-10% | ~15-25% | JSON 语法开销占比有限 |
+| 嵌套 Schema 定义 | ~57% | ~60-65% | Schema 压缩由专门的 SchemaCompressor 处理 |

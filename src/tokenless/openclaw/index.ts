@@ -1,12 +1,16 @@
 /**
  * Token-Less Unified Plugin for OpenClaw v5
  *
- * Combines two complementary optimisation strategies into a single plugin:
+ * Combines multiple complementary optimisation strategies into a single plugin:
  *
  *   1. RTK command rewriting  — transparently rewrites exec tool commands to
  *      their RTK equivalents (delegated to `rtk rewrite`).
- *   2. Response compression   — compresses API/tool responses via
- *      `tokenless compress-response`.
+ *   2. Tokenless schema / response compression — compresses tool schemas and
+ *      tool responses via `tokenless compress-schema` / `tokenless compress-response`.
+ *   3. TOON context compression — encodes JSON tool responses to TOON format
+ *      via `toon -e`, reducing token usage for structured data. When both
+ *      response and TOON compression are enabled, they run sequentially:
+ *      Response Compression strips noise → TOON eliminates JSON format overhead.
  *
  * Stats are recorded automatically by tokenless compress-response / compress-schema.
  * Context passing uses environment variables (TOKENLESS_AGENT_ID,
@@ -27,6 +31,7 @@ const sessionMap: Map<string, string> = new Map();
 
 let rtkAvailable: boolean | null = null;
 let tokenlessAvailable: boolean | null = null;
+let toonAvailable: boolean | null = null;
 
 function checkRtk(): boolean {
   if (rtkAvailable !== null) return rtkAvailable;
@@ -59,6 +64,17 @@ function checkTokenless(): boolean {
     tokenlessAvailable = false;
   }
   return tokenlessAvailable;
+}
+
+function checkToon(): boolean {
+  if (toonAvailable !== null) return toonAvailable;
+  try {
+    execSync("which toon", { stdio: "ignore" });
+    toonAvailable = true;
+  } catch {
+    toonAvailable = false;
+  }
+  return toonAvailable;
 }
 
 // ---- Subprocess helpers -------------------------------------------------------
@@ -97,17 +113,51 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
   }
 }
 
+function tryCompressSchema(schema: Record<string, unknown>): Record<string, unknown> | null {
+  try {
+    const input = JSON.stringify(schema);
+    const result = execFileSync("tokenless", ["compress-schema"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      input,
+    }).trim();
+    return JSON.parse(result);
+  } catch {
+    return null;
+  }
+}
+
+function tryCompressToon(response: any): { toonText: string; savingsPct: number } | null {
+  try {
+    const input = JSON.stringify(response);
+    const beforeChars = input.length;
+    const toonText = execFileSync("toon", ["-e"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      input,
+    }).trim();
+    if (!toonText) return null;
+    const afterChars = toonText.length;
+    const savingsPct = beforeChars > 0 ? Math.round(((beforeChars - afterChars) / beforeChars) * 100) : 0;
+    return { toonText, savingsPct };
+  } catch {
+    return null;
+  }
+}
+
 // ---- Plugin entry point -------------------------------------------------------
 
 export default {
   id: "tokenless-openclaw",
   name: "Token-Less",
-  version: "5.0.0",
-  description: "Unified RTK command rewriting + response compression",
+  version: "1.0.0",
+  description: "Unified RTK command rewriting + schema/response/TOON compression",
   register(api: any) {
   const pluginConfig = api.config ?? {};
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
+  const schemaCompressionEnabled = pluginConfig.schema_compression_enabled !== false;
+  const toonCompressionEnabled = pluginConfig.toon_compression_enabled !== false;
   const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead"]).map((t: string) => t.toLowerCase()));
   const verbose = pluginConfig.verbose !== false;
 
@@ -153,9 +203,35 @@ export default {
     );
   }
 
-  // ---- 2. Response compression (tool_result_persist) --------------------------
+  // ---- 2. Schema compression (before_tool_register) ---------------------------
 
-  if (responseCompressionEnabled && checkTokenless()) {
+  if (schemaCompressionEnabled && checkTokenless()) {
+    api.on(
+      "before_tool_register",
+      (event: { toolName: string; schema: Record<string, unknown> }) => {
+        const compressed = tryCompressSchema(event.schema);
+        if (!compressed) return;
+
+        if (verbose) {
+          const before = JSON.stringify(event.schema).length;
+          const after = JSON.stringify(compressed).length;
+          console.log(
+            `[tokenless/schema] ${event.toolName}: ${before} -> ${after} chars (${Math.round((1 - after / before) * 100)}% reduction)`,
+          );
+        }
+
+        return { schema: compressed };
+      },
+      { priority: 10 },
+    );
+  }
+
+  // ---- 3. Response / TOON compression (tool_result_persist) -------------------
+  // Pipeline: Response Compression → TOON (sequential, not mutually exclusive)
+  //   1. Strip debug/nulls/empty, truncate long strings/arrays
+  //   2. If result is still valid JSON and TOON is enabled, encode to TOON format
+
+  if (checkTokenless() && (responseCompressionEnabled || toonCompressionEnabled)) {
     api.on(
       "tool_result_persist",
       (event: { toolName?: string; toolCallId?: string; message: any; isSynthetic?: boolean }, ctx: { agentId?: string; sessionId?: string; sessionKey?: string; toolName?: string; toolCallId?: string }) => {
@@ -181,18 +257,70 @@ export default {
           || process.env.TOKENLESS_SESSION_ID
           || ctx?.sessionKey;
 
-        const compressed = tryCompressResponse(event.message, sessionId, toolCallId);
-        if (!compressed) return;
+        // Step 1: Response Compression
+        let currentMessage: any = event.message;
+        let usedResponseCompression = false;
+
+        if (responseCompressionEnabled) {
+          const compressed = tryCompressResponse(currentMessage, sessionId, toolCallId);
+          if (compressed) {
+            currentMessage = compressed;
+            usedResponseCompression = true;
+          }
+        }
+
+        // Step 2: TOON Encoding (if compressed result is JSON-serializable)
+        let usedToon = false;
+        let toonText = "";
+
+        if (toonCompressionEnabled && checkToon()) {
+          try {
+            const jsonInput = JSON.stringify(currentMessage);
+            const result = execFileSync("toon", ["-e"], {
+              encoding: "utf-8",
+              timeout: 3000,
+              input: jsonInput,
+            }).trim();
+            if (result) {
+              toonText = result;
+              usedToon = true;
+            }
+          } catch { /* TOON failed — fall back to response-compressed result */ }
+        }
+
+        // Nothing was compressed — pass through unchanged
+        if (!usedResponseCompression && !usedToon) return;
+
+        // Build the final output
+        let finalMessage: any;
+        let savingsLabel: string;
+        let totalSavingsPct: number;
+
+        if (usedToon) {
+          const before = JSON.stringify(event.message).length;
+          const after = toonText.length;
+          totalSavingsPct = before > 0 ? Math.round(((before - after) / before) * 100) : 0;
+          savingsLabel = usedResponseCompression
+            ? "response compressed + TOON encoded"
+            : "TOON encoded";
+          finalMessage = `[TOON format, ${totalSavingsPct}% token savings]\n${toonText}`;
+        } else {
+          const before = JSON.stringify(event.message).length;
+          const after = JSON.stringify(currentMessage).length;
+          totalSavingsPct = before > 0 ? Math.round(((before - after) / before) * 100) : 0;
+          savingsLabel = "response compressed";
+          finalMessage = currentMessage;
+        }
 
         if (verbose) {
-          const beforeChars = JSON.stringify(event.message).length;
-          const afterChars = JSON.stringify(compressed).length;
+          const before = JSON.stringify(event.message).length;
+          const after = usedToon ? toonText.length : JSON.stringify(finalMessage).length;
           console.log(
-            `[tokenless/response] ${event.toolName}: ${beforeChars} -> ${afterChars} chars (${Math.round((1 - afterChars / beforeChars) * 100)}% reduction)`,
+            `[tokenless/${savingsLabel}] ${event.toolName}: ${before} -> ${after} chars (${totalSavingsPct}% reduction)`,
           );
         }
 
-        return { message: compressed };
+        return { message: finalMessage };
       },
       { priority: 10 },
     );
@@ -201,11 +329,14 @@ export default {
   // ---- Done -------------------------------------------------------------------
 
   if (verbose) {
+    checkToon(); // populate toonAvailable cache before logging
     const features = [
       rtkEnabled && rtkAvailable ? "rtk-rewrite" : null,
+      schemaCompressionEnabled && tokenlessAvailable ? "schema-compression" : null,
       responseCompressionEnabled && tokenlessAvailable ? "response-compression" : null,
+      toonCompressionEnabled && toonAvailable ? "toon-compression" : null,
     ].filter(Boolean);
-    console.log(`[tokenless] OpenClaw plugin v5 registered — active features: ${features.join(", ") || "none"}`);
+    console.log(`[tokenless] OpenClaw plugin registered — active features: ${features.join(", ") || "none"}`);
   }
   },
 };

@@ -354,12 +354,16 @@ install_from_source() {
     info "Building rtk..."
     cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
+    info "Building toon..."
+    cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
+
     # Install binaries
     info "Installing binaries to $INSTALL_DIR..."
     mkdir -p "$INSTALL_DIR"
     cp target/release/tokenless "$INSTALL_DIR/"
     cp third_party/rtk/target/release/rtk "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/tokenless" "$INSTALL_DIR/rtk"
+    cp third_party/toon/target/release/toon "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/tokenless" "$INSTALL_DIR/rtk" "$INSTALL_DIR/toon"
 
     # Setup OpenClaw
     setup_openclaw "local"
@@ -394,7 +398,7 @@ rpm_postinstall() {
     info ""
     info "Hook features:"
     info "  PreToolUse:  Command rewriting (RTK) - Save 60-90% tokens"
-    info "  PostToolUse: Response compression - Save ~26% tokens"
+    info "  PostToolUse: Response → TOON compression - Save 30-60% (combined)"
     info "  BeforeModel: Schema compression - Save ~57% tokens"
     info ""
     info "To reconfigure, run:"
@@ -439,16 +443,19 @@ verify_installation() {
     local verify_ok=true
     local tokenless_path
     local rtk_path
+    local toon_path
     local install_mode="local"
 
     # Check system-wide installation first
     if [ -x "${SYS_BIN_DIR}/tokenless" ]; then
         tokenless_path="${SYS_BIN_DIR}/tokenless"
         rtk_path="${SYS_BIN_DIR}/rtk"
+        toon_path="${SYS_BIN_DIR}/toon"
         install_mode="system"
     else
         tokenless_path="${INSTALL_DIR}/tokenless"
         rtk_path="${INSTALL_DIR}/rtk"
+        toon_path="${INSTALL_DIR}/toon"
     fi
 
     if "$tokenless_path" --version &>/dev/null; then
@@ -462,6 +469,13 @@ verify_installation() {
         info "  rtk: $($rtk_path --version)"
     else
         warn "  rtk: verification failed"
+        verify_ok=false
+    fi
+
+    if "$toon_path" --version &>/dev/null; then
+        info "  toon: $($toon_path --version)"
+    else
+        warn "  toon: verification failed"
         verify_ok=false
     fi
 
@@ -484,12 +498,14 @@ verify_installation() {
         echo "  Binaries:"
         echo "    tokenless -> ${SYS_BIN_DIR}/tokenless"
         echo "    rtk       -> ${SYS_BIN_DIR}/rtk"
+        echo "    toon      -> ${SYS_BIN_DIR}/toon"
     else
         echo "  Installation Mode: Local (Source)"
         echo ""
         echo "  Binaries:"
         echo "    tokenless -> ${INSTALL_DIR}/tokenless"
         echo "    rtk       -> ${INSTALL_DIR}/rtk"
+        echo "    toon      -> ${INSTALL_DIR}/toon"
     fi
     echo ""
     echo "  OpenClaw Plugin:"
@@ -497,7 +513,7 @@ verify_installation() {
     echo ""
     echo "  Copilot-Shell Hooks:"
     echo "    ${COPILOT_SHELL_HOOK_DIR}/tokenless-rewrite.sh"
-    echo "    ${COPILOT_SHELL_HOOK_DIR}/tokenless-compress-response.sh"
+    echo "    ${COPILOT_SHELL_HOOK_DIR}/tokenless-compress-response.sh (includes TOON encoding)"
     echo "    ${COPILOT_SHELL_HOOK_DIR}/tokenless-compress-schema.sh"
     echo ""
     if [ "$verify_ok" = true ]; then

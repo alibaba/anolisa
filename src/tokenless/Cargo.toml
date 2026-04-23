@@ -7,6 +7,7 @@ members = [
 ]
 exclude = [
     "third_party/rtk",
+    "third_party/toon",
 ]
 
 [workspace.package]
