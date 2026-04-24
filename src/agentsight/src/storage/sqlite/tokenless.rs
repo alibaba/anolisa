@@ -19,7 +19,7 @@ pub fn default_stats_path() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct TokenlessStatRow {
     pub session_id: String,
-    pub tool_call_id: String,
+    pub tool_use_id: String,
     pub before_tokens: i64,
     pub after_tokens: i64,
     pub diff_text: Option<String>,
@@ -63,7 +63,7 @@ impl TokenlessStatsStore {
         for chunk in ids.chunks(500) {
             let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "SELECT session_id, tool_call_id, before_tokens, after_tokens, diff_text, operation \
+                "SELECT session_id, tool_use_id, before_tokens, after_tokens, diff_text, operation \
                  FROM stats WHERE session_id IN ({})",
                 placeholders
             );
@@ -84,7 +84,7 @@ impl TokenlessStatsStore {
             let rows = match stmt.query_map(params.as_slice(), |row| {
                 Ok(TokenlessStatRow {
                     session_id: row.get(0)?,
-                    tool_call_id: row.get(1)?,
+                    tool_use_id: row.get(1)?,
                     before_tokens: row.get(2)?,
                     after_tokens: row.get(3)?,
                     diff_text: row.get(4)?,

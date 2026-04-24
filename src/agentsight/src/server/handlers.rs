@@ -1003,7 +1003,7 @@ pub async fn get_token_savings(
                     .unwrap_or_default();
 
                 items.push(OptimizationItemDto {
-                    id: row.tool_call_id.clone(),
+                    id: row.tool_use_id.clone(),
                     category: category.to_string(),
                     title: title.to_string(),
                     before_tokens: row.before_tokens,
