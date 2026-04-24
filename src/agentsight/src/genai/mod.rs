@@ -19,3 +19,16 @@ pub use exporter::GenAIExporter;
 pub use builder::GenAIBuilder;
 pub use storage::{GenAIStore, GenAIStoreStats};
 pub use sls::SlsUploader;
+
+// Blanket implementation: Arc<T> implements GenAIExporter if T does.
+// This allows storing an Arc<GenAISqliteStore> both in genai_exporters and
+// as a direct handle for two-phase pending/complete writes.
+use std::sync::Arc;
+impl<T: GenAIExporter + Sync> GenAIExporter for Arc<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    fn export(&self, events: &[GenAISemanticEvent]) {
+        (**self).export(events);
+    }
+}

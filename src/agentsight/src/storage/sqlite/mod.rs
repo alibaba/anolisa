@@ -11,6 +11,7 @@ pub mod audit;
 pub mod connection;
 pub mod genai;
 pub mod http;
+pub mod interruption;
 pub mod token;
 pub mod token_consumption;
 pub mod tokenless;
@@ -35,7 +36,12 @@ pub use token_consumption::{
 pub use http::HttpStore;
 
 // Re-export GenAI SQLite storage
-pub use genai::GenAISqliteStore;
+pub use genai::{GenAISqliteStore, PendingCallInfo, SseEnrichment};
+
+// Re-export Interruption SQLite storage
+pub use interruption::{
+    InterruptionStore, InterruptionRecord, InterruptionTypeStat,
+};
 
 // Re-export connection utilities
 pub use connection::{create_connection, default_base_path};

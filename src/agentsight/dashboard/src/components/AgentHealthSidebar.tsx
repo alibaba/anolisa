@@ -149,7 +149,11 @@ export const AgentHealthSidebar: React.FC = () => {
       setLastScan(data.last_scan_time);
       setError(null);
     } catch (e: any) {
-      setError(e.message || '请求失败');
+      // If we already have agent data, suppress transient poll errors (e.g. 408
+      // timeout during backend restart) to avoid flickering the error banner.
+      if (agents.length === 0) {
+        setError(e.message || '请求失败');
+      }
     } finally {
       setLoading(false);
     }

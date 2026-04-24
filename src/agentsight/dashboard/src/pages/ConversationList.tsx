@@ -4,17 +4,28 @@ import {
   LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
+import { InterruptionBadge } from '../components/InterruptionBadge';
+import { InterruptionPanel } from '../components/InterruptionPanel';
 import {
   fetchSessions,
   fetchTraces,
   fetchAgentNames,
   fetchTimeseries,
   fetchTraceDetail,
+  fetchInterruptionCount,
+  fetchInterruptionStats,
+  fetchInterruptionSessionCounts,
+  fetchInterruptionTraceCounts,
   SessionSummary,
   TraceSummary,
   TimeseriesBucket,
   ModelTimeseriesBucket,
   TraceEventDetail,
+  InterruptionCountResponse,
+  InterruptionTypeStat,
+  SessionInterruptionCount,
+  TraceInterruptionCount,
+  INTERRUPTION_TYPE_CN,
 } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -299,25 +310,29 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
 
 interface TraceSubTableProps {
   sessionId: string;
+  traceInterruptionCounts: Map<string, TraceInterruptionCount>;
+  startNs?: number;
+  endNs?: number;
 }
 
 const PAGE_SIZE = 10;
 
-const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
+const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterruptionCounts, startNs, endNs }) => {
   const navigate = useNavigate();
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0); // 0-based
+  const [expandedTracePanel, setExpandedTracePanel] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
     setPage(0);
-    fetchTraces(sessionId)
+    fetchTraces(sessionId, startNs, endNs)
       .then(setTraces)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [sessionId]);
+  }, [sessionId, startNs, endNs]);
 
   if (loading)
     return (
@@ -343,73 +358,104 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId }) => {
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
-        <td colSpan={8} className="px-4 lg:px-8 py-2">
-          <div className="grid grid-cols-8 text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
-            <div className="col-span-2 w-[220px]">Conversation ID</div>
-            <div className="col-span-2 w-[200px]">用户请求</div>
-            <div className="w-[110px]">输入 Token</div>
-            <div className="w-[110px]">输出 Token</div>
-            <div className="w-[150px]">开始时间</div>
-            <div className="text-right w-[80px]">操作</div>
+        <td colSpan={9} className="px-4 lg:px-8 py-2">
+          <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
+            <div>Conversation ID</div>
+            <div>用户请求</div>
+            <div>输入 Token</div>
+            <div>输出 Token</div>
+            <div>开始时间</div>
+            <div>操作</div>
+            <div>中断</div>
           </div>
         </td>
       </tr>
 
       {traces.length === 0 && (
         <tr className="bg-blue-50">
-          <td colSpan={8} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
+          <td colSpan={9} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
             该 Session 下暂无 Trace
           </td>
         </tr>
       )}
 
       {pageTraces.map((tr) => (
-        <tr key={tr.conversation_id} className="bg-blue-50 hover:bg-blue-100 transition-colors">
-          <td colSpan={8} className="px-4 lg:px-8 py-2">
-            <div className="grid grid-cols-8 items-center text-sm min-w-[800px]">
-              {/* Col 1: Conversation ID */}
-              <div className="col-span-2 min-w-0 pr-2 w-[220px]">
-                <div className="flex items-center gap-1">
-                  <span
-                    className="font-mono text-xs text-blue-600 block truncate"
-                    title={tr.conversation_id}
+        <React.Fragment key={tr.conversation_id}>
+          <tr className="bg-blue-50 hover:bg-blue-100 transition-colors">
+            <td colSpan={9} className="px-4 lg:px-8 py-2">
+              <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] items-center text-sm min-w-[800px]">
+                {/* Col 1: Conversation ID */}
+                <div className="min-w-0 pr-2">
+                  <div className="flex items-center gap-1">
+                    <span
+                      className="font-mono text-xs text-blue-600 block truncate"
+                      title={tr.conversation_id}
+                    >
+                      {shortId(tr.conversation_id, 18)}
+                    </span>
+                    <CopyButton text={tr.conversation_id} />
+                  </div>
+                </div>
+                {/* Col 2: User query */}
+                <div className="min-w-0 pr-2">
+                  {tr.user_query ? (
+                    <div
+                      className="text-sm text-gray-800 truncate"
+                      title={tr.user_query}
+                    >
+                      {tr.user_query}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-400">—</span>
+                  )}
+                </div>
+                <div className="text-blue-600 font-semibold">
+                  {fmtTokens(tr.total_input_tokens)}
+                </div>
+                <div className="text-green-600 font-semibold">
+                  {fmtTokens(tr.total_output_tokens)}
+                </div>
+                <div className="text-xs text-gray-500">{nsToDate(tr.start_ns)}</div>
+                <div>
+                  <button
+                    onClick={() => navigate(`/atif?type=conversation&id=${encodeURIComponent(tr.conversation_id)}`)}
+                    className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors"
                   >
-                    {shortId(tr.conversation_id, 18)}
-                  </span>
-                  <CopyButton text={tr.conversation_id} />
+                    详情
+                  </button>
+                </div>
+                <div>
+                  {(() => {
+                    const ic = traceInterruptionCounts.get(tr.trace_id);
+                    if (!ic || ic.total === 0) return <span className="text-xs text-gray-300">—</span>;
+                    return (
+                      <InterruptionBadge
+                        bySeverity={ic.by_severity}
+                        types={ic.types}
+                        onClick={() => setExpandedTracePanel(
+                          expandedTracePanel === tr.trace_id ? null : tr.trace_id
+                        )}
+                      />
+                    );
+                  })()}
                 </div>
               </div>
-              {/* Col 2: User query */}
-              <div className="col-span-2 min-w-0 pr-2 w-[200px]">
-                {tr.user_query ? (
-                  <div
-                    className="text-sm text-gray-800 truncate"
-                    title={tr.user_query}
-                  >
-                    {tr.user_query}
-                  </div>
-                ) : (
-                  <span className="text-xs text-gray-400">—</span>
-                )}
-              </div>
-              <div className="text-blue-600 font-semibold w-[110px]">
-                {fmtTokens(tr.total_input_tokens)}
-              </div>
-              <div className="text-green-600 font-semibold w-[110px]">
-                {fmtTokens(tr.total_output_tokens)}
-              </div>
-              <div className="text-xs text-gray-500 w-[150px]">{nsToDate(tr.start_ns)}</div>
-              <div className="text-right w-[80px]">
-                <button
-                  onClick={() => navigate(`/atif?type=conversation&id=${encodeURIComponent(tr.conversation_id)}`)}
-                  className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors"
-                >
-                  详情
-                </button>
-              </div>
-            </div>
-          </td>
-        </tr>
+            </td>
+          </tr>
+          {/* Trace interruption panel */}
+          {expandedTracePanel === tr.trace_id && (
+            <tr className="bg-blue-50">
+              <td colSpan={9} className="px-4 lg:px-8 pb-3 pt-0">
+                <div className="border border-gray-200 rounded-lg overflow-hidden">
+                  <InterruptionPanel
+                    traceId={tr.trace_id}
+                    onClose={() => setExpandedTracePanel(null)}
+                  />
+                </div>
+              </td>
+            </tr>
+          )}
+        </React.Fragment>
       ))}
 
       {/* 分页控制 */}
@@ -733,6 +779,15 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   // Whether user has ever queried (controls showing charts/table)
   const [hasQueried, setHasQueried] = useState(false);
 
+  // Interruption count for the queried time range
+  const [interruptionCount, setInterruptionCount] = useState<InterruptionCountResponse | null>(null);
+  // Per-type stats for tooltip breakdown
+  const [interruptionStats, setInterruptionStats] = useState<InterruptionTypeStat[]>([]);
+
+  // Interruption counts per session / trace
+  const [sessionInterruptionCounts, setSessionInterruptionCounts] = useState<Map<string, SessionInterruptionCount>>(new Map());
+  const [traceInterruptionCounts, setTraceInterruptionCounts] = useState<Map<string, TraceInterruptionCount>>(new Map());
+
   // Which session row is expanded to show traces
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
 
@@ -767,6 +822,27 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     loadAgentNames(startMs, endMs);
   }, [startMs, endMs, loadAgentNames]);
 
+  // Shared data-fetch helper: runs all 6 parallel queries and updates state.
+  const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
+    const [sessData, tsData, intData, iStats, iSessionCounts, iTraceCounts] = await Promise.all([
+      fetchSessions(startNs, endNs).then((data) =>
+        agent ? data.filter((s) => s.agent_name === agent) : data
+      ),
+      fetchTimeseries(startNs, endNs, agent),
+      fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
+      fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
+      fetchInterruptionSessionCounts(startNs, endNs).catch(() => [] as SessionInterruptionCount[]),
+      fetchInterruptionTraceCounts(startNs, endNs).catch(() => [] as TraceInterruptionCount[]),
+    ]);
+    setSessions(sessData);
+    setTokenSeries(tsData.token_series);
+    setModelSeries(tsData.model_series);
+    setInterruptionCount(intData);
+    setInterruptionStats(iStats);
+    setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
+    setTraceInterruptionCounts(new Map(iTraceCounts.map((c) => [c.trace_id, c])));
+  }, []);
+
   const handleQuery = useCallback(async () => {
     const effectiveEnd = Date.now();
     setEndMs(effectiveEnd);
@@ -782,23 +858,14 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     syncParams(startMs, effectiveEnd, selectedAgent);
 
     try {
-      // Run sessions and timeseries queries in parallel
-      const [sessData, tsData] = await Promise.all([
-        fetchSessions(startNs, endNs).then((data) =>
-          agent ? data.filter((s) => s.agent_name === agent) : data
-        ),
-        fetchTimeseries(startNs, endNs, agent),
-      ]);
-      setSessions(sessData);
-      setTokenSeries(tsData.token_series);
-      setModelSeries(tsData.model_series);
+      await runQuery(startNs, endNs, agent);
     } catch (e: any) {
       setError(e.message ?? '查询失败');
     } finally {
       setLoading(false);
       setTimeseriesLoading(false);
     }
-  }, [startMs, selectedAgent, syncParams]);
+  }, [startMs, selectedAgent, syncParams, runQuery]);
 
   // Auto-restore: if URL has q=1, replay the query on mount using URL params
   const hasRestoredRef = React.useRef(false);
@@ -812,16 +879,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       setLoading(true);
       setTimeseriesLoading(true);
       setQueryRangeNs([startNs, endNs]);
-      Promise.all([
-        fetchSessions(startNs, endNs).then((data) =>
-          agent ? data.filter((s) => s.agent_name === agent) : data
-        ),
-        fetchTimeseries(startNs, endNs, agent),
-      ]).then(([sessData, tsData]) => {
-        setSessions(sessData);
-        setTokenSeries(tsData.token_series);
-        setModelSeries(tsData.model_series);
-      }).catch((e: any) => {
+      runQuery(startNs, endNs, agent).catch((e: any) => {
         setError(e.message ?? '查询失败');
       }).finally(() => {
         setLoading(false);
@@ -921,7 +979,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
         {hasQueried && (
           <>
             {/* Summary cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
                 <p className="text-sm text-gray-500">Sessions</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">{sessions.length}</p>
@@ -937,6 +995,52 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                 <p className="text-3xl font-bold text-green-600 mt-1">
                   {fmtTokens(totalOutputTokens)}
                 </p>
+              </div>
+              {/* ── 异常中断卡片 ── */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                <p className="text-sm text-gray-500">异常中断</p>
+                {interruptionCount === null ? (
+                  <p className="text-3xl font-bold text-gray-400 mt-1">—</p>
+                ) : (
+                  <>
+                    <p className="text-3xl font-bold text-red-500 mt-1">{interruptionCount.total}</p>
+                    {interruptionCount.total > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {(
+                          [
+                            { key: 'critical', label: '严重', bg: 'bg-red-100 text-red-700 border border-red-300' },
+                            { key: 'high',     label: '高危', bg: 'bg-orange-100 text-orange-700 border border-orange-300' },
+                            { key: 'medium',   label: '中危', bg: 'bg-yellow-100 text-yellow-700 border border-yellow-300' },
+                            { key: 'low',      label: '低危', bg: 'bg-blue-100 text-blue-700 border border-blue-300' },
+                          ] as const
+                        ).map(({ key, label, bg }) => {
+                          const cnt = interruptionCount.by_severity[key];
+                          if (cnt === 0) return null;
+                          const tooltipLines = interruptionStats
+                            .filter((s) => s.severity === key)
+                            .sort((a, b) => b.count - a.count)
+                            .map((s) => `${INTERRUPTION_TYPE_CN[s.interruption_type] ?? s.interruption_type}: ${s.count} 次`);
+                          return (
+                            <span
+                              key={key}
+                              className={`relative group inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold cursor-default ${bg}`}
+                            >
+                              {label} {cnt}
+                              {tooltipLines.length > 0 && (
+                                <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:flex flex-col items-start px-2 py-1.5 rounded bg-gray-800 text-white text-xs whitespace-nowrap shadow-lg z-50 pointer-events-none">
+                                  {tooltipLines.map((line, i) => (
+                                    <span key={i}>{line}</span>
+                                  ))}
+                                  <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+                                </span>
+                              )}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
 
@@ -992,6 +1096,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
                         操作
+                      </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
+                        中断
                       </th>
                     </tr>
                   </thead>
@@ -1068,12 +1175,28 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                               详情
                             </a>
                           </td>
+                          <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            {(() => {
+                              const ic = sessionInterruptionCounts.get(sess.session_id);
+                              if (!ic || ic.total === 0) return <span className="text-xs text-gray-300">—</span>;
+                              return (
+                                <InterruptionBadge
+                                  bySeverity={ic.by_severity}
+                                  types={ic.types}
+                                />
+                              );
+                            })()}
+                          </td>
                         </tr>
 
                         {/* Expanded trace sub-table */}
                         {isExpanded && (
                           <TraceSubTable
+                            key={`${sess.session_id}-${queryRangeNs[0]}`}
                             sessionId={sess.session_id}
+                            traceInterruptionCounts={traceInterruptionCounts}
+                            startNs={queryRangeNs[0]}
+                            endNs={queryRangeNs[1]}
                           />
                         )}
                       </React.Fragment>

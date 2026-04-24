@@ -14,6 +14,7 @@ use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder}
 use include_dir::{include_dir, Dir};
 
 use crate::health::{HealthChecker, HealthStore};
+use crate::storage::sqlite::InterruptionStore;
 
 /// Embedded frontend static files (built from dashboard/ via `npm run build:embed`)
 /// The directory `frontend-dist/` must exist at compile time; if it is absent
@@ -28,6 +29,8 @@ pub struct AppState {
     pub start_time: Instant,
     /// Shared health store populated by the background HealthChecker
     pub health_store: Arc<RwLock<HealthStore>>,
+    /// Interruption events store
+    pub interruption_store: Option<Arc<InterruptionStore>>,
 }
 
 // ─── Static file handler ─────────────────────────────────────────────────────
@@ -88,15 +91,54 @@ fn mime_for_path(path: &str) -> &'static str {
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
 /// This function blocks until the server is shut down.
 pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io::Result<()> {
+    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls)
+    let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
+        match crate::storage::sqlite::GenAISqliteStore::new() {
+            Ok(store) => {
+                log::info!("GenAI SQLite store initialized for HealthChecker");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize GenAI store for HealthChecker: {}", e);
+                None
+            }
+        };
+
+    // Initialize interruption store
+    let interruption_store: Option<Arc<InterruptionStore>> = {
+        use crate::storage::sqlite::GenAISqliteStore;
+        let db_path = GenAISqliteStore::default_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+            .join("interruption_events.db");
+        match InterruptionStore::new_with_path(&db_path) {
+            Ok(store) => {
+                log::info!("Interruption store initialized at {:?}", db_path);
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                log::warn!("Failed to open interruption store: {}", e);
+                None
+            }
+        }
+    };
+
     // Spin up the background health checker
     let health_store = Arc::new(RwLock::new(HealthStore::new()));
-    let checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30));
+    let mut checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30));
+    if let Some(ref istore) = interruption_store {
+        checker = checker.with_interruption_store(Arc::clone(istore));
+    }
+    if let Some(ref gstore) = genai_store {
+        checker = checker.with_genai_store(Arc::clone(gstore));
+    }
     checker.start();
 
     let data = web::Data::new(AppState {
         storage_path,
         start_time: Instant::now(),
         health_store,
+        interruption_store,
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -133,6 +175,16 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .service(handlers::get_agent_health)
             .service(handlers::delete_agent_health)
             .service(handlers::restart_agent_health)
+            // Interruption API routes
+            .service(handlers::list_interruptions)
+            .service(handlers::interruption_count)
+            .service(handlers::interruption_stats)
+            .service(handlers::interruption_session_counts)
+            .service(handlers::interruption_trace_counts)
+            .service(handlers::list_session_interruptions)
+            .service(handlers::list_trace_interruptions)
+            .service(handlers::resolve_interruption)
+            .service(handlers::get_interruption)
             .service(handlers::get_token_savings)
             // Frontend static files (catch-all, must be last)
             .service(serve_frontend)

@@ -41,6 +41,7 @@ pub mod tokenizer;
 pub mod genai;
 pub mod atif;
 pub mod response_map;
+pub mod interruption;
 #[cfg(feature = "server")]
 pub mod server;
 mod unified;

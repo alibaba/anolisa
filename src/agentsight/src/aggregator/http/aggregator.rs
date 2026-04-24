@@ -313,6 +313,66 @@ impl HttpConnectionAggregator {
             .map(|(k, _)| (k, self.connections.pop(&k).unwrap()))
             .collect()
     }
+
+    /// Drain connections whose PID is no longer alive.
+    ///
+    /// Checks `/proc/{pid}` for each unique PID in the connection pool.
+    /// Returns `(ConnectionId, ConnectionState)` for dead-PID entries that
+    /// were in `RequestPending` or `SseActive` state.  `Idle` entries are
+    /// silently discarded.  This allows the caller to persist orphaned
+    /// in-flight requests before they are lost.
+    pub fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        use std::collections::HashSet;
+
+        // 1. Collect unique PIDs
+        let pids: HashSet<u32> = self.connections.iter()
+            .map(|(k, _)| k.pid)
+            .collect();
+
+        // 2. Determine which PIDs are dead
+        let dead_pids: HashSet<u32> = pids.into_iter()
+            .filter(|pid| !std::path::Path::new(&format!("/proc/{}", pid)).exists())
+            .collect();
+
+        if dead_pids.is_empty() {
+            return vec![];
+        }
+
+        // 3. Collect keys for dead PIDs (can't mutate while iterating)
+        let dead_keys: Vec<ConnectionId> = self.connections.iter()
+            .filter(|(k, _)| dead_pids.contains(&k.pid))
+            .map(|(k, _)| *k)
+            .collect();
+
+        // 4. Pop dead entries and return non-Idle ones
+        let mut result = Vec::new();
+        for key in dead_keys {
+            if let Some(state) = self.connections.pop(&key) {
+                match state {
+                    ConnectionState::Idle => {
+                        // Silently discard idle entries
+                    }
+                    _ => {
+                        log::debug!(
+                            "[HttpAggregator] Draining dead-PID connection: pid={} ssl_ptr={:#x}",
+                            key.pid, key.ssl_ptr,
+                        );
+                        result.push((key, state));
+                    }
+                }
+            }
+        }
+
+        if !result.is_empty() {
+            log::info!(
+                "[HttpAggregator] Drained {} connection(s) for dead PIDs: {:?}",
+                result.len(),
+                dead_pids,
+            );
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]

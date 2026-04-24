@@ -1,6 +1,6 @@
 //! API request handlers
 
-use actix_web::{get, web, HttpResponse, Responder};
+use actix_web::{delete, get, post, web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
@@ -519,6 +519,314 @@ pub async fn export_atif_conversation(
     match crate::atif::convert_trace_to_atif(&conversation_id, events) {
         Ok(doc) => HttpResponse::Ok().json(doc),
         Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+// ─── Interruption endpoints ────────────────────────────────────────────────────
+
+/// Query parameters for /api/interruptions
+#[derive(Debug, Deserialize)]
+pub struct InterruptionQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub agent_name: Option<String>,
+    /// Filter by type: llm_error | sse_truncated | timeout | agent_crash | token_limit | context_overflow | tool_incomplete
+    pub interruption_type: Option<String>,
+    pub severity: Option<String>,
+    pub resolved: Option<bool>,
+    pub limit: Option<i64>,
+}
+
+/// GET /api/interruptions
+///
+/// Returns a list of interruption events matching the query.
+#[get("/api/interruptions")]
+pub async fn list_interruptions(
+    data: web::Data<AppState>,
+    query: web::Query<InterruptionQuery>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let limit    = query.limit.unwrap_or(200);
+
+    match istore.list(
+        start_ns, end_ns,
+        query.agent_name.as_deref(),
+        query.interruption_type.as_deref(),
+        query.severity.as_deref(),
+        query.resolved,
+        limit,
+    ) {
+        Ok(rows) => HttpResponse::Ok().json(rows),
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/interruptions/count?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
+///
+/// Returns total interruption count + breakdown by severity within a time range.
+/// Response: { total, by_severity: { critical, high, medium, low } }
+#[get("/api/interruptions/count")]
+pub async fn interruption_count(
+    data: web::Data<AppState>,
+    query: web::Query<InterruptionQuery>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+
+    match istore.stats(start_ns, end_ns) {
+        Ok(stats) => {
+            let mut total = 0u64;
+            let mut critical = 0u64;
+            let mut high = 0u64;
+            let mut medium = 0u64;
+            let mut low = 0u64;
+            for s in &stats {
+                total += s.count as u64;
+                match s.severity.as_str() {
+                    "critical" => critical += s.count as u64,
+                    "high"     => high     += s.count as u64,
+                    "medium"   => medium   += s.count as u64,
+                    _          => low      += s.count as u64,
+                }
+            }
+            HttpResponse::Ok().json(serde_json::json!({
+                "total": total,
+                "by_severity": {
+                    "critical": critical,
+                    "high":     high,
+                    "medium":   medium,
+                    "low":      low
+                }
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/interruptions/stats
+///
+/// Returns per-type count statistics within a time range.
+#[get("/api/interruptions/stats")]
+pub async fn interruption_stats(
+    data: web::Data<AppState>,
+    query: web::Query<InterruptionQuery>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+
+    match istore.stats(start_ns, end_ns) {
+        Ok(stats) => HttpResponse::Ok().json(stats),
+        Err(e)    => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/interruptions/session-counts?start_ns=<i64>&end_ns=<i64>
+///
+/// Returns unresolved interruption breakdown per session_id, grouped by severity and type.
+/// Response: [ { session_id, total, by_severity: { critical, high, medium, low },
+///              types: [ { interruption_type, severity, count }, ... ] }, ... ]
+#[get("/api/interruptions/session-counts")]
+pub async fn interruption_session_counts(
+    data: web::Data<AppState>,
+    query: web::Query<InterruptionQuery>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+
+    match istore.count_unresolved_by_session_detailed(start_ns, end_ns) {
+        Ok(rows) => {
+            // Group by session_id
+            let mut map: std::collections::HashMap<String, (i64, std::collections::HashMap<String, i64>, Vec<serde_json::Value>)> = std::collections::HashMap::new();
+            for (sid, severity, itype, cnt) in rows {
+                let entry = map.entry(sid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
+                entry.0 += cnt;
+                *entry.1.entry(severity.clone()).or_insert(0) += cnt;
+                entry.2.push(serde_json::json!({
+                    "interruption_type": itype,
+                    "severity": severity,
+                    "count": cnt,
+                }));
+            }
+            let json: Vec<_> = map.into_iter().map(|(sid, (total, by_sev, types))| {
+                serde_json::json!({
+                    "session_id": sid,
+                    "total": total,
+                    "by_severity": {
+                        "critical": by_sev.get("critical").copied().unwrap_or(0),
+                        "high": by_sev.get("high").copied().unwrap_or(0),
+                        "medium": by_sev.get("medium").copied().unwrap_or(0),
+                        "low": by_sev.get("low").copied().unwrap_or(0),
+                    },
+                    "types": types,
+                })
+            }).collect();
+            HttpResponse::Ok().json(json)
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/interruptions/trace-counts?start_ns=<i64>&end_ns=<i64>
+///
+/// Returns unresolved interruption breakdown per trace_id, grouped by severity and type.
+/// Response: [ { trace_id, total, by_severity: { critical, high, medium, low },
+///              types: [ { interruption_type, severity, count }, ... ] }, ... ]
+#[get("/api/interruptions/trace-counts")]
+pub async fn interruption_trace_counts(
+    data: web::Data<AppState>,
+    query: web::Query<InterruptionQuery>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+
+    match istore.count_unresolved_by_trace_detailed(start_ns, end_ns) {
+        Ok(rows) => {
+            let mut map: std::collections::HashMap<String, (i64, std::collections::HashMap<String, i64>, Vec<serde_json::Value>)> = std::collections::HashMap::new();
+            for (tid, severity, itype, cnt) in rows {
+                let entry = map.entry(tid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
+                entry.0 += cnt;
+                *entry.1.entry(severity.clone()).or_insert(0) += cnt;
+                entry.2.push(serde_json::json!({
+                    "interruption_type": itype,
+                    "severity": severity,
+                    "count": cnt,
+                }));
+            }
+            let json: Vec<_> = map.into_iter().map(|(tid, (total, by_sev, types))| {
+                serde_json::json!({
+                    "trace_id": tid,
+                    "total": total,
+                    "by_severity": {
+                        "critical": by_sev.get("critical").copied().unwrap_or(0),
+                        "high": by_sev.get("high").copied().unwrap_or(0),
+                        "medium": by_sev.get("medium").copied().unwrap_or(0),
+                        "low": by_sev.get("low").copied().unwrap_or(0),
+                    },
+                    "types": types,
+                })
+            }).collect();
+            HttpResponse::Ok().json(json)
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/sessions/{session_id}/interruptions
+///
+/// Returns all interruption events for a specific session.
+#[get("/api/sessions/{session_id}/interruptions")]
+pub async fn list_session_interruptions(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let session_id = path.into_inner();
+    match istore.list_by_session(&session_id) {
+        Ok(rows) => HttpResponse::Ok().json(rows),
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/traces/{trace_id}/interruptions
+///
+/// Returns all interruption events for a specific trace.
+#[get("/api/traces/{trace_id}/interruptions")]
+pub async fn list_trace_interruptions(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let trace_id = path.into_inner();
+    match istore.list_by_trace(&trace_id) {
+        Ok(rows) => HttpResponse::Ok().json(rows),
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/interruptions/{interruption_id}/resolve
+///
+/// Mark a specific interruption event as resolved.
+#[post("/api/interruptions/{interruption_id}/resolve")]
+pub async fn resolve_interruption(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let interruption_id = path.into_inner();
+    match istore.resolve(&interruption_id) {
+        Ok(true)  => HttpResponse::Ok().json(serde_json::json!({"status": "resolved"})),
+        Ok(false) => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Interruption not found"})),
+        Err(e)    => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/interruptions/{interruption_id}
+///
+/// Get a single interruption event by ID.
+#[get("/api/interruptions/{interruption_id}")]
+pub async fn get_interruption(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(ref istore) = data.interruption_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "Interruption store not initialized"}));
+    };
+
+    let interruption_id = path.into_inner();
+    match istore.get_by_id(&interruption_id) {
+        Ok(Some(row)) => HttpResponse::Ok().json(row),
+        Ok(None)      => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Interruption not found"})),
+        Err(e)        => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": e.to_string()})),
     }
 }

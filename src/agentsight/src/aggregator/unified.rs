@@ -3,7 +3,7 @@
 //! This module provides a unified interface for aggregating parsed messages.
 //! It combines HTTP Connection Aggregator and Process Event Aggregator.
 
-use super::http::{ConnectionId, HttpConnectionAggregator};
+use super::http::{ConnectionId, ConnectionState, HttpConnectionAggregator};
 use super::http2::Http2StreamAggregator;
 use super::proctrace::ProcessEventAggregator;
 use super::result::AggregatedResult;
@@ -127,5 +127,12 @@ impl Aggregator {
         self.http.clear();
         self.http2.clear();
         self.process.clear();
+    }
+
+    /// Drain connections whose PID is no longer alive.
+    ///
+    /// Delegates to the HTTP aggregator's dead-PID drain.
+    pub fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        self.http.drain_dead_pid_connections()
     }
 }

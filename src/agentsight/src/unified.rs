@@ -31,12 +31,13 @@ use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
 use crate::genai::semantic::GenAISemanticEvent;
+use crate::interruption::{InterruptionDetector, DetectorConfig};
 use crate::parser::Parser;
 use crate::probes::{Probes, ProbesPoller, FileWatchEvent, FileWriteEvent};
 use crate::storage::{
     SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult,
 };
-use crate::storage::sqlite::GenAISqliteStore;
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 use crate::tokenizer::LlmTokenizer;
 use crate::response_map::ResponseSessionMapper;
 
@@ -62,6 +63,13 @@ pub struct AgentSight {
     genai_builder: GenAIBuilder,
     /// Pluggable GenAI event exporters (JSONL, SLS, etc.)
     genai_exporters: Vec<Box<dyn GenAIExporter>>,
+    /// Direct reference to the SQLite GenAI store for two-phase pending/complete writes.
+    /// `None` when SLS is configured (SQLite exporter is not registered in that case).
+    genai_sqlite_store: Option<Arc<GenAISqliteStore>>,
+    /// Interruption event detector (online rules)
+    interruption_detector: InterruptionDetector,
+    /// Interruption event store (SQLite)
+    interruption_store: Option<Arc<InterruptionStore>>,
     /// Unified storage
     storage: Storage,
     /// Agent scanner for process lifecycle tracking
@@ -80,6 +88,8 @@ pub struct AgentSight {
     pending_genai: Vec<PendingGenAI>,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
     ffi_sender: Option<FfiEventSender>,
+    /// Rate-limiter for dead-PID connection drain (at most once per second)
+    last_drain_check: std::time::Instant,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -134,6 +144,7 @@ impl AgentSight {
 
         // Build GenAI exporters
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+        let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
 
         // Always add local JSONL exporter
         genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
@@ -154,6 +165,8 @@ impl AgentSight {
             match GenAISqliteStore::new() {
                 Ok(store) => {
                     log::info!("SQLite GenAI exporter enabled (SLS not configured)");
+                    let store = Arc::new(store);
+                    genai_sqlite_store = Some(Arc::clone(&store));
                     genai_exporters.push(Box::new(store));
                 }
                 Err(e) => {
@@ -192,11 +205,47 @@ impl AgentSight {
             Analyzer::new()
         };
 
+        // Initialize interruption store (co-located in same directory as genai db)
+        let interruption_store: Option<Arc<InterruptionStore>> = {
+            let db_path = GenAISqliteStore::default_path()
+                .parent()
+                .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+                .join("interruption_events.db");
+            match InterruptionStore::new_with_path(&db_path) {
+                Ok(store) => {
+                    log::info!("Interruption events store initialized at {:?}", db_path);
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    log::warn!("Failed to initialize interruption store: {}", e);
+                    None
+                }
+            }
+        };
+
         log::info!(
             "AgentSight initialized: {} existing agent(s), {} GenAI exporter(s)",
             existing_agents.len(),
             genai_exporters.len(),
         );
+
+        // Spawn background thread that marks stale PENDING calls as 'interrupted'.
+        // Fires every 60 seconds; any pending call older than 5 minutes is assumed lost.
+        if let Some(ref sqlite_store) = genai_sqlite_store {
+            let store_ref = Arc::clone(sqlite_store);
+            std::thread::Builder::new()
+                .name("genai-stale-scanner".to_string())
+                .spawn(move || {
+                    log::info!("GenAI stale-pending scanner started (interval=60s, timeout=300s)");
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        if let Err(e) = store_ref.mark_interrupted_stale(300) {
+                            log::warn!("Stale-pending scan failed: {}", e);
+                        }
+                    }
+                })
+                .ok();
+        }
 
         Ok(AgentSight {
             probes,
@@ -205,6 +254,9 @@ impl AgentSight {
             analyzer,
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
+            genai_sqlite_store,
+            interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
+            interruption_store,
             storage,
             scanner,
             _poller,
@@ -214,6 +266,7 @@ impl AgentSight {
             response_mapper: ResponseSessionMapper::new(),
             pending_genai: Vec::new(),
             ffi_sender: None,
+            last_drain_check: std::time::Instant::now(),
         })
     }
 
@@ -312,8 +365,8 @@ impl AgentSight {
         for agg_result in &aggregated_results {
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
-            // Build GenAI semantic events from analysis results (reuse extracted data)
-            let output = self.genai_builder.build(&analysis_results, &self.response_mapper);
+            // Build GenAI semantic events AND pending info in one pass
+            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper);
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {
@@ -325,8 +378,36 @@ impl AgentSight {
                     });
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
-                    // Session_id resolved (or no response_id) — export immediately
-                    self.export_genai_events(&output.events);
+                    // Session_id resolved (or no response_id) — export immediately.
+                    // For SQLite: write pending first, then complete_pending;
+                    // for other exporters: normal export.
+                    if let Some(ref info) = pending_info {
+                        if let Some(sqlite_store) = self.genai_sqlite_store.as_ref() {
+                            if let Err(e) = sqlite_store.insert_pending(info) {
+                                log::warn!("Failed to insert pending call {}: {}", info.call_id, e);
+                            }
+                            for event in &output.events {
+                                if let Err(e) = sqlite_store.complete_pending(event) {
+                                    log::warn!("Failed to complete pending call: {}", e);
+                                }
+                            }
+                            // Export to non-SQLite exporters only (SQLite already written)
+                            for exporter in &self.genai_exporters {
+                                if exporter.name() != "sqlite" {
+                                    exporter.export(&output.events);
+                                    log::debug!("Exported {} GenAI events via '{}'", output.events.len(), exporter.name());
+                                }
+                            }
+                        } else {
+                            self.export_genai_events(&output.events);
+                        }
+                    } else {
+                        self.export_genai_events(&output.events);
+                    }
+
+                    // ── Online interruption detection ─────────────────────────────
+                    // Run after export so the call is already persisted.
+                    self.detect_and_store_interruptions(&output.events);
                 }
             } else if let Some(ref sender) = self.ffi_sender {
                 // No LLM event produced — send plain HTTP data via FFI channel
@@ -408,6 +489,8 @@ impl AgentSight {
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();
+                // Drain orphaned connections from dead PIDs and persist as pending
+                self.drain_and_persist_dead_connections();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -446,6 +529,141 @@ impl AgentSight {
             for exporter in &self.genai_exporters {
                 exporter.export(events);
                 log::debug!("Exported {} GenAI events via '{}'", events.len(), exporter.name());
+            }
+        }
+    }
+
+    /// Online interruption detection: inspect exported events and persist any
+    /// detected interruption records.  Also stamps the `interruption_type`
+    /// column on the corresponding `genai_events` row when SQLite is in use.
+    fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
+        if let Some(ref istore) = self.interruption_store {
+            for event in events {
+                if let GenAISemanticEvent::LLMCall(llm_call) = event {
+                    let interruptions = self.interruption_detector.detect(llm_call);
+                    for ie in &interruptions {
+                        // Deduplicate: skip if same (trace_id, type, error_msg) already
+                        // recorded for this conversation.  Same error retried N times
+                        // produces only 1 interruption; different errors each get 1.
+                        if let Some(ref tid) = ie.trace_id {
+                            let error_msg = llm_call.error.as_deref();
+                            if istore.exists_for_trace(tid, &ie.interruption_type, error_msg) {
+                                log::debug!(
+                                    "Skipping duplicate {:?} for trace_id={} error={:?}",
+                                    ie.interruption_type, tid, error_msg
+                                );
+                                // Still stamp the genai_events row so the call is marked
+                                if let Some(ref sqlite) = self.genai_sqlite_store {
+                                    let _ = sqlite.update_interruption_type(
+                                        &llm_call.call_id,
+                                        ie.interruption_type.as_str(),
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                        if let Err(e) = istore.insert(ie) {
+                            log::warn!("Failed to store interruption event: {}", e);
+                        }
+                        // Also stamp genai_events row with interruption_type
+                        if let Some(ref sqlite) = self.genai_sqlite_store {
+                            let _ = sqlite.update_interruption_type(
+                                &llm_call.call_id,
+                                ie.interruption_type.as_str(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drain aggregator connections whose PID is no longer alive and persist
+    /// them as `pending` records in `genai_events`.  Rate-limited to once per
+    /// second to avoid excessive `/proc` scanning.
+    fn drain_and_persist_dead_connections(&mut self) {
+        if self.last_drain_check.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.last_drain_check = std::time::Instant::now();
+
+        let drained = self.aggregator.drain_dead_pid_connections();
+        if drained.is_empty() {
+            return;
+        }
+
+        print!("[DrainCheck] Found {} dead-PID connection(s) to persist\n",
+            drained.len());
+
+        use crate::aggregator::ConnectionState;
+        use crate::genai::GenAIBuilder;
+
+        for (conn_id, state) in drained {
+            // Destructure to capture both request AND sse_events
+            let (state_name, request, sse_events) = match state {
+                ConnectionState::RequestPending { request } => {
+                    ("RequestPending", request, vec![])
+                }
+                ConnectionState::SseActive { request: Some(req), sse_events, .. } => {
+                    ("SseActive", req, sse_events)
+                }
+                _ => continue,
+            };
+
+            print!("[DrainCheck] dead-PID conn: pid={} ssl_ptr={:#x} state={} path={} sse_events={}\n",
+                conn_id.pid, conn_id.ssl_ptr, state_name, request.path, sse_events.len());
+
+            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id) {
+                if let Some(ref store) = self.genai_sqlite_store {
+                    let call_id = pending.call_id.clone();
+                    let pid = pending.pid;
+
+                    if let Err(e) = store.insert_pending(&pending) {
+                        print!("[DrainCheck] FAIL persist: {}\n", e);
+                        continue;
+                    }
+                    print!("[DrainCheck] OK persisted: pid={} call_id={} session_id={:?} conversation_id={:?}\n",
+                        conn_id.pid, call_id, pending.session_id, pending.conversation_id);
+
+                    // ── Session ID reconciliation ──────────────────────────
+                    // The drain path computes session_id via SHA256 hash fallback,
+                    // but normal flow uses ResponseSessionMapper (agent .jsonl UUID).
+                    // Look up the real session_id from completed records for the same PID.
+                    match store.lookup_session_for_pid(pid) {
+                        Ok(Some(ref real_session_id)) => {
+                            if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
+                                if let Err(e) = store.update_session_id(&call_id, real_session_id) {
+                                    print!("[DrainCheck] FAIL update session_id: {}\n", e);
+                                } else {
+                                    print!("[DrainCheck] session_id reconciled: {:?} -> {}\n",
+                                        pending.session_id, real_session_id);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            print!("[DrainCheck] no completed session found for pid={}, keeping hash fallback\n", pid);
+                        }
+                        Err(e) => {
+                            print!("[DrainCheck] FAIL lookup session: {}\n", e);
+                        }
+                    }
+
+                    // ── SSE enrichment ────────────────────────────────────
+                    // Parse captured SSE events for model, trace_id, tokens, output content
+                    if !sse_events.is_empty() {
+                        if let Some(enrichment) = GenAIBuilder::extract_sse_enrichment(&sse_events) {
+                            if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
+                                print!("[DrainCheck] FAIL enrich SSE: {}\n", e);
+                            } else {
+                                print!("[DrainCheck] SSE enriched: model={:?} trace_id={:?} input_tokens={:?} output_tokens={:?}\n",
+                                    enrichment.model, enrichment.trace_id, enrichment.input_tokens, enrichment.output_tokens);
+                            }
+                        }
+                    }
+                }
+            } else {
+                print!("[DrainCheck] build_pending returned None: pid={} path={} body_len={}\n",
+                    conn_id.pid, request.path, request.body_len);
             }
         }
     }
@@ -494,6 +712,7 @@ impl AgentSight {
 
         for events in &to_export {
             self.export_genai_events(events);
+            self.detect_and_store_interruptions(events);
         }
     }
 
@@ -524,6 +743,7 @@ impl AgentSight {
 
         for events in &to_export {
             self.export_genai_events(events);
+            self.detect_and_store_interruptions(events);
         }
     }
 
@@ -538,6 +758,7 @@ impl AgentSight {
         }
         for pending in pending_items {
             self.export_genai_events(&pending.events);
+            self.detect_and_store_interruptions(&pending.events);
         }
     }
 
