@@ -1094,6 +1094,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
                         输入 Token
                       </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
+                        节省 Token
+                      </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
                         输出 Token
                       </th>
@@ -1105,9 +1108,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
                         中断
-                      </th>
-                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                        Token 优化
                       </th>
                     </tr>
                   </thead>
@@ -1169,6 +1169,26 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-blue-600">
                             {fmtTokens(sess.total_input_tokens)}
                           </td>
+                          <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            {(() => {
+                              const saved = savingsMap.get(sess.session_id);
+                              if (!saved) return <span className="text-xs text-gray-300">—</span>;
+                              const params = new URLSearchParams({
+                                session_id: sess.session_id,
+                                start: String(startMs),
+                                end: String(endMs),
+                              });
+                              if (selectedAgent) params.set('agent', selectedAgent);
+                              return (
+                                <a
+                                  href={`#/savings?${params.toString()}`}
+                                  className="text-sm font-semibold text-green-600 underline decoration-green-300 hover:text-green-800 hover:decoration-green-600 transition-colors"
+                                >
+                                  {fmtTokens(saved)}
+                                </a>
+                              );
+                            })()}
+                          </td>
                           <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-green-600">
                             {fmtTokens(sess.total_output_tokens)}
                           </td>
@@ -1193,26 +1213,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                                   bySeverity={ic.by_severity}
                                   types={ic.types}
                                 />
-                              );
-                            })()}
-                          </td>
-                          <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                            {(() => {
-                              const saved = savingsMap.get(sess.session_id);
-                              if (!saved) return <span className="text-xs text-gray-300">—</span>;
-                              const params = new URLSearchParams({
-                                session_id: sess.session_id,
-                                start: String(startMs),
-                                end: String(endMs),
-                              });
-                              if (selectedAgent) params.set('agent', selectedAgent);
-                              return (
-                                <a
-                                  href={`#/savings?${params.toString()}`}
-                                  className="text-sm font-semibold text-green-600 hover:text-green-800 hover:underline transition-colors"
-                                >
-                                  {fmtTokens(saved)}
-                                </a>
                               );
                             })()}
                           </td>
