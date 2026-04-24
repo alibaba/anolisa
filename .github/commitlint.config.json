@@ -11,6 +11,7 @@
         "sec-core",
         "skill",
         "sight",
+        "tokenless",
         "deps",
         "ci",
         "docs",

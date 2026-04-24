@@ -18,6 +18,7 @@ on:
           - agent-sec-core
           - agentsight
           - os-skills
+          - tokenless
       version:
         description: 'Version (e.g. 2.1.0, without v prefix)'
         required: true

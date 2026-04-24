@@ -32,6 +32,7 @@ jobs:
       sec-core-version: ${{ steps.sec-core.outputs.version }}
       # TODO: uncomment when agentsight is integrated
       # sight-version: ${{ steps.sight.outputs.version }}
+      tokenless-version: ${{ steps.tokenless.outputs.version }}
       image-version: ${{ steps.image.outputs.version }}
       image-version-tag: ${{ steps.image.outputs.version_tag }}
     steps:
@@ -85,6 +86,12 @@ jobs:
         with:
           tag-match: "os-release/v*"
 
+      - name: "Version: tokenless"
+        id: tokenless
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "tokenless/v*"
+
       - name: Summary
         run: |
           echo "## Component Versions" >> $GITHUB_STEP_SUMMARY
@@ -94,6 +101,7 @@ jobs:
           echo "| os-skills | \`${{ steps.skill.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-sec-core | \`${{ steps.sec-core.outputs.version || '_skipped (no release branch)_' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
+          echo "| tokenless | \`${{ steps.tokenless.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **image** | \`${{ steps.image.outputs.version }}\` (tag: \`${{ steps.image.outputs.version_tag }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry-run }}" = "true" ]; then
@@ -134,6 +142,21 @@ jobs:
           retention-days: "7"
           skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
           skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
+
+  package-tokenless:
+    name: "Package: tokenless"
+    runs-on: ubuntu-22.04
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: tokenless
+          version: ${{ needs.versions.outputs.tokenless-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
 
   # TODO: uncomment when agentsight is integrated
   # package-sight:
@@ -234,6 +257,20 @@ jobs:
       source-artifact: "agent-sec-core-${{ needs.versions.outputs.sec-core-version }}.nightly"
       artifact-suffix: ".nightly"
 
+  rpm-tokenless:
+    name: "RPM: tokenless (${{ matrix.arch }})"
+    needs: [versions, package-tokenless]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: tokenless
+      version: ${{ needs.versions.outputs.tokenless-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "tokenless-${{ needs.versions.outputs.tokenless-version }}.nightly"
+      artifact-suffix: ".nightly"
+
   # ===========================================================================
   # Job 4: Build and push Docker image
   # ===========================================================================
@@ -245,6 +282,7 @@ jobs:
       - rpm-cosh
       - rpm-skill
       - rpm-sec-core
+      - rpm-tokenless
       # TODO: uncomment when agentsight is integrated
       # - rpm-sight
     steps:
@@ -348,6 +386,7 @@ jobs:
           echo "| os-skills | \`${{ needs.versions.outputs.skill-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-sec-core | \`${{ needs.versions.outputs.sec-core-version || '_skipped_' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
+          echo "| tokenless | \`${{ needs.versions.outputs.tokenless-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.GHCR_IMAGE }}:${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY

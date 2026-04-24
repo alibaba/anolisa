@@ -49,6 +49,7 @@ runs:
           copilot-shell)  SRC_DIR="src/copilot-shell" ;;
           agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
           agentsight)     SRC_DIR="src/agentsight" ;;
+          tokenless)     SRC_DIR="src/tokenless" ;;
           os-skills)      SRC_DIR="src/os-skills" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"

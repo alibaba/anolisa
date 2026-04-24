@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_tokenless:
+        description: 'Force run tokenless tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,6 +42,7 @@ jobs:
       copilot_shell: ${{ steps.changes.outputs.copilot_shell }}
       agent_sec_core: ${{ steps.changes.outputs.agent_sec_core }}
       agentsight: ${{ steps.changes.outputs.agentsight }}
+      tokenless: ${{ steps.changes.outputs.tokenless }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +66,7 @@ jobs:
           COPILOT_SHELL=false
           AGENT_SEC=false
           AGENTSIGHT=false
+          TOKENLESS=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -70,6 +77,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/agentsight/"; then
             AGENTSIGHT=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/tokenless/"; then
+            TOKENLESS=true
           fi
 
           # Manual override via workflow_dispatch
@@ -82,10 +92,14 @@ jobs:
           if [[ "${{ inputs.run_agentsight }}" == "true" ]]; then
             AGENTSIGHT=true
           fi
+          if [[ "${{ inputs.run_tokenless }}" == "true" ]]; then
+            TOKENLESS=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
           echo "agentsight=$AGENTSIGHT" >> $GITHUB_OUTPUT
+          echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -93,6 +107,7 @@ jobs:
           echo "| copilot-shell | $COPILOT_SHELL |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-sec-core | $AGENT_SEC |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | $AGENTSIGHT |" >> $GITHUB_STEP_SUMMARY
+          echo "| tokenless | $TOKENLESS |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -272,3 +287,37 @@ jobs:
           rustup component add rustfmt
           cd src/agentsight
           cargo test
+
+  # =========================================================================
+  # Step 6: Test tokenless
+  # =========================================================================
+  test-tokenless:
+    name: Test tokenless
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tokenless == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.70'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/tokenless
+
+      - name: Check formatting
+        run: |
+          cd src/tokenless
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/tokenless
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/tokenless
+          cargo test --workspace

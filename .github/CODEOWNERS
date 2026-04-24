@@ -24,6 +24,7 @@
 /src/agent-sec-core/linux-sandbox/      @yanrong-hsr                # auto-label: component:sec-core
 /src/os-skills/                         @Ziqi002                    # auto-label: component:skill
 /src/osbase/                            @casparant                  # auto-label: component:osbase
+/src/tokenless/                         @Forrest-ly @shiloong       # auto-label: component:tokenless
 
 # ---------------------------------------------------------------------------
 # Scope paths

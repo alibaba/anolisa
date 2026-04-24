@@ -19,6 +19,7 @@ body:
         - sec-core
         - skill
         - sight
+        - tokenless
         - other
     validations:
       required: true

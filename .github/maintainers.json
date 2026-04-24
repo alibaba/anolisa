@@ -49,6 +49,17 @@
             ]
         },
         {
+            "label": "component:tokenless",
+            "maintainers": [
+                {
+                    "github": "Forrest-ly"
+                },
+                {
+                    "github": "shiloong"
+                }
+            ]
+        },
+        {
             "label": "component:sight",
             "maintainers": [
                 {

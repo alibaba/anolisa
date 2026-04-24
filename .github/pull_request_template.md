@@ -38,6 +38,7 @@ closes #
 - [ ] `sec-core` (agent-sec-core)
 - [ ] `skill` (os-skills)
 - [ ] `sight` (agentsight)
+- [ ] `tokenless` (tokenless)
 - [ ] Multiple / Project-wide
 
 ## Checklist
@@ -53,6 +54,7 @@ closes #
 - [ ] For `sec-core` (Python): Ruff format and pytest pass
 - [ ] For `skill`: Skill directory structure is valid and shell scripts pass syntax check
 - [ ] For `sight`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
+- [ ] For `tokenless`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
 - [ ] Lock files are up to date (`package-lock.json` / `Cargo.lock`)
 
 ## Testing

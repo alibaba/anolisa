@@ -56,6 +56,9 @@ jobs:
             agentsight)
               dnf install -y rust cargo clang-devel elfutils-libelf-devel zlib-devel
               ;;
+            tokenless)
+              dnf install -y rust cargo jq
+              ;;
             os-skills)
               # noarch, no extra build deps
               ;;
