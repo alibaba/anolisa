@@ -75,6 +75,53 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | `agentsight audit` | `src/bin/cli/audit.rs` | 查询审计事件 |
 | `agentsight discover` | `src/bin/cli/discover.rs` | 发现运行中的 AI Agent |
 | `agentsight metrics` | `src/bin/cli/metrics.rs` | Prometheus 格式指标 |
+| `agentsight interruption` | `src/bin/cli/interruption.rs` | 查询/管理会话中断事件 |
+
+### 6.1 Interruption CLI 详细用法
+
+查询和管理 AI Agent 会话中断事件。数据存储于 SQLite 数据库。
+
+**数据库路径**: `/var/log/sysak/.agentsight/interruption_events.db`（可通过 `--db` 覆盖）
+
+**中断类型**:
+
+| 类型 | 含义 | 默认严重级别 |
+|------|------|-------------|
+| `llm_error` | HTTP 状态码 >= 400 或 SSE body 包含 `{"error":...}` | high |
+| `sse_truncated` | SSE 流未收到 `finish_reason=stop` 即终止 | high |
+| `context_overflow` | 上下文长度超限（`context_length_exceeded`） | high |
+| `agent_crash` | Agent 进程在会话中途消失（OOM/signal） | critical |
+| `token_limit` | `finish_reason=length` 且 `output_tokens >= max_tokens * 0.95` | medium |
+
+**严重级别**: `critical` > `high` > `medium` > `low`
+
+**子命令**:
+
+```bash
+# 列出中断事件（默认最近24小时，最多100条）
+agentsight interruption list [--last <HOURS>] [--type <TYPE>] [--severity <LEVEL>] [--agent <NAME>] [--unresolved|--resolved] [--limit <N>] [--json]
+
+# 按类型统计中断数量
+agentsight interruption stats [--last <HOURS>] [--json]
+
+# 按严重级别统计未解决的中断数量
+agentsight interruption count [--last <HOURS>] [--json]
+
+# 获取单个中断事件详情
+agentsight interruption get <INTERRUPTION_ID> [--json]
+
+# 列出指定 session 的所有中断
+agentsight interruption session <SESSION_ID> [--json]
+
+# 列出指定 conversation 的所有中断
+agentsight interruption conversation <CONVERSATION_ID> [--json]
+
+# 标记中断为已解决
+agentsight interruption resolve <INTERRUPTION_ID>
+
+# 使用自定义数据库路径
+agentsight interruption --db /path/to/interruption_events.db list --last 48
+```
 
 ## 7. API Endpoints
 
@@ -92,6 +139,15 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | `/api/agent-health/{pid}/restart` | POST | 重启 Agent |
 | `/api/export/atif/trace/{id}` | GET | ATIF trace 导出 |
 | `/api/export/atif/session/{id}` | GET | ATIF session 导出 |
+| `/api/interruptions` | GET | 中断事件列表（`start_ns`, `end_ns`, `agent_name`, `type`, `severity`, `resolved`, `limit`） |
+| `/api/interruptions/count` | GET | 中断计数按严重级别（`start_ns`, `end_ns`） |
+| `/api/interruptions/stats` | GET | 中断按类型统计（`start_ns`, `end_ns`） |
+| `/api/interruptions/session-counts` | GET | 按 session 分组的中断计数（`start_ns`, `end_ns`） |
+| `/api/interruptions/trace-counts` | GET | 按 trace 分组的中断计数（`start_ns`, `end_ns`） |
+| `/api/interruptions/{id}` | GET | 单个中断事件详情 |
+| `/api/interruptions/{id}/resolve` | POST | 标记中断为已解决 |
+| `/api/sessions/{id}/interruptions` | GET | 指定 session 的所有中断 |
+| `/api/traces/{id}/interruptions` | GET | 指定 trace 的所有中断 |
 
 ## 8. Frontend
 

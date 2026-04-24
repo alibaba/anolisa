@@ -601,16 +601,16 @@ impl GenAISqliteStore {
 
     /// List all pending calls for a specific PID.
     ///
-    /// Returns (call_id, session_id, trace_id) tuples for all PENDING records
-    /// matching the given PID. Used by HealthChecker to link agent_crash events
-    /// to their associated LLM calls.
+    /// Returns (call_id, session_id, trace_id, conversation_id) tuples for all
+    /// PENDING records matching the given PID. Used by HealthChecker to link
+    /// agent_crash events to their associated LLM calls.
     pub fn list_pending_for_pid(
         &self,
         pid: i32,
-    ) -> Result<Vec<(String, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT call_id, session_id, trace_id
+            "SELECT call_id, session_id, trace_id, conversation_id
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND status = 'pending'
@@ -621,6 +621,7 @@ impl GenAISqliteStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?.filter_map(|r| r.ok()).collect();
         Ok(rows)
@@ -650,28 +651,24 @@ impl GenAISqliteStore {
         Ok(updated)
     }
 
-    /// Find sessions/traces whose agentic loop was cut short by a process crash.
+    /// Find sessions whose agentic loop was cut short by a process crash.
     ///
-    /// Looks for the most recent `complete` LLM call for each (session, trace) pair
-    /// associated with the given PID where the finish reason is `tool_calls` —
-    /// meaning the model issued another tool call and was still mid-loop when the
-    /// process died.  These sessions never produced a final answer and should be
-    /// surfaced as `agent_crash` interruptions even though every individual call
-    /// completed successfully.
+    /// Looks for the most recent `complete` LLM call for each
+    /// (session, conversation) pair associated with the given PID where the
+    /// finish reason is `tool_calls` — meaning the model issued another tool
+    /// call and was still mid-loop when the process died.
     ///
-    /// Returns `(call_id, session_id, trace_id)` tuples, deduplicated by
-    /// (session_id, trace_id) so one interruption event is emitted per trace.
+    /// Returns `(call_id, session_id, trace_id, conversation_id)` tuples,
+    /// deduplicated by (session_id, conversation_id) so one interruption event
+    /// is emitted per conversation.
     pub fn list_incomplete_agentic_sessions_for_pid(
         &self,
         pid: i32,
         since_ns: i64,
-    ) -> Result<Vec<(String, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        // For each (session_id, trace_id) group belonging to this pid, find the
-        // call with the highest start_timestamp_ns.  If that call's finish_reason
-        // contains 'tool_calls' the agentic loop was never concluded.
         let mut stmt = conn.prepare(
-            "SELECT call_id, session_id, trace_id
+            "SELECT call_id, session_id, trace_id, conversation_id
              FROM genai_events g1
              WHERE g1.event_type = 'llm_call'
                AND g1.status    = 'complete'
@@ -685,8 +682,8 @@ impl GenAISqliteStore {
                      AND g2.status     = 'complete'
                      AND g2.pid        = ?1
                      AND g2.start_timestamp_ns >= ?2
-                     AND COALESCE(g2.session_id, '') = COALESCE(g1.session_id, '')
-                     AND COALESCE(g2.trace_id,   '') = COALESCE(g1.trace_id,   '')
+                     AND COALESCE(g2.session_id,      '') = COALESCE(g1.session_id,      '')
+                     AND COALESCE(g2.conversation_id,  '') = COALESCE(g1.conversation_id,  '')
                )",
         )?;
         let rows = stmt.query_map(params![pid, since_ns], |row| {
@@ -694,6 +691,7 @@ impl GenAISqliteStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?.filter_map(|r| r.ok()).collect();
         Ok(rows)
@@ -751,7 +749,9 @@ impl GenAISqliteStore {
                 output_messages  = COALESCE(?5, output_messages),
                 sse_event_count  = COALESCE(?6, sse_event_count),
                 input_tokens     = COALESCE(?7, input_tokens),
-                output_tokens    = COALESCE(?8, output_tokens)
+                output_tokens    = COALESCE(?8, output_tokens),
+                total_tokens     = COALESCE(?7, input_tokens, 0)
+                                 + COALESCE(?8, output_tokens, 0)
              WHERE call_id = ?1",
             params![
                 call_id,

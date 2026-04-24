@@ -5,12 +5,14 @@
 //! - `trace`: Trace agent activity via eBPF
 //! - `audit`: Query audit events
 //! - `discover`: Discover running AI agents
+//! - `interruption`: Query and manage session interruption events
 
 pub mod token;
 pub mod trace;
 pub mod audit;
 pub mod discover;
 pub mod metrics;
+pub mod interruption;
 #[cfg(feature = "server")]
 pub mod serve;
 

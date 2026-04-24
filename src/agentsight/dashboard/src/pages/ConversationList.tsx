@@ -5,7 +5,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { InterruptionBadge } from '../components/InterruptionBadge';
-import { InterruptionPanel } from '../components/InterruptionPanel';
+import { InterruptionPanel, ResolvedEventInfo } from '../components/InterruptionPanel';
 import {
   fetchSessions,
   fetchTraces,
@@ -15,7 +15,7 @@ import {
   fetchInterruptionCount,
   fetchInterruptionStats,
   fetchInterruptionSessionCounts,
-  fetchInterruptionTraceCounts,
+  fetchInterruptionConversationCounts,
   fetchTokenSavings,
   SessionSummary,
   TraceSummary,
@@ -25,7 +25,7 @@ import {
   InterruptionCountResponse,
   InterruptionTypeStat,
   SessionInterruptionCount,
-  TraceInterruptionCount,
+  ConversationInterruptionCount,
   INTERRUPTION_TYPE_CN,
 } from '../utils/apiClient';
 
@@ -311,14 +311,15 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
 
 interface TraceSubTableProps {
   sessionId: string;
-  traceInterruptionCounts: Map<string, TraceInterruptionCount>;
+  conversationInterruptionCounts: Map<string, ConversationInterruptionCount>;
   startNs?: number;
   endNs?: number;
+  onResolvedEvent?: (info: ResolvedEventInfo) => void;
 }
 
 const PAGE_SIZE = 10;
 
-const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterruptionCounts, startNs, endNs }) => {
+const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationInterruptionCounts, startNs, endNs, onResolvedEvent }) => {
   const navigate = useNavigate();
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -427,14 +428,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
                 </div>
                 <div>
                   {(() => {
-                    const ic = traceInterruptionCounts.get(tr.trace_id);
+                    const ic = conversationInterruptionCounts.get(tr.conversation_id);
                     if (!ic || ic.total === 0) return <span className="text-xs text-gray-300">—</span>;
                     return (
                       <InterruptionBadge
                         bySeverity={ic.by_severity}
                         types={ic.types}
                         onClick={() => setExpandedTracePanel(
-                          expandedTracePanel === tr.trace_id ? null : tr.trace_id
+                          expandedTracePanel === tr.conversation_id ? null : tr.conversation_id
                         )}
                       />
                     );
@@ -444,13 +445,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
             </td>
           </tr>
           {/* Trace interruption panel */}
-          {expandedTracePanel === tr.trace_id && (
+          {expandedTracePanel === tr.conversation_id && (
             <tr className="bg-blue-50">
               <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <InterruptionPanel
-                    traceId={tr.trace_id}
+                    conversationId={tr.conversation_id}
                     onClose={() => setExpandedTracePanel(null)}
+                    onResolvedEvent={onResolvedEvent}
                   />
                 </div>
               </td>
@@ -785,15 +787,84 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   // Per-type stats for tooltip breakdown
   const [interruptionStats, setInterruptionStats] = useState<InterruptionTypeStat[]>([]);
 
-  // Interruption counts per session / trace
+  // Interruption counts per session / conversation
   const [sessionInterruptionCounts, setSessionInterruptionCounts] = useState<Map<string, SessionInterruptionCount>>(new Map());
-  const [traceInterruptionCounts, setTraceInterruptionCounts] = useState<Map<string, TraceInterruptionCount>>(new Map());
+  const [conversationInterruptionCounts, setConversationInterruptionCounts] = useState<Map<string, ConversationInterruptionCount>>(new Map());
 
   // Token savings per session (session_id → saved_tokens)
   const [savingsMap, setSavingsMap] = useState<Map<string, number>>(new Map());
 
   // Which session row is expanded to show traces
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
+
+  // Called when a single interruption event is resolved inside InterruptionPanel.
+  // Decrements counts in all relevant state maps so badges update without re-query.
+  const handleResolvedEvent = useCallback((info: ResolvedEventInfo) => {
+    const sev = info.severity as 'critical' | 'high' | 'medium' | 'low';
+
+    // 1. Update overview card total + by_severity
+    setInterruptionCount(prev => {
+      if (!prev) return prev;
+      const newTotal = Math.max(0, prev.total - 1);
+      return {
+        total: newTotal,
+        by_severity: { ...prev.by_severity, [sev]: Math.max(0, prev.by_severity[sev] - 1) },
+      };
+    });
+
+    // 2. Update per-type stats (for tooltip)
+    setInterruptionStats(prev =>
+      prev.map(s =>
+        s.severity === info.severity && s.interruption_type === info.interruption_type
+          ? { ...s, count: Math.max(0, s.count - 1) }
+          : s
+      ).filter(s => s.count > 0)
+    );
+
+    // 3. Update conversation-level badge counts
+    if (info.conversation_id) {
+      setConversationInterruptionCounts(prev => {
+        const existing = prev.get(info.conversation_id!);
+        if (!existing) return prev;
+        const next = new Map(prev);
+        const newTotal = Math.max(0, existing.total - 1);
+        const newBySev = { ...existing.by_severity, [sev]: Math.max(0, existing.by_severity[sev] - 1) };
+        const newTypes = existing.types.map(t =>
+          t.severity === info.severity && t.interruption_type === info.interruption_type
+            ? { ...t, count: Math.max(0, t.count - 1) }
+            : t
+        ).filter(t => t.count > 0);
+        if (newTotal === 0) {
+          next.delete(info.conversation_id!);
+        } else {
+          next.set(info.conversation_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
+        }
+        return next;
+      });
+    }
+
+    // 4. Update session-level badge counts
+    if (info.session_id) {
+      setSessionInterruptionCounts(prev => {
+        const existing = prev.get(info.session_id!);
+        if (!existing) return prev;
+        const next = new Map(prev);
+        const newTotal = Math.max(0, existing.total - 1);
+        const newBySev = { ...existing.by_severity, [sev]: Math.max(0, existing.by_severity[sev] - 1) };
+        const newTypes = existing.types.map(t =>
+          t.severity === info.severity && t.interruption_type === info.interruption_type
+            ? { ...t, count: Math.max(0, t.count - 1) }
+            : t
+        ).filter(t => t.count > 0);
+        if (newTotal === 0) {
+          next.delete(info.session_id!);
+        } else {
+          next.set(info.session_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
+        }
+        return next;
+      });
+    }
+  }, []);
 
   // Sync filter state to URL so back-navigation restores it
   const syncParams = useCallback((sMs: number, eMs: number, agent: string) => {
@@ -828,7 +899,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
   // Shared data-fetch helper: runs all 7 parallel queries and updates state.
   const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
-    const [sessData, tsData, intData, iStats, iSessionCounts, iTraceCounts, savingsResp] = await Promise.all([
+    const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
         agent ? data.filter((s) => s.agent_name === agent) : data
       ),
@@ -836,7 +907,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
       fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
       fetchInterruptionSessionCounts(startNs, endNs).catch(() => [] as SessionInterruptionCount[]),
-      fetchInterruptionTraceCounts(startNs, endNs).catch(() => [] as TraceInterruptionCount[]),
+      fetchInterruptionConversationCounts(startNs, endNs).catch(() => [] as ConversationInterruptionCount[]),
       fetchTokenSavings(startNs, endNs, agent).catch(() => null),
     ]);
     setSessions(sessData);
@@ -845,7 +916,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setInterruptionCount(intData);
     setInterruptionStats(iStats);
     setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
-    setTraceInterruptionCounts(new Map(iTraceCounts.map((c) => [c.trace_id, c])));
+    setConversationInterruptionCounts(new Map(iConvCounts.map((c) => [c.conversation_id, c])));
     setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.saved_tokens]) ?? []));
   }, []);
 
@@ -1223,9 +1294,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           <TraceSubTable
                             key={`${sess.session_id}-${queryRangeNs[0]}`}
                             sessionId={sess.session_id}
-                            traceInterruptionCounts={traceInterruptionCounts}
+                            conversationInterruptionCounts={conversationInterruptionCounts}
                             startNs={queryRangeNs[0]}
                             endNs={queryRangeNs[1]}
+                            onResolvedEvent={handleResolvedEvent}
                           />
                         )}
                       </React.Fragment>

@@ -292,6 +292,7 @@ export interface InterruptionRecord {
   interruption_id: string;
   session_id: string | null;
   trace_id: string | null;
+  conversation_id: string | null;
   call_id: string | null;
   pid: number | null;
   agent_name: string | null;
@@ -352,8 +353,8 @@ export interface SessionInterruptionCount {
   types: InterruptionTypeDetail[];
 }
 
-export interface TraceInterruptionCount {
-  trace_id: string;
+export interface ConversationInterruptionCount {
+  conversation_id: string;
   total: number;
   by_severity: {
     critical: number;
@@ -383,11 +384,11 @@ export async function fetchSessionInterruptions(sessionId: string): Promise<Inte
 }
 
 /**
- * Fetch all unresolved interruptions for a trace.
+ * Fetch all unresolved interruptions for a conversation.
  */
-export async function fetchTraceInterruptions(traceId: string): Promise<InterruptionRecord[]> {
+export async function fetchConversationInterruptions(conversationId: string): Promise<InterruptionRecord[]> {
   return apiFetch<InterruptionRecord[]>(
-    `${API_BASE}/api/traces/${encodeURIComponent(traceId)}/interruptions`
+    `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}/interruptions`
   );
 }
 
@@ -437,17 +438,17 @@ export async function fetchInterruptionSessionCounts(
 }
 
 /**
- * Fetch unresolved interruption count + max severity per trace_id.
+ * Fetch unresolved interruption count + max severity per conversation_id.
  */
-export async function fetchInterruptionTraceCounts(
+export async function fetchInterruptionConversationCounts(
   startNs: number,
   endNs: number
-): Promise<TraceInterruptionCount[]> {
+): Promise<ConversationInterruptionCount[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
-  return apiFetch<TraceInterruptionCount[]>(
-    `${API_BASE}/api/interruptions/trace-counts?${params.toString()}`
+  return apiFetch<ConversationInterruptionCount[]>(
+    `${API_BASE}/api/interruptions/conversation-counts?${params.toString()}`
   );
 }
 

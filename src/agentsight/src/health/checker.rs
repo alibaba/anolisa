@@ -3,7 +3,7 @@
 //! Periodically scans for agent processes, detects their listening ports,
 //! and probes them via HTTP to determine health status.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -97,6 +97,7 @@ impl HealthChecker {
         };
 
         // Write agent_crash interruption events for processes that just went offline
+        // Group by conversation_id: 1 agent_crash per conversation, not per call.
         if !newly_offline.is_empty() {
             if let Some(ref istore) = self.interruption_store {
                 let now_ns = std::time::SystemTime::now()
@@ -105,23 +106,31 @@ impl HealthChecker {
                     .unwrap_or(0);
 
                 for offline in &newly_offline {
-                    // Query pending calls for this pid from genai_events
-                    // and mark them as interrupted + create linked InterruptionEvent
                     let pending_calls = self.get_pending_calls_for_pid(offline.pid);
                     if !pending_calls.is_empty() {
-                        for (call_id, session_id, trace_id) in &pending_calls {
-                            // Create InterruptionEvent linked to the pending call
+                        // Group pending calls by conversation_id → 1 event per conversation
+                        let mut by_conv: HashMap<Option<String>, Vec<(String, Option<String>)>> = HashMap::new();
+                        for (call_id, session_id, _trace_id, conversation_id) in &pending_calls {
+                            by_conv.entry(conversation_id.clone())
+                                .or_default()
+                                .push((call_id.clone(), session_id.clone()));
+                        }
+
+                        for (conversation_id, calls) in &by_conv {
+                            let session_id = calls.first().and_then(|(_, s)| s.clone());
+                            let call_ids: Vec<&str> = calls.iter().map(|(c, _)| c.as_str()).collect();
                             let detail = serde_json::json!({
                                 "pid": offline.pid,
                                 "agent_name": offline.agent_name,
                                 "exe_path": offline.exe_path.clone(),
-                                "call_id": call_id,
+                                "call_ids": call_ids,
                             });
                             let event = InterruptionEvent::new(
                                 InterruptionType::AgentCrash,
-                                session_id.clone(),
-                                trace_id.clone(),
-                                Some(call_id.clone()),
+                                session_id,
+                                None,
+                                conversation_id.clone(),
+                                None,
                                 Some(offline.pid as i32),
                                 Some(offline.agent_name.clone()),
                                 now_ns,
@@ -130,31 +139,39 @@ impl HealthChecker {
                             if let Err(e) = istore.insert(&event) {
                                 log::warn!("Failed to record agent_crash interruption for pid={}: {}", offline.pid, e);
                             } else {
-                                log::info!("Recorded agent_crash interruption for {} (pid={}, call_id={})",
-                                    offline.agent_name, offline.pid, call_id);
+                                log::info!("Recorded agent_crash for {} (pid={}, conversation={:?}, {} call(s))",
+                                    offline.agent_name, offline.pid, conversation_id, calls.len());
                             }
                         }
-                        // Mark all pending calls for this pid as interrupted in genai_events
                         self.mark_pending_interrupted(offline.pid, "agent_crash");
                     } else {
-                        // No pending calls — check if any agentic loop was cut short:
-                        // the last LLM call for a session finished with finish_reason=tool_calls,
-                        // meaning the agent was still thinking when it crashed.
+                        // No pending calls — check if any agentic loop was cut short
                         let incomplete = self.get_incomplete_agentic_sessions_for_pid(offline.pid);
                         if !incomplete.is_empty() {
-                            for (call_id, session_id, trace_id) in &incomplete {
+                            // Group by conversation_id
+                            let mut by_conv: HashMap<Option<String>, Vec<(String, Option<String>)>> = HashMap::new();
+                            for (call_id, session_id, _trace_id, conversation_id) in &incomplete {
+                                by_conv.entry(conversation_id.clone())
+                                    .or_default()
+                                    .push((call_id.clone(), session_id.clone()));
+                            }
+
+                            for (conversation_id, calls) in &by_conv {
+                                let session_id = calls.first().and_then(|(_, s)| s.clone());
+                                let call_ids: Vec<&str> = calls.iter().map(|(c, _)| c.as_str()).collect();
                                 let detail = serde_json::json!({
                                     "pid": offline.pid,
                                     "agent_name": offline.agent_name,
                                     "exe_path": offline.exe_path.clone(),
-                                    "call_id": call_id,
+                                    "call_ids": call_ids,
                                     "reason": "agentic_loop_incomplete",
                                 });
                                 let event = InterruptionEvent::new(
                                     InterruptionType::AgentCrash,
-                                    session_id.clone(),
-                                    trace_id.clone(),
-                                    Some(call_id.clone()),
+                                    session_id,
+                                    None,
+                                    conversation_id.clone(),
+                                    None,
                                     Some(offline.pid as i32),
                                     Some(offline.agent_name.clone()),
                                     now_ns,
@@ -163,8 +180,8 @@ impl HealthChecker {
                                 if let Err(e) = istore.insert(&event) {
                                     log::warn!("Failed to record agent_crash (incomplete loop) for pid={}: {}", offline.pid, e);
                                 } else {
-                                    log::info!("Recorded agent_crash (incomplete agentic loop) for {} (pid={}, call_id={})",
-                                        offline.agent_name, offline.pid, call_id);
+                                    log::info!("Recorded agent_crash (incomplete loop) for {} (pid={}, conversation={:?})",
+                                        offline.agent_name, offline.pid, conversation_id);
                                 }
                             }
                         } else {
@@ -180,6 +197,7 @@ impl HealthChecker {
                                 None,
                                 None,
                                 None,
+                                None,
                                 Some(offline.pid as i32),
                                 Some(offline.agent_name.clone()),
                                 now_ns,
@@ -188,7 +206,7 @@ impl HealthChecker {
                             if let Err(e) = istore.insert(&event) {
                                 log::warn!("Failed to record agent_crash interruption for pid={}: {}", offline.pid, e);
                             } else {
-                                log::info!("Recorded agent_crash interruption for {} (pid={}, no pending call)",
+                                log::info!("Recorded agent_crash for {} (pid={}, no pending call)",
                                     offline.agent_name, offline.pid);
                             }
                         }
@@ -325,8 +343,8 @@ impl HealthChecker {
 
     /// Query pending LLM calls for a specific PID from genai_events.
     ///
-    /// Returns a list of (call_id, session_id, trace_id) tuples.
-    fn get_pending_calls_for_pid(&self, pid: u32) -> Vec<(String, Option<String>, Option<String>)> {
+    /// Returns a list of (call_id, session_id, trace_id, conversation_id) tuples.
+    fn get_pending_calls_for_pid(&self, pid: u32) -> Vec<(String, Option<String>, Option<String>, Option<String>)> {
         if let Some(ref genai_store) = self.genai_store {
             match genai_store.list_pending_for_pid(pid as i32) {
                 Ok(calls) => calls,
@@ -342,14 +360,15 @@ impl HealthChecker {
 
     /// Query sessions whose agentic loop was incomplete for a specific PID.
     ///
-    /// Returns (call_id, session_id, conversation_id) for the last call of each
-    /// (session, conversation) that ended with finish_reason=tool_calls,
-    /// indicating the agent was mid-loop when it crashed.  Only considers calls
-    /// from the last 5 minutes to avoid false positives from historical data.
+    /// Returns (call_id, session_id, trace_id, conversation_id) for the last
+    /// call of each (session, conversation) that ended with
+    /// finish_reason=tool_calls, indicating the agent was mid-loop when it
+    /// crashed.  Only considers calls from the last 5 minutes to avoid false
+    /// positives from historical data.
     fn get_incomplete_agentic_sessions_for_pid(
         &self,
         pid: u32,
-    ) -> Vec<(String, Option<String>, Option<String>)> {
+    ) -> Vec<(String, Option<String>, Option<String>, Option<String>)> {
         if let Some(ref genai_store) = self.genai_store {
             // 5-minute lookback window (in nanoseconds)
             let since_ns = std::time::SystemTime::now()

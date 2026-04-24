@@ -516,15 +516,20 @@ impl GenAIBuilder {
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
             http.response_body.as_ref().and_then(|body| {
-                /// Strip HTTP chunked transfer encoding (e.g. "b6\r\n{json}\r\n") and
-                /// return the first JSON object found in the body.
+                /// Strip HTTP chunked transfer encoding (e.g. "b6\r\n{json}\r\n0\r\n\r\n")
+                /// and return the JSON object substring.
                 fn strip_chunked(body: &str) -> &str {
                     // Find the first '{' — everything before it may be chunk-size hex + CRLF
-                    if let Some(idx) = body.find('{') {
-                        &body[idx..]
-                    } else {
-                        body
-                    }
+                    let start = match body.find('{') {
+                        Some(idx) => idx,
+                        None => return body,
+                    };
+                    // Find the last '}' — everything after it is chunked trailer
+                    let end = match body.rfind('}') {
+                        Some(idx) => idx + 1,
+                        None => return &body[start..],
+                    };
+                    &body[start..end]
                 }
 
                 /// Try to extract `message` from a JSON value (handles nested / escaped JSON)
@@ -1492,3 +1497,4 @@ impl GenAIBuilder {
         if parts.is_empty() { None } else { Some((parts, finish_reason)) }
     }
 }
+

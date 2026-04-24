@@ -1,6 +1,6 @@
 ---
 name: agentsight
-description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据和审计事件。当用户询问 token 用量、花费、消耗趋势,或询问 LLM 调用、进程行为审计时使用此技能。
+description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据、审计事件和会话中断事件。当用户询问 token 用量、花费、消耗趋势、LLM 调用、进程行为审计，或询问会话中断、Agent 异常、LLM 错误等中断事件时使用此技能。
 ---
 
 # Dashboard（前端）
@@ -94,6 +94,17 @@ Top commands:
 |------|------|
 | `llm_call` | provider, model, input_tokens, output_tokens, request_path, response_status, is_sse |
 | `process_action` | filename, args, exit_code |
+
+---
+
+# 会话中断查询
+
+数据库：`/var/log/sysak/.agentsight/interruption_events.db`，可通过 `--db <PATH>` 覆盖。
+
+中断类型：`llm_error`、`sse_truncated`、`context_overflow`、`agent_crash`、`token_limit`
+严重级别：`critical` > `high` > `medium` > `low`
+
+使用 `/usr/local/bin/agentsight interruption --help` 查看所有子命令和参数。
 
 ---
 

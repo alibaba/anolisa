@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
 } from '../types';
-import { fetchAtifByTrace, fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
+import { fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -338,8 +338,8 @@ export const AtifViewerPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Input state
-  const [queryType, setQueryType] = useState<'trace' | 'session' | 'conversation'>(
-    (searchParams.get('type') as 'trace' | 'session' | 'conversation') || 'trace'
+  const [queryType, setQueryType] = useState<'session' | 'conversation'>(
+    (searchParams.get('type') as 'session' | 'conversation') || 'session'
   );
   const [queryId, setQueryId] = useState(searchParams.get('id') || '');
 
@@ -362,7 +362,7 @@ export const AtifViewerPage: React.FC = () => {
   }, []);
 
   // Load data
-  const handleLoad = useCallback(async (type?: 'trace' | 'session' | 'conversation', id?: string) => {
+  const handleLoad = useCallback(async (type?: 'session' | 'conversation', id?: string) => {
     const t = type ?? queryType;
     const i = id ?? queryId;
     if (!i.trim()) return;
@@ -375,9 +375,7 @@ export const AtifViewerPage: React.FC = () => {
 
     try {
       let data: AtifDocument;
-      if (t === 'trace') {
-        data = await fetchAtifByTrace(i.trim());
-      } else if (t === 'conversation') {
+      if (t === 'conversation') {
         data = await fetchAtifByConversation(i.trim());
       } else {
         data = await fetchAtifBySession(i.trim());
@@ -392,7 +390,7 @@ export const AtifViewerPage: React.FC = () => {
 
   // Auto-load from URL on mount
   useEffect(() => {
-    const urlType = searchParams.get('type') as 'trace' | 'session' | 'conversation' | null;
+    const urlType = searchParams.get('type') as 'session' | 'conversation' | null;
     const urlId = searchParams.get('id');
     if (urlType && urlId) {
       setQueryType(urlType);
@@ -493,7 +491,7 @@ export const AtifViewerPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Type toggle */}
           <div className="flex gap-1">
-            {(['trace', 'conversation', 'session'] as const).map(t => (
+            {(['session', 'conversation'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => setQueryType(t)}
@@ -503,7 +501,7 @@ export const AtifViewerPage: React.FC = () => {
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                按 {t === 'trace' ? 'Trace' : t === 'conversation' ? 'Conversation' : 'Session'}
+                按 {t === 'conversation' ? 'Conversation' : 'Session'}
               </button>
             ))}
           </div>
@@ -515,7 +513,7 @@ export const AtifViewerPage: React.FC = () => {
               value={queryId}
               onChange={e => setQueryId(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleLoad(); }}
-              placeholder={queryType === 'trace' ? '输入 Trace ID...' : queryType === 'conversation' ? '输入 Conversation ID...' : '输入 Session ID...'}
+              placeholder={queryType === 'conversation' ? '输入 Conversation ID...' : '输入 Session ID...'}
               className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
             />
           </div>
@@ -556,7 +554,7 @@ export const AtifViewerPage: React.FC = () => {
         {loading && (
           <div className="flex items-center justify-center py-16">
             <div className="text-center">
-              <div className="animate-spin text-4xl mb-4">\u23f3</div>
+              <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-4" />
               <p className="text-gray-600">加载中...</p>
             </div>
           </div>
@@ -566,8 +564,8 @@ export const AtifViewerPage: React.FC = () => {
         {!loading && !doc && !error && (
           <div className="flex items-center justify-center py-24">
             <div className="text-center">
-              <div className="text-5xl mb-4">🔍</div>
-              <p className="text-gray-500">请输入 Trace 或 Session ID，然后点击「加载」</p>
+              <p className="text-3xl text-gray-300 mb-4">ATIF</p>
+              <p className="text-gray-500">请输入 Session 或 Conversation ID，然后点击「加载」</p>
               <p className="text-gray-400 text-sm mt-1">或导入本地 ATIF JSON 文件</p>
             </div>
           </div>
@@ -612,7 +610,7 @@ export const AtifViewerPage: React.FC = () => {
 
               {doc.steps.length === 0 ? (
                 <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-                  <div className="text-4xl mb-2">\ud83d\udced</div>
+                  <p className="text-4xl text-gray-300 mb-2">--</p>
                   <p className="text-gray-400">该轨迹暂无步骤数据</p>
                 </div>
               ) : (

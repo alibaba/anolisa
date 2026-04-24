@@ -531,7 +531,7 @@ pub struct InterruptionQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
     pub agent_name: Option<String>,
-    /// Filter by type: llm_error | sse_truncated | timeout | agent_crash | token_limit | context_overflow | tool_incomplete
+    /// Filter by type: llm_error | sse_truncated | agent_crash | token_limit | context_overflow
     pub interruption_type: Option<String>,
     pub severity: Option<String>,
     pub resolved: Option<bool>,
@@ -692,13 +692,13 @@ pub async fn interruption_session_counts(
     }
 }
 
-/// GET /api/interruptions/trace-counts?start_ns=<i64>&end_ns=<i64>
+/// GET /api/interruptions/conversation-counts?start_ns=<i64>&end_ns=<i64>
 ///
-/// Returns unresolved interruption breakdown per trace_id, grouped by severity and type.
-/// Response: [ { trace_id, total, by_severity: { critical, high, medium, low },
+/// Returns unresolved interruption breakdown per conversation_id, grouped by severity and type.
+/// Response: [ { conversation_id, total, by_severity: { critical, high, medium, low },
 ///              types: [ { interruption_type, severity, count }, ... ] }, ... ]
-#[get("/api/interruptions/trace-counts")]
-pub async fn interruption_trace_counts(
+#[get("/api/interruptions/conversation-counts")]
+pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
 ) -> impl Responder {
@@ -710,11 +710,11 @@ pub async fn interruption_trace_counts(
     let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.count_unresolved_by_trace_detailed(start_ns, end_ns) {
+    match istore.count_unresolved_by_conversation_detailed(start_ns, end_ns) {
         Ok(rows) => {
             let mut map: std::collections::HashMap<String, (i64, std::collections::HashMap<String, i64>, Vec<serde_json::Value>)> = std::collections::HashMap::new();
-            for (tid, severity, itype, cnt) in rows {
-                let entry = map.entry(tid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
+            for (cid, severity, itype, cnt) in rows {
+                let entry = map.entry(cid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
                 entry.0 += cnt;
                 *entry.1.entry(severity.clone()).or_insert(0) += cnt;
                 entry.2.push(serde_json::json!({
@@ -723,9 +723,9 @@ pub async fn interruption_trace_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map.into_iter().map(|(tid, (total, by_sev, types))| {
+            let json: Vec<_> = map.into_iter().map(|(cid, (total, by_sev, types))| {
                 serde_json::json!({
-                    "trace_id": tid,
+                    "conversation_id": cid,
                     "total": total,
                     "by_severity": {
                         "critical": by_sev.get("critical").copied().unwrap_or(0),
@@ -764,11 +764,11 @@ pub async fn list_session_interruptions(
     }
 }
 
-/// GET /api/traces/{trace_id}/interruptions
+/// GET /api/conversations/{conversation_id}/interruptions
 ///
-/// Returns all interruption events for a specific trace.
-#[get("/api/traces/{trace_id}/interruptions")]
-pub async fn list_trace_interruptions(
+/// Returns all interruption events for a specific conversation.
+#[get("/api/conversations/{conversation_id}/interruptions")]
+pub async fn list_conversation_interruptions(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
@@ -777,8 +777,8 @@ pub async fn list_trace_interruptions(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let trace_id = path.into_inner();
-    match istore.list_by_trace(&trace_id) {
+    let conversation_id = path.into_inner();
+    match istore.list_by_conversation(&conversation_id) {
         Ok(rows) => HttpResponse::Ok().json(rows),
         Err(e)   => HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": e.to_string()})),

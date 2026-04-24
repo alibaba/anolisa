@@ -15,6 +15,7 @@ pub struct InterruptionRecord {
     pub interruption_id: String,
     pub session_id: Option<String>,
     pub trace_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub call_id: Option<String>,
     pub pid: Option<i64>,
     pub agent_name: Option<String>,
@@ -55,6 +56,7 @@ impl InterruptionStore {
                 interruption_id     TEXT NOT NULL UNIQUE,
                 session_id          TEXT,
                 trace_id            TEXT,
+                conversation_id     TEXT,
                 call_id             TEXT,
                 pid                 INTEGER,
                 agent_name          TEXT,
@@ -69,8 +71,13 @@ impl InterruptionStore {
             CREATE INDEX IF NOT EXISTS idx_interruption_occurred ON interruption_events(occurred_at_ns);
             CREATE INDEX IF NOT EXISTS idx_interruption_type     ON interruption_events(interruption_type);
             CREATE INDEX IF NOT EXISTS idx_interruption_agent    ON interruption_events(agent_name);
-            CREATE INDEX IF NOT EXISTS idx_interruption_resolved ON interruption_events(resolved);",
+            CREATE INDEX IF NOT EXISTS idx_interruption_resolved ON interruption_events(resolved);
+            CREATE INDEX IF NOT EXISTS idx_interruption_conversation ON interruption_events(conversation_id);",
         )?;
+        // Migration: add conversation_id column for existing databases
+        let _ = conn.execute_batch(
+            "ALTER TABLE interruption_events ADD COLUMN conversation_id TEXT;",
+        );
         Ok(())
     }
 
@@ -81,13 +88,14 @@ impl InterruptionStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO interruption_events (
-                interruption_id, session_id, trace_id, call_id, pid, agent_name,
+                interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                 interruption_type, severity, occurred_at_ns, detail, resolved
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 event.interruption_id,
                 event.session_id,
                 event.trace_id,
+                event.conversation_id,
                 event.call_id,
                 event.pid,
                 event.agent_name,
@@ -145,23 +153,23 @@ impl InterruptionStore {
     }
 
     /// Deduplication check: return true if an unresolved row with same
-    /// trace_id (conversation) + interruption_type + error message already exists.
+    /// conversation_id + interruption_type + error message already exists.
     ///
     /// When `error_msg` is Some, uses keyword-based matching: the error is
     /// normalized to a core message (stripping nested JSON wrappers) and
     /// compared via substring containment.  This handles cases where the same
     /// error appears as a clean message in one call and as raw JSON in another.
-    /// When `error_msg` is None, any unresolved row with same (trace_id, type) matches.
-    pub fn exists_for_trace(&self, trace_id: &str, itype: &InterruptionType, error_msg: Option<&str>) -> bool {
+    /// When `error_msg` is None, any unresolved row with same (conversation_id, type) matches.
+    pub fn exists_for_conversation(&self, conversation_id: &str, itype: &InterruptionType, error_msg: Option<&str>) -> bool {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT detail FROM interruption_events
-             WHERE trace_id=?1 AND interruption_type=?2 AND resolved=0",
+             WHERE conversation_id=?1 AND interruption_type=?2 AND resolved=0",
         ) {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let rows = match stmt.query_map(params![trace_id, itype.as_str()], |row| {
+        let rows = match stmt.query_map(params![conversation_id, itype.as_str()], |row| {
             row.get::<_, Option<String>>(0)
         }) {
             Ok(r) => r,
@@ -248,7 +256,7 @@ impl InterruptionStore {
         let _ = idx;
 
         let sql = format!(
-            "SELECT id, interruption_id, session_id, trace_id, call_id, pid, agent_name,
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
              FROM interruption_events
              WHERE {}
@@ -267,14 +275,15 @@ impl InterruptionStore {
                 interruption_id: row.get(1)?,
                 session_id: row.get(2)?,
                 trace_id: row.get(3)?,
-                call_id: row.get(4)?,
-                pid: row.get(5)?,
-                agent_name: row.get(6)?,
-                interruption_type: row.get(7)?,
-                severity: row.get(8)?,
-                occurred_at_ns: row.get(9)?,
-                detail: row.get(10)?,
-                resolved: row.get::<_, i32>(11)? != 0,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
             })
         })?;
         let mut result = Vec::new();
@@ -286,7 +295,7 @@ impl InterruptionStore {
     pub fn get_by_id(&self, interruption_id: &str) -> Result<Option<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, interruption_id, session_id, trace_id, call_id, pid, agent_name,
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
              FROM interruption_events WHERE interruption_id=?1",
         )?;
@@ -296,14 +305,15 @@ impl InterruptionStore {
                 interruption_id: row.get(1)?,
                 session_id: row.get(2)?,
                 trace_id: row.get(3)?,
-                call_id: row.get(4)?,
-                pid: row.get(5)?,
-                agent_name: row.get(6)?,
-                interruption_type: row.get(7)?,
-                severity: row.get(8)?,
-                occurred_at_ns: row.get(9)?,
-                detail: row.get(10)?,
-                resolved: row.get::<_, i32>(11)? != 0,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -313,7 +323,7 @@ impl InterruptionStore {
     pub fn list_by_session(&self, session_id: &str) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, interruption_id, session_id, trace_id, call_id, pid, agent_name,
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
              FROM interruption_events
              WHERE session_id=?1
@@ -325,14 +335,15 @@ impl InterruptionStore {
                 interruption_id: row.get(1)?,
                 session_id: row.get(2)?,
                 trace_id: row.get(3)?,
-                call_id: row.get(4)?,
-                pid: row.get(5)?,
-                agent_name: row.get(6)?,
-                interruption_type: row.get(7)?,
-                severity: row.get(8)?,
-                occurred_at_ns: row.get(9)?,
-                detail: row.get(10)?,
-                resolved: row.get::<_, i32>(11)? != 0,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
             })
         })?;
         let mut result = Vec::new();
@@ -340,29 +351,30 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    pub fn list_by_trace(&self, trace_id: &str) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
+    pub fn list_by_conversation(&self, conversation_id: &str) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, interruption_id, session_id, trace_id, call_id, pid, agent_name,
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
              FROM interruption_events
-             WHERE trace_id=?1
+             WHERE conversation_id=?1
              ORDER BY occurred_at_ns ASC",
         )?;
-        let rows = stmt.query_map(params![trace_id], |row| {
+        let rows = stmt.query_map(params![conversation_id], |row| {
             Ok(InterruptionRecord {
                 id: row.get(0)?,
                 interruption_id: row.get(1)?,
                 session_id: row.get(2)?,
                 trace_id: row.get(3)?,
-                call_id: row.get(4)?,
-                pid: row.get(5)?,
-                agent_name: row.get(6)?,
-                interruption_type: row.get(7)?,
-                severity: row.get(8)?,
-                occurred_at_ns: row.get(9)?,
-                detail: row.get(10)?,
-                resolved: row.get::<_, i32>(11)? != 0,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
             })
         })?;
         let mut result = Vec::new();
@@ -426,21 +438,21 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    /// Count unresolved interruptions grouped by (trace_id, severity, type).
-    pub fn count_unresolved_by_trace_detailed(
+    /// Count unresolved interruptions grouped by (conversation_id, severity, type).
+    pub fn count_unresolved_by_conversation_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trace_id, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT conversation_id, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
-             WHERE trace_id IS NOT NULL
+             WHERE conversation_id IS NOT NULL
                AND resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY trace_id, severity, interruption_type
-             ORDER BY trace_id, cnt DESC",
+             GROUP BY conversation_id, severity, interruption_type
+             ORDER BY conversation_id, cnt DESC",
         )?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {
             Ok((

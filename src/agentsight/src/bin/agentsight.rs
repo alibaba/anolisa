@@ -5,11 +5,12 @@
 //! - `trace`: Trace agent activity via eBPF
 //! - `audit`: Query audit events
 //! - `discover`: Discover running AI agents
+//! - `interruption`: Query and manage session interruption events
 
 use structopt::StructOpt;
 
 mod cli;
-use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand};
+use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand, interruption::InterruptionCommand};
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
 
@@ -26,6 +27,8 @@ pub enum Command {
     Discover(DiscoverCommand),
     /// Print per-agent token usage metrics in Prometheus text format
     Metrics(MetricsCommand),
+    /// Query and manage session interruption events detected during agent conversations
+    Interruption(InterruptionCommand),
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
@@ -40,6 +43,7 @@ fn main() {
         Command::Audit(audit_cmd) => audit_cmd.execute(),
         Command::Discover(discover_cmd) => discover_cmd.execute(),
         Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
+        Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
     }

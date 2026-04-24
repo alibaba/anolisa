@@ -66,7 +66,13 @@ fn main() {
         std::fs::create_dir_all(&frontend_dist)
             .expect("Failed to create frontend-dist directory");
     }
+    // Watch the directory AND each file inside it so cargo detects content changes
     println!("cargo:rerun-if-changed=frontend-dist");
+    if let Ok(entries) = std::fs::read_dir(&frontend_dist) {
+        for entry in entries.flatten() {
+            println!("cargo:rerun-if-changed={}", entry.path().display());
+        }
+    }
 
     // Generate C header from src/ffi.rs via cbindgen
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();

@@ -542,15 +542,15 @@ impl AgentSight {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
                     for ie in &interruptions {
-                        // Deduplicate: skip if same (trace_id, type, error_msg) already
-                        // recorded for this conversation.  Same error retried N times
-                        // produces only 1 interruption; different errors each get 1.
-                        if let Some(ref tid) = ie.trace_id {
+                        // Deduplicate: skip if same (conversation_id, type, error_msg)
+                        // already recorded.  Same error retried N times produces only
+                        // 1 interruption; different errors each get 1.
+                        if let Some(ref cid) = ie.conversation_id {
                             let error_msg = llm_call.error.as_deref();
-                            if istore.exists_for_trace(tid, &ie.interruption_type, error_msg) {
+                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg) {
                                 log::debug!(
-                                    "Skipping duplicate {:?} for trace_id={} error={:?}",
-                                    ie.interruption_type, tid, error_msg
+                                    "Skipping duplicate {:?} for conversation_id={} error={:?}",
+                                    ie.interruption_type, cid, error_msg
                                 );
                                 // Still stamp the genai_events row so the call is marked
                                 if let Some(ref sqlite) = self.genai_sqlite_store {
@@ -651,7 +651,85 @@ impl AgentSight {
                     // ── SSE enrichment ────────────────────────────────────
                     // Parse captured SSE events for model, trace_id, tokens, output content
                     if !sse_events.is_empty() {
-                        if let Some(enrichment) = GenAIBuilder::extract_sse_enrichment(&sse_events) {
+                        if let Some(mut enrichment) = GenAIBuilder::extract_sse_enrichment(&sse_events) {
+                            // If SSE didn't carry usage data (stream was interrupted before
+                            // the final chunk), compute tokens via the real tokenizer.
+                            if enrichment.input_tokens.is_none() || enrichment.output_tokens.is_none() {
+                                let model_name = enrichment.model.as_deref()
+                                    .or(pending.model.as_deref())
+                                    .unwrap_or("unknown");
+                                if let Ok(tokenizer) = crate::tokenizer::get_global_tokenizer(model_name) {
+                                    // ── input tokens ──
+                                    if enrichment.input_tokens.is_none() {
+                                        if let Some(body) = request.json_body() {
+                                            if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+                                                let mut msgs = messages.clone();
+                                                // Parse tool_calls.arguments from string to object
+                                                for msg in msgs.iter_mut() {
+                                                    if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                                                        for tc in tcs.iter_mut() {
+                                                            if let Some(f) = tc.get_mut("function") {
+                                                                if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                                                                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
+                                                                        f["arguments"] = p;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                let tools_json: Option<Vec<serde_json::Value>> = body.get("tools")
+                                                    .and_then(|t| t.as_array()).map(|a| a.to_vec());
+                                                let count = match tokenizer.apply_chat_template_with_tools(&msgs, tools_json.as_deref(), true) {
+                                                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+                                                    Err(_) => {
+                                                        // Fallback: raw message count
+                                                        msgs.iter().filter_map(|m| serde_json::to_string(m).ok())
+                                                            .map(|s| tokenizer.count(&s).unwrap_or(0))
+                                                            .sum()
+                                                    }
+                                                };
+                                                if count > 0 {
+                                                    enrichment.input_tokens = Some(count as i64);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // ── output tokens ──
+                                    if enrichment.output_tokens.is_none() {
+                                        use crate::analyzer::token::extract_response_content;
+                                        let mut all_content = String::new();
+                                        let mut all_reasoning = String::new();
+                                        let mut all_tool_calls = Vec::new();
+                                        for ev in &sse_events {
+                                            if let Some(chunk) = ev.json_body() {
+                                                if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(&chunk)) {
+                                                    if !content.is_empty() { all_content.push_str(&content); }
+                                                    if let Some(r) = reasoning { if !r.is_empty() { all_reasoning.push_str(&r); } }
+                                                    for tc in tool_calls { if !tc.is_empty() { all_tool_calls.push(tc); } }
+                                                }
+                                            }
+                                        }
+                                        let mut total = 0usize;
+                                        if !all_reasoning.is_empty() {
+                                            let wrapped = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                                            total += tokenizer.count(&wrapped).unwrap_or(0);
+                                        }
+                                        if !all_content.is_empty() {
+                                            total += tokenizer.count(&all_content).unwrap_or(0);
+                                        }
+                                        if !all_tool_calls.is_empty() {
+                                            total += tokenizer.count(&all_tool_calls.join("")).unwrap_or(0);
+                                        }
+                                        if total > 0 {
+                                            enrichment.output_tokens = Some(total as i64);
+                                        }
+                                    }
+                                } else {
+                                    print!("[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation\n",
+                                        enrichment.model.as_deref().or(pending.model.as_deref()));
+                                }
+                            }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
                                 print!("[DrainCheck] FAIL enrich SSE: {}\n", e);
                             } else {

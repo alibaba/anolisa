@@ -73,23 +73,21 @@ pub fn recover_oom_events(
         // Match against known agent process name prefixes
         let agent_name = match_agent_name(&ev.process_name);
 
-        // Try to correlate with genai_events to find active session/trace
+        // Try to correlate with genai_events to find active session/conversation
         // Use 5-minute lookback window to avoid false positives from old data
         let since_ns = ev.timestamp_ns.saturating_sub(300_000_000_000) as i64;
-        let (session_id, trace_id, active_traces): (Option<String>, Option<String>, Vec<String>) =
+        let (session_id, conversation_id, active_conversations): (Option<String>, Option<String>, Vec<String>) =
             if let Some(gstore) = genai_store {
                 match gstore.list_incomplete_agentic_sessions_for_pid(ev.pid, since_ns) {
                     Ok(pairs) => {
-                        // Use the first pair as the primary session/trace;
-                        // collect all trace_ids for the detail field.
                         let primary = pairs.first();
-                        let traces: Vec<String> = pairs.iter()
-                            .filter_map(|(_, _, tid)| tid.clone())
+                        let convs: Vec<String> = pairs.iter()
+                            .filter_map(|(_, _, _, cid)| cid.clone())
                             .collect();
                         (
-                            primary.and_then(|(_, sid, _)| sid.clone()),
-                            primary.and_then(|(_, _, tid)| tid.clone()),
-                            traces,
+                            primary.and_then(|(_, sid, _, _)| sid.clone()),
+                            primary.and_then(|(_, _, _, cid)| cid.clone()),
+                            convs,
                         )
                     }
                     Err(e) => {
@@ -108,14 +106,15 @@ pub fn recover_oom_events(
             "oom": true,
             "source": "dmesg",
         });
-        if !active_traces.is_empty() {
-            detail["active_traces"] = serde_json::json!(active_traces);
+        if !active_conversations.is_empty() {
+            detail["active_conversations"] = serde_json::json!(active_conversations);
         }
 
         let interruption = InterruptionEvent::new(
             InterruptionType::AgentCrash,
             session_id,
-            trace_id,
+            None,
+            conversation_id,
             None,
             Some(ev.pid),
             agent_name.map(|s| s.to_string()),

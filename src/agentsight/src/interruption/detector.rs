@@ -46,7 +46,8 @@ impl InterruptionDetector {
         let mut events = Vec::new();
 
         let session_id = call.metadata.get("session_id").cloned();
-        let trace_id   = call.metadata.get("conversation_id").cloned();
+        let trace_id   = call.metadata.get("response_id").cloned();
+        let conversation_id = call.metadata.get("conversation_id").cloned();
         let call_id    = Some(call.call_id.clone());
         let pid        = Some(call.pid);
         let agent_name = call.agent_name.clone();
@@ -86,7 +87,7 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ContextOverflow,
-                session_id.clone(), trace_id.clone(), call_id.clone(),
+                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
                 pid, agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
@@ -103,7 +104,7 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::LlmError,
-                session_id.clone(), trace_id.clone(), call_id.clone(),
+                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
                 pid, agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
@@ -124,7 +125,7 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SseTruncated,
-                session_id.clone(), trace_id.clone(), call_id.clone(),
+                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
                 pid, agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
@@ -147,7 +148,7 @@ impl InterruptionDetector {
                         });
                         events.push(InterruptionEvent::new(
                             InterruptionType::TokenLimit,
-                            session_id.clone(), trace_id.clone(), call_id.clone(),
+                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
                             pid, agent_name.clone(),
                             call.end_timestamp_ns as i64,
                             Some(detail),
@@ -177,7 +178,7 @@ impl InterruptionDetector {
                         });
                         events.push(InterruptionEvent::new(
                             InterruptionType::ContextOverflow,
-                            session_id.clone(), trace_id.clone(), call_id.clone(),
+                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
                             pid, agent_name.clone(),
                             call.end_timestamp_ns as i64,
                             Some(detail),
