@@ -16,6 +16,7 @@ import {
   fetchInterruptionStats,
   fetchInterruptionSessionCounts,
   fetchInterruptionTraceCounts,
+  fetchTokenSavings,
   SessionSummary,
   TraceSummary,
   TimeseriesBucket,
@@ -337,7 +338,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
   if (loading)
     return (
       <tr>
-        <td colSpan={8} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
+        <td colSpan={10} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
           加载 Trace 列表...
         </td>
       </tr>
@@ -345,7 +346,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
   if (error)
     return (
       <tr>
-        <td colSpan={8} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
+        <td colSpan={10} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
           ⚠️ {error}
         </td>
       </tr>
@@ -358,7 +359,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
-        <td colSpan={9} className="px-4 lg:px-8 py-2">
+        <td colSpan={10} className="px-4 lg:px-8 py-2">
           <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
             <div>Conversation ID</div>
             <div>用户请求</div>
@@ -373,7 +374,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
 
       {traces.length === 0 && (
         <tr className="bg-blue-50">
-          <td colSpan={9} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
+          <td colSpan={10} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
             该 Session 下暂无 Trace
           </td>
         </tr>
@@ -382,7 +383,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
       {pageTraces.map((tr) => (
         <React.Fragment key={tr.conversation_id}>
           <tr className="bg-blue-50 hover:bg-blue-100 transition-colors">
-            <td colSpan={9} className="px-4 lg:px-8 py-2">
+            <td colSpan={10} className="px-4 lg:px-8 py-2">
               <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] items-center text-sm min-w-[800px]">
                 {/* Col 1: Conversation ID */}
                 <div className="min-w-0 pr-2">
@@ -445,7 +446,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
           {/* Trace interruption panel */}
           {expandedTracePanel === tr.trace_id && (
             <tr className="bg-blue-50">
-              <td colSpan={9} className="px-4 lg:px-8 pb-3 pt-0">
+              <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <InterruptionPanel
                     traceId={tr.trace_id}
@@ -461,7 +462,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterrupt
       {/* 分页控制 */}
       {totalPages > 1 && (
         <tr className="bg-blue-50 border-t border-blue-100">
-          <td colSpan={8} className="px-4 lg:px-8 py-2">
+          <td colSpan={10} className="px-4 lg:px-8 py-2">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-xs text-gray-500">
                 {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length} 条
@@ -788,6 +789,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   const [sessionInterruptionCounts, setSessionInterruptionCounts] = useState<Map<string, SessionInterruptionCount>>(new Map());
   const [traceInterruptionCounts, setTraceInterruptionCounts] = useState<Map<string, TraceInterruptionCount>>(new Map());
 
+  // Token savings per session (session_id → saved_tokens)
+  const [savingsMap, setSavingsMap] = useState<Map<string, number>>(new Map());
+
   // Which session row is expanded to show traces
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
 
@@ -822,9 +826,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     loadAgentNames(startMs, endMs);
   }, [startMs, endMs, loadAgentNames]);
 
-  // Shared data-fetch helper: runs all 6 parallel queries and updates state.
+  // Shared data-fetch helper: runs all 7 parallel queries and updates state.
   const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
-    const [sessData, tsData, intData, iStats, iSessionCounts, iTraceCounts] = await Promise.all([
+    const [sessData, tsData, intData, iStats, iSessionCounts, iTraceCounts, savingsResp] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
         agent ? data.filter((s) => s.agent_name === agent) : data
       ),
@@ -833,6 +837,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
       fetchInterruptionSessionCounts(startNs, endNs).catch(() => [] as SessionInterruptionCount[]),
       fetchInterruptionTraceCounts(startNs, endNs).catch(() => [] as TraceInterruptionCount[]),
+      fetchTokenSavings(startNs, endNs, agent).catch(() => null),
     ]);
     setSessions(sessData);
     setTokenSeries(tsData.token_series);
@@ -841,6 +846,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setInterruptionStats(iStats);
     setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
     setTraceInterruptionCounts(new Map(iTraceCounts.map((c) => [c.trace_id, c])));
+    setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.saved_tokens]) ?? []));
   }, []);
 
   const handleQuery = useCallback(async () => {
@@ -1100,12 +1106,15 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
                         中断
                       </th>
+                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
+                        Token 优化
+                      </th>
                     </tr>
                   </thead>
                 <tbody className="divide-y divide-gray-100">
                   {!loading && sessions.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-4 lg:px-6 py-12 text-center text-gray-400">
+                      <td colSpan={10} className="px-4 lg:px-6 py-12 text-center text-gray-400">
                         <div className="text-4xl mb-2">🔍</div>
                         <p>所选时间范围内暂无 Session 数据</p>
                         <p className="text-xs mt-1">请确认 agentsight 服务已启动并有数据写入</p>
@@ -1184,6 +1193,26 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                                   bySeverity={ic.by_severity}
                                   types={ic.types}
                                 />
+                              );
+                            })()}
+                          </td>
+                          <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            {(() => {
+                              const saved = savingsMap.get(sess.session_id);
+                              if (!saved) return <span className="text-xs text-gray-300">—</span>;
+                              const params = new URLSearchParams({
+                                session_id: sess.session_id,
+                                start: String(startMs),
+                                end: String(endMs),
+                              });
+                              if (selectedAgent) params.set('agent', selectedAgent);
+                              return (
+                                <a
+                                  href={`#/savings?${params.toString()}`}
+                                  className="text-sm font-semibold text-green-600 hover:text-green-800 hover:underline transition-colors"
+                                >
+                                  {fmtTokens(saved)}
+                                </a>
                               );
                             })()}
                           </td>

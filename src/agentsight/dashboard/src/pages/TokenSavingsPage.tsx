@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
@@ -158,12 +159,17 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
 
 // ─── Session row with expand ──────────────────────────────────────────────────
 
-const SessionRow: React.FC<{ session: SessionSavings }> = ({ session }) => {
-  const [expanded, setExpanded] = useState(false);
+const SessionRow: React.FC<{
+  session: SessionSavings;
+  initialExpanded?: boolean;
+  rowRef?: React.Ref<HTMLTableRowElement>;
+}> = ({ session, initialExpanded = false, rowRef }) => {
+  const [expanded, setExpanded] = useState(initialExpanded);
 
   return (
     <>
       <tr
+        ref={rowRef}
         className={`hover:bg-gray-50 transition-colors cursor-pointer ${
           expanded ? 'bg-blue-50' : ''
         }`}
@@ -255,11 +261,22 @@ const SessionRow: React.FC<{ session: SessionSavings }> = ({ session }) => {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export const TokenSavingsPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
   const now = Date.now();
-  const [startMs, setStartMs] = useState(now - 24 * 3600 * 1000);
-  const [endMs, setEndMs] = useState(now);
+
+  // Read URL params for deep-link from homepage
+  const targetSessionId = searchParams.get('session_id');
+  const paramStart = Number(searchParams.get('start'));
+  const paramEnd = Number(searchParams.get('end'));
+  const paramAgent = searchParams.get('agent') ?? '';
+
+  const [startMs, setStartMs] = useState(paramStart || (now - 24 * 3600 * 1000));
+  const [endMs, setEndMs] = useState(paramEnd || now);
   const [hasQueried, setHasQueried] = useState(false);
-  const [selectedAgent, setSelectedAgent] = useState('');
+  const [selectedAgent, setSelectedAgent] = useState(paramAgent);
+
+  // Track which session to auto-expand (from URL deep-link)
+  const [expandedSessionId] = useState<string | null>(targetSessionId);
 
   // API data state
   const [sessions, setSessions] = useState<SessionSavings[]>([]);
@@ -268,6 +285,9 @@ export const TokenSavingsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agentNames, setAgentNames] = useState<string[]>([]);
+
+  // Ref for scrolling to the target session row
+  const targetRowRef = useRef<HTMLTableRowElement>(null);
 
   // Load agent names on mount
   useEffect(() => {
@@ -293,6 +313,23 @@ export const TokenSavingsPage: React.FC = () => {
       setLoading(false);
     }
   }, [startMs, endMs, selectedAgent]);
+
+  // Auto-query on mount when navigated from homepage with URL params
+  const hasAutoQueriedRef = useRef(false);
+  useEffect(() => {
+    if (targetSessionId && !hasAutoQueriedRef.current) {
+      hasAutoQueriedRef.current = true;
+      handleQuery();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-scroll to the target session row after data loads
+  useEffect(() => {
+    if (expandedSessionId && sessions.length > 0 && targetRowRef.current) {
+      targetRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [expandedSessionId, sessions]);
 
   const totalInput = summary?.total_input_tokens ?? 0;
   const totalOutput = summary?.total_output_tokens ?? 0;
@@ -545,7 +582,12 @@ export const TokenSavingsPage: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sessions.map((sess) => (
-                <SessionRow key={sess.session_id} session={sess} />
+                <SessionRow
+                  key={sess.session_id}
+                  session={sess}
+                  initialExpanded={sess.session_id === expandedSessionId}
+                  rowRef={sess.session_id === expandedSessionId ? targetRowRef : undefined}
+                />
               ))}
             </tbody>
           </table>
