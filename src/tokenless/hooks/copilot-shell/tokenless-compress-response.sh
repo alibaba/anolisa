@@ -34,7 +34,7 @@
 
 set -euo pipefail
 
-# --- Dependency checks (fail-open: never block tool responses) ---
+# --- Dependency checks (fail-open) ---
 
 if ! command -v jq &>/dev/null; then
   echo "[tokenless] WARNING: jq is not installed. Response compression hook disabled." >&2
@@ -53,7 +53,7 @@ INPUT=$(cat || {
   exit 0
 })
 
-# --- Extract tool_response (fail-open) ---
+# --- Extract tool_response ---
 
 TOOL_RESPONSE=$(echo "$INPUT" | jq -c '.tool_response // empty' 2>/dev/null || echo '')
 
@@ -95,11 +95,18 @@ if [ -n "$TOOL_RESPONSE_RAW" ]; then
   esac
 fi
 
-# --- Compress response via tokenless ---
-# tool_response may not be valid JSON in all cases (e.g., shell output wrapped as string).
-# tokenless compress-response expects JSON input; if it fails, fall through gracefully.
+# --- Extract caller context from raw payload ---
 
-COMPRESSED=$(echo "$TOOL_RESPONSE" | tokenless compress-response 2>/dev/null) || {
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo '')
+TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || echo '')
+
+# --- Compress response ---
+
+COMPRESSED=$(echo "$TOOL_RESPONSE" | tokenless compress-response \
+  --agent-id copilot-shell \
+  ${SESSION_ID:+--session-id "$SESSION_ID"} \
+  ${TOOL_USE_ID:+--tool-use-id "$TOOL_USE_ID"} \
+  2>/dev/null) || {
   echo "[tokenless] WARNING: Response compression failed. Passing through unchanged." >&2
   exit 0
 }
@@ -111,10 +118,6 @@ if [ -z "$COMPRESSED" ]; then
 fi
 
 # --- Build copilot-shell response ---
-# suppressOutput: true  — hides the original verbose tool output from the agent
-# additionalContext      — injects the compressed content instead
-
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo 'unknown')
 
 jq -n \
   --arg context "$COMPRESSED" \

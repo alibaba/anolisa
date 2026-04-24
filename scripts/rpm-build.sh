@@ -398,59 +398,30 @@ build_tokenless() {
     local spec_file
     spec_file=$(process_spec_template "$spec_in" "$version")
 
-    log "Step 1/3: Building tokenless and rtk..."
+    log "Step 1/3: Initializing submodules..."
     (
         cd "$TOKEN_DIR"
-        # Initialize submodules if not already done
         if [ ! -d "third_party/rtk/.git" ]; then
             log "Initializing git submodules..."
             git submodule update --init --recursive
         fi
-        # Build tokenless
-        cargo build --release --workspace
-        # Build rtk from submodule
-        cargo build --release --manifest-path third_party/rtk/Cargo.toml
     )
 
     log "Step 2/3: Creating source tarball ${tarball_name}..."
-
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"/{openclaw,hooks/copilot-shell,scripts}
+    local pkg_dir="${tmp_dir}/${pkg_name}"
+    mkdir -p "$pkg_dir"
 
-    # Copy binaries
-    cp -rp "${TOKEN_DIR}/target/release/tokenless" "$pkg_dir/" 2>/dev/null || warn "tokenless binary missing"
-    cp -rp "${TOKEN_DIR}/third_party/rtk/target/release/rtk" "$pkg_dir/" 2>/dev/null || warn "rtk binary missing"
+    # Copy full source tree, excluding build artifacts and VCS
+    tar -cf - -C "$TOKEN_DIR" \
+        --exclude='target' \
+        --exclude='.git' \
+        --exclude='.gitmodules' \
+        --exclude='node_modules' \
+        . | tar -xf - -C "$pkg_dir"
 
-    # Copy documentation (user manuals from docs/ directory)
-    mkdir -p "$pkg_dir/docs"
-    [ -f "${TOKEN_DIR}/docs/tokenless-user-manual-en.md" ] && cp "${TOKEN_DIR}/docs/tokenless-user-manual-en.md" "$pkg_dir/docs/"
-    [ -f "${TOKEN_DIR}/docs/tokenless-user-manual-zh.md" ] && cp "${TOKEN_DIR}/docs/tokenless-user-manual-zh.md" "$pkg_dir/docs/"
-    [ -f "${TOKEN_DIR}/docs/response-compression.md" ] && cp "${TOKEN_DIR}/docs/response-compression.md" "$pkg_dir/docs/"
-    # LICENSE from project root
-    [ -f "${TOKEN_DIR}/LICENSE" ] && cp "${TOKEN_DIR}/LICENSE" "$pkg_dir/docs/" || \
-    [ -f "${ROOT_DIR}/LICENSE" ] && cp "${ROOT_DIR}/LICENSE" "$pkg_dir/docs/"
-
-    # Copy OpenClaw plugin files
-    [ -f "${TOKEN_DIR}/openclaw/index.ts" ] && cp "${TOKEN_DIR}/openclaw/index.ts" "$pkg_dir/openclaw/"
-    [ -f "${TOKEN_DIR}/openclaw/openclaw.plugin.json" ] && cp "${TOKEN_DIR}/openclaw/openclaw.plugin.json" "$pkg_dir/openclaw/"
-    [ -f "${TOKEN_DIR}/openclaw/package.json" ] && cp "${TOKEN_DIR}/openclaw/package.json" "$pkg_dir/openclaw/"
-    [ -f "${TOKEN_DIR}/openclaw/README.md" ] && cp "${TOKEN_DIR}/openclaw/README.md" "$pkg_dir/openclaw/"
-
-    # Copy copilot-shell hook files (preserve permissions)
-    if [ -d "${TOKEN_DIR}/hooks/copilot-shell" ]; then
-        cp -p "${TOKEN_DIR}/hooks/copilot-shell"/* "$pkg_dir/hooks/copilot-shell/" 2>/dev/null || warn "Hook files missing"
-        chmod 0755 "$pkg_dir/hooks/copilot-shell"/tokenless-*.sh 2>/dev/null || true
-    fi
-
-    # Copy installation script (preserve permissions)
-    if [ -f "${TOKEN_DIR}/scripts/install.sh" ]; then
-        cp -p "${TOKEN_DIR}/scripts/install.sh" "$pkg_dir/scripts/"
-        chmod 0755 "$pkg_dir/scripts/install.sh"
-    fi
-
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}"
     rm -rf "$tmp_dir"
 
     log "Step 3/3: Running rpmbuild..."

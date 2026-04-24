@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(compressor.compress(&json!(true)), json!(true));
         assert_eq!(compressor.compress(&json!(false)), json!(false));
         assert_eq!(compressor.compress(&json!(42)), json!(42));
-        assert_eq!(compressor.compress(&json!(3.14)), json!(3.14));
+        assert_eq!(compressor.compress(&json!(42.5)), json!(42.5));
         assert_eq!(compressor.compress(&json!("short")), json!("short"));
     }
 

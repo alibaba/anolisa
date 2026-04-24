@@ -1,0 +1,175 @@
+diff --git a/src/core/tracking.rs b/src/core/tracking.rs
+index 982c937..5eb93c1 100644
+--- a/src/core/tracking.rs
++++ b/src/core/tracking.rs
+@@ -1294,6 +1294,9 @@ impl TimedExecution {
+         let input_tokens = estimate_tokens(input);
+         let output_tokens = estimate_tokens(output);
+ 
++        // Also record to tokenless stats database (fail-silent)
++        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
++
+         if let Ok(tracker) = Tracker::new() {
+             let _ = tracker.record(
+                 original_cmd,
+@@ -1355,6 +1358,160 @@ pub fn args_display(args: &[OsString]) -> String {
+         .join(" ")
+ }
+ 
++/// Estimate token count from character count using ~4 chars/token heuristic.
++fn estimate_tokens_from_chars(chars: usize) -> usize {
++    if chars == 0 { return 0; }
++    chars.div_ceil(4)
++}
++
++/// Resolve caller context from environment variables (primary) or
++/// .rewrite-context file (fallback for backwards compatibility).
++fn resolve_tokenless_context() -> (String, Option<String>, Option<String>) {
++    let pid = std::process::id();
++
++    // Primary: environment variables set by the hook
++    let env_agent = std::env::var("TOKENLESS_AGENT_ID").ok();
++    let env_session = std::env::var("TOKENLESS_SESSION_ID").ok();
++    let env_toolcall = std::env::var("TOKENLESS_TOOL_USE_ID").ok();
++
++    if env_agent.is_some() || env_session.is_some() || env_toolcall.is_some() {
++        let agent = env_agent.map(|a| format!("{}({})", a, pid))
++            .unwrap_or_else(|| format!("cli({})", pid));
++        let sid = env_session.filter(|s| !s.is_empty());
++        let tuid = env_toolcall.filter(|t| !t.is_empty());
++        return (agent, sid, tuid);
++    }
++
++    // Fallback: .rewrite-context file (legacy compat)
++    let context_file = dirs::home_dir()
++        .map(|d| d.join(".tokenless/.rewrite-context"))
++        .filter(|p| p.exists())
++        .and_then(|p| std::fs::read_to_string(p).ok());
++    if let Some(ctx) = &context_file {
++        let mut lines = ctx.lines();
++        let agent = lines.next().unwrap_or("").trim().to_string();
++        let session = lines.next().unwrap_or("").trim().to_string();
++        let toolcall = lines.next().unwrap_or("").trim().to_string();
++        // Clean up the context file after reading
++        let _ = dirs::home_dir()
++            .map(|d| d.join(".tokenless/.rewrite-context"))
++            .as_ref()
++            .map(std::fs::remove_file);
++        let agent_with_pid = if !agent.is_empty() {
++            format!("{}({})", agent, pid)
++        } else {
++            format!("cli({})", pid)
++        };
++        let sid = if session.is_empty() { None } else { Some(session) };
++        let tuid = if toolcall.is_empty() { None } else { Some(toolcall) };
++        return (agent_with_pid, sid, tuid);
++    }
++
++    (format!("cli({})", pid), None::<String>, None::<String>)
++}
++
++/// Check if tokenless stats are enabled.
++/// Priority: TOKENLESS_STATS_ENABLED env > config.json > default(true)
++fn is_tokenless_stats_enabled() -> bool {
++    // Check env var first
++    if let Ok(val) = std::env::var("TOKENLESS_STATS_ENABLED") {
++        return val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes");
++    }
++    // Fall back to config file
++    dirs::home_dir()
++        .map(|d| d.join(".tokenless/config.json"))
++        .and_then(|p| std::fs::read_to_string(p).ok())
++        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
++        .and_then(|v| v.get("stats_enabled").and_then(|b| b.as_bool()))
++        .unwrap_or(true)
++}
++
++/// Record RTK command output compression stats to the tokenless stats database.
++///
++/// Called from `TimedExecution::track` whenever RTK filters command output.
++/// Reads caller context from environment variables (primary) or
++/// .rewrite-context file (fallback) to obtain agent_id, session_id, and
++/// tool_use_id so the record can be correlated with a specific tool call.
++///
++/// Fails silently so RTK output is never blocked by database errors.
++fn record_to_tokenless_stats(
++    original_cmd: &str,
++    rtk_cmd: &str,
++    raw_output: &str,
++    filtered_output: &str,
++) {
++    let _ = (original_cmd, rtk_cmd);
++
++    if !is_tokenless_stats_enabled() {
++        return;
++    }
++
++    let (agent_id, session_id, tool_use_id) = resolve_tokenless_context();
++
++    let db_path = std::env::var("TOKENLESS_STATS_DB")
++        .unwrap_or_else(|_| {
++            format!(
++                "{}/.tokenless/stats.db",
++                std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
++            )
++        });
++
++    let before_chars = raw_output.len();
++    let after_chars = filtered_output.len();
++    let before_tokens = estimate_tokens_from_chars(before_chars);
++    let after_tokens = estimate_tokens_from_chars(after_chars);
++
++    let _ = (|| -> anyhow::Result<()> {
++        if let Some(parent) = std::path::Path::new(&db_path).parent() {
++            std::fs::create_dir_all(parent)?;
++        }
++        let conn = rusqlite::Connection::open(&db_path)?;
++        conn.execute_batch(
++            "CREATE TABLE IF NOT EXISTS stats (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                timestamp TEXT NOT NULL,
++                operation TEXT NOT NULL,
++                agent_id TEXT NOT NULL,
++                source_pid INTEGER,
++                session_id TEXT,
++                tool_use_id TEXT,
++                before_chars INTEGER NOT NULL,
++                before_tokens INTEGER NOT NULL,
++                after_chars INTEGER NOT NULL,
++                after_tokens INTEGER NOT NULL,
++                before_text TEXT,
++                after_text TEXT
++            );
++            CREATE INDEX IF NOT EXISTS idx_stats_timestamp ON stats(timestamp);
++            CREATE INDEX IF NOT EXISTS idx_stats_operation ON stats(operation);
++            CREATE INDEX IF NOT EXISTS idx_stats_agent_id ON stats(agent_id);
++            CREATE INDEX IF NOT EXISTS idx_stats_session_id ON stats(session_id);",
++        )?;
++        conn.execute(
++            "INSERT INTO stats (
++                timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
++                before_chars, before_tokens, after_chars, after_tokens,
++                before_text, after_text
++            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
++            rusqlite::params![
++                chrono::Utc::now().to_rfc3339(),
++                "rewrite-command",
++                agent_id,
++                None::<i64>,
++                session_id,
++                tool_use_id,
++                before_chars as i64,
++                before_tokens as i64,
++                after_chars as i64,
++                after_tokens as i64,
++                raw_output,
++                filtered_output,
++            ],
++        )?;
++        Ok(())
++    })();
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;

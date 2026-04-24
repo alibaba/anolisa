@@ -1,7 +1,7 @@
 {
   "id": "tokenless-openclaw",
   "name": "Token-Less",
-  "version": "1.0.0",
+  "version": "5.0.0",
   "description": "Unified RTK command rewriting + schema/response compression",
   "configSchema": {
     "type": "object",

@@ -6,7 +6,7 @@ OPENCLAW_DIR ?= /usr/share/tokenless/openclaw
 COPILOT_SHELL_HOOK_DIR ?= /usr/share/tokenless/hooks/copilot-shell
 RTK_DIR := third_party/rtk
 
-.PHONY: build build-tokenless build-rtk install test lint clean \
+.PHONY: build build-tokenless build-rtk install test lint clean dist \
         openclaw-install openclaw-uninstall \
         copilot-shell-install copilot-shell-uninstall setup help
 
@@ -58,6 +58,16 @@ clean:
 	@echo "==> Cleaning..."
 	cargo clean
 	cargo clean --manifest-path $(RTK_DIR)/Cargo.toml
+
+# Create source tarball (excludes build artifacts)
+dist: clean
+	@echo "==> Creating tarball..."
+	tar czf ../tokenless-0.1.0.tar.gz \
+	    --exclude='target' \
+	    --exclude='third_party/rtk/target' \
+	    --exclude='.git' \
+	    -C .. tokenless
+	@echo "==> Tarball: ../tokenless-0.1.0.tar.gz"
 
 # OpenClaw plugin management
 openclaw-install:

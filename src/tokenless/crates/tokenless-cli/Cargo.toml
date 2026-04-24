@@ -11,5 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 tokenless-schema = { path = "../tokenless-schema" }
+tokenless-stats = { path = "../tokenless-stats" }
 clap.workspace = true
 serde_json.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

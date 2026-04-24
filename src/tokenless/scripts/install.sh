@@ -80,54 +80,84 @@ setup_openclaw() {
 
     info "Configuring OpenClaw plugin..."
     info "  Source: $openclaw_src"
-    info "  Destination: $OPENCLAW_DIR"
 
-    mkdir -p "$OPENCLAW_DIR"
+    # Install plugin files to ~/.openclaw/extensions/tokenless/
+    local ext_dir="$HOME/.openclaw/extensions/tokenless"
+    mkdir -p "$ext_dir"
 
-    # Copy openclaw files
-    if [ -f "${openclaw_src}/index.ts" ]; then
-        cp "${openclaw_src}/index.ts" "$OPENCLAW_DIR/"
-        info "  Copied index.ts"
-    fi
-
-    if [ -f "${openclaw_src}/openclaw.plugin.json" ]; then
-        cp "${openclaw_src}/openclaw.plugin.json" "$OPENCLAW_DIR/"
-        info "  Copied openclaw.plugin.json"
-    fi
-
-    if [ -f "${openclaw_src}/package.json" ]; then
-        cp "${openclaw_src}/package.json" "$OPENCLAW_DIR/"
-        info "  Copied package.json"
-    fi
+    cp "${openclaw_src}/index.ts" "$ext_dir/" 2>/dev/null || true
+    cp "${openclaw_src}/openclaw.plugin.json" "$ext_dir/"
+    cp "${openclaw_src}/package.json" "$ext_dir/"
+    info "  Copied plugin files to $ext_dir"
 
     # Compile TypeScript to JavaScript
     if command -v npx &>/dev/null; then
-        if npx --yes esbuild "${OPENCLAW_DIR}/index.ts" --bundle --platform=node --format=esm --outfile="${OPENCLAW_DIR}/index.js" 2>/dev/null; then
+        if npx --yes esbuild "${ext_dir}/index.ts" --bundle --platform=node --format=esm --outfile="${ext_dir}/index.js" 2>/dev/null; then
             info "  Compiled index.ts -> index.js (esbuild)"
         else
-            sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${OPENCLAW_DIR}/index.ts" > "${OPENCLAW_DIR}/index.js"
+            sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${ext_dir}/index.ts" > "${ext_dir}/index.js"
             info "  Compiled index.ts -> index.js (sed fallback)"
         fi
     else
-        sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${OPENCLAW_DIR}/index.ts" > "${OPENCLAW_DIR}/index.js"
+        sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${ext_dir}/index.ts" > "${ext_dir}/index.js"
         info "  Compiled index.ts -> index.js (sed fallback)"
     fi
 
-    # Configure plugins.allow
+    # Register plugin in openclaw.json
     local openclaw_config="$HOME/.openclaw/openclaw.json"
-    if [ -f "$openclaw_config" ] && command -v python3 &>/dev/null; then
-        python3 -c "
-import json
-cfg = json.load(open('$openclaw_config'))
-p = cfg.setdefault('plugins', {})
-a = set(p.get('allow', []))
-a.add('tokenless-openclaw')
-p['allow'] = sorted(a)
-json.dump(cfg, open('$openclaw_config', 'w'), indent=2)
-"
-        info "  Added tokenless-openclaw to plugins.allow"
-    elif [ -f "$openclaw_config" ]; then
-        warn "  python3 not found — please manually add 'tokenless-openclaw' to plugins.allow in $openclaw_config"
+    if [ -f "$openclaw_config" ] && command -v jq &>/dev/null; then
+        local temp_file
+        temp_file=$(mktemp)
+        jq '
+            .plugins.enabled = true |
+            .plugins.entries["tokenless-openclaw"] = {"enabled": true} |
+            .plugins.allow = (.plugins.allow // [] | map(select(. != "tokenless-openclaw")) + ["tokenless-openclaw"])
+        ' "$openclaw_config" > "$temp_file" 2>/dev/null
+        if [ -s "$temp_file" ]; then
+            mv "$temp_file" "$openclaw_config"
+            info "  Registered tokenless-openclaw in $openclaw_config"
+        else
+            rm -f "$temp_file"
+            warn "  Failed to update openclaw.json"
+        fi
+    else
+        warn "  jq not found — manually add tokenless-openclaw to $openclaw_config"
+    fi
+}
+
+cleanup_openclaw() {
+    local is_upgrade="${1:-0}"
+
+    if [ "$is_upgrade" -eq 1 ]; then
+        info "Upgrade detected, preserving OpenClaw plugin"
+        return 0
+    fi
+
+    info "Cleaning up OpenClaw plugin..."
+
+    # Remove extension directory
+    local ext_dir="$HOME/.openclaw/extensions/tokenless"
+    if [ -d "$ext_dir" ]; then
+        rm -rf "$ext_dir"
+        info "  Removed $ext_dir"
+    fi
+
+    # Unregister from openclaw.json
+    local openclaw_config="$HOME/.openclaw/openclaw.json"
+    if [ -f "$openclaw_config" ] && command -v jq &>/dev/null; then
+        local temp_file
+        temp_file=$(mktemp)
+        jq '
+            del(.plugins.entries["tokenless-openclaw"]) |
+            .plugins.allow = (.plugins.allow // [] | map(select(. != "tokenless-openclaw")))
+        ' "$openclaw_config" > "$temp_file" 2>/dev/null
+        if [ -s "$temp_file" ]; then
+            mv "$temp_file" "$openclaw_config"
+            info "  Unregistered tokenless-openclaw from $openclaw_config"
+        else
+            rm -f "$temp_file"
+            warn "  Failed to update openclaw.json"
+        fi
     fi
 }
 
@@ -350,6 +380,9 @@ rpm_postinstall() {
     info "Token-Less Post-Installation Configuration"
     info "=========================================="
 
+    # Configure OpenClaw plugin
+    setup_openclaw "system" || true
+
     # Configure copilot-shell hooks (system-wide path)
     configure_cosh_hooks "$SYS_SHARE_DIR/hooks/copilot-shell" || true
 
@@ -382,7 +415,14 @@ rpm_preuninstall() {
 
     # Clean up hooks configuration
     # $1 = 0: full uninstall, $1 = 1: upgrade
+    cleanup_openclaw "$action"
     cleanup_cosh_hooks "$action"
+
+    # Clean up stats data on full uninstall (preserve on upgrade)
+    if [ "$action" -eq 0 ] && [ -d "$HOME/.tokenless" ]; then
+        rm -rf "$HOME/.tokenless"
+        info "  Removed stats data: $HOME/.tokenless"
+    fi
 
     info "=========================================="
     info "Cleanup completed"

@@ -1,4 +1,4 @@
-%define anolis_release 4
+%define anolis_release 5
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -26,20 +26,32 @@ Core Features:
 - Schema Compression: Compresses OpenAI Function Calling tool definitions
 - Response Compression: Compresses API/tool responses
 - Command Rewriting: Filters CLI command output via RTK
+- Statistics Tracking: SQLite-based metrics for compression effectiveness
 
 The package includes:
-- tokenless: CLI tool for schema and response compression
+- tokenless: CLI tool for schema and response compression with stats tracking
 - rtk: High-performance CLI proxy for command rewriting (Apache-2.0 licensed)
 
 Note: OpenClaw plugin and copilot-shell hooks are available in the source tree
 at /usr/share/doc/tokenless/ for manual configuration.
 
 %prep
-%setup -q
+%setup -q -n tokenless
+
+# Clean any stale build artifacts from the tarball
+cargo clean --release
+cargo clean --release --manifest-path third_party/rtk/Cargo.toml
+
+# Apply tokenless stats patch to RTK (upstream rtk v0.36.0)
+# Patch is included in the tarball under third_party/patches/
+patch --forward -p1 --no-backup-if-mismatch -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
 
 %build
-# Binaries are pre-built by scripts/rpm-build.sh
-# No build step needed in RPM build
+# Build tokenless (schema + response compression + stats)
+cargo build --release
+
+# Build rtk (command rewriting)
+cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
 %install
 rm -rf %{buildroot}
@@ -47,15 +59,15 @@ mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_datadir}/tokenless
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
-# Install pre-built binaries
-install -m 0755 tokenless %{buildroot}%{_bindir}/tokenless
-install -m 0755 rtk %{buildroot}%{_bindir}/rtk
+# Install binaries
+install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
+install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_bindir}/rtk
 
-# Install documentation (user manuals from docs/ directory)
+# Install documentation
 install -m 0644 docs/tokenless-user-manual-en.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
-install -m 0644 docs/LICENSE %{buildroot}%{_docdir}/tokenless/
+install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
 # Install source files for reference (openclaw, hooks, scripts)
 mkdir -p %{buildroot}%{_datadir}/tokenless/openclaw
@@ -76,12 +88,10 @@ install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
 %attr(0755,root,root) %{_bindir}/rtk
-# Documentation files
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 %doc %{_docdir}/tokenless/tokenless-user-manual-en.md
 %doc %{_docdir}/tokenless/tokenless-user-manual-zh.md
-# Scripts and hooks with executable permissions
 %dir %{_datadir}/tokenless
 %dir %{_datadir}/tokenless/scripts
 %dir %{_datadir}/tokenless/hooks
@@ -93,15 +103,11 @@ install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 %{_datadir}/tokenless/openclaw/*
 
 %post
-# Configure copilot-shell hooks after installation
 if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
     %{_datadir}/tokenless/scripts/install.sh --install || true
 fi
 
 %preun
-# Clean up configuration before uninstallation
-# $1 = 0: full uninstall
-# $1 = 1: upgrade
 if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
     if [ $1 -eq 1 ]; then
         %{_datadir}/tokenless/scripts/install.sh --upgrade || true
@@ -111,6 +117,12 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-5
+- Add compression stats: auto-record real before/after data from all modes
+- Remove stats record subcommand; derive chars/tokens from actual text
+- RTK patch records command output compression (not command strings)
+- Clean ~/.tokenless on RPM uninstall
+
 * Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-4
 - Fix: skip compression for content-retrieval tools and skill files
   - Added tool-name-based skip list: Read, read_file, Glob, list_directory, NotebookRead
@@ -119,27 +131,10 @@ fi
   - Fail-open design: original response passes through on any error path
 
 * Sat Apr 11 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-3
-- Fix: Response compression not working issue
-  - Fixed `tokenless compress-response` command not taking effect
-  - Fixed `tokenless-compress-response.sh` hook script execution failure
+- Fix: response compression command not working
 
 * Sat Apr 11 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-2
-- Unified install.sh script combining postinstall and preuninstall functionality
-  - Single script handles: source install, RPM post-install, RPM pre-uninstall
-  - Modes: --install, --uninstall, --upgrade, --uninstall-source, --help
-  - Backward compatible with existing RPM workflow
-- Added cosh (copilot-shell) hook support
-  - tokenless-compress-schema.sh: Compress LLM schema for cosh
-  - tokenless-compress-response.sh: Compress LLM response for cosh
-  - tokenless-rewrite.sh: Rewrite requests for cosh integration
-- Automatic copilot-shell hook configuration via %post/%preun scriptlets
-  - Supports both ~/.copilot-shell/settings.json and ~/.qwen-code/settings.json
-  - Idempotent installation (no duplicate hooks on reinstall)
-  - Complete cleanup on uninstall (removes empty hooks arrays)
-  - Fail-open design: gracefully handles missing dependencies
+- Add copilot-shell hooks and unified install script
 
 * Fri Apr 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
-- Initial package for tokenless 0.1.0
-- Include rtk (Rust Token Killer) binary
-- Include openclaw TypeScript and JSON files
-- Include install.sh script
+- Initial package
