@@ -87,8 +87,7 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
 
     Search order mirrors copilot-shell's SkillManager priority:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/) → extensions
-    (~/.copilot-shell/extensions/*/).
+    → system (/usr/share/anolisa/skills/).
 
     Returns ``(path, traversal_detected)``:
     - ``(str, False)`` — resolved successfully.
@@ -113,129 +112,7 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
         if resolved.is_dir() and (resolved / "SKILL.md").is_file():
             return str(resolved), False
 
-    # Search extension skill directories
-    ext_result = _resolve_extension_skill_dir(skill_name)
-    if ext_result is not None:
-        return ext_result, False
-
     return None, traversal_detected
-
-
-def _get_extensions_dir() -> Path:
-    """Return the global copilot-shell extensions directory."""
-    return Path.home() / ".copilot-shell" / "extensions"
-
-
-def _read_json_file(filepath: Path) -> dict | None:
-    """Read and parse a JSON file, returning ``None`` on any error."""
-    try:
-        return json.loads(filepath.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _effective_extension_path(ext_dir: Path) -> Path:
-    """Resolve the effective extension path, following ``link`` installs.
-
-    If ``.qwen-extension-install.json`` declares ``"type": "link"``, the
-    ``source`` field points to the real extension root.
-    """
-    install_meta = _read_json_file(ext_dir / ".qwen-extension-install.json")
-    if install_meta and install_meta.get("type") == "link":
-        source = install_meta.get("source", "")
-        if source:
-            linked = Path(source)
-            if linked.is_dir():
-                return linked
-    return ext_dir
-
-
-def _extension_skill_bases(ext_path: Path) -> list[Path]:
-    """Read extension config and return the list of skill base directories.
-
-    Mirrors ``getSkillDirs()`` in copilot-shell's extensionManager.ts.
-    """
-    config: dict | None = None
-    for config_name in ("cosh-extension.json", "qwen-extension.json"):
-        config = _read_json_file(ext_path / config_name)
-        if config is not None:
-            break
-    if config is None:
-        return []
-
-    skills_field = config.get("skills")
-    if skills_field is None:
-        dirs = ["skills"]
-    elif isinstance(skills_field, list):
-        dirs = [str(d) for d in skills_field]
-    else:
-        dirs = [str(skills_field)]
-
-    return [ext_path / d for d in dirs]
-
-
-def _find_skill_recursive(
-    base: Path,
-    skill_name: str,
-    trust_root: Path,
-) -> str | None:
-    """Recursively search *base* for a skill directory named *skill_name*.
-
-    Mirrors copilot-shell's ``loadSkillsFromDir`` recursion:
-    directories containing ``SKILL.md`` are skills; others are containers
-    that are recursed into.
-
-    *trust_root* is used for path-traversal protection — the resolved
-    path must stay within *trust_root*.
-    """
-    if not base.is_dir():
-        return None
-    try:
-        entries = sorted(base.iterdir())
-    except OSError:
-        return None
-
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        has_manifest = (entry / "SKILL.md").is_file()
-        if has_manifest:
-            if entry.name == skill_name:
-                try:
-                    resolved = entry.resolve()
-                    if resolved.is_relative_to(trust_root.resolve()):
-                        return str(resolved)
-                except (OSError, ValueError):
-                    pass
-        else:
-            # Container directory (no SKILL.md) — recurse into it
-            result = _find_skill_recursive(entry, skill_name, trust_root)
-            if result is not None:
-                return result
-    return None
-
-
-def _resolve_extension_skill_dir(skill_name: str) -> str | None:
-    """Search installed extensions for a skill directory named *skill_name*.
-
-    Iterates every extension under ``~/.copilot-shell/extensions/``, reads
-    its config to determine skill directories, then recursively searches
-    each for ``<skill_name>/SKILL.md``.
-    """
-    extensions_dir = _get_extensions_dir()
-    if not extensions_dir.is_dir():
-        return None
-
-    for ext_entry in sorted(extensions_dir.iterdir()):
-        if not ext_entry.is_dir():
-            continue
-        effective_path = _effective_extension_path(ext_entry)
-        skill_bases = _extension_skill_bases(effective_path)
-        for skill_base in skill_bases:
-            result = _find_skill_recursive(skill_base, skill_name, effective_path)
-            if result is not None:
-                return result
-    return None
 
 
 def _keys_exist() -> bool:
@@ -260,6 +137,29 @@ def _ensure_keys() -> None:
         )
     except Exception:
         pass
+
+
+def _format_cosh(check_result: dict, skill_name: str) -> str:
+    """Convert a check-result dict into a cosh HookOutput JSON string.
+
+    Mapping (design doc §4 — warning-only, never block):
+        status == "pass"  → decision "allow" (silent)
+        status otherwise  → decision "allow" + warning reason
+    """
+    status = check_result.get("status", "unknown")
+
+    if status == "pass":
+        return _allow()
+
+    template = _WARNING_MESSAGES.get(status)
+    if template:
+        reason = template.format(name=skill_name)
+    else:
+        reason = "\u26a0\ufe0f Skill '{}' has unknown status '{}'".format(
+            skill_name, status
+        )
+
+    return _allow_with_reason(reason)
 
 
 # -- main --------------------------------------------------------------------
@@ -308,7 +208,7 @@ def main() -> None:
         print(_allow_with_reason(reason))
         return
     if skill_dir is None:
-        # Not found in any location (project/user/system/extension) — remote or unknown → fail-open
+        # Not found in any location (project/user/system) — remote or unknown → fail-open
         reason = (
             "\u26a0\ufe0f Skill '{}' not found on disk \u2014 check skipped".format(
                 skill_name
@@ -333,31 +233,14 @@ def main() -> None:
         print(_allow())
         return
 
-    # 6. Parse check result JSON — the CLI may use non-zero exit codes
-    #    for non-pass statuses (e.g. deny → rc=1), so we parse stdout
-    #    regardless of returncode.
+    # 6. Parse check result and format output
     try:
         check_result = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         print(_allow())
         return
 
-    status = check_result.get("status", "unknown")
-
-    # 7. Format output — always allow, warn on non-pass (design doc §4)
-    if status == "pass":
-        print(_allow())
-        return
-
-    template = _WARNING_MESSAGES.get(status)
-    if template:
-        reason = template.format(name=skill_name)
-    else:
-        reason = "\u26a0\ufe0f Skill '{}' has unknown status '{}'".format(
-            skill_name, status
-        )
-
-    print(_allow_with_reason(reason))
+    print(_format_cosh(check_result, skill_name))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,19 @@
 {
   "name": "agent-sec-core",
-  "version": "0.3.0"
+  "version": "0.3.0",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "skill",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "skill-ledger",
+            "command": "python3 ${extensionPath}/hooks/skill_ledger_hook.py",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
 }
