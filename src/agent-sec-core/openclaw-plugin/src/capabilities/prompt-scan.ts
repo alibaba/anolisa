@@ -20,7 +20,8 @@ export const promptScan: SecurityCapability = {
   name: "Prompt Injection Scanner",
   hooks: ["before_dispatch"],
   register(api) {
-    api.on("before_dispatch", async (event: any, ctx: any) => {
+    const cfg = (api.pluginConfig as Record<string, any>) ?? {};
+    api.on("before_dispatch", async (event: any) => {
       try {
         const text = String(event.content ?? event.body ?? "");
         if (!text.trim()) {
@@ -53,8 +54,9 @@ export const promptScan: SecurityCapability = {
           api.logger.warn(`[prompt-scan] DENY — ${msg}`);
           // handled: true + text → text sent as final reply, LLM call skipped
           // handled: false + text → text ignored, event passes through to LLM
-          // Set PROMPT_SCAN_BLOCK=1 to enable blocking mode.
-          const blockEnabled = process.env["PROMPT_SCAN_BLOCK"] === "1";
+          // promptScanBlock=true (openclaw.json) 开启拦截模式
+          api.logger.warn(`[prompt-scan] promptScanBlock=${cfg.promptScanBlock}`);
+          const blockEnabled = cfg.promptScanBlock === true;
           return { handled: blockEnabled, text: msg };
         }
 

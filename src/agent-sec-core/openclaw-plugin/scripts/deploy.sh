@@ -38,5 +38,10 @@ echo "安装插件..."
 openclaw plugins install "$PLUGIN_DIR" --force --dangerously-force-unsafe-install
 
 echo "  ✓ 插件已安装/更新"
+
 echo ""
 echo "提示: 请重启 OpenClaw gateway 以加载插件"
+echo "  openclaw gateway restart"
+echo ""
+echo "拦截 prompt 注入风险请求"
+echo "  openclaw config set plugins.entries.agent-sec.config.promptScanBlock true"

@@ -5,10 +5,21 @@
   "description": "Security hooks powered by agent-sec-cli",
   "extensions": ["./dist/index.js"],
   "configSchema": {
-    "capabilities": {
-      "type": "object",
-      "description": "各能力的启用/禁用和配置",
-      "default": {}
+    "type": "object",
+    "properties": {
+      "promptScanBlock": {
+        "type": "boolean",
+        "default": false,
+        "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+      }
+
     }
+  },
+  "uiHints": {
+    "promptScanBlock": {
+      "label": "Prompt 扫描拦截模式",
+      "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+    }
+
   }
 }
