@@ -47,26 +47,29 @@ def _format_cosh(scan_result: dict) -> str:
     Mapping:
         verdict == "pass"  -> decision "allow"
         verdict == "warn"  -> decision "ask"  (let user decide)
-        verdict == "deny"  -> decision "block" (reject the prompt)
+        verdict == "deny"  -> decision "ask"  (let user decide)
         otherwise          -> fail-open "allow"
     """
     verdict = scan_result.get("verdict", "pass")
-    findings = scan_result.get("findings", [])
 
     if verdict == "pass":
         return json.dumps({"decision": "allow"})
 
-    descs = [f"- {f.get('desc_zh', f.get('desc_en', ''))}" for f in findings]
-    msg = f"[prompt-scanner] Detected {len(findings)} issue(s):\n" + "\n".join(descs)
+    # Build reason from summary; it already contains threat type, confidence & evidence.
+    summary = scan_result.get("summary", "")
+    threat_type = scan_result.get("threat_type", "")
+    msg = f"[prompt-scanner] {summary or threat_type or 'Prompt rejected by security policy'}"
 
     if verdict == "warn":
         return json.dumps(
             {"decision": "ask", "reason": msg},
             ensure_ascii=False,
         )
+    # Use "ask" to avoid blocking users outright.
+    # TODO: switch to "block" once the policy is mature enough.
     if verdict == "deny":
         return json.dumps(
-            {"decision": "block", "reason": msg},
+            {"decision": "ask", "reason": msg},
             ensure_ascii=False,
         )
     # error or unknown -> fail-open

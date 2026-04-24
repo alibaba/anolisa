@@ -41,20 +41,25 @@ export const promptScan: SecurityCapability = {
         const findings: any[] = scanResult.findings ?? [];
 
         if (verdict === "pass" || findings.length === 0) {
-          api.logger.info(`[prompt-scan] ✅ pass`);
+          api.logger.info(`[prompt-scan] pass`);
           return undefined;
         }
 
-        const descs = findings.map((f) => `- ${f.desc_zh ?? f.desc_en ?? ""}`);
-        const msg = `[prompt-scan] Detected ${findings.length} issue(s):\n${descs.join("\n")}`;
+        const summary: string = scanResult.summary ?? "";
+        const threatType: string = scanResult.threat_type ?? "";
+        const msg = `[prompt-scan] ${summary || threatType || "Prompt rejected by security policy"}`;
 
         if (verdict === "deny") {
-          api.logger.info(`[prompt-scan] 🚫 DENY — blocking user prompt`);
-          return { handled: true, text: msg };
+          api.logger.warn(`[prompt-scan] DENY — ${msg}`);
+          // handled: true + text → text sent as final reply, LLM call skipped
+          // handled: false + text → text ignored, event passes through to LLM
+          // Set PROMPT_SCAN_BLOCK=1 to enable blocking mode.
+          const blockEnabled = process.env["PROMPT_SCAN_BLOCK"] === "1";
+          return { handled: blockEnabled, text: msg };
         }
 
         if (verdict === "warn") {
-          api.logger.info(`[prompt-scan] ⚠️ WARN — passing user prompt with warning`);
+          api.logger.warn(`[prompt-scan] WARN — passing user prompt with warning`);
           return { handled: false, text: `[Security Warning] ${msg}` };
         }
 

@@ -14,6 +14,19 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "prompt-scanner",
+            "command": "python3 ${extensionPath}/hooks/prompt_scanner_hook.py",
+            "description": "Scans user prompts for prompt injection and jailbreak attempts.",
+            "timeout": 10000
+          }
+        ]
+      }
     ]
   }
 }
