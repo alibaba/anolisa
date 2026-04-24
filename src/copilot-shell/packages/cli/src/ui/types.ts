@@ -425,6 +425,14 @@ export interface LoopDetectionConfirmationRequest {
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
 
+/** Confirmation request for UserPromptSubmit hook 'ask' decisions. */
+export interface UserPromptConfirmationRequest {
+  /** The reason/message from the hook to display to the user. */
+  reason: string;
+  /** Resolve the deferred confirmation: true = proceed, false = cancel. */
+  resolve: (confirmed: boolean) => void;
+}
+
 export interface SandboxBypassRequest {
   /** The command that failed inside the sandbox */
   original_command: string;

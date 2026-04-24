@@ -12,6 +12,7 @@ import type {
   ShellConfirmationRequest,
   ConfirmationRequest,
   LoopDetectionConfirmationRequest,
+  UserPromptConfirmationRequest,
   SandboxBypassRequest,
   HistoryItemWithoutId,
   StreamingState,
@@ -68,6 +69,7 @@ export interface UIState {
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
+  userPromptConfirmationRequest: UserPromptConfirmationRequest | null;
   sandboxBypassRequest: SandboxBypassRequest | null;
   geminiMdFileCount: number;
   streamingState: StreamingState;

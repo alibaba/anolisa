@@ -1407,4 +1407,10 @@ export default {
   'View details (subcommand help)': '  inspect <slug>          查看技能详情',
   'Login (subcommand help)': '  login <token>           登录 clawhub',
   'Show identity (subcommand help)': '  whoami                  显示当前身份',
+
+  // ============================================================================
+  // Hook dialogs
+  // ============================================================================
+  '⚠️  **Hook Safety Check**': '⚠️  **Hook 安全检查提示**',
+  'Send this prompt or cancel?': '是否继续发送这条 prompt？',
 };

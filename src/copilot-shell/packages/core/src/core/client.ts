@@ -34,6 +34,7 @@ import {
   Turn,
   type ChatCompressionInfo,
   type ServerGeminiStreamEvent,
+  type UserPromptConfirmationValue,
 } from './turn.js';
 
 // Services
@@ -539,6 +540,47 @@ export class GeminiClient {
           },
         };
         return new Turn(this.getChat(), prompt_id);
+      }
+
+      // Ask: pause the stream and wait for user confirmation before proceeding.
+      if (hookOutput?.isAskDecision()) {
+        const askReason =
+          hookOutput.reason ||
+          hookOutput.systemMessage ||
+          'Prompt reviewed and approved';
+        let resolveConfirmation!: (confirmed: boolean) => void;
+        const confirmationPromise = new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        });
+
+        // Race against the abort signal so that cancelOngoingRequest() always
+        // unblocks this await — even if the user never touches the dialog.
+        const abortPromise = new Promise<boolean>((resolve) => {
+          if (signal.aborted) {
+            resolve(false);
+            return;
+          }
+          signal.addEventListener('abort', () => resolve(false), {
+            once: true,
+          });
+        });
+
+        const confirmationValue: UserPromptConfirmationValue = {
+          reason: askReason,
+          resolve: resolveConfirmation,
+        };
+        yield {
+          type: GeminiEventType.UserPromptConfirmation,
+          value: confirmationValue,
+        };
+        const confirmed = await Promise.race([
+          confirmationPromise,
+          abortPromise,
+        ]);
+        if (!confirmed) {
+          yield { type: GeminiEventType.UserCancelled };
+          return new Turn(this.getChat(), prompt_id);
+        }
       }
 
       // Add additional context from hooks to the request

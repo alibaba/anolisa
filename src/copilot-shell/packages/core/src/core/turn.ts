@@ -66,6 +66,7 @@ export enum GeminiEventType {
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
   AfterModelHookStop = 'after_model_hook_stop',
+  UserPromptConfirmation = 'user_prompt_confirmation',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -210,6 +211,18 @@ export type ServerGeminiAfterModelHookStopEvent = {
   type: GeminiEventType.AfterModelHookStop;
 };
 
+export interface UserPromptConfirmationValue {
+  /** The reason message displayed to the user (from the hook's reason/systemMessage). */
+  reason: string;
+  /** Resolve the deferred confirmation: true = proceed, false = cancel. */
+  resolve: (confirmed: boolean) => void;
+}
+
+export type ServerGeminiUserPromptConfirmationEvent = {
+  type: GeminiEventType.UserPromptConfirmation;
+  value: UserPromptConfirmationValue;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
   | ServerGeminiChatCompressedEvent
@@ -227,7 +240,8 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiToolCallResponseEvent
   | ServerGeminiUserCancelledEvent
   | ServerGeminiSessionTokenLimitExceededEvent
-  | ServerGeminiRetryEvent;
+  | ServerGeminiRetryEvent
+  | ServerGeminiUserPromptConfirmationEvent;
 
 // A turn manages the agentic loop turn within the server context.
 export class Turn {

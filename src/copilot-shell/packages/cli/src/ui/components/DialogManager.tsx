@@ -53,6 +53,7 @@ import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { SkillsDialog } from './SkillsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { t } from '../../i18n/index.js';
 import {
   readOpenClawConfig,
   readQwenCodeConfig,
@@ -198,6 +199,16 @@ export const DialogManager = ({
     return (
       <LoopDetectionConfirmation
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
+      />
+    );
+  }
+  if (uiState.userPromptConfirmationRequest) {
+    const { reason, resolve } = uiState.userPromptConfirmationRequest;
+    return (
+      <ConsentPrompt
+        prompt={`${t('⚠️  **Hook Safety Check**')}\n\n${reason}\n\n${t('Send this prompt or cancel?')}`}
+        onConfirm={resolve}
+        terminalWidth={terminalWidth}
       />
     );
   }

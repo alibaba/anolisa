@@ -1586,4 +1586,10 @@ export default {
   'Login (subcommand help)': '  login <token>           Login to clawhub',
   'Show identity (subcommand help)':
     '  whoami                  Show current identity',
+
+  // ============================================================================
+  // Hook dialogs
+  // ============================================================================
+  '⚠️  **Hook Safety Check**': '⚠️  **Hook Safety Check**',
+  'Send this prompt or cancel?': 'Send this prompt or cancel?',
 };

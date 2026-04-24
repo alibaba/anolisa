@@ -169,6 +169,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     settingInputRequests: [],
     pluginChoiceRequests: [],
     loopDetectionConfirmationRequest: null,
+    userPromptConfirmationRequest: null,
     sandboxBypassRequest: null,
     streamingState: 'idle',
     initError: null,

@@ -44,6 +44,7 @@ import type {
   HistoryItemToolGroup,
   SlashCommandProcessorResult,
   SandboxBypassRequest,
+  UserPromptConfirmationRequest,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
 import { isAtCommand, isSlashCommand } from '../utils/commandUtils.js';
@@ -156,6 +157,9 @@ export const useGeminiStream = (
 
   const [sandboxBypassRequest, setSandboxBypassRequest] =
     useState<SandboxBypassRequest | null>(null);
+
+  const [userPromptConfirmationRequest, setUserPromptConfirmationRequest] =
+    useState<UserPromptConfirmationRequest | null>(null);
 
   const handleSandboxBypassRequested = useCallback(
     (request: SandboxBypassApprovalRequest): Promise<boolean> =>
@@ -307,6 +311,13 @@ export const useGeminiStream = (
     }
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
+
+    // If a UserPromptSubmit 'ask' dialog is pending, clear it immediately so
+    // the UI is consistent before the abort signal unblocks the generator.
+    // The abort signal (fired below) will resolve the deferred Promise in
+    // client.ts via Promise.race, so no explicit resolve(false) is needed here.
+    setUserPromptConfirmationRequest(null);
+
     abortControllerRef.current?.abort();
 
     // Log API cancellation
@@ -938,6 +949,17 @@ export const useGeminiStream = (
             // AfterModel hook requested stop — agent loop is ended by client.ts.
             // No UI action needed here; just acknowledge the event.
             break;
+          case ServerGeminiEventType.UserPromptConfirmation:
+            // Hook returned 'ask' for UserPromptSubmit — show a confirmation
+            // dialog and resolve the deferred promise when user decides.
+            setUserPromptConfirmationRequest({
+              reason: event.value.reason,
+              resolve: (confirmed: boolean) => {
+                setUserPromptConfirmationRequest(null);
+                event.value.resolve(confirmed);
+              },
+            });
+            break;
           default: {
             // enforces exhaustive switch-case
             const unreachable: never = event;
@@ -1434,6 +1456,7 @@ export const useGeminiStream = (
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    userPromptConfirmationRequest,
     sandboxBypassRequest,
   };
 };

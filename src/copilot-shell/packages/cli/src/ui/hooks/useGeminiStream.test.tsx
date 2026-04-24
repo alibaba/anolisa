@@ -3089,4 +3089,232 @@ describe('useGeminiStream', () => {
       });
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // UserPromptSubmit ask decision
+  // ---------------------------------------------------------------------------
+  describe('UserPromptSubmit ask decision', () => {
+    /**
+     * Build a mock sendMessageStream that:
+     * 1. Yields a UserPromptConfirmation event with a captured resolver.
+     * 2. Awaits the resolver (or the abort signal) before yielding more events.
+     *
+     * The test drives the flow by calling getCapturedResolve()(true/false),
+     * or by calling cancelOngoingRequest() which fires the abort signal.
+     */
+    function makeMockAskStream(reason = 'Prompt reviewed and approved') {
+      let capturedEventResolve: ((confirmed: boolean) => void) | null = null;
+
+      const setupMock = () => {
+        mockSendMessageStream.mockImplementation(
+          (_query: unknown, signal: AbortSignal) =>
+            (async function* () {
+              // Deferred promise that the test resolves via the event callback.
+              let resolveDeferred!: (confirmed: boolean) => void;
+              const deferredPromise = new Promise<boolean>((res) => {
+                resolveDeferred = res;
+              });
+
+              // Abort races with the user's choice — mirrors the real client.ts logic.
+              const abortPromise = new Promise<boolean>((res) => {
+                if (signal.aborted) {
+                  res(false);
+                  return;
+                }
+                signal.addEventListener('abort', () => res(false), {
+                  once: true,
+                });
+              });
+
+              capturedEventResolve = (confirmed: boolean) =>
+                resolveDeferred(confirmed);
+
+              yield {
+                type: ServerGeminiEventType.UserPromptConfirmation,
+                value: { reason, resolve: capturedEventResolve },
+              };
+
+              const confirmed = await Promise.race([
+                deferredPromise,
+                abortPromise,
+              ]);
+
+              if (confirmed) {
+                yield {
+                  type: ServerGeminiEventType.Content,
+                  value: 'AI response after confirmation',
+                };
+                yield {
+                  type: ServerGeminiEventType.Finished,
+                  value: { reason: 'STOP', usageMetadata: undefined },
+                };
+              } else {
+                yield { type: ServerGeminiEventType.UserCancelled };
+              }
+            })(),
+        );
+      };
+
+      return { setupMock, getCapturedResolve: () => capturedEventResolve };
+    }
+
+    it('should set userPromptConfirmationRequest when UserPromptConfirmation event is received', async () => {
+      const { setupMock, getCapturedResolve } = makeMockAskStream();
+      setupMock();
+
+      const { result } = renderTestHook();
+
+      // Fire off without awaiting — generator pauses at confirmation.
+      result.current.submitQuery('test query with ask keyword');
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).not.toBeNull();
+        expect(result.current.userPromptConfirmationRequest?.reason).toBe(
+          'Prompt reviewed and approved',
+        );
+        expect(
+          typeof result.current.userPromptConfirmationRequest?.resolve,
+        ).toBe('function');
+      });
+
+      // Clean up: resolve false to let the generator terminate.
+      await act(async () => {
+        getCapturedResolve()!(false);
+      });
+    });
+
+    it('should clear userPromptConfirmationRequest and continue when user confirms', async () => {
+      const { setupMock, getCapturedResolve } = makeMockAskStream();
+      setupMock();
+
+      const { result } = renderTestHook();
+
+      result.current.submitQuery('test query');
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).not.toBeNull();
+      });
+
+      // User confirms: call the wrapped resolver exposed by the hook state.
+      await act(async () => {
+        result.current.userPromptConfirmationRequest?.resolve(true);
+      });
+
+      // Dialog must be cleared.
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).toBeNull();
+      });
+
+      // The underlying event resolver must have been forwarded (captured).
+      expect(getCapturedResolve()).not.toBeNull();
+
+      // Content after confirmation should be added to history.
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'AI response after confirmation',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should clear userPromptConfirmationRequest and handle UserCancelled when user rejects', async () => {
+      const { setupMock } = makeMockAskStream();
+      setupMock();
+
+      const { result } = renderTestHook();
+
+      result.current.submitQuery('test query');
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).not.toBeNull();
+      });
+
+      // User rejects: call resolve(false) via the hook state wrapper.
+      await act(async () => {
+        result.current.userPromptConfirmationRequest?.resolve(false);
+      });
+
+      // Dialog cleared.
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).toBeNull();
+      });
+
+      // UserCancelled path produces an info message.
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'info' }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should clear userPromptConfirmationRequest immediately when cancelOngoingRequest is called', async () => {
+      const { setupMock } = makeMockAskStream();
+      setupMock();
+
+      const { result } = renderTestHook();
+
+      result.current.submitQuery('test query');
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).not.toBeNull();
+      });
+
+      // ESC / cancel button — clears dialog AND fires abort signal.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+      });
+
+      // Dialog gone immediately.
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).toBeNull();
+      });
+
+      // Abort unblocks the generator → UserCancelled → info message.
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'info' }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should not reopen the dialog if stale resolve is called after cancel', async () => {
+      const { setupMock } = makeMockAskStream();
+      setupMock();
+
+      const { result } = renderTestHook();
+
+      result.current.submitQuery('test query');
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).not.toBeNull();
+      });
+
+      // Capture the resolver before cancelling.
+      const staleResolve =
+        result.current.userPromptConfirmationRequest?.resolve;
+      expect(staleResolve).toBeDefined();
+
+      // Cancel clears the dialog.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await waitFor(() => {
+        expect(result.current.userPromptConfirmationRequest).toBeNull();
+      });
+
+      // Calling the stale resolve AFTER cancel must NOT reopen the dialog.
+      await act(async () => {
+        staleResolve!(true);
+      });
+
+      // State stays null.
+      expect(result.current.userPromptConfirmationRequest).toBeNull();
+    });
+  });
 });
