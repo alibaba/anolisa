@@ -66,17 +66,16 @@ class PromptScanner:
         self._detectors: list[DetectionLayer] = self._init_detectors()
 
     def warmup(self) -> None:
-        """Pre-load all ML models so the first scan has no cold-start delay.
+        """Pre-download all ML models so the first scan avoids a network fetch.
 
-        Call this once during service startup (or via ``scan-prompt warmup``
-        CLI command) to trigger ModelScope download and model load eagerly.
-        Has no effect for FAST mode (no ML models involved).
+        Only downloads model files to the local cache with **visible**
+        progress output.  Does **not** load models into memory — that
+        happens lazily on the first ``scan()`` call via ``load_model``
+        (silently, with ``_silent_ml_loading``).
 
-        Example::
+        Call this once after installation::
 
-            scanner = PromptScanner()   # STANDARD: L1 + L2
-            scanner.warmup()            # downloads / loads L2 model now
-            result = scanner.scan(text) # no cold-start delay
+            agent-sec-cli scan-prompt warmup
         """
         log.info("Warming up %d detector(s)...", len(self._detectors))
         for detector in self._detectors:

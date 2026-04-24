@@ -1,19 +1,17 @@
 """Model manager – lazy loading, caching, and device selection.
 
-Model download strategy
------------------------
-Models are downloaded via **ModelScope SDK** (``modelscope.snapshot_download``)
-rather than HuggingFace Hub directly.  This is the preferred approach for
-production deployments in mainland China where HuggingFace may be slow or
-unavailable.  The downloaded model path is then loaded with ``transformers``
-``AutoModel`` / ``AutoTokenizer`` as usual.
+Models are downloaded separately via ``download_model`` (e.g. ``scan-prompt warmup``)
+and loaded on demand by ``load_model``.  Loading uses ``transformers``
+``AutoTokenizer`` / ``AutoModelForSequenceClassification`` from the local cache.
 
-ModelScope mirror IDs for Llama Prompt Guard 2:
+ModelScope model IDs for Llama Prompt Guard 2:
     22M fast model : ``LLM-Research/Llama-Prompt-Guard-2-22M``
     86M accurate   : ``LLM-Research/Llama-Prompt-Guard-2-86M``
 """
 
+import contextlib
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,21 +70,54 @@ class ModelManager:
     # Public API
     # ------------------------------------------------------------------
 
+    def download_model(self, model_name: str) -> str:
+        """Download a model via ModelScope and return the local path.
+
+        Progress output (tqdm bars) is **visible** — intended for the
+        ``warmup`` CLI command where users expect to see download progress.
+
+        Idempotent: if the model is already cached locally, ModelScope
+        returns immediately from the file-system cache.
+
+        Args:
+            model_name: ModelScope model ID, e.g.
+                ``"LLM-Research/Llama-Prompt-Guard-2-86M"``.
+
+        Returns:
+            Absolute path to the local model directory.
+
+        Raises:
+            ModelLoadError: if the download fails.
+        """
+        from modelscope import snapshot_download
+
+        cache_dir = Path(self._cache_dir).expanduser()
+        try:
+            return snapshot_download(model_name, cache_dir=str(cache_dir))
+        except Exception as exc:
+            raise ModelLoadError(
+                f"ModelScope download failed for '{model_name}': {exc}"
+            ) from exc
+
     def load_model(self, model_name: str) -> tuple[object, object]:
         """Return a cached ``(model, tokenizer)`` pair, loading on demand.
 
         Thread-safe: concurrent calls for the same model will block on the
         lock and reuse the result of the first successful load.
 
+        The model **must** have been downloaded beforehand (e.g. via
+        ``scan-prompt warmup``).  If it is not present locally, a
+        ``ModelLoadError`` is raised with instructions to run warmup.
+
         Args:
-            model_name: HuggingFace model identifier or local path.
+            model_name: ModelScope model identifier.
 
         Returns:
             ``(model, tokenizer)`` tuple ready for inference.
 
         Raises:
             agent_sec_cli.prompt_scanner.exceptions.ModelLoadError: if the
-                model cannot be loaded (missing deps, download failure, etc.).
+                model cannot be loaded (missing deps, not downloaded, etc.).
         """
         # Fast path: model already loaded (no lock needed for dict reads under GIL).
         if model_name in self._loaded_models:
@@ -120,7 +151,7 @@ class ModelManager:
         return self._device_cached
 
     # ------------------------------------------------------------------
-    # Device detection
+    # Internal
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -138,67 +169,69 @@ class ModelManager:
         return "cpu"
 
     # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
-    def _do_load(self, model_name: str) -> tuple[object, object]:
-        """Download (via ModelScope) and load a model+tokenizer, then move to device.
-
-        Download flow
-        -------------
-        1. Try ``modelscope.snapshot_download`` to get a local model path.
-           The model is cached under ``self._cache_dir`` (default:
-           ``~/.cache/prompt_scanner/models``); subsequent calls return
-           immediately from cache.
-        2. Load the local path with ``transformers`` ``AutoModelForSequenceClassification``
-           and ``AutoTokenizer``.
-        3. Move the model to the target device and set ``eval()`` mode.
-
-        Args:
-            model_name: ModelScope model ID, e.g.
-                ``"LLM-Research/Llama-Prompt-Guard-2-86M"``.
+    def _resolve_local_model_path(self, model_name: str) -> str:
+        """Return the local cache path for *model_name* without triggering a download.
 
         Raises:
-            ModelLoadError: missing deps, download failure, or load failure.
+            ModelLoadError: if the model has not been downloaded yet, with a
+                user-friendly message pointing to ``scan-prompt warmup``.
         """
-        log.info(
-            "Downloading model '%s' via ModelScope (cached after first run).",
-            model_name,
+        cache_dir = Path(self._cache_dir).expanduser()
+        candidate = cache_dir / Path(model_name)
+
+        if candidate.is_dir() and (candidate / "config.json").exists():
+            return str(candidate)
+
+        raise ModelLoadError(
+            f"Model '{model_name}' is not available locally.\n"
+            "Please run the following command to download it first:\n"
+            "  agent-sec-cli scan-prompt warmup"
         )
 
-        import torch  # lazy import: only needed when actually running ML inference
-        from modelscope import snapshot_download  # lazy import
-        from transformers import (  # lazy import
+    def _do_load(self, model_name: str) -> tuple[object, object]:
+        """Load a model+tokenizer from the local cache (no download).
+
+        Raises ``ModelLoadError`` with a warmup hint if the model is not
+        present on disk.  All transformers output is suppressed unless
+        ``AGENT_SEC_DEBUG=1`` is set.
+        """
+        import torch
+        from transformers import (
             AutoModelForSequenceClassification,
             AutoTokenizer,
         )
 
-        cache_dir = Path(self._cache_dir).expanduser()
-        _ms_logger = logging.getLogger("modelscope")
-        _orig_level = _ms_logger.level
-        _ms_logger.setLevel(logging.ERROR)
-        try:
-            local_model_path = snapshot_download(model_name, cache_dir=str(cache_dir))
-        except Exception as exc:
-            raise ModelLoadError(
-                f"ModelScope download failed for '{model_name}': {exc}"
-            ) from exc
-        finally:
-            _ms_logger.setLevel(_orig_level)
+        local_model_path = self._resolve_local_model_path(model_name)
 
-        # --- load from local path ----------------------------------------
         log.info(
             "Loading model from '%s' onto device '%s'.", local_model_path, self.device
         )
+
+        tf_logger = logging.getLogger("transformers")
+        saved_level = tf_logger.level
         try:
-            tokenizer = AutoTokenizer.from_pretrained(local_model_path)
-            model = AutoModelForSequenceClassification.from_pretrained(local_model_path)
-            model.to(torch.device(self.device))
-            model.eval()
+            if os.environ.get("AGENT_SEC_DEBUG") != "1":
+                tf_logger.setLevel(logging.ERROR)
+            # Suppress stdout/stderr to silence tqdm progress bars and any
+            # hardcoded print() calls from transformers internals.
+            with open(os.devnull, "w") as _devnull, contextlib.redirect_stdout(
+                _devnull
+            ), contextlib.redirect_stderr(_devnull):
+                tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    local_model_path
+                )
+        except ModelLoadError:
+            raise
         except Exception as exc:
             raise ModelLoadError(
                 f"Failed to load model from '{local_model_path}': {exc}"
             ) from exc
+        finally:
+            tf_logger.setLevel(saved_level)
 
+        model.to(torch.device(self.device))
+        model.eval()
         log.info("Model '%s' loaded successfully.", model_name)
         return model, tokenizer

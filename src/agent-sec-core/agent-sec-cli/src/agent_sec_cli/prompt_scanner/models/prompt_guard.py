@@ -128,13 +128,17 @@ class PromptGuardClassifier:
     # ------------------------------------------------------------------
 
     def warmup(self) -> None:
-        """Eagerly load the model into memory.
+        """Pre-download the model so that the first scan avoids a download.
 
-        Triggers ModelScope download (first run) and loads the model+tokenizer
-        into the shared ModelManager cache.  Subsequent calls are no-ops.
+        Only fetches model files to the local cache; does **not** load
+        the model into memory.  The actual load happens lazily on the
+        first ``classify`` / ``classify_batch`` call via ``load_model``.
+
+        Progress output (tqdm, modelscope print) is visible — this is
+        intended for the ``scan-prompt warmup`` CLI command.
         """
-        self._manager.load_model(self._model_name)
-        log.info("PromptGuardClassifier warmup complete for '%s'.", self._model_name)
+        self._manager.download_model(self._model_name)
+        log.info("Model '%s' downloaded to local cache.", self._model_name)
 
     def classify(self, text: str) -> ClassifierResult:
         """Classify a single prompt and return a ``ClassifierResult``.
