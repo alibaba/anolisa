@@ -6,6 +6,7 @@ suitable for CLI stdout or upstream consumer display.
 
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 from agent_sec_cli.security_events.schema import SecurityEvent
@@ -41,6 +42,7 @@ def format_summary(events: list[SecurityEvent], time_label: str) -> str:
     code_scan_events = by_category.get("code_scan", [])
     sandbox_events = by_category.get("sandbox", [])
     prompt_scan_events = by_category.get("prompt_scan", [])
+    skill_ledger_events = by_category.get("skill_ledger", [])
 
     if harden_events:
         sections.append(_summarize_hardening(harden_events))
@@ -52,11 +54,23 @@ def format_summary(events: list[SecurityEvent], time_label: str) -> str:
         sections.append(_summarize_sandbox(sandbox_events))
     if prompt_scan_events:
         sections.append(_summarize_prompt_scan(prompt_scan_events))
+    if skill_ledger_events:
+        sections.append(_summarize_skill_ledger(skill_ledger_events))
+
+    ledger_statuses = (
+        _skill_ledger_latest_statuses(skill_ledger_events)
+        if skill_ledger_events
+        else {}
+    )
 
     header = _compute_posture(
-        harden_events, asset_events, prompt_scan_events, time_label
+        harden_events,
+        asset_events,
+        prompt_scan_events,
+        ledger_statuses,
+        time_label,
     )
-    footer = _build_footer(events, harden_events)
+    footer = _build_footer(events, harden_events, ledger_statuses)
     return "\n\n".join([header, *sections, footer])
 
 
@@ -333,6 +347,121 @@ def _summarize_prompt_scan(events: list[SecurityEvent]) -> str:
     return "\n".join(lines)
 
 
+def _summarize_skill_ledger(events: list[SecurityEvent]) -> str:
+    """Summarize skill_ledger category events.
+
+    Classifies events by command (check / certify), deduplicates check results
+    to the latest per skill, and surfaces tampered / deny alerts.
+    """
+    lines = ["--- Skill Ledger ---"]
+
+    # Classify events by command in a single pass
+    checks: list[SecurityEvent] = []
+    certifications: list[SecurityEvent] = []
+    for e in events:
+        result = _get_result(e)
+        cmd = result.get("command", "")
+        if cmd == "check":
+            checks.append(e)
+        elif cmd == "certify":
+            certifications.append(e)
+
+    # --- Check activity ---
+    checks_ok = sum(1 for e in checks if e.result == "succeeded")
+    checks_fail = len(checks) - checks_ok
+    lines.append(
+        f"  Checks performed: {len(checks)} "
+        f"(succeeded: {checks_ok}, failed: {checks_fail})"
+    )
+
+    # --- Certification activity ---
+    if certifications:
+        cert_ok = sum(1 for e in certifications if e.result == "succeeded")
+        scan_status_counts: dict[str, int] = defaultdict(int)
+        for e in certifications:
+            if e.result == "succeeded":
+                ss = _get_result(e).get("scanStatus", "unknown")
+                scan_status_counts[ss] += 1
+        parts = [f"{s}: {c}" for s, c in sorted(scan_status_counts.items())]
+        lines.append(f"  Certifications:   {cert_ok} ({', '.join(parts)})")
+
+    # --- Latest status per skill (deduplicate by skill_dir) ---
+    latest_per_skill: dict[str, SecurityEvent] = {}
+    for e in checks:
+        if e.result != "succeeded":
+            continue
+        req = _get_request(e)
+        skill_dir = req.get("skill_dir", "")
+        if skill_dir and skill_dir not in latest_per_skill:
+            latest_per_skill[skill_dir] = e
+
+    if latest_per_skill:
+        status_counts: dict[str, int] = defaultdict(int)
+        tampered_skills: list[tuple[str, SecurityEvent]] = []
+        denied_skills: list[tuple[str, SecurityEvent]] = []
+
+        for skill_dir, e in latest_per_skill.items():
+            s = _get_result(e).get("status", "unknown")
+            status_counts[s] += 1
+            skill_name = PurePosixPath(skill_dir).name
+            if s == "tampered":
+                tampered_skills.append((skill_name, e))
+            elif s == "deny":
+                denied_skills.append((skill_name, e))
+
+        lines.append("")
+        lines.append(f"  Skills tracked: {len(latest_per_skill)}")
+        parts = [f"{s}: {c}" for s, c in sorted(status_counts.items())]
+        lines.append(f"  Status: {', '.join(parts)}")
+
+        # Critical alerts (capped at 3 each, matching prompt_scan pattern)
+        if tampered_skills:
+            lines.append("")
+            lines.append(f"  Tampered ({len(tampered_skills)}):")
+            for skill_name, e in tampered_skills[:3]:
+                reason = _get_result(e).get("reason", "signature mismatch")
+                ts = _format_timestamp(e.timestamp)
+                lines.append(f"    [{ts}] {skill_name} — {reason}")
+
+        if denied_skills:
+            lines.append("")
+            lines.append(f"  Denied ({len(denied_skills)}):")
+            for skill_name, e in denied_skills[:3]:
+                ts = _format_timestamp(e.timestamp)
+                lines.append(f"    [{ts}] {skill_name} — high-risk findings")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Skill-ledger helpers for posture / suggestions
+# ---------------------------------------------------------------------------
+
+
+def _skill_ledger_latest_statuses(
+    events: list[SecurityEvent],
+) -> dict[str, int]:
+    """Derive per-skill latest status counts from skill_ledger events.
+
+    Returns a dict mapping status string to count (e.g. {"pass": 3, "tampered": 1}).
+    Only considers succeeded *check* events, deduplicated to the newest per skill.
+    """
+    seen: set[str] = set()
+    counts: dict[str, int] = defaultdict(int)
+    for e in events:
+        if e.result != "succeeded":
+            continue
+        result = _get_result(e)
+        if result.get("command") != "check":
+            continue
+        skill_dir = _get_request(e).get("skill_dir", "")
+        if not skill_dir or skill_dir in seen:
+            continue
+        seen.add(skill_dir)
+        counts[result.get("status", "unknown")] += 1
+    return dict(counts)
+
+
 # ---------------------------------------------------------------------------
 # Posture and footer
 # ---------------------------------------------------------------------------
@@ -342,12 +471,13 @@ def _compute_posture(
     hardening_events: list[SecurityEvent],
     verify_events: list[SecurityEvent],
     prompt_scan_events: list[SecurityEvent],
+    ledger_statuses: dict[str, int],
     time_label: str,
 ) -> str:
     """Compute overall security posture status.
 
-    Status is determined by the latest hardening, asset_verify, and
-    prompt_scan results.
+    Status is determined by the latest hardening, asset_verify,
+    prompt_scan, and skill_ledger results.
     """
 
     needs_attention = False
@@ -387,6 +517,10 @@ def _compute_posture(
                 needs_attention = True
                 break
 
+    # --- Skill Ledger (any tampered or deny status) ---
+    if ledger_statuses.get("tampered", 0) > 0 or ledger_statuses.get("deny", 0) > 0:
+        needs_attention = True
+
     # Determine status
     if needs_attention:
         status_line = "System Status: Needs attention \u26a0"
@@ -404,6 +538,7 @@ def _compute_posture(
 def _build_footer(
     events: list[SecurityEvent],
     hardening_events: list[SecurityEvent],
+    ledger_statuses: dict[str, int],
 ) -> str:
     """Build footer with stats and suggested actions."""
     total = len(events)
@@ -419,7 +554,7 @@ def _build_footer(
     ]
 
     # Suggested actions
-    suggestions = _compute_suggestions(hardening_events)
+    suggestions = _compute_suggestions(hardening_events, ledger_statuses)
     if suggestions:
         lines.append("")
         lines.append("Suggested actions:")
@@ -449,17 +584,41 @@ def _time_since_last_event(event: SecurityEvent) -> str:
         return "unknown"
 
 
-def _compute_suggestions(hardening_events: list[SecurityEvent]) -> list[str]:
-    """Generate actionable suggestions based on latest hardening event."""
+def _compute_suggestions(
+    hardening_events: list[SecurityEvent],
+    ledger_statuses: dict[str, int],
+) -> list[str]:
+    """Generate actionable suggestions based on latest events."""
     suggestions: list[str] = []
 
-    if not hardening_events:
-        return suggestions
+    # --- Hardening suggestions ---
+    if hardening_events:
+        latest = hardening_events[0]  # newest-first after _group_by_category sort
+        if latest.result == "succeeded":
+            result = _get_result(latest)
+            if result.get("failures"):
+                suggestions.append(
+                    "agent-sec-cli harden --reinforce    Fix failed rules"
+                )
 
-    latest = hardening_events[0]  # newest-first after _group_by_category sort
-    if latest.result == "succeeded":
-        result = _get_result(latest)
-        if result.get("failures"):
-            suggestions.append("agent-sec-cli harden --reinforce    Fix failed rules")
+    # --- Skill-ledger suggestions ---
+    if ledger_statuses:
+        _LEDGER_HINTS = [
+            (
+                "tampered",
+                "agent-sec-cli skill-ledger check <dir>    Investigate tampered skills",
+            ),
+            (
+                "drifted",
+                "agent-sec-cli skill-ledger certify <dir>  Re-certify drifted skills",
+            ),
+            (
+                "none",
+                "agent-sec-cli skill-ledger certify <dir>  Certify unchecked skills",
+            ),
+        ]
+        for status_key, hint in _LEDGER_HINTS:
+            if ledger_statuses.get(status_key, 0) > 0:
+                suggestions.append(hint)
 
     return suggestions

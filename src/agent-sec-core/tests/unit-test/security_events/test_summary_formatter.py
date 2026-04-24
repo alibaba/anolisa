@@ -1203,3 +1203,287 @@ class TestFooter:
         output = format_summary(events, "last 24 hours")
         assert "Needs attention" in output
         assert "\u26a0" in output
+
+
+# ---------------------------------------------------------------------------
+# Helpers: skill-ledger event factory
+# ---------------------------------------------------------------------------
+
+
+def _make_skill_ledger_event(
+    command: str,
+    status: str = "pass",
+    skill_dir: str = "/opt/skills/my-skill",
+    result_extra: dict[str, Any] | None = None,
+    event_result: str = "succeeded",
+    minutes_ago: int = 5,
+) -> SecurityEvent:
+    """Build a skill_ledger SecurityEvent for tests."""
+    result_data: dict[str, Any] = {"command": command, "status": status}
+    if result_extra:
+        result_data.update(result_extra)
+    return _make_event(
+        event_type="skill_ledger",
+        category="skill_ledger",
+        result=event_result,
+        details={
+            "request": {"command": command, "skill_dir": skill_dir},
+            "result": result_data,
+        },
+        timestamp=_ts_minutes_ago(minutes_ago),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: skill-ledger summary section
+# ---------------------------------------------------------------------------
+
+
+class TestSkillLedgerSummary:
+    def test_section_header_present(self):
+        events = [_make_skill_ledger_event("check", "pass")]
+        output = format_summary(events, "last 24 hours")
+        assert "--- Skill Ledger ---" in output
+
+    def test_check_counts(self):
+        events = [
+            _make_skill_ledger_event("check", "pass", minutes_ago=1),
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/b", minutes_ago=2
+            ),
+            _make_skill_ledger_event(
+                "check", "error", event_result="failed", minutes_ago=3
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Checks performed: 3 (succeeded: 2, failed: 1)" in output
+
+    def test_certification_counts(self):
+        events = [
+            _make_skill_ledger_event(
+                "certify",
+                result_extra={"scanStatus": "pass", "versionId": "v000001"},
+                minutes_ago=1,
+            ),
+            _make_skill_ledger_event(
+                "certify",
+                result_extra={"scanStatus": "warn", "versionId": "v000001"},
+                skill_dir="/opt/skills/b",
+                minutes_ago=2,
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Certifications:   2 (pass: 1, warn: 1)" in output
+
+    def test_status_distribution(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/a", minutes_ago=1
+            ),
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/b", minutes_ago=2
+            ),
+            _make_skill_ledger_event(
+                "check", "drifted", skill_dir="/opt/skills/c", minutes_ago=3
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Skills tracked: 3" in output
+        assert "drifted: 1" in output
+        assert "pass: 2" in output
+
+    def test_tampered_alert(self):
+        events = [
+            _make_skill_ledger_event(
+                "check",
+                "tampered",
+                skill_dir="/opt/skills/evil",
+                result_extra={"reason": "manifestHash does not match"},
+                minutes_ago=1,
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Tampered (1):" in output
+        assert "evil" in output
+        assert "manifestHash does not match" in output
+
+    def test_denied_alert(self):
+        events = [
+            _make_skill_ledger_event(
+                "check",
+                "deny",
+                skill_dir="/opt/skills/risky",
+                minutes_ago=1,
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Denied (1):" in output
+        assert "risky" in output
+        assert "high-risk findings" in output
+
+    def test_deduplicates_to_latest_per_skill(self):
+        """Multiple checks for the same skill: only the latest counts."""
+        events = [
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/a", minutes_ago=1
+            ),
+            _make_skill_ledger_event(
+                "check", "drifted", skill_dir="/opt/skills/a", minutes_ago=10
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Skills tracked: 1" in output
+        # Latest is pass (1 min ago), not drifted (10 min ago)
+        assert "pass: 1" in output
+        assert "drifted" not in output.split("Status:")[1].split("\n")[0]
+
+    def test_no_skills_tracked_when_only_failed_checks(self):
+        """Failed check events should not appear in skill status tracking."""
+        events = [
+            _make_skill_ledger_event(
+                "check", "error", event_result="failed", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Skills tracked" not in output
+
+
+# ---------------------------------------------------------------------------
+# Test: skill-ledger posture integration
+# ---------------------------------------------------------------------------
+
+
+class TestSkillLedgerPosture:
+    def test_tampered_triggers_needs_attention(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "tampered", skill_dir="/opt/skills/evil", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Needs attention" in output
+        assert "\u26a0" in output
+
+    def test_deny_triggers_needs_attention(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "deny", skill_dir="/opt/skills/bad", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Needs attention" in output
+        assert "\u26a0" in output
+
+    def test_pass_does_not_trigger_needs_attention(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/good", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Good" in output
+        assert "\u2713" in output
+
+    def test_drifted_does_not_trigger_needs_attention(self):
+        """Drifted is a warning, not a critical signal for posture."""
+        events = [
+            _make_skill_ledger_event(
+                "check", "drifted", skill_dir="/opt/skills/s", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Good" in output
+        assert "\u2713" in output
+
+    def test_failed_event_does_not_affect_posture(self):
+        """A skill_ledger event that itself failed should NOT affect posture."""
+        events = [
+            _make_skill_ledger_event(
+                "check",
+                "tampered",
+                event_result="failed",
+                minutes_ago=1,
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Good" in output
+
+
+# ---------------------------------------------------------------------------
+# Test: skill-ledger suggestions
+# ---------------------------------------------------------------------------
+
+
+class TestSkillLedgerSuggestions:
+    def test_tampered_suggestion(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "tampered", skill_dir="/opt/skills/x", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Investigate tampered skills" in output
+
+    def test_drifted_suggestion(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "drifted", skill_dir="/opt/skills/x", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Re-certify drifted skills" in output
+
+    def test_none_suggestion(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "none", skill_dir="/opt/skills/x", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Certify unchecked skills" in output
+
+    def test_no_suggestion_when_all_pass(self):
+        events = [
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/a", minutes_ago=1
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "skill-ledger" not in output.split("---\n")[-1]
+
+
+# ---------------------------------------------------------------------------
+# Test: skill-ledger in mixed report
+# ---------------------------------------------------------------------------
+
+
+class TestSkillLedgerMixed:
+    def test_section_order_in_combined_report(self):
+        """Skill Ledger section appears after Hardening."""
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="succeeded",
+                details={
+                    "request": {"args": ["--scan"]},
+                    "result": {
+                        "mode": "scan",
+                        "passed": 48,
+                        "failed": 0,
+                        "total": 48,
+                        "failures": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+            _make_skill_ledger_event(
+                "check", "pass", skill_dir="/opt/skills/a", minutes_ago=3
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "--- Hardening ---" in output
+        assert "--- Skill Ledger ---" in output
+        harden_pos = output.index("--- Hardening ---")
+        ledger_pos = output.index("--- Skill Ledger ---")
+        assert harden_pos < ledger_pos
