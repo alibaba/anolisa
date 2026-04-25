@@ -5,7 +5,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { InterruptionBadge } from '../components/InterruptionBadge';
-import { InterruptionPanel, ResolvedEventInfo } from '../components/InterruptionPanel';
+import { InterruptionPanel } from '../components/InterruptionPanel';
 import {
   fetchSessions,
   fetchTraces,
@@ -15,8 +15,7 @@ import {
   fetchInterruptionCount,
   fetchInterruptionStats,
   fetchInterruptionSessionCounts,
-  fetchInterruptionConversationCounts,
-  fetchTokenSavings,
+  fetchInterruptionTraceCounts,
   SessionSummary,
   TraceSummary,
   TimeseriesBucket,
@@ -25,7 +24,7 @@ import {
   InterruptionCountResponse,
   InterruptionTypeStat,
   SessionInterruptionCount,
-  ConversationInterruptionCount,
+  TraceInterruptionCount,
   INTERRUPTION_TYPE_CN,
 } from '../utils/apiClient';
 
@@ -311,15 +310,14 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
 
 interface TraceSubTableProps {
   sessionId: string;
-  conversationInterruptionCounts: Map<string, ConversationInterruptionCount>;
+  traceInterruptionCounts: Map<string, TraceInterruptionCount>;
   startNs?: number;
   endNs?: number;
-  onResolvedEvent?: (info: ResolvedEventInfo) => void;
 }
 
 const PAGE_SIZE = 10;
 
-const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationInterruptionCounts, startNs, endNs, onResolvedEvent }) => {
+const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, traceInterruptionCounts, startNs, endNs }) => {
   const navigate = useNavigate();
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -339,7 +337,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   if (loading)
     return (
       <tr>
-        <td colSpan={10} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
+        <td colSpan={8} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
           加载 Trace 列表...
         </td>
       </tr>
@@ -347,7 +345,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   if (error)
     return (
       <tr>
-        <td colSpan={10} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
+        <td colSpan={8} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
           ⚠️ {error}
         </td>
       </tr>
@@ -360,7 +358,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
-        <td colSpan={10} className="px-4 lg:px-8 py-2">
+        <td colSpan={9} className="px-4 lg:px-8 py-2">
           <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
             <div>Conversation ID</div>
             <div>用户请求</div>
@@ -375,7 +373,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
       {traces.length === 0 && (
         <tr className="bg-blue-50">
-          <td colSpan={10} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
+          <td colSpan={9} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
             该 Session 下暂无 Trace
           </td>
         </tr>
@@ -384,7 +382,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       {pageTraces.map((tr) => (
         <React.Fragment key={tr.conversation_id}>
           <tr className="bg-blue-50 hover:bg-blue-100 transition-colors">
-            <td colSpan={10} className="px-4 lg:px-8 py-2">
+            <td colSpan={9} className="px-4 lg:px-8 py-2">
               <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] items-center text-sm min-w-[800px]">
                 {/* Col 1: Conversation ID */}
                 <div className="min-w-0 pr-2">
@@ -428,14 +426,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                 </div>
                 <div>
                   {(() => {
-                    const ic = conversationInterruptionCounts.get(tr.conversation_id);
+                    const ic = traceInterruptionCounts.get(tr.trace_id);
                     if (!ic || ic.total === 0) return <span className="text-xs text-gray-300">—</span>;
                     return (
                       <InterruptionBadge
                         bySeverity={ic.by_severity}
                         types={ic.types}
                         onClick={() => setExpandedTracePanel(
-                          expandedTracePanel === tr.conversation_id ? null : tr.conversation_id
+                          expandedTracePanel === tr.trace_id ? null : tr.trace_id
                         )}
                       />
                     );
@@ -445,14 +443,13 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
             </td>
           </tr>
           {/* Trace interruption panel */}
-          {expandedTracePanel === tr.conversation_id && (
+          {expandedTracePanel === tr.trace_id && (
             <tr className="bg-blue-50">
-              <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
+              <td colSpan={9} className="px-4 lg:px-8 pb-3 pt-0">
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <InterruptionPanel
-                    conversationId={tr.conversation_id}
+                    traceId={tr.trace_id}
                     onClose={() => setExpandedTracePanel(null)}
-                    onResolvedEvent={onResolvedEvent}
                   />
                 </div>
               </td>
@@ -464,7 +461,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       {/* 分页控制 */}
       {totalPages > 1 && (
         <tr className="bg-blue-50 border-t border-blue-100">
-          <td colSpan={10} className="px-4 lg:px-8 py-2">
+          <td colSpan={8} className="px-4 lg:px-8 py-2">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-xs text-gray-500">
                 {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length} 条
@@ -787,84 +784,12 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   // Per-type stats for tooltip breakdown
   const [interruptionStats, setInterruptionStats] = useState<InterruptionTypeStat[]>([]);
 
-  // Interruption counts per session / conversation
+  // Interruption counts per session / trace
   const [sessionInterruptionCounts, setSessionInterruptionCounts] = useState<Map<string, SessionInterruptionCount>>(new Map());
-  const [conversationInterruptionCounts, setConversationInterruptionCounts] = useState<Map<string, ConversationInterruptionCount>>(new Map());
-
-  // Token savings per session (session_id → saved_tokens)
-  const [savingsMap, setSavingsMap] = useState<Map<string, number>>(new Map());
+  const [traceInterruptionCounts, setTraceInterruptionCounts] = useState<Map<string, TraceInterruptionCount>>(new Map());
 
   // Which session row is expanded to show traces
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
-
-  // Called when a single interruption event is resolved inside InterruptionPanel.
-  // Decrements counts in all relevant state maps so badges update without re-query.
-  const handleResolvedEvent = useCallback((info: ResolvedEventInfo) => {
-    const sev = info.severity as 'critical' | 'high' | 'medium' | 'low';
-
-    // 1. Update overview card total + by_severity
-    setInterruptionCount(prev => {
-      if (!prev) return prev;
-      const newTotal = Math.max(0, prev.total - 1);
-      return {
-        total: newTotal,
-        by_severity: { ...prev.by_severity, [sev]: Math.max(0, prev.by_severity[sev] - 1) },
-      };
-    });
-
-    // 2. Update per-type stats (for tooltip)
-    setInterruptionStats(prev =>
-      prev.map(s =>
-        s.severity === info.severity && s.interruption_type === info.interruption_type
-          ? { ...s, count: Math.max(0, s.count - 1) }
-          : s
-      ).filter(s => s.count > 0)
-    );
-
-    // 3. Update conversation-level badge counts
-    if (info.conversation_id) {
-      setConversationInterruptionCounts(prev => {
-        const existing = prev.get(info.conversation_id!);
-        if (!existing) return prev;
-        const next = new Map(prev);
-        const newTotal = Math.max(0, existing.total - 1);
-        const newBySev = { ...existing.by_severity, [sev]: Math.max(0, existing.by_severity[sev] - 1) };
-        const newTypes = existing.types.map(t =>
-          t.severity === info.severity && t.interruption_type === info.interruption_type
-            ? { ...t, count: Math.max(0, t.count - 1) }
-            : t
-        ).filter(t => t.count > 0);
-        if (newTotal === 0) {
-          next.delete(info.conversation_id!);
-        } else {
-          next.set(info.conversation_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
-        }
-        return next;
-      });
-    }
-
-    // 4. Update session-level badge counts
-    if (info.session_id) {
-      setSessionInterruptionCounts(prev => {
-        const existing = prev.get(info.session_id!);
-        if (!existing) return prev;
-        const next = new Map(prev);
-        const newTotal = Math.max(0, existing.total - 1);
-        const newBySev = { ...existing.by_severity, [sev]: Math.max(0, existing.by_severity[sev] - 1) };
-        const newTypes = existing.types.map(t =>
-          t.severity === info.severity && t.interruption_type === info.interruption_type
-            ? { ...t, count: Math.max(0, t.count - 1) }
-            : t
-        ).filter(t => t.count > 0);
-        if (newTotal === 0) {
-          next.delete(info.session_id!);
-        } else {
-          next.set(info.session_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
-        }
-        return next;
-      });
-    }
-  }, []);
 
   // Sync filter state to URL so back-navigation restores it
   const syncParams = useCallback((sMs: number, eMs: number, agent: string) => {
@@ -897,9 +822,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     loadAgentNames(startMs, endMs);
   }, [startMs, endMs, loadAgentNames]);
 
-  // Shared data-fetch helper: runs all 7 parallel queries and updates state.
+  // Shared data-fetch helper: runs all 6 parallel queries and updates state.
   const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
-    const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
+    const [sessData, tsData, intData, iStats, iSessionCounts, iTraceCounts] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
         agent ? data.filter((s) => s.agent_name === agent) : data
       ),
@@ -907,8 +832,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
       fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
       fetchInterruptionSessionCounts(startNs, endNs).catch(() => [] as SessionInterruptionCount[]),
-      fetchInterruptionConversationCounts(startNs, endNs).catch(() => [] as ConversationInterruptionCount[]),
-      fetchTokenSavings(startNs, endNs, agent).catch(() => null),
+      fetchInterruptionTraceCounts(startNs, endNs).catch(() => [] as TraceInterruptionCount[]),
     ]);
     setSessions(sessData);
     setTokenSeries(tsData.token_series);
@@ -916,8 +840,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setInterruptionCount(intData);
     setInterruptionStats(iStats);
     setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
-    setConversationInterruptionCounts(new Map(iConvCounts.map((c) => [c.conversation_id, c])));
-    setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.saved_tokens]) ?? []));
+    setTraceInterruptionCounts(new Map(iTraceCounts.map((c) => [c.trace_id, c])));
   }, []);
 
   const handleQuery = useCallback(async () => {
@@ -1165,9 +1088,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
                         输入 Token
                       </th>
-                      <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                        节省 Token
-                      </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
                         输出 Token
                       </th>
@@ -1185,7 +1105,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                 <tbody className="divide-y divide-gray-100">
                   {!loading && sessions.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="px-4 lg:px-6 py-12 text-center text-gray-400">
+                      <td colSpan={8} className="px-4 lg:px-6 py-12 text-center text-gray-400">
                         <div className="text-4xl mb-2">🔍</div>
                         <p>所选时间范围内暂无 Session 数据</p>
                         <p className="text-xs mt-1">请确认 agentsight 服务已启动并有数据写入</p>
@@ -1240,26 +1160,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-blue-600">
                             {fmtTokens(sess.total_input_tokens)}
                           </td>
-                          <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                            {(() => {
-                              const saved = savingsMap.get(sess.session_id);
-                              if (!saved) return <span className="text-xs text-gray-300">—</span>;
-                              const params = new URLSearchParams({
-                                session_id: sess.session_id,
-                                start: String(startMs),
-                                end: String(endMs),
-                              });
-                              if (selectedAgent) params.set('agent', selectedAgent);
-                              return (
-                                <a
-                                  href={`#/savings?${params.toString()}`}
-                                  className="text-sm font-semibold text-green-600 underline decoration-green-300 hover:text-green-800 hover:decoration-green-600 transition-colors"
-                                >
-                                  {fmtTokens(saved)}
-                                </a>
-                              );
-                            })()}
-                          </td>
                           <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-green-600">
                             {fmtTokens(sess.total_output_tokens)}
                           </td>
@@ -1294,10 +1194,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           <TraceSubTable
                             key={`${sess.session_id}-${queryRangeNs[0]}`}
                             sessionId={sess.session_id}
-                            conversationInterruptionCounts={conversationInterruptionCounts}
+                            traceInterruptionCounts={traceInterruptionCounts}
                             startNs={queryRangeNs[0]}
                             endNs={queryRangeNs[1]}
-                            onResolvedEvent={handleResolvedEvent}
                           />
                         )}
                       </React.Fragment>

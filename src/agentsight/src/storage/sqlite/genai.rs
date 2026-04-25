@@ -91,6 +91,7 @@ pub struct SavingsSessionSummary {
     pub agent_name: Option<String>,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub request_count: i64,
 }
 
 /// Summary of a single conversation (user query) within a session
@@ -827,7 +828,8 @@ impl GenAISqliteStore {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
                     COALESCE(SUM(input_tokens), 0)   AS total_input,
-                    COALESCE(SUM(output_tokens), 0)  AS total_output
+                    COALESCE(SUM(output_tokens), 0)  AS total_output,
+                    COUNT(*)                         AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
@@ -839,7 +841,8 @@ impl GenAISqliteStore {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
                     COALESCE(SUM(input_tokens), 0)   AS total_input,
-                    COALESCE(SUM(output_tokens), 0)  AS total_output
+                    COALESCE(SUM(output_tokens), 0)  AS total_output,
+                    COUNT(*)                         AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
@@ -856,6 +859,7 @@ impl GenAISqliteStore {
                 agent_name: row.get(1)?,
                 total_input_tokens: row.get(2)?,
                 total_output_tokens: row.get(3)?,
+                request_count: row.get(4)?,
             })
         };
 
@@ -869,6 +873,37 @@ impl GenAISqliteStore {
         for row in rows {
             result.push(row?);
         }
+        Ok(result)
+    }
+
+    /// Get the turn index (1-based) for each llm_call in a session.
+    ///
+    /// Returns a map from `call_id` to its position in the time-ordered
+    /// sequence of LLM calls within the session.
+    pub fn get_call_turn_indices(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut result = std::collections::HashMap::new();
+
+        for sid in session_ids {
+            let sql = "SELECT call_id FROM genai_events \
+                       WHERE event_type = 'llm_call' AND session_id = ?1 \
+                       ORDER BY start_timestamp_ns ASC";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![sid], |row| {
+                let call_id: String = row.get(0)?;
+                Ok(call_id)
+            })?;
+
+            for (idx, row) in rows.enumerate() {
+                let call_id: String = row?;
+                // 1-based turn index
+                result.insert(call_id, idx + 1);
+            }
+        }
+
         Ok(result)
     }
 

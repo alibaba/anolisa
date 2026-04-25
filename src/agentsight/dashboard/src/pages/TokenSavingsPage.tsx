@@ -131,7 +131,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
           {fmtTokens(item.after_tokens)}
         </td>
         <td className="px-4 py-3 text-sm font-semibold text-green-600 text-right">
-          {fmtTokens(item.saved_tokens)}
+          {fmtTokens(item.compounded_saved)}
         </td>
         <td className="px-4 py-3 text-center">
           <button
@@ -201,18 +201,18 @@ const SessionRow: React.FC<{
           {fmtTokens(session.total_output_tokens)}
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-green-600 text-right">
-          {fmtTokens(session.saved_tokens)}
+          {fmtTokens(session.compounded_saved)}
         </td>
         <td className="px-4 lg:px-6 py-4">
           <div className="flex items-center gap-2">
             <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden max-w-[80px]">
               <div
                 className="h-full bg-green-500 rounded-full"
-                style={{ width: `${Math.min(session.savings_rate, 100)}%` }}
+                style={{ width: `${Math.min(session.compounded_savings_rate, 100)}%` }}
               />
             </div>
             <span className="text-xs font-semibold text-green-600">
-              {session.savings_rate.toFixed(1)}%
+              {session.compounded_savings_rate.toFixed(1)}%
             </span>
           </div>
         </td>
@@ -334,10 +334,10 @@ export const TokenSavingsPage: React.FC = () => {
   const totalInput = summary?.total_input_tokens ?? 0;
   const totalOutput = summary?.total_output_tokens ?? 0;
   const totalTokens = summary?.total_tokens ?? 0;
-  const totalSaved = summary?.total_saved_tokens ?? 0;
-  const totalToolSaved = summary?.total_tool_saved ?? 0;
-  const totalMcpSaved = summary?.total_mcp_saved ?? 0;
-  const savingsRate = summary?.savings_rate ?? 0;
+  const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
+  const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
+  const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
+  const compoundedSavingsRate = summary?.compounded_savings_rate ?? 0;
 
   return (
     <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
@@ -473,15 +473,15 @@ export const TokenSavingsPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm text-gray-500">已降低 Token</p>
           <p className="text-3xl font-bold text-green-600 mt-1">
-            {fmtTokens(totalSaved)}
+            {fmtTokens(totalCompoundedSaved)}
           </p>
           <div className="mt-3">
             <ResponsiveContainer width="100%" height={60}>
               <PieChart>
                 <Pie
                   data={[
-                    { name: '工具', value: totalToolSaved },
-                    { name: 'MCP', value: totalMcpSaved },
+                    { name: '工具', value: totalCompoundedToolSaved },
+                    { name: 'MCP', value: totalCompoundedMcpSaved },
                   ]}
                   cx="50%"
                   cy="50%"
@@ -500,11 +500,11 @@ export const TokenSavingsPage: React.FC = () => {
             <div className="flex justify-center gap-4 -mt-1">
               <span className="flex items-center gap-1 text-xs text-gray-500">
                 <span className="w-2 h-2 rounded-full bg-orange-500" />
-                工具 {fmtTokens(totalToolSaved)}
+                工具 {fmtTokens(totalCompoundedToolSaved)}
               </span>
               <span className="flex items-center gap-1 text-xs text-gray-500">
                 <span className="w-2 h-2 rounded-full bg-violet-500" />
-                MCP {fmtTokens(totalMcpSaved)}
+                MCP {fmtTokens(totalCompoundedMcpSaved)}
               </span>
             </div>
           </div>
@@ -522,29 +522,29 @@ export const TokenSavingsPage: React.FC = () => {
                   cy="40"
                   r="34"
                   fill="none"
-                  stroke={savingsRate >= 30 ? '#10b981' : savingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
+                  stroke={compoundedSavingsRate >= 30 ? '#10b981' : compoundedSavingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
                   strokeWidth="6"
-                  strokeDasharray={`${(savingsRate / 100) * 213.6} 213.6`}
+                  strokeDasharray={`${(compoundedSavingsRate / 100) * 213.6} 213.6`}
                   strokeLinecap="round"
                 />
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-lg font-bold text-gray-900">
-                  {savingsRate.toFixed(1)}%
+                  {compoundedSavingsRate.toFixed(1)}%
                 </span>
               </div>
             </div>
             <div>
               <span
                 className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  savingsRate >= 30
+                  compoundedSavingsRate >= 30
                     ? 'bg-green-100 text-green-700'
-                    : savingsRate >= 15
+                    : compoundedSavingsRate >= 15
                     ? 'bg-blue-100 text-blue-700'
                     : 'bg-orange-100 text-orange-700'
                 }`}
               >
-                {savingsRate >= 30 ? '优秀' : savingsRate >= 15 ? '良好' : '待优化'}
+                {compoundedSavingsRate >= 30 ? '优秀' : compoundedSavingsRate >= 15 ? '良好' : '待优化'}
               </span>
               <p className="text-xs text-gray-400 mt-1">
                 基于总消耗计算

@@ -207,6 +207,8 @@ export interface OptimizationItem {
   before_tokens: number;
   after_tokens: number;
   saved_tokens: number;
+  compounded_saved: number;
+  compounding_turns: number;
   before_summary: string;
   after_summary: string;
   diff_lines: DiffLine[];
@@ -219,7 +221,10 @@ export interface SessionSavings {
   total_output_tokens: number;
   total_tokens: number;
   saved_tokens: number;
+  compounded_saved: number;
   savings_rate: number;
+  compounded_savings_rate: number;
+  request_count: number;
   tool_saved: number;
   mcp_saved: number;
   optimization_items: OptimizationItem[];
@@ -230,9 +235,13 @@ export interface SavingsSummary {
   total_output_tokens: number;
   total_tokens: number;
   total_saved_tokens: number;
+  total_compounded_saved: number;
   savings_rate: number;
+  compounded_savings_rate: number;
   total_tool_saved: number;
   total_mcp_saved: number;
+  total_compounded_tool_saved: number;
+  total_compounded_mcp_saved: number;
 }
 
 export interface TokenSavingsResponse {
