@@ -19,6 +19,7 @@
 //! ```
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,8 @@ pub struct AgentSight {
     ffi_sender: Option<FfiEventSender>,
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
+    /// Cache of pid → agent_name, persists after process exit for deferred resolution
+    pid_agent_name_cache: HashMap<u32, String>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -134,6 +137,12 @@ impl AgentSight {
         // Attach SSL probes to already-running agents
         for agent in &existing_agents {
             Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
+        }
+
+        // Build pid → agent_name cache from existing agents (persists after process exit)
+        let mut pid_agent_name_cache = HashMap::new();
+        for agent in &existing_agents {
+            pid_agent_name_cache.insert(agent.pid, agent.agent_info.name.clone());
         }
 
         // Start polling (non-blocking)
@@ -267,6 +276,7 @@ impl AgentSight {
             pending_genai: Vec::new(),
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
+            pid_agent_name_cache,
         })
     }
 
@@ -366,7 +376,7 @@ impl AgentSight {
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper);
+            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper, &self.pid_agent_name_cache);
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {
@@ -442,6 +452,7 @@ impl AgentSight {
                 // Check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
+                    self.pid_agent_name_cache.insert(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
                 }
             }
@@ -607,7 +618,7 @@ impl AgentSight {
                 _ => continue,
             };
 
-            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id) {
+            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id, &self.pid_agent_name_cache) {
                 if let Some(ref store) = self.genai_sqlite_store {
                     let call_id = pending.call_id.clone();
                     let pid = pending.pid;

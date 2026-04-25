@@ -77,12 +77,13 @@ impl GenAIBuilder {
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        if let Some(llm_call) = self.build_llm_call(results, response_mapper) {
+        if let Some(llm_call) = self.build_llm_call(results, response_mapper, pid_agent_name_cache) {
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
                 AnalysisResult::Http(h) => Some(h.clone()),
@@ -161,6 +162,7 @@ impl GenAIBuilder {
         &self,
         request: &ParsedRequest,
         conn_id: &ConnectionId,
+        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
         let path_match = self.is_llm_api_path(&request.path);
@@ -280,9 +282,8 @@ impl GenAIBuilder {
         // Extract provider from request path
         let provider = self.extract_provider_from_path(&request.path);
 
-        // Resolve agent_name from comm using known_agents registry
-        // (PID is dead so /proc is gone, but comm is still available from the captured request)
-        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm);
+        // Resolve agent_name: check pid→name cache first (works for dead PIDs), then comm-based fallback
+        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache);
 
         Some(PendingCallInfo {
             call_id,
@@ -401,7 +402,7 @@ impl GenAIBuilder {
     /// Build LLMCall from analysis results
     ///
     /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper) -> Option<LLMCall> {
+    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper, pid_agent_name_cache: &std::collections::HashMap<u32, String>) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
             AnalysisResult::Token(t) => Some(t.clone()),
@@ -547,7 +548,7 @@ impl GenAIBuilder {
             error,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm, http.pid),
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -1209,7 +1210,11 @@ impl GenAIBuilder {
 
     /// Resolve agent name from comm string only (no /proc access).
     /// Used for dead-PID drain where the process is already gone.
-    fn resolve_agent_name_from_comm(comm: &str) -> Option<String> {
+    fn resolve_agent_name_from_comm(comm: &str, pid: u32, cache: &std::collections::HashMap<u32, String>) -> Option<String> {
+        // First check the pid→agent_name cache (works even for dead processes)
+        if let Some(name) = cache.get(&pid) {
+            return Some(name.clone());
+        }
         let ctx = ProcessContext {
             comm: comm.to_string(),
             cmdline_args: vec![],
@@ -1222,7 +1227,11 @@ impl GenAIBuilder {
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    fn resolve_agent_name(comm: &str, pid: u32) -> Option<String> {
+    fn resolve_agent_name(comm: &str, pid: u32, cache: &std::collections::HashMap<u32, String>) -> Option<String> {
+        // First check the pid→agent_name cache (works even for dead processes)
+        if let Some(name) = cache.get(&pid) {
+            return Some(name.clone());
+        }
         // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
         let cmdline_args = std::fs::read(format!("/proc/{}/cmdline", pid))
             .ok()
