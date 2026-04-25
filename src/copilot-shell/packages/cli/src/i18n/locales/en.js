@@ -1042,8 +1042,8 @@ export default {
   'Invalid auth method selected.': 'Invalid auth method selected.',
   'Failed to authenticate. Message: {{message}}':
     'Failed to authenticate. Message: {{message}}',
-  'Authenticated successfully with {{authType}} credentials.':
-    'Authenticated successfully with {{authType}} credentials.',
+  '{{authType}} credentials saved successfully.':
+    '{{authType}} credentials saved successfully.',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     'Invalid API key. Please check your API key and try again.',

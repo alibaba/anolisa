@@ -264,6 +264,57 @@ describe('OpenAIContentGenerator (Refactored)', () => {
         'Authentication failed: Network connection failed',
       );
     });
+
+    it('should skip validation for non-DashScope providers', async () => {
+      // Create a generator with a custom (non-DashScope) baseUrl
+      const customConfig = {
+        model: 'custom-model',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.custom-provider.com/v1',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+        timeout: 120000,
+        maxRetries: 3,
+        samplingParams: {
+          temperature: 0.7,
+          max_tokens: 1000,
+          top_p: 0.9,
+        },
+      };
+      const modelsRetrieve = vi.fn();
+      const mockProvider: OpenAICompatibleProvider = {
+        buildHeaders: vi.fn().mockReturnValue({}),
+        buildClient: vi.fn().mockReturnValue({
+          chat: { completions: { create: vi.fn() } },
+          embeddings: { create: vi.fn() },
+          models: { retrieve: modelsRetrieve },
+        } as unknown as OpenAI),
+        buildRequest: vi.fn().mockImplementation((req) => req),
+        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
+      };
+      const customGenerator = new OpenAIContentGenerator(
+        customConfig,
+        mockConfig,
+        mockProvider,
+      );
+
+      // Should resolve immediately without calling models.retrieve
+      await expect(customGenerator.validateApiKey()).resolves.toBeUndefined();
+      expect(modelsRetrieve).not.toHaveBeenCalled();
+    });
+
+    it('should still validate for DashScope providers', async () => {
+      // Default generator has no baseUrl, which isDashScopeProvider returns true for
+      mockOpenAIClient.models.retrieve.mockResolvedValue({
+        id: 'gpt-4',
+        object: 'model',
+        created: 1234567890,
+        owned_by: 'dashscope',
+      });
+
+      await expect(generator.validateApiKey()).resolves.toBeUndefined();
+      expect(mockOpenAIClient.models.retrieve).toHaveBeenCalledWith('gpt-4');
+    });
   });
 
   describe('shouldSuppressErrorLogging', () => {

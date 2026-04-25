@@ -1,6 +1,9 @@
 import type { ContentGenerator } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
-import { type OpenAICompatibleProvider } from './provider/index.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  type OpenAICompatibleProvider,
+} from './provider/index.js';
 import type {
   CountTokensParameters,
   CountTokensResponse,
@@ -73,9 +76,15 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * @returns Promise<void> - resolves if both valid, rejects if either invalid
    */
   async validateApiKey(): Promise<void> {
+    // Only validate for DashScope providers; custom providers may not support /v1/models endpoint
+    const cgConfig = this.pipeline.getContentGeneratorConfig();
+    if (!DashScopeOpenAICompatibleProvider.isDashScopeProvider(cgConfig)) {
+      return;
+    }
+
     try {
       const openai = this.pipeline.getProvider().buildClient();
-      const model = this.pipeline.getContentGeneratorConfig().model;
+      const model = cgConfig.model;
 
       // Use models.retrieve() to directly check if the specific model exists
       // This avoids pagination issues with models.list() when providers have many models

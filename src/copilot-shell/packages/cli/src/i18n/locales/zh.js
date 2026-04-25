@@ -987,8 +987,8 @@ export default {
     '未找到 ANTHROPIC_BASE_URL 环境变量。',
   'Invalid auth method selected.': '选择了无效的认证方式。',
   'Failed to authenticate. Message: {{message}}': '认证失败。消息：{{message}}',
-  'Authenticated successfully with {{authType}} credentials.':
-    '使用 {{authType}} 凭据成功认证。',
+  '{{authType}} credentials saved successfully.':
+    '{{authType}} 认证方式凭据已保存。',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     '无效的 API 密钥。请检查您的 API 密钥并重试。',

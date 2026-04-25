@@ -223,7 +223,7 @@ export const useAuthCommand = (
       addItem(
         {
           type: MessageType.INFO,
-          text: t('Authenticated successfully with {{authType}} credentials.', {
+          text: t('{{authType}} credentials saved successfully.', {
             authType,
           }),
         },
