@@ -315,7 +315,7 @@ impl GenAISqliteStore {
             CREATE INDEX IF NOT EXISTS idx_genai_trace_timestamp ON genai_events(trace_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_conversation_timestamp ON genai_events(conversation_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid_timestamp ON genai_events(pid, start_timestamp_ns);
-            CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns);",
+            CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns)",
             // NOTE: idx_genai_status and idx_genai_interruption_type are NOT created here
             // because they depend on columns added via migration. They are created in the
             // migration blocks below, which guarantees the columns exist first.
@@ -377,6 +377,9 @@ impl GenAISqliteStore {
 
         // Migration: add conversation_id column for existing databases
         let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+
+        // v5: tool_call_ids JSON array for output tool calls
+        ensure_col!("tool_call_ids", "TEXT");
 
         Ok(())
     }
@@ -475,6 +478,20 @@ impl GenAISqliteStore {
                     if reasons.is_empty() { None } else { serde_json::to_string(&reasons).ok() }
                 };
 
+                let tool_call_ids: Option<String> = {
+                    let ids: Vec<String> = call.response.messages.iter()
+                        .flat_map(|m| m.parts.iter())
+                        .filter_map(|p| {
+                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                                Some(tc_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                };
+
                 let updated = conn.execute(
                     "UPDATE genai_events SET
                         status = 'complete',
@@ -503,8 +520,9 @@ impl GenAISqliteStore {
                         output_messages     = ?23,
                         status_code         = ?24,
                         sse_event_count     = ?25,
-                        event_json          = ?26
-                    WHERE call_id = ?27 AND status = 'pending'",
+                        event_json          = ?26,
+                        tool_call_ids       = ?27
+                    WHERE call_id = ?28 AND status = 'pending'",
                     params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
@@ -532,6 +550,7 @@ impl GenAISqliteStore {
                         call.metadata.get("status_code").and_then(|s| s.parse::<i64>().ok()),
                         call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
                         event_json,
+                        tool_call_ids,
                         call.call_id,
                     ],
                 )?;
@@ -1386,6 +1405,21 @@ impl GenAISqliteStore {
                     else { serde_json::to_string(&reasons).ok() }
                 };
 
+                // Extract tool_call_ids from response messages (outgoing tool calls)
+                let tool_call_ids: Option<String> = {
+                    let ids: Vec<String> = call.response.messages.iter()
+                        .flat_map(|m| m.parts.iter())
+                        .filter_map(|p| {
+                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                                Some(tc_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                };
+
                 // Get instance ID (same logic as SLS uploader)
                 let instance = crate::genai::sls::SlsUploader::get_instance_id();
 
@@ -1400,12 +1434,12 @@ impl GenAISqliteStore {
                         cache_creation_tokens, cache_read_tokens,
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
-                        is_sse, sse_event_count, event_json
+                        is_sse, sse_event_count, event_json, tool_call_ids
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
                     )",
                     params![
                         "llm_call",
@@ -1447,6 +1481,7 @@ impl GenAISqliteStore {
                         call.metadata.get("is_sse").map(|s| if s == "true" { 1i64 } else { 0 }),
                         call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
                         event_json,
+                        tool_call_ids,
                     ],
                 )?;
             }

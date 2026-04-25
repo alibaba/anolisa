@@ -165,15 +165,11 @@ impl GenAIBuilder {
         let body_str = if request.body_len > 0 { Some(request.body_str().to_string()) } else { None };
         let body_match = !path_match && Self::is_sysom_pop_request(&body_str);
         if !path_match && !body_match {
-            print!("[GenAI] build_pending: skip non-LLM path={} body_len={}\n",
-                request.path, request.body_len);
             return None;
         }
 
         let call_id = self.generate_id();
         let body = request.json_body();
-        print!("[GenAI] build_pending: path={} body_parsed={} body_len={}\n",
-            request.path, body.is_some(), request.body_len);
 
         // Determine if streaming
         let is_sse = body.as_ref()
@@ -186,27 +182,6 @@ impl GenAIBuilder {
         let (session_id, conversation_id, user_query, input_messages, system_instructions) =
             if let Some(ref v) = body {
                 if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
-                    // Diagnostic: dump message roles and content types
-                    let total = messages.len();
-                    let user_count = messages.iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .count();
-                    print!("[GenAI] build_pending: messages.len={} user_count={}\n", total, user_count);
-                    // Print first 3 user messages' content type
-                    for (i, m) in messages.iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .take(3)
-                        .enumerate()
-                    {
-                        let ctype = match m.get("content") {
-                            Some(c) if c.is_string() => format!("string(len={})", c.as_str().unwrap_or("").len()),
-                            Some(c) if c.is_array() => format!("array(len={})", c.as_array().unwrap().len()),
-                            Some(c) if c.is_null() => "null".to_string(),
-                            Some(_) => "other".to_string(),
-                            None => "missing".to_string(),
-                        };
-                        print!("[GenAI] build_pending: user_msg[{}] content_type={}\n", i, ctype);
-                    }
                     // Helper: extract text from "content" which can be either
                     // a plain string or an array of content blocks:
                     //   "content": "text"
@@ -287,14 +262,9 @@ impl GenAIBuilder {
                     (session_id, conversation_id, user_query, input_messages, system_instructions)
                 } else {
                     // messages key missing or not an array
-                    let keys: Vec<_> = v.as_object()
-                        .map(|o| o.keys().take(10).cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    print!("[GenAI] build_pending: no 'messages' array, top-level keys={:?}\n", keys);
                     (None, None, None, None, None)
                 }
             } else {
-                print!("[GenAI] build_pending: body is None (json parse failed)\n");
                 (None, None, None, None, None)
             };
 
@@ -311,12 +281,6 @@ impl GenAIBuilder {
         // Resolve agent_name from comm using known_agents registry
         // (PID is dead so /proc is gone, but comm is still available from the captured request)
         let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm);
-
-        print!("[GenAI] build_pending: pid={} session_id={:?} conversation_id={:?} user_query={:?} model={:?} provider={:?} agent={:?}\n",
-            conn_id.pid, session_id, conversation_id,
-            user_query.as_deref().map(|s| if s.len() > 100 { &s[..100] } else { s }),
-            model, provider, agent_name,
-        );
 
         Some(PendingCallInfo {
             call_id,
@@ -421,9 +385,6 @@ impl GenAIBuilder {
 
         let event_count = sse_events.len() as i64;
 
-        print!("[GenAI] extract_sse_enrichment: events={} model={:?} trace_id={:?} content_len={} input_tokens={:?} output_tokens={:?}\n",
-            event_count, model, trace_id, content_buf.len(), input_tokens, output_tokens);
-
         Some(SseEnrichment {
             model,
             trace_id,
@@ -466,7 +427,7 @@ impl GenAIBuilder {
             return None;
         }
 
-        let call_id = self.generate_id();
+        let internal_id = self.generate_id();
 
         // Build request from parsed message or HTTP record
         let request = self.build_request(&parsed_message, &http);
@@ -510,8 +471,11 @@ impl GenAIBuilder {
             .unwrap_or_else(|| Self::compute_session_id(&request));
 
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
-        let response_id = Self::extract_response_id(&parsed_message, &http)
-            .unwrap_or_else(|| call_id.clone());
+        // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
+        // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
+        let response_id = Self::extract_response_id(&parsed_message, &http);
+        let call_id = response_id.clone().unwrap_or_else(|| internal_id.clone());
+        let response_id = response_id.unwrap_or_else(|| call_id.clone());
 
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
