@@ -979,10 +979,12 @@ pub async fn get_token_savings(
         std::collections::HashMap::new()
     };
 
-    // Step 3.5: Build call_id → turn_index map so we can determine
-    // at which turn each tool_use_id was invoked.
+    // Step 3.5: Build tool_call_id → turn_index map so we can determine
+    // at which turn each tool_use_id was invoked. Uses the tool_call_ids
+    // column (JSON array) from genai_events, with backward compatibility
+    // for stats.db entries that still store call_id.
     let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => store.get_call_turn_indices(&session_ids).unwrap_or_default(),
+        Ok(store) => store.get_tool_call_turn_indices(&session_ids).unwrap_or_default(),
         Err(_) => std::collections::HashMap::new(),
     };
 

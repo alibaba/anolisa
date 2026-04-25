@@ -926,6 +926,52 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
+    /// Build a mapping from `tool_call_id` to the turn index of the LLM call
+    /// that issued it.
+    ///
+    /// Reads the `tool_call_ids` JSON array column from `genai_events` and
+    /// expands it so that each individual tool_call_id maps to the turn index
+    /// (1-based) of its parent LLM call.
+    pub fn get_tool_call_turn_indices(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut result = std::collections::HashMap::new();
+
+        for sid in session_ids {
+            let sql = "SELECT call_id, tool_call_ids FROM genai_events \
+                       WHERE event_type = 'llm_call' AND session_id = ?1 \
+                       ORDER BY start_timestamp_ns ASC";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![sid], |row| {
+                let call_id: String = row.get(0)?;
+                let tool_call_ids: Option<String> = row.get(1)?;
+                Ok((call_id, tool_call_ids))
+            })?;
+
+            for (idx, row) in rows.enumerate() {
+                let (call_id, tool_call_ids_json) = row?;
+                let turn = idx + 1; // 1-based
+
+                // Also map the call_id itself (for backward compat with
+                // stats.db that may still store call_id as tool_use_id)
+                result.insert(call_id.clone(), turn);
+
+                // Expand each tool_call_id in the JSON array
+                if let Some(json_str) = tool_call_ids_json {
+                    if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json_str) {
+                        for tc_id in ids {
+                            result.insert(tc_id, turn);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     /// List all conversations under a given session, with aggregated token stats.
     pub fn list_traces_by_session(
         &self,
