@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0
+
+- Add interruption detection system with drain mechanism and dashboard integration. (#315)
+- Add token savings page and API endpoint for optimization visualization. (#310)
+- Add compounded token savings and request count tracking. (#320)
+- Add C FFI API with cbindgen header generation. (#306)
+- Add filewatch and filewrite eBPF probes for file access monitoring. (#308, #309)
+- Support SysOM AK/SK GenAI capture for cosh. (#305)
+- Use LLM API response_id as trace_id and add conversation_id field. (#304)
+- Resolve session_id from agent's own session via ResponseSessionMapper. (#303)
+- Fix interruption CLI and align conversation_id naming. (#318)
+- Fix cosh session_id recognition by supporting snake_case response_id. (#307)
+- Fix wrong tool call id in token savings compounding. (#316, #317)
+- Fix standardize call_id, add tool_call_ids column. (#319)
+- Fix session_id and response_id mapping in genai builder and storage. (#321)
+- Fix token savings display in conversation list. (#322)
+- Fix cache agent name by pid for dead process resolution. (#358)
+- Fix remove custom db path and use default paths. (#359)
+- Support nightly docker image build in CI. (#302)
+
 ## 0.2.2
 
 - Support starting backend-server for dashboard with AgentSight service.
