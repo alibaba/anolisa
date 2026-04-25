@@ -22,7 +22,8 @@ pub struct TokenlessStatRow {
     pub tool_use_id: String,
     pub before_tokens: i64,
     pub after_tokens: i64,
-    pub diff_text: Option<String>,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
     pub operation: String,
 }
 
@@ -63,7 +64,7 @@ impl TokenlessStatsStore {
         for chunk in ids.chunks(500) {
             let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "SELECT session_id, tool_use_id, before_tokens, after_tokens, diff_text, operation \
+                "SELECT session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation \
                  FROM stats WHERE session_id IN ({})",
                 placeholders
             );
@@ -87,8 +88,9 @@ impl TokenlessStatsStore {
                     tool_use_id: row.get(1)?,
                     before_tokens: row.get(2)?,
                     after_tokens: row.get(3)?,
-                    diff_text: row.get(4)?,
-                    operation: row.get(5)?,
+                    before_text: row.get(4)?,
+                    after_text: row.get(5)?,
+                    operation: row.get(6)?,
                 })
             }) {
                 Ok(rows) => rows,

@@ -89,23 +89,31 @@ const CATEGORY_CONFIG: Record<OptimizationCategory, { label: string; color: stri
 const PIE_COLORS = ['#3b82f6', '#10b981']; // 输入蓝, 输出绿
 const SAVED_PIE_COLORS = ['#f59e0b', '#8b5cf6']; // 工具橙, MCP紫
 
-// ─── Diff line component ──────────────────────────────────────────────────────
+// ─── Diff view (split / unified toggle) ──────────────────────────────────────
 
-const DiffLineView: React.FC<{ line: DiffLine }> = ({ line }) => {
-  if (line.type === 'context') {
-    return <div className="h-2" />;
-  }
-  const isRemove = line.type === 'remove';
+const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
   return (
-    <div
-      className={`font-mono text-xs px-2 py-0.5 ${
-        isRemove ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
-      }`}
-    >
-      <span className="inline-block w-4 text-center opacity-60">
-        {isRemove ? '-' : '+'}
-      </span>
-      {line.content}
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+        <div className="grid grid-cols-2 divide-x divide-gray-200">
+          <div>
+            <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">
+              原始内容
+            </div>
+            <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-red-50 text-red-700">
+              {item.before_text ?? (item.diff_lines.filter(l => l.type === 'remove').map(l => l.content).join('\n') || '无变更')}
+            </pre>
+          </div>
+          <div>
+            <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">
+              优化后
+            </div>
+            <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-green-50 text-green-700">
+              {item.after_text ?? (item.diff_lines.filter(l => l.type === 'add').map(l => l.content).join('\n') || '无变更')}
+            </pre>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
@@ -145,11 +153,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
       {expanded && (
         <tr className="bg-gray-50">
           <td colSpan={5} className="px-4 py-3">
-            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-              {item.diff_lines.map((dl, i) => (
-                <DiffLineView key={i} line={dl} />
-              ))}
-            </div>
+            <DiffView item={item} />
           </td>
         </tr>
       )}

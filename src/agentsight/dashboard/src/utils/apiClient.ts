@@ -211,6 +211,8 @@ export interface OptimizationItem {
   compounding_turns: number;
   before_summary: string;
   after_summary: string;
+  before_text: string | null;
+  after_text: string | null;
   diff_lines: DiffLine[];
 }
 

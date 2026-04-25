@@ -870,6 +870,8 @@ pub struct OptimizationItemDto {
     pub compounding_turns: i64,
     pub before_summary: String,
     pub after_summary: String,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
     pub diff_lines: Vec<DiffLineDto>,
 }
 
@@ -905,21 +907,6 @@ pub struct TokenSavingsResponse {
     pub stats_available: bool,
     pub summary: SavingsSummary,
     pub sessions: Vec<SessionSavingsDto>,
-}
-
-/// Parse a unified-diff-style text into DiffLine entries.
-fn parse_diff_text(text: &str) -> Vec<DiffLineDto> {
-    text.lines()
-        .map(|line| {
-            if let Some(content) = line.strip_prefix('+') {
-                DiffLineDto { line_type: "add".into(), content: content.to_string() }
-            } else if let Some(content) = line.strip_prefix('-') {
-                DiffLineDto { line_type: "remove".into(), content: content.to_string() }
-            } else {
-                DiffLineDto { line_type: "context".into(), content: line.to_string() }
-            }
-        })
-        .collect()
 }
 
 /// Map stats.db operation field to frontend category.
@@ -1037,9 +1024,7 @@ pub async fn get_token_savings(
                 session_saved += saved;
                 session_compounded_saved += compounded;
 
-                let diff_lines = row.diff_text.as_deref()
-                    .map(parse_diff_text)
-                    .unwrap_or_default();
+                let diff_lines: Vec<DiffLineDto> = Vec::new();
 
                 items.push(OptimizationItemDto {
                     id: row.tool_use_id.clone(),
@@ -1052,6 +1037,8 @@ pub async fn get_token_savings(
                     compounding_turns,
                     before_summary: format!("\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens", row.before_tokens),
                     after_summary: format!("\u{4f18}\u{5316}\u{540e} {} tokens", row.after_tokens),
+                    before_text: row.before_text.clone(),
+                    after_text: row.after_text.clone(),
                     diff_lines,
                 });
             }
