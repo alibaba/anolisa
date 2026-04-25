@@ -44,6 +44,7 @@ All options are set via `openclaw.plugin.json` config or the OpenClaw UI:
 | `rtk_enabled` | boolean | `true` | Enable RTK command rewriting |
 | `schema_compression_enabled` | boolean | `true` | Enable tool schema compression |
 | `response_compression_enabled` | boolean | `true` | Enable tool response compression |
+| `skip_tools` | string[] | `["Read", "read_file", "Glob", "list_directory", "NotebookRead", "read", "glob", "notebookread"]` | Tool names whose responses should not be compressed |
 | `verbose` | boolean | `false` | Log detailed rewrite/compression info to console |
 
 ## Architecture

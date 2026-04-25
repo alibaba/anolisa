@@ -9,6 +9,11 @@
       "rtk_enabled": { "type": "boolean", "default": true },
       "schema_compression_enabled": { "type": "boolean", "default": true },
       "response_compression_enabled": { "type": "boolean", "default": true },
+      "skip_tools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["Read", "read_file", "Glob", "list_directory", "NotebookRead", "read", "glob", "notebookread"]
+      },
       "verbose": { "type": "boolean", "default": false }
     }
   },
@@ -16,6 +21,7 @@
     "rtk_enabled": { "label": "Enable RTK command rewriting" },
     "schema_compression_enabled": { "label": "Enable schema compression" },
     "response_compression_enabled": { "label": "Enable response compression" },
+    "skip_tools": { "label": "Tool names whose responses should not be compressed" },
     "verbose": { "label": "Verbose logging" }
   }
 }

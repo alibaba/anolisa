@@ -1,4 +1,4 @@
-%define anolis_release 3
+%define anolis_release 4
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -111,6 +111,13 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-4
+- Fix: skip compression for content-retrieval tools and skill files
+  - Added tool-name-based skip list: Read, read_file, Glob, list_directory, NotebookRead
+  - Added skill file (YAML frontmatter) detection to avoid breaking metadata
+  - Configurable via skip_tools in OpenClaw plugin and SKIP_TOOLS in copilot-shell hook
+  - Fail-open design: original response passes through on any error path
+
 * Sat Apr 11 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-3
 - Fix: Response compression not working issue
   - Fixed `tokenless compress-response` command not taking effect

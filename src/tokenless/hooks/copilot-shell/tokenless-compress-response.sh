@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# tokenless-hook-version: 1
-# Token-Less copilot-shell hook — compresses tool call responses to save ~26% response tokens.
-# Requires: tokenless, jq
+# tokenless-hook-version: 6
+# Token-Less copilot-shell hook — compresses tool call responses.
+# Stats are recorded automatically by tokenless compress-response.
+# Requires: jq
 #
 # Hook event: PostToolUse
 #
@@ -57,15 +58,41 @@ INPUT=$(cat || {
 TOOL_RESPONSE=$(echo "$INPUT" | jq -c '.tool_response // empty' 2>/dev/null || echo '')
 
 if [ -z "$TOOL_RESPONSE" ] || [ "$TOOL_RESPONSE" = "null" ] || [ "$TOOL_RESPONSE" = "{}" ]; then
-  # No response or empty response — nothing to compress.
   exit 0
 fi
 
-# --- Skip small responses (not worth compressing) ---
+# --- Skip content-retrieval tools ---
+# Tools that return content the agent explicitly requested must not be compressed
+# because truncation would make the content incomplete and unusable.
+SKIP_TOOLS="Read read_file Glob list_directory NotebookRead read glob notebookread"
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo 'unknown')
+
+if [ "$TOOL_NAME" != "unknown" ] && echo "$SKIP_TOOLS" | grep -qw "$TOOL_NAME"; then
+  exit 0
+fi
+
+# --- Skip small responses ---
 
 RESPONSE_LEN=${#TOOL_RESPONSE}
 if [ "$RESPONSE_LEN" -lt 200 ]; then
   exit 0
+fi
+
+# --- Skip skill files (YAML frontmatter markdown) ---
+# Skill files (.md with YAML frontmatter) must not be compressed because
+# truncation would break the skill metadata and make agent skills unusable.
+# Detection failure is intentionally non-fatal (fail-open): if detection
+# fails, we continue to compression rather than blocking the response.
+TOOL_RESPONSE_RAW=$(echo "$INPUT" | jq -r '.tool_response // empty' 2>/dev/null || echo '')
+if [ -n "$TOOL_RESPONSE_RAW" ]; then
+  case "$TOOL_RESPONSE_RAW" in
+    ---*)
+      # Extract first 20 lines and check for typical skill metadata fields
+      if echo "$TOOL_RESPONSE_RAW" | head -n 20 | grep -qE '^(name|description):'; then
+        exit 0
+      fi
+      ;;
+  esac
 fi
 
 # --- Compress response via tokenless ---

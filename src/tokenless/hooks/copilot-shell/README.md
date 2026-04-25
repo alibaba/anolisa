@@ -23,8 +23,9 @@ Intercept and optimize LLM interactions via copilot-shell hooks for **significan
 
 1. copilot-shell fires `PostToolUse` after every tool call completes.
 2. The hook reads the JSON payload from stdin (includes `tool_response`).
-3. Compresses the response via `tokenless compress-response`.
-4. Returns a JSON response with `suppressOutput: true` and the compressed content as `additionalContext`.
+3. Skip logic is applied: content-retrieval tools (Read, Glob, etc.) and skill files pass through uncompressed.
+4. Compresses the response via `tokenless compress-response`.
+5. Returns a JSON response with `suppressOutput: true` and the compressed content as `additionalContext`.
 
 ### Schema Compression (`tokenless-compress-schema.sh`)
 
@@ -142,6 +143,6 @@ echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","param
 | `rtk too old` warning | Upgrade: `cargo install rtk` |
 | Command not rewritten | Not all commands have RTK equivalents — check `rtk rewrite "cmd"` directly |
 | `tokenless not installed` warning | Build and install: `make install` |
-| Response not compressed | Responses shorter than 200 bytes are skipped (not worth compressing) |
+| Response not compressed | Responses shorter than 200 bytes, content-retrieval tools (Read, Glob, etc.), or skill files are skipped |
 | Schema compression not active | Expected — waiting for anolisa protocol to add `tools` to LLMRequest |
 | JSON parse error | Ensure the settings JSON is valid — use `jq . < settings.json` to validate |

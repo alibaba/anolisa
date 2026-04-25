@@ -35,6 +35,17 @@ function checkRtk(): boolean {
   return rtkAvailable;
 }
 
+function isSkillContent(message: any): boolean {
+  // Skill files (.md with YAML frontmatter) must not be compressed because
+  // truncation would break the skill metadata and make agent skills unusable.
+  if (typeof message !== "string") return false;
+  const trimmed = message.trimStart();
+  if (!trimmed.startsWith("---")) return false;
+  // Check the first few lines for typical skill metadata fields
+  const firstLines = trimmed.split("\n", 20).join("\n");
+  return /^name:/m.test(firstLines) || /^description:/m.test(firstLines);
+}
+
 function checkTokenless(): boolean {
   if (tokenlessAvailable !== null) return tokenlessAvailable;
   try {
@@ -109,6 +120,7 @@ export default {
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
   const schemaCompressionEnabled = pluginConfig.schema_compression_enabled !== false;
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
+  const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead"]).map((t: string) => t.toLowerCase()));
   const verbose = pluginConfig.verbose !== false;
 
   // ---- 1. RTK command rewriting (before_tool_call) ----------------------------
@@ -167,6 +179,12 @@ export default {
         // Skip exec tool results when RTK is enabled — RTK already produces
         // optimized output, double-compression is wasteful.
         if (rtkEnabled && rtkAvailable && event.toolName === "exec") return;
+
+        // Skip content-retrieval tools — agent needs complete responses
+        if (event.toolName && skipTools.has(event.toolName.toLowerCase())) return;
+
+        // Skip skill content to avoid breaking YAML frontmatter metadata.
+        if (isSkillContent(event.message)) return;
 
         const compressed = tryCompressResponse(event.message);
         if (!compressed) return;
