@@ -1,6 +1,6 @@
 ---
 name: agentsight
-description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据、审计事件和会话中断事件。当用户询问 token 用量、花费、消耗趋势、LLM 调用、进程行为审计，或询问会话中断、Agent 异常、LLM 错误等中断事件时使用此技能。
+description: 通过命令行或 Dashboard（前端） 查询 AgentSight 平台的 token 消耗数据、token 节省（优化）数据、审计事件和会话中断事件。当用户询问 token 用量、花费、消耗趋势、token 节省、优化效果、LLM 调用、进程行为审计，或询问会话中断、Agent 异常、LLM 错误等中断事件时使用此技能。
 ---
 
 # Dashboard（前端）
@@ -105,6 +105,13 @@ Top commands:
 严重级别：`critical` > `high` > `medium` > `low`
 
 使用 `/usr/local/bin/agentsight interruption --help` 查看所有子命令和参数。
+
+---
+
+# Token 节省查询
+
+`GET /api/token-savings` — 参数：`start_ns`、`end_ns`、`agent_name`；数据源：`genai_events.db` + `~/.tokenless/stats.db`
+`GET /api/agent-names` — 获取可选的 `agent_name` 值列表
 
 ---
 
