@@ -11,10 +11,7 @@ use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 // ============================================================
 
 fn fixtures_dir() -> String {
-    format!(
-        "{}/tests/fixtures/schemas",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/tests/fixtures/schemas", env!("CARGO_MANIFEST_DIR"))
 }
 
 fn load_schema(name: &str) -> Value {
@@ -80,13 +77,21 @@ fn test_compress_nested_properties() {
     let result = compressor.compress(&schema);
 
     // Nested structure preserved
-    assert!(result.pointer("/function/parameters/properties/address/properties/street").is_some());
+    assert!(result
+        .pointer("/function/parameters/properties/address/properties/street")
+        .is_some());
 
     // Titles removed at all levels
-    assert!(result.pointer("/function/parameters/properties/address")
-        .unwrap().get("title").is_none());
-    assert!(result.pointer("/function/parameters/properties/address/properties/street")
-        .unwrap().get("title").is_none());
+    assert!(result
+        .pointer("/function/parameters/properties/address")
+        .unwrap()
+        .get("title")
+        .is_none());
+    assert!(result
+        .pointer("/function/parameters/properties/address/properties/street")
+        .unwrap()
+        .get("title")
+        .is_none());
 }
 
 #[test]
@@ -115,7 +120,10 @@ fn test_protected_fields_preserved() {
     assert_eq!(result["function"]["parameters"]["type"], "object");
     assert!(result["function"]["parameters"]["required"].is_array());
     assert!(result["function"]["parameters"]["properties"]["op"]["enum"].is_array());
-    assert_eq!(result["function"]["parameters"]["properties"]["op"]["default"], "add");
+    assert_eq!(
+        result["function"]["parameters"]["properties"]["op"]["default"],
+        "add"
+    );
 }
 
 #[test]
@@ -163,7 +171,9 @@ fn test_titles_removed() {
 
     assert!(result["function"].get("title").is_none());
     assert!(result["function"]["parameters"].get("title").is_none());
-    assert!(result["function"]["parameters"]["properties"]["x"].get("title").is_none());
+    assert!(result["function"]["parameters"]["properties"]["x"]
+        .get("title")
+        .is_none());
 }
 
 #[test]
@@ -185,8 +195,11 @@ fn test_examples_removed() {
     });
 
     let result = compressor.compress(&schema);
-    assert!(result.pointer("/function/parameters/properties/email")
-        .unwrap().get("examples").is_none());
+    assert!(result
+        .pointer("/function/parameters/properties/email")
+        .unwrap()
+        .get("examples")
+        .is_none());
 }
 
 #[test]
@@ -208,7 +221,9 @@ fn test_enum_values_preserved() {
     });
 
     let result = compressor.compress(&schema);
-    let op = result.pointer("/function/parameters/properties/operation").unwrap();
+    let op = result
+        .pointer("/function/parameters/properties/operation")
+        .unwrap();
     assert!(op.get("enum").is_some());
     assert_eq!(op["enum"].as_array().unwrap().len(), 4);
 }
@@ -343,7 +358,9 @@ fn test_fixture_simple_calculator() {
     assert_eq!(compressed["function"]["name"], "calculate");
 
     // Enum preserved
-    let op = compressed.pointer("/function/parameters/properties/operation").unwrap();
+    let op = compressed
+        .pointer("/function/parameters/properties/operation")
+        .unwrap();
     assert!(op.get("enum").is_some());
 }
 
@@ -356,7 +373,9 @@ fn test_fixture_hubspot_contact() {
     assert!(compressed.is_object());
 
     // Structure preserved
-    assert!(compressed.pointer("/function/parameters/properties").is_some());
+    assert!(compressed
+        .pointer("/function/parameters/properties")
+        .is_some());
     assert_eq!(compressed["function"]["name"], "create_or_update_contact");
 
     // Compression occurred
@@ -370,7 +389,9 @@ fn test_fixture_hubspot_contact() {
     );
 
     // Enum preserved on lifecyclestage
-    if let Some(ls) = compressed.pointer("/function/parameters/properties/properties/properties/lifecyclestage") {
+    if let Some(ls) =
+        compressed.pointer("/function/parameters/properties/properties/properties/lifecyclestage")
+    {
         assert!(ls.get("enum").is_some(), "Enum should be preserved");
     }
 }
@@ -397,7 +418,11 @@ fn test_fixture_stripe_payment() {
 #[test]
 fn test_all_fixtures_produce_valid_json() {
     let compressor = SchemaCompressor::new();
-    let files = ["simple_calculator.json", "hubspot_contact.json", "stripe_payment.json"];
+    let files = [
+        "simple_calculator.json",
+        "hubspot_contact.json",
+        "stripe_payment.json",
+    ];
 
     for name in files {
         let schema = load_schema(name);
@@ -427,7 +452,11 @@ fn test_all_fixtures_produce_valid_json() {
 #[test]
 fn test_fixture_compression_ratio_benchmark() {
     let compressor = SchemaCompressor::new();
-    let files = ["simple_calculator.json", "hubspot_contact.json", "stripe_payment.json"];
+    let files = [
+        "simple_calculator.json",
+        "hubspot_contact.json",
+        "stripe_payment.json",
+    ];
 
     let mut total_orig = 0usize;
     let mut total_comp = 0usize;
@@ -440,14 +469,20 @@ fn test_fixture_compression_ratio_benchmark() {
         let comp = serde_json::to_string(&compressed).unwrap().len();
 
         let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
-        println!("{:<30} {} -> {} bytes ({:.1}% saved)", name, orig, comp, saved);
+        println!(
+            "{:<30} {} -> {} bytes ({:.1}% saved)",
+            name, orig, comp, saved
+        );
 
         total_orig += orig;
         total_comp += comp;
     }
 
     let avg_saved = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
-    println!("TOTAL: {} -> {} ({:.1}% saved)", total_orig, total_comp, avg_saved);
+    println!(
+        "TOTAL: {} -> {} ({:.1}% saved)",
+        total_orig, total_comp, avg_saved
+    );
 
     // At minimum some compression should occur on complex schemas
     assert!(

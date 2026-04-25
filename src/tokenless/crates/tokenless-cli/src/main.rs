@@ -55,8 +55,8 @@ fn run() -> Result<(), (String, i32)> {
     match cli.command {
         Commands::CompressSchema { file, batch } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value =
-                serde_json::from_str(&input).map_err(|e| (format!("JSON parse error: {}", e), 1))?;
+            let value: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|e| (format!("JSON parse error: {}", e), 1))?;
 
             let compressor = SchemaCompressor::new();
 
@@ -78,8 +78,8 @@ fn run() -> Result<(), (String, i32)> {
         }
         Commands::CompressResponse { file } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value =
-                serde_json::from_str(&input).map_err(|e| (format!("JSON parse error: {}", e), 1))?;
+            let value: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|e| (format!("JSON parse error: {}", e), 1))?;
 
             let compressor = ResponseCompressor::new();
             let result = compressor.compress(&value);

@@ -371,16 +371,32 @@ build_tokenless() {
     log "Building RPM: tokenless"
     log "=========================================="
 
-    local spec_file="${TOKEN_DIR}/tokenless.spec"
-    if [ ! -f "$spec_file" ]; then
-        err "Spec file not found: $spec_file"
+    local spec_in="${TOKEN_DIR}/tokenless.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
         return 1
     fi
 
-    local pkg_name pkg_version
-    pkg_name=$(parse_spec_name "$spec_file")
-    pkg_version=$(parse_spec_version "$spec_file")
-    local tarball_name="${pkg_name}-${pkg_version}.tar.gz"
+    # Version from env or Cargo.toml workspace
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${TOKEN_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        version="0.0.1"
+        warn "No version specified for tokenless, using default: ${version}"
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    # Step 1: Process spec template
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
 
     log "Step 1/3: Building tokenless and rtk..."
     (
@@ -396,12 +412,11 @@ build_tokenless() {
         cargo build --release --manifest-path third_party/rtk/Cargo.toml
     )
 
-    log "Step 2/3: Preparing spec and source tarball..."
-    cp "$spec_file" "${BUILD_DIR}/SPECS/"
+    log "Step 2/3: Creating source tarball ${tarball_name}..."
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}-${pkg_version}"
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"/{openclaw,hooks/copilot-shell,scripts}
 
     # Copy binaries
@@ -435,13 +450,13 @@ build_tokenless() {
         chmod 0755 "$pkg_dir/scripts/install.sh"
     fi
 
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${pkg_version}"
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
     log "Step 3/3: Running rpmbuild..."
     "$RPMBUILD" -ba --nodeps \
         --define "_topdir ${BUILD_DIR}" \
-        "${BUILD_DIR}/SPECS/tokenless.spec"
+        "$spec_file"
 
     ok "tokenless RPM built successfully"
 }

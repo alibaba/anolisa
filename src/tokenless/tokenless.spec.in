@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           tokenless
-Version:        0.1.0
+Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        LLM Token Optimization Toolkit - Schema/Response Compression + Command Rewriting
 
@@ -12,7 +12,7 @@ Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.70
+BuildRequires:  rust >= 1.85
 
 # Runtime dependencies
 Requires:       jq

@@ -142,7 +142,11 @@ impl SchemaCompressor {
         }
 
         // Compress description
-        if let Some(desc) = obj.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()) {
+        if let Some(desc) = obj
+            .get("description")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string())
+        {
             let max_len = if depth == 0 {
                 self.func_desc_max_len
             } else {
@@ -416,18 +420,24 @@ mod tests {
         assert!(result["function"]["parameters"]["properties"]["level1"]
             .get("title")
             .is_none());
-        assert!(result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
-            .get("title")
-            .is_none());
-        assert!(result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
-            ["properties"]["level3"]
-            .get("title")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
+                .get("title")
+                .is_none()
+        );
+        assert!(
+            result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
+                ["properties"]["level3"]
+                .get("title")
+                .is_none()
+        );
 
         // Check nested examples are removed
-        assert!(result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
-            .get("examples")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
+                .get("examples")
+                .is_none()
+        );
     }
 
     #[test]
@@ -439,7 +449,11 @@ mod tests {
         let result = compressor.truncate_description(text, 60);
 
         // Should truncate at a sentence boundary
-        assert!(result.ends_with('.'), "Result '{}' should end with '.'", result);
+        assert!(
+            result.ends_with('.'),
+            "Result '{}' should end with '.'",
+            result
+        );
         assert!(result.len() <= 60);
     }
 
@@ -487,21 +501,29 @@ mod tests {
         let result = compressor.compress(&schema);
 
         // Check anyOf items are compressed
-        assert!(result["function"]["parameters"]["properties"]["field1"]["anyOf"][0]
-            .get("title")
-            .is_none());
-        assert!(result["function"]["parameters"]["properties"]["field1"]["anyOf"][0]
-            .get("examples")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["field1"]["anyOf"][0]
+                .get("title")
+                .is_none()
+        );
+        assert!(
+            result["function"]["parameters"]["properties"]["field1"]["anyOf"][0]
+                .get("examples")
+                .is_none()
+        );
 
         // Check oneOf items are compressed
-        assert!(result["function"]["parameters"]["properties"]["field2"]["oneOf"][0]
-            .get("title")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["field2"]["oneOf"][0]
+                .get("title")
+                .is_none()
+        );
 
         // Check allOf items are compressed
-        assert!(result["function"]["parameters"]["properties"]["field3"]["allOf"][0]
-            .get("title")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["field3"]["allOf"][0]
+                .get("title")
+                .is_none()
+        );
     }
 }
