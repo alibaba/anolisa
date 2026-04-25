@@ -527,8 +527,8 @@ impl Analyzer {
                 let req_body = request.json_body();
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
-            AggregatedResult::ResponseOnly { .. } 
-            | AggregatedResult::ProcessComplete(_) 
+            AggregatedResult::ResponseOnly { .. }
+            | AggregatedResult::ProcessComplete(_)
             | AggregatedResult::Http2Frames { .. }
             | AggregatedResult::Http2StreamComplete(_) => None,
         }

@@ -82,16 +82,6 @@ impl GenAIBuilder {
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        // Check if the response ID exists but mapper didn't resolve it
-        let parsed_message = results.iter().find_map(|r| match r {
-            AnalysisResult::Message(m) => Some(m.clone()),
-            _ => None,
-        });
-        let response_id = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
-        let mapper_hit = response_id.as_deref()
-            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
-            .is_some();
-
         if let Some(llm_call) = self.build_llm_call(results, response_mapper) {
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
@@ -114,6 +104,23 @@ impl GenAIBuilder {
                 )
             };
 
+            // Determine response_id from call metadata (may come from parsed_message
+            // or SSE body fallback), and check if mapper resolved it.
+            let response_id = llm_call.metadata.get("response_id").cloned();
+            let mapper_hit = response_id.as_deref()
+                .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+                .is_some();
+
+            // If response_id exists but mapper didn't resolve session_id, queue
+            // for deferred resolution so the next FileWrite event can fix it.
+            if response_id.is_some() && !mapper_hit {
+                pending_response_id = response_id;
+                log::debug!(
+                    "GenAI response_id {} not yet in mapper, will defer session_id resolution",
+                    pending_response_id.as_deref().unwrap_or_default()
+                );
+            }
+
             pending = Some(PendingCallInfo {
                 call_id: llm_call.call_id.clone(),
                 trace_id: llm_call.metadata.get("response_id").cloned(),
@@ -134,11 +141,6 @@ impl GenAIBuilder {
             });
 
             events.push(GenAISemanticEvent::LLMCall(llm_call));
-        }
-
-        // If response_id exists but mapper didn't have it, mark as pending
-        if !events.is_empty() && response_id.is_some() && !mapper_hit {
-            pending_response_id = response_id;
         }
 
         (BuildOutput { events, pending_response_id }, pending)
@@ -1069,10 +1071,22 @@ impl GenAIBuilder {
             }
         }
 
-        // 2. SSE fallback: parse first JSON object from response_body for "id" field
+        // 2. SSE fallback: extract "id" field from response body
         if http.is_sse {
             if let Some(ref body) = http.response_body {
-                // SSE body contains lines like "data: {...}" — find first JSON with "id"
+                // Try JSON array format first (from HTTP/2 stream aggregation)
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                    if let Some(arr) = v.as_array() {
+                        for chunk in arr {
+                            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+                                if !id.is_empty() {
+                                    return Some(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Try SSE line format (from HTTP/1.1: "data: {...}" per line)
                 for line in body.lines() {
                     let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
                     if json_str.is_empty() || json_str == "[DONE]" {
