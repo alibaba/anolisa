@@ -99,7 +99,7 @@ Top commands:
 
 # 会话中断查询
 
-数据库：`/var/log/sysak/.agentsight/interruption_events.db`，可通过 `--db <PATH>` 覆盖。
+数据库：`/var/log/sysak/.agentsight/interruption_events.db`
 
 中断类型：`llm_error`、`sse_truncated`、`context_overflow`、`agent_crash`、`token_limit`
 严重级别：`critical` > `high` > `medium` > `low`

@@ -5,19 +5,16 @@ use structopt::StructOpt;
 
 /// Print per-agent token usage metrics in Prometheus text format
 #[derive(Debug, StructOpt, Clone)]
-pub struct MetricsCommand {
-    /// Custom database path (defaults to the genai_events.db written by `agentsight trace`)
-    #[structopt(long)]
-    pub db: Option<String>,
-}
+pub struct MetricsCommand {}
 
 impl MetricsCommand {
     pub fn execute(&self) {
-        let db_path = self
-            .db
-            .as_ref()
-            .map(|p| std::path::PathBuf::from(p))
-            .unwrap_or_else(GenAISqliteStore::default_path);
+        let db_path = GenAISqliteStore::default_path();
+
+        if !db_path.exists() {
+            eprintln!("Database file not found: {:?}", db_path);
+            std::process::exit(1);
+        }
 
         let store = match GenAISqliteStore::new_with_path(&db_path) {
             Ok(s) => s,

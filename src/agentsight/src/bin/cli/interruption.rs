@@ -9,7 +9,6 @@
 //! # Database
 //!
 //! Default path: `/var/log/sysak/.agentsight/interruption_events.db`
-//! Override with `--db <PATH>`.
 //!
 //! # Interruption Types
 //!
@@ -54,9 +53,6 @@
 //!
 //! # Output as JSON (for programmatic consumption)
 //! agentsight interruption list --last 24 --json
-//!
-//! # Use a custom database path
-//! agentsight interruption list --db /path/to/interruption_events.db --last 24
 //! ```
 
 use agentsight::storage::sqlite::{GenAISqliteStore, InterruptionStore, InterruptionRecord};
@@ -73,11 +69,6 @@ use structopt::StructOpt;
 /// Severity levels: critical, high, medium, low
 #[derive(Debug, StructOpt, Clone)]
 pub struct InterruptionCommand {
-    /// Custom interruption database path.
-    /// Default: /var/log/sysak/.agentsight/interruption_events.db
-    #[structopt(long, global = true)]
-    pub db: Option<String>,
-
     #[structopt(subcommand)]
     pub action: InterruptionAction,
 }
@@ -222,7 +213,13 @@ pub enum InterruptionAction {
 
 impl InterruptionCommand {
     pub fn execute(&self) {
-        let db_path = self.db_path();
+        let db_path = default_db_path();
+
+        if !db_path.exists() {
+            eprintln!("Database file not found: {:?}", db_path);
+            std::process::exit(1);
+        }
+
         let store = match InterruptionStore::new_with_path(&db_path) {
             Ok(s) => s,
             Err(e) => {
@@ -420,22 +417,17 @@ impl InterruptionCommand {
             }
         }
     }
-
-    /// Determine the database path.
-    /// Priority: --db flag > default derived from GenAISqliteStore::default_path()
-    fn db_path(&self) -> std::path::PathBuf {
-        if let Some(ref p) = self.db {
-            std::path::PathBuf::from(p)
-        } else {
-            GenAISqliteStore::default_path()
-                .parent()
-                .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                .join("interruption_events.db")
-        }
-    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Default database path for interruption events.
+fn default_db_path() -> std::path::PathBuf {
+    GenAISqliteStore::default_path()
+        .parent()
+        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+        .join("interruption_events.db")
+}
 
 /// Compute (start_ns, end_ns) for the last N hours from now.
 fn time_range_ns(hours: u64) -> (i64, i64) {
