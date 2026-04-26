@@ -228,6 +228,8 @@ jobs:
           version: ${{ needs.versions.outputs.sec-core-version }}
           artifact-suffix: ".nightly"
           retention-days: "7"
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
 
   # ===========================================================================
   # Job 3: Build RPMs
