@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Added `hermes-agent-install` skill. (#353)
+- Added `clawhub-skill-mng` skill with npm install support and YAML description matching. (#315)
+- Fixed AgentSight custom db path issue, using default paths instead. (#366)
+- Fixed AgentSight token savings query support. (#355)
+- Fixed AgentSight interruption CLI and aligned `conversation_id` naming. (#334)
+
 ## 0.2.2
 
 - Support enable AgentSight dashboard in `agentsight` skill. (#222)
