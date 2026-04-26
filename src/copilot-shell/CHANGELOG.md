@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.2.0
+
+- Added `ask` decision support for UserPromptSubmit hook. (#328)
+- Added new command for Clawhub CLI. (#313)
+- Added interactive Skills TUI Panel with enable/disable support. (#311)
+- Added variable substitution and display control for extension TOML commands. (#291)
+- Added immediate hook activation on extension install/uninstall. (#283)
+- Added `ask` decision support for PreToolUse hooks. (#276)
+- Added configurable status bar. (#251)
+- Added `/export` command for session history. (#245)
+- Fixed API key validation to skip non-Dashscope providers. (#337)
+- Fixed PreToolUse ask dialog by unifying it to info type with diff preview. (#345)
+- Fixed memory leak in memory management. (#309)
+- Fixed extension lifecycle reliability. (#298)
+- Fixed hook registry sync on extension enable/disable. (#298)
+- Fixed interface crash caused by leftBottomContent of Box nested in Text in Footer. (#293)
+- Fixed `/hooks install` command by removing it and adding default help. (#287)
+- Fixed extension examples installation and package configuration. (#271)
+
 ## 2.1.0
 
 - Added startup bash entry and simplified manual auth dialog. (#217)
