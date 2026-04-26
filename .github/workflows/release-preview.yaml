@@ -19,6 +19,7 @@ on:
           - agentsight
           - os-skills
           - tokenless
+          - ws-ckpt
       version:
         description: 'Version (e.g. 2.1.0, without v prefix)'
         required: true

@@ -59,6 +59,9 @@ jobs:
             tokenless)
               dnf install -y rust cargo jq
               ;;
+            ws-ckpt)
+              dnf install -y rust cargo btrfs-progs rsync systemd-rpm-macros
+              ;;
             os-skills)
               # noarch, no extra build deps
               ;;
@@ -120,11 +123,13 @@ jobs:
           EXPECTED_TAR="${COMPONENT}-${VERSION}.tar.gz"
           cp "$SOURCE_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_TAR}"
 
-          # Copy vendor tarball if present
+          # Copy vendor tarball if present, renaming to match spec Source1:
+          # %{name}-%{version}-vendor.tar.gz (strip any artifact suffix).
           if [ -d "/tmp/vendor/" ]; then
             VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1)
             if [ -n "$VENDOR_TAR" ]; then
-              cp "$VENDOR_TAR" ~/rpmbuild/SOURCES/
+              EXPECTED_VENDOR_TAR="${COMPONENT}-${VERSION}-vendor.tar.gz"
+              cp "$VENDOR_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_VENDOR_TAR}"
             fi
           fi
 

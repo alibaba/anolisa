@@ -9,82 +9,87 @@ Summary:        AI-oriented workspace snapshot tool based on btrfs
 License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
 
-Requires:       rsync btrfs-progs
+BuildRequires:  cargo >= 1.70
+BuildRequires:  rust >= 1.70
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pkgconfig
+BuildRequires:  systemd-rpm-macros
+
+Requires:       rsync
+Requires:       btrfs-progs
 
 %description
-ws-ckpt 是一个为 AI 助手设计的文件系统快照工具。
-支持工作区初始化、快照创建、秒级回滚等功能。
-支持多后端架构（btrfs-base / btrfs-loop / overlayfs），
-通过三级自动探测选择最优存储后端，实现高效快照管理。
+ws-ckpt is an AI-oriented filesystem snapshot tool. It supports workspace
+initialization, snapshot creation and second-level rollback. Its
+multi-backend architecture (btrfs-base / btrfs-loop / overlayfs) with
+three-tier auto detection picks the optimal backend for efficient
+snapshots.
 
 %prep
-%setup -q
+%setup -q -a 1
 
 %build
-# 二进制由 build-rpm.sh 预先编译并打包进 Source0 tarball，此处无需额外编译步骤。
+cd src
+cargo build --release --offline
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -d -m 0755 %{buildroot}/usr/local/bin
+install -d -m 0755 %{buildroot}%{_bindir}
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}/etc/ws-ckpt
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
 
-# 安装二进制文件
-install -p -m 0755 ws-ckpt %{buildroot}/usr/local/bin/ws-ckpt
-
-# 安装 systemd 服务文件
-install -p -m 0644 ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
-
-# 安装默认配置文件
-install -p -m 0644 config.toml %{buildroot}/etc/ws-ckpt/config.toml
+install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_bindir}/ws-ckpt
+install -p -m 0644 src/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
+install -p -m 0644 src/config.toml %{buildroot}/etc/ws-ckpt/config.toml
+install -p -m 0644 src/skills/ws-ckpt/SKILL.md %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt/SKILL.md
 
 %files
-%attr(0755,root,root) /usr/local/bin/ws-ckpt
+%license LICENSE
+%doc README.md
+%attr(0755,root,root) %{_bindir}/ws-ckpt
 %{_unitdir}/ws-ckpt.service
 %config(noreplace) /etc/ws-ckpt/config.toml
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/runtime
+%dir %{_datadir}/anolisa/runtime/skills
+%{_datadir}/anolisa/runtime/skills/ws-ckpt/
 
 %pre
-# 安装前：确保 btrfs 内核模块已加载，创建必要的运行时目录
-modprobe btrfs 2>/dev/null || { echo "错误：内核不支持 btrfs，无法安装 ws-ckpt"; exit 1; }
-mkdir -p /run/ws-ckpt
-mkdir -p /data/ws-ckpt
-mkdir -p /mnt/btrfs-workspace
-mkdir -p /etc/ws-ckpt
+modprobe btrfs 2>/dev/null || { echo "ERROR: kernel does not support btrfs"; exit 1; }
+mkdir -p /run/ws-ckpt /data/ws-ckpt /mnt/btrfs-workspace /etc/ws-ckpt
 
 %post
 systemctl daemon-reload
 systemctl enable ws-ckpt.service
 systemctl start ws-ckpt.service 2>/dev/null || true
-echo "ws-ckpt 已安装、已启动、已设置为开机自启。"
-echo "运行 'systemctl status ws-ckpt' 查看服务状态。"
-echo "运行 'ws-ckpt --help' 查看使用帮助。"
+echo "ws-ckpt installed, started and enabled at boot."
+echo "Run 'systemctl status ws-ckpt' to check service status."
+echo "Run 'ws-ckpt --help' for usage."
 
 %preun
-# 卸载前（仅在完全卸载时，$1 == 0）
 if [ $1 -eq 0 ]; then
-    # 1. 先还原所有工作区（daemon 此时仍在运行）
-    if [ -x /usr/local/bin/ws-ckpt ]; then
-        /usr/local/bin/ws-ckpt recover --all --force 2>&1 || \
+    # Recover workspaces before stopping the daemon
+    if [ -x %{_bindir}/ws-ckpt ]; then
+        %{_bindir}/ws-ckpt recover --all --force 2>&1 || \
             echo "WARNING: recover workspaces failed"
     fi
-    # 2. 再停止并禁用服务
     systemctl stop ws-ckpt.service 2>/dev/null || true
     systemctl disable ws-ckpt.service 2>/dev/null || true
 fi
 
 %postun
-# 卸载后：清理运行时资源并重新加载 systemd（仅在完全卸载时）
 if [ $1 -eq 0 ]; then
-    # BtrfsLoop 后端: umount + 释放 loop + 删除 img
+    # BtrfsLoop backend: umount + release loop + remove img
     if [ -f "/data/ws-ckpt/btrfs-data.img" ]; then
         umount /mnt/btrfs-workspace 2>/dev/null || true
         losetup -j /data/ws-ckpt/btrfs-data.img 2>/dev/null | \
             cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true
         rm -f /data/ws-ckpt/btrfs-data.img 2>/dev/null || true
     fi
-    # BtrfsBase 后端: 无需 umount（原生分区由系统管理）
-    # 清理 %pre 创建的运行时目录（rmdir 仅删空目录，残留数据会自动保护）
     rmdir /mnt/btrfs-workspace 2>/dev/null || true
     rmdir /data/ws-ckpt 2>/dev/null || true
     rmdir /run/ws-ckpt 2>/dev/null || true
@@ -92,5 +97,5 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Apr 23 2026 ws-ckpt ziqi02<ziqi02@alibaba-inc.com> - 0.1.0-1
+* Thu Apr 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.1.0-1
 - Initial release

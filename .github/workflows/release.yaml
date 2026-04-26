@@ -8,6 +8,7 @@ on:
       - 'sight/v*'
       - 'skill/v*'
       - 'tokenless/v*'
+      - 'ckpt/v*'
 
 permissions:
   contents: write
@@ -45,6 +46,7 @@ jobs:
             sight)    COMPONENT="agentsight" ;;
             skill)    COMPONENT="os-skills" ;;
             tokenless) COMPONENT="tokenless" ;;
+            ckpt)     COMPONENT="ws-ckpt" ;;
             *)
               echo "Unknown scope: $SCOPE"
               exit 1
@@ -140,6 +142,7 @@ jobs:
             agentsight)     PREFIX="sight/v" ;;
             os-skills)      PREFIX="skill/v" ;;
             tokenless)      PREFIX="tokenless/v" ;;
+            ws-ckpt)        PREFIX="ckpt/v" ;;
           esac
 
           PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)

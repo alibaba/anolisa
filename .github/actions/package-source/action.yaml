@@ -51,6 +51,7 @@ runs:
           agentsight)     SRC_DIR="src/agentsight" ;;
           tokenless)     SRC_DIR="src/tokenless" ;;
           os-skills)      SRC_DIR="src/os-skills" ;;
+          ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"
             exit 1

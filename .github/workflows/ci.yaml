@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_ws_ckpt:
+        description: 'Force run ws-ckpt tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ jobs:
       agent_sec_core: ${{ steps.changes.outputs.agent_sec_core }}
       agentsight: ${{ steps.changes.outputs.agentsight }}
       tokenless: ${{ steps.changes.outputs.tokenless }}
+      ws_ckpt: ${{ steps.changes.outputs.ws_ckpt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,6 +73,7 @@ jobs:
           AGENT_SEC=false
           AGENTSIGHT=false
           TOKENLESS=false
+          WS_CKPT=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -80,6 +87,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/tokenless/"; then
             TOKENLESS=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/ws-ckpt/"; then
+            WS_CKPT=true
           fi
 
           # Manual override via workflow_dispatch
@@ -95,11 +105,15 @@ jobs:
           if [[ "${{ inputs.run_tokenless }}" == "true" ]]; then
             TOKENLESS=true
           fi
+          if [[ "${{ inputs.run_ws_ckpt }}" == "true" ]]; then
+            WS_CKPT=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
           echo "agentsight=$AGENTSIGHT" >> $GITHUB_OUTPUT
           echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
+          echo "ws_ckpt=$WS_CKPT" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -108,6 +122,7 @@ jobs:
           echo "| agent-sec-core | $AGENT_SEC |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | $AGENTSIGHT |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | $TOKENLESS |" >> $GITHUB_STEP_SUMMARY
+          echo "| ws-ckpt | $WS_CKPT |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -321,4 +336,43 @@ jobs:
       - name: Run tests
         run: |
           cd src/tokenless
+          cargo test --workspace
+
+  # =========================================================================
+  # Step 7: Test ws-ckpt
+  # =========================================================================
+  test-ws-ckpt:
+    name: Test ws-ckpt
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ws_ckpt == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/ws-ckpt/src
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs rsync
+
+      - name: Check formatting
+        run: |
+          cd src/ws-ckpt/src
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/ws-ckpt/src
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/ws-ckpt/src
           cargo test --workspace

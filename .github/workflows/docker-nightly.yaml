@@ -33,6 +33,7 @@ jobs:
       # TODO: uncomment when agentsight is integrated
       # sight-version: ${{ steps.sight.outputs.version }}
       tokenless-version: ${{ steps.tokenless.outputs.version }}
+      ws-ckpt-version: ${{ steps.ws-ckpt.outputs.version }}
       image-version: ${{ steps.image.outputs.version }}
       image-version-tag: ${{ steps.image.outputs.version_tag }}
     steps:
@@ -92,6 +93,12 @@ jobs:
         with:
           tag-match: "tokenless/v*"
 
+      - name: "Version: ws-ckpt"
+        id: ws-ckpt
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "ckpt/v*"
+
       - name: Summary
         run: |
           echo "## Component Versions" >> $GITHUB_STEP_SUMMARY
@@ -102,6 +109,7 @@ jobs:
           echo "| agent-sec-core | \`${{ steps.sec-core.outputs.version || '_skipped (no release branch)_' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ steps.tokenless.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ws-ckpt | \`${{ steps.ws-ckpt.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **image** | \`${{ steps.image.outputs.version }}\` (tag: \`${{ steps.image.outputs.version_tag }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry-run }}" = "true" ]; then
@@ -155,6 +163,29 @@ jobs:
         with:
           component: tokenless
           version: ${{ needs.versions.outputs.tokenless-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+  package-ws-ckpt:
+    name: "Package: ws-ckpt"
+    runs-on: ubuntu-22.04
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: ws-ckpt
+          version: ${{ needs.versions.outputs.ws-ckpt-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: ws-ckpt
+          version: ${{ needs.versions.outputs.ws-ckpt-version }}
           artifact-suffix: ".nightly"
           retention-days: "7"
 
@@ -271,6 +302,21 @@ jobs:
       source-artifact: "tokenless-${{ needs.versions.outputs.tokenless-version }}.nightly"
       artifact-suffix: ".nightly"
 
+  rpm-ws-ckpt:
+    name: "RPM: ws-ckpt (${{ matrix.arch }})"
+    needs: [versions, package-ws-ckpt]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: ws-ckpt
+      version: ${{ needs.versions.outputs.ws-ckpt-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "ws-ckpt-${{ needs.versions.outputs.ws-ckpt-version }}.nightly"
+      vendor-artifact: "ws-ckpt-${{ needs.versions.outputs.ws-ckpt-version }}.nightly-vendor"
+      artifact-suffix: ".nightly"
+
   # ===========================================================================
   # Job 4: Build and push Docker image
   # ===========================================================================
@@ -283,6 +329,7 @@ jobs:
       - rpm-skill
       - rpm-sec-core
       - rpm-tokenless
+      - rpm-ws-ckpt
       # TODO: uncomment when agentsight is integrated
       # - rpm-sight
     steps:
@@ -387,6 +434,7 @@ jobs:
           echo "| agent-sec-core | \`${{ needs.versions.outputs.sec-core-version || '_skipped_' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ needs.versions.outputs.tokenless-version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ws-ckpt | \`${{ needs.versions.outputs.ws-ckpt-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.GHCR_IMAGE }}:${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY

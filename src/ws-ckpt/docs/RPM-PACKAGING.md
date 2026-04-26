@@ -22,7 +22,7 @@ rpm -ivh ws-ckpt-0.1.0-1.x86_64.rpm
 ```
 
 安装过程会自动：
-- 将 `ws-ckpt` 二进制部署到 `/usr/local/bin/`
+- 将 `ws-ckpt` 二进制部署到 `/usr/bin/`
 - 安装 systemd 服务文件到 `/etc/systemd/system/`
 - 创建运行时目录（`/run/ws-ckpt`、`/data/ws-ckpt`、`/mnt/btrfs-workspace`）
 - 执行 `systemctl daemon-reload` 并 `enable` 服务

@@ -19,6 +19,7 @@ body:
         - skill
         - sight
         - tokenless
+        - ckpt
         - other
     validations:
       required: true
