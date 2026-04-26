@@ -3,7 +3,7 @@
 //! Tests cover SchemaCompressor and ResponseCompressor functionality
 //! including real-world fixture schemas.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 
 // ============================================================
@@ -77,21 +77,27 @@ fn test_compress_nested_properties() {
     let result = compressor.compress(&schema);
 
     // Nested structure preserved
-    assert!(result
-        .pointer("/function/parameters/properties/address/properties/street")
-        .is_some());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address/properties/street")
+            .is_some()
+    );
 
     // Titles removed at all levels
-    assert!(result
-        .pointer("/function/parameters/properties/address")
-        .unwrap()
-        .get("title")
-        .is_none());
-    assert!(result
-        .pointer("/function/parameters/properties/address/properties/street")
-        .unwrap()
-        .get("title")
-        .is_none());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address")
+            .unwrap()
+            .get("title")
+            .is_none()
+    );
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address/properties/street")
+            .unwrap()
+            .get("title")
+            .is_none()
+    );
 }
 
 #[test]
@@ -171,9 +177,11 @@ fn test_titles_removed() {
 
     assert!(result["function"].get("title").is_none());
     assert!(result["function"]["parameters"].get("title").is_none());
-    assert!(result["function"]["parameters"]["properties"]["x"]
-        .get("title")
-        .is_none());
+    assert!(
+        result["function"]["parameters"]["properties"]["x"]
+            .get("title")
+            .is_none()
+    );
 }
 
 #[test]
@@ -195,11 +203,13 @@ fn test_examples_removed() {
     });
 
     let result = compressor.compress(&schema);
-    assert!(result
-        .pointer("/function/parameters/properties/email")
-        .unwrap()
-        .get("examples")
-        .is_none());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/email")
+            .unwrap()
+            .get("examples")
+            .is_none()
+    );
 }
 
 #[test]
@@ -373,9 +383,11 @@ fn test_fixture_hubspot_contact() {
     assert!(compressed.is_object());
 
     // Structure preserved
-    assert!(compressed
-        .pointer("/function/parameters/properties")
-        .is_some());
+    assert!(
+        compressed
+            .pointer("/function/parameters/properties")
+            .is_some()
+    );
     assert_eq!(compressed["function"]["name"], "create_or_update_contact");
 
     // Compression occurred

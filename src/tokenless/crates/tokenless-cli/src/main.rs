@@ -6,8 +6,8 @@ use std::io::{self, Read};
 use std::process;
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::estimate_tokens_from_chars;
-use tokenless_stats::{format_list, format_show, format_summary};
 use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, TokenlessConfig};
+use tokenless_stats::{format_list, format_show, format_summary};
 
 #[derive(Parser)]
 #[command(

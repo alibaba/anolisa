@@ -355,14 +355,18 @@ mod tests {
         // Titles should be removed
         assert!(result["function"].get("title").is_none());
         assert!(result["function"]["parameters"].get("title").is_none());
-        assert!(result["function"]["parameters"]["properties"]["field1"]
-            .get("title")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["field1"]
+                .get("title")
+                .is_none()
+        );
 
         // Examples should be removed
-        assert!(result["function"]["parameters"]["properties"]["field1"]
-            .get("examples")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["field1"]
+                .get("examples")
+                .is_none()
+        );
     }
 
     #[test]
@@ -417,9 +421,11 @@ mod tests {
         let result = compressor.compress(&schema);
 
         // Check nested titles are removed
-        assert!(result["function"]["parameters"]["properties"]["level1"]
-            .get("title")
-            .is_none());
+        assert!(
+            result["function"]["parameters"]["properties"]["level1"]
+                .get("title")
+                .is_none()
+        );
         assert!(
             result["function"]["parameters"]["properties"]["level1"]["properties"]["level2"]
                 .get("title")

@@ -1,4 +1,4 @@
-%define anolis_release 6
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -127,6 +127,14 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Sun Apr 26 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-1
+- Bump to v0.2.0 with new features and fixes
+  - feat: add TOON context compression support
+  - feat: add compression stats with auto-record from real data
+  - fix: skip compression for skill and content-retrieval tools
+  - build: convert spec to template with @VERSION@ substitution
+  - chore: upgrade Rust edition to 2024
+
 * Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-6
 - Integrate TOON into response compression pipeline
   - Build toon binary from third_party/toon submodule
