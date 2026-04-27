@@ -26,10 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
-
 from agent_sec_cli.cli import app as cli_app
-
+from typer.testing import CliRunner
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1199,6 +1197,3 @@ def test_key_rotation_old_sigs_verifiable(ws):
         f"Expected 'pass' for unchanged skill after key rotation, "
         f"got '{out['status']}'"
     )
-
-
-

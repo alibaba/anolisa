@@ -260,8 +260,14 @@ def run_verification(skill: str | None = None) -> dict[str, list]:
     trusted_keys = load_trusted_keys(DEFAULT_TRUSTED_KEYS_DIR)
 
     if skill is not None:
-        verify_skill(skill, trusted_keys)
-        return {"passed": [os.path.basename(skill)], "failed": []}
+        try:
+            verify_skill(skill, trusted_keys)
+            return {"passed": [os.path.basename(skill)], "failed": []}
+        except Exception as e:
+            return {
+                "passed": [],
+                "failed": [{"name": os.path.basename(skill), "error": str(e)}],
+            }
 
     config = load_config(DEFAULT_CONFIG)
     all_passed: list[str] = []
