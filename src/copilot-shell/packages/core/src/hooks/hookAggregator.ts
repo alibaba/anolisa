@@ -17,9 +17,35 @@ import {
 } from './types.js';
 import type {
   HookOutput,
+  HookConfig,
   HookExecutionResult,
   BeforeToolSelectionOutput,
 } from './types.js';
+
+/**
+ * A hook output paired with the display name of the hook that produced it.
+ * Used by merge strategies that need to attribute messages to their source
+ * (e.g. prefixing systemMessage with `[name]` when multiple hooks contribute).
+ */
+interface NamedHookOutput {
+  name: string;
+  output: HookOutput;
+}
+
+/**
+ * Derive a human-readable display name for a hook. Prefers the explicit `name`
+ * field; falls back to the command basename if name is absent.
+ */
+function getHookDisplayName(config: HookConfig | undefined): string {
+  if (!config) return 'hook';
+  if (config.name && config.name.trim().length > 0) return config.name;
+  const cmd = (config.command || '').trim();
+  if (!cmd) return 'hook';
+  // Take the first token (command binary) and strip path.
+  const firstToken = cmd.split(/\s+/)[0] ?? '';
+  const basename = firstToken.split('/').pop() ?? '';
+  return basename || 'hook';
+}
 
 /**
  * Aggregated result from multiple hook executions
@@ -47,6 +73,7 @@ export class HookAggregator {
     eventName: HookEventName,
   ): AggregatedHookResult {
     const allOutputs: HookOutput[] = [];
+    const namedOutputs: NamedHookOutput[] = [];
     const errors: Error[] = [];
     let totalDuration = 0;
 
@@ -59,11 +86,15 @@ export class HookAggregator {
 
       if (result.output) {
         allOutputs.push(result.output);
+        namedOutputs.push({
+          name: getHookDisplayName(result.hookConfig),
+          output: result.output,
+        });
       }
     }
 
     const success = errors.length === 0;
-    const finalOutput = this.mergeOutputs(allOutputs, eventName);
+    const finalOutput = this.mergeOutputs(namedOutputs, eventName);
 
     return {
       success,
@@ -78,16 +109,21 @@ export class HookAggregator {
    * Merge multiple hook outputs based on event type
    */
   private mergeOutputs(
-    outputs: HookOutput[],
+    named: NamedHookOutput[],
     eventName: HookEventName,
   ): HookOutput | undefined {
-    if (outputs.length === 0) {
+    if (named.length === 0) {
       return undefined;
     }
 
-    if (outputs.length === 1) {
-      return this.createSpecificHookOutput(outputs[0], eventName);
+    if (named.length === 1) {
+      // Single-hook fast path: pass through without `[name]` prefixing to
+      // preserve backward-compatible output for the common case.
+      return this.createSpecificHookOutput(named[0].output, eventName);
     }
+
+    // For merge strategies that don't need hook names, strip them once.
+    const outputs = named.map((n) => n.output);
 
     let merged: HookOutput;
 
@@ -96,7 +132,7 @@ export class HookAggregator {
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
-        merged = this.mergeWithOrLogic(outputs);
+        merged = this.mergeWithOrLogic(named);
         break;
       case HookEventName.PermissionRequest:
         merged = this.mergePermissionRequestOutputs(outputs);
@@ -123,20 +159,26 @@ export class HookAggregator {
    * Rules:
    * - Any "block" or "deny" decision results in blocking (most restrictive wins)
    * - Reasons are concatenated with newlines
+   * - systemMessage values from multiple hooks are concatenated as
+   *   `[hookName] message` on separate lines, so users can see which hook
+   *   contributed which message (fixes the pre-existing "last write wins"
+   *   ambiguity where the triggering hook's message could be silently
+   *   overridden by a later allow hook).
    * - continue=false takes precedence over continue=true
    * - Additional context is concatenated
    */
-  private mergeWithOrLogic(outputs: HookOutput[]): HookOutput {
+  private mergeWithOrLogic(named: NamedHookOutput[]): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
+    const systemMessages: string[] = [];
     let hasBlock = false;
     let hasAsk = false;
     let hasContinueFalse = false;
     let stopReason: string | undefined;
     const otherHookSpecificFields: Record<string, unknown> = {};
 
-    for (const output of outputs) {
+    for (const { name, output } of named) {
       // Check for blocking decisions
       if (output.decision === 'block' || output.decision === 'deny') {
         hasBlock = true;
@@ -176,8 +218,10 @@ export class HookAggregator {
       if (output.suppressOutput !== undefined) {
         merged.suppressOutput = output.suppressOutput;
       }
-      if (output.systemMessage !== undefined) {
-        merged.systemMessage = output.systemMessage;
+      // systemMessage is accumulated with hook-name attribution rather than
+      // last-write-wins, so users see every hook's voice.
+      if (output.systemMessage !== undefined && output.systemMessage !== '') {
+        systemMessages.push(`[${name}] ${output.systemMessage}`);
       }
     }
 
@@ -186,13 +230,18 @@ export class HookAggregator {
       merged.decision = 'block';
     } else if (hasAsk) {
       merged.decision = 'ask';
-    } else if (outputs.some((o) => o.decision === 'allow')) {
+    } else if (named.some(({ output }) => output.decision === 'allow')) {
       merged.decision = 'allow';
     }
 
     // Set merged reason
     if (reasons.length > 0) {
       merged.reason = reasons.join('\n');
+    }
+
+    // Set merged systemMessage (concatenated with hook name prefixes)
+    if (systemMessages.length > 0) {
+      merged.systemMessage = systemMessages.join('\n');
     }
 
     // Set continue flag

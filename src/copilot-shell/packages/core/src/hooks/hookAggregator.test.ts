@@ -203,6 +203,157 @@ describe('HookAggregator', () => {
     });
   });
 
+  describe('mergeWithOrLogic - systemMessage concatenation', () => {
+    it('should pass through single systemMessage untouched (fast path)', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: '/path/to/guard.py',
+            name: 'rm-guard',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'ask', systemMessage: 'danger detected' },
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      // Single hook keeps its original systemMessage, no `[name]` prefix.
+      expect(result.finalOutput?.systemMessage).toBe('danger detected');
+    });
+
+    it('should concatenate multiple systemMessages with [name] prefixes', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: './guard.py',
+            name: 'rm-guard',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'ask', systemMessage: 'rm detected' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: './audit.py',
+            name: 'audit',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'allow', systemMessage: 'logged' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      // ask wins over allow for decision; both systemMessages are retained.
+      expect(result.finalOutput?.decision).toBe('ask');
+      expect(result.finalOutput?.systemMessage).toBe(
+        '[rm-guard] rm detected\n[audit] logged',
+      );
+    });
+
+    it('should fall back to command basename when name is missing', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: '/usr/local/bin/guard.py --strict',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'ask', systemMessage: 'blocked' },
+          duration: 10,
+        },
+        {
+          hookConfig: { type: HookType.Command, command: 'audit.sh' },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'allow', systemMessage: 'ok' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.systemMessage).toBe(
+        '[guard.py] blocked\n[audit.sh] ok',
+      );
+    });
+
+    it('should skip hooks with empty or undefined systemMessage', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'a',
+            name: 'A',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'ask', systemMessage: 'A says ask' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'b',
+            name: 'B',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'allow' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'c',
+            name: 'C',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'allow', systemMessage: '' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'd',
+            name: 'D',
+          },
+          eventName: HookEventName.PreToolUse,
+          success: true,
+          output: { decision: 'allow', systemMessage: 'D note' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      // Only A and D contribute; B (undefined) and C (empty) are skipped.
+      expect(result.finalOutput?.decision).toBe('ask');
+      expect(result.finalOutput?.systemMessage).toBe(
+        '[A] A says ask\n[D] D note',
+      );
+    });
+  });
+
   describe('mergePermissionRequestOutputs', () => {
     it('should prioritize deny over allow', () => {
       const outputs: HookOutput[] = [
