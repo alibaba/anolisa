@@ -49,7 +49,7 @@
             ]
         },
         {
-            "label": "component:tokenless",
+            "label": "component:hook",
             "maintainers": [
                 {
                     "github": "Forrest-ly"

@@ -74,7 +74,7 @@ Format: `type(scope): description`
 | `src/agent-sec-core/` | `sec-core` |
 | `src/os-skills/` | `skill` |
 | `src/agentsight/` | `sight` |
-| `src/tokenless/` | `tokenless` |
+| `src/tokenless/` | `hook` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -141,7 +141,7 @@ When generating a PR description, use `.github/pull_request_template.md` as the 
 - `sec-core` → any file under `src/agent-sec-core/`
 - `skill` → any file under `src/os-skills/`
 - `sight` → any file under `src/agentsight/`
-- `tokenless` → any file under `src/tokenless/`
+- `hook` → any file under `src/tokenless/`
 - `Multiple / Project-wide` → cross-component or root-level changes
 
 **Checklist** — mark items that actually apply to this PR; skip items for unaffected components.
@@ -186,7 +186,7 @@ closes #42
 - [x] My code follows the project's code style
 - [x] I have added tests that prove my fix is effective or that my feature works
 - [x] For `cosh`: Lint passes, type check passes, and tests pass
-- [x] For `tokenless`: Cargo test passes, clippy warnings resolved
+- [x] For `hook`: Cargo test passes, clippy warnings resolved
 - [x] Lock files are up to date
 
 ## Testing

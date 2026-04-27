@@ -25,7 +25,7 @@
 /src/os-skills/                         @Ziqi002                    # auto-label: component:skill
 /src/ws-ckpt/                           @Ziqi002                    # auto-label: component:ckpt
 /src/osbase/                            @casparant                  # auto-label: component:osbase
-/src/tokenless/                         @Forrest-ly @shiloong       # auto-label: component:tokenless
+/src/tokenless/                         @Forrest-ly @shiloong       # auto-label: component:hook
 
 # ---------------------------------------------------------------------------
 # Scope paths

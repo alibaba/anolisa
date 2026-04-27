@@ -79,7 +79,7 @@ jobs:
             if (scopeMatch) {
               const scope = scopeMatch[1].slice(1, -1);
               const validScopes = [
-                'cosh', 'sec-core', 'skill', 'sight', 'tokenless', 'ckpt',
+                'cosh', 'sec-core', 'skill', 'sight', 'hook', 'ckpt',
                 'agent-sec-core', 'agentsight', 'os-skills', 'ws-ckpt', // legacy aliases
                 'deps', 'ci', 'docs', 'chore'
               ];
@@ -125,7 +125,7 @@ jobs:
             }
 
             // Valid scopes — short names preferred; legacy long names accepted for forward compatibility
-            const validScopes = ['cosh', 'sec-core', 'skill', 'sight', 'tokenless', 'ckpt', 'agent-sec-core', 'agentsight', 'os-skills', 'ws-ckpt', 'ci', 'docs', 'deps'];
+            const validScopes = ['cosh', 'sec-core', 'skill', 'sight', 'tokenless', 'hook', 'ckpt', 'agent-sec-core', 'agentsight', 'os-skills', 'ws-ckpt', 'ci', 'docs', 'deps'];
             const scopePattern = validScopes.join('|');
 
             // Valid branch patterns per development spec

@@ -7,7 +7,7 @@ on:
       - 'sec-core/v*'
       - 'sight/v*'
       - 'skill/v*'
-      - 'tokenless/v*'
+      - 'hook/v*'
       - 'ckpt/v*'
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
             sec-core) COMPONENT="agent-sec-core" ;;
             sight)    COMPONENT="agentsight" ;;
             skill)    COMPONENT="os-skills" ;;
-            tokenless) COMPONENT="tokenless" ;;
+            hook)     COMPONENT="tokenless" ;;
             ckpt)     COMPONENT="ws-ckpt" ;;
             *)
               echo "Unknown scope: $SCOPE"
@@ -141,7 +141,7 @@ jobs:
             agent-sec-core) PREFIX="sec-core/v" ;;
             agentsight)     PREFIX="sight/v" ;;
             os-skills)      PREFIX="skill/v" ;;
-            tokenless)      PREFIX="tokenless/v" ;;
+            tokenless)      PREFIX="hook/v" ;;
             ws-ckpt)        PREFIX="ckpt/v" ;;
           esac
 
