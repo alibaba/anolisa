@@ -644,7 +644,7 @@ def test_certify_all_multiple_skills(ws: Workspace):
         make_skill(batch_root, name, {"main.py": f"# {name}\n"})
 
     # Write config.json with skillDirs glob
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -665,7 +665,7 @@ def test_certify_all_no_skill_dirs(ws: Workspace):
     env = ws.env()
 
     # Write config.json with empty skillDirs
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -794,7 +794,7 @@ def test_status_human_readable_output(ws: Workspace):
     for name in ("sa-skill-1", "sa-skill-2"):
         make_skill(batch_root, name, {"run.sh": f"echo {name}\n"})
 
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -834,7 +834,7 @@ def test_status_drifted_shows_details(ws: Workspace):
         {"orig.txt": "original"},
     )
 
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -938,8 +938,8 @@ def test_contract_init_keys_empty_passphrase_env(ws: Workspace):
         out.get("encrypted") is False
     ), f"Empty passphrase should produce unencrypted keys, got {out}"
 
-    # Step 0.2 also checks: ls ~/.local/share/skill-ledger/key.pub
-    key_pub = Path(alt_data) / "skill-ledger" / "key.pub"
+    # Step 0.2 also checks: ls ~/.local/share/agent-sec/skill-ledger/key.pub
+    key_pub = Path(alt_data) / "agent-sec" / "skill-ledger" / "key.pub"
     assert key_pub.exists(), f"key.pub not at expected path: {key_pub}"
 
 
@@ -1187,7 +1187,7 @@ def test_key_rotation_old_sigs_verifiable(ws: Workspace):
     assert r.returncode == 0, f"certify failed: {r.stderr}"
 
     # Capture the old key fingerprint from the public key file
-    pub_path = Path(env["XDG_DATA_HOME"]) / "skill-ledger" / "key.pub"
+    pub_path = Path(env["XDG_DATA_HOME"]) / "agent-sec" / "skill-ledger" / "key.pub"
     old_fp = "sha256:" + hashlib.sha256(pub_path.read_bytes()).hexdigest()
 
     # check passes with original key

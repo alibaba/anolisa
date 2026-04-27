@@ -1,4 +1,4 @@
-"""Configuration loading for skill-ledger (``~/.config/skill-ledger/config.json``)."""
+"""Configuration loading for skill-ledger (``~/.config/agent-sec/skill-ledger/config.json``)."""
 
 import json
 import logging

@@ -178,7 +178,7 @@ class TestRememberSkillDir(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.config_dir = Path(self.tmpdir) / "config" / "skill-ledger"
+        self.config_dir = Path(self.tmpdir) / "config" / "agent-sec" / "skill-ledger"
         self.config_dir.mkdir(parents=True)
         self.config_file = self.config_dir / "config.json"
 

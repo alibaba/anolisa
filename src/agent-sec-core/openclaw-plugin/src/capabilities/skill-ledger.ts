@@ -40,17 +40,17 @@ const WARNING_MESSAGES: Record<string, (name: string) => string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Key path resolution (mirrors Python's XDG_DATA_HOME / skill-ledger)
+// Key path resolution (mirrors Python's XDG_DATA_HOME / agent-sec/skill-ledger)
 // ---------------------------------------------------------------------------
 
 function getKeyPubPath(): string {
   const xdgData = process.env.XDG_DATA_HOME || resolve(homedir(), ".local", "share");
-  return resolve(xdgData, "skill-ledger", "key.pub");
+  return resolve(xdgData, "agent-sec", "skill-ledger", "key.pub");
 }
 
 function getKeyEncPath(): string {
   const xdgData = process.env.XDG_DATA_HOME || resolve(homedir(), ".local", "share");
-  return resolve(xdgData, "skill-ledger", "key.enc");
+  return resolve(xdgData, "agent-sec", "skill-ledger", "key.enc");
 }
 
 /** Return true only if both key.pub and key.enc exist (mirrors Python key_manager.keys_exist). */

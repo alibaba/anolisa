@@ -236,7 +236,7 @@ def mock_cli_env(tmp_path):
     _create_skill_dir(str(project), "test-skill")
 
     # Create fake key files so _ensure_keys() is a no-op
-    data_dir = tmp_path / "xdg-data" / "skill-ledger"
+    data_dir = tmp_path / "xdg-data" / "agent-sec" / "skill-ledger"
     data_dir.mkdir(parents=True)
     (data_dir / "key.pub").write_text("fake-pub")
     (data_dir / "key.enc").write_text("fake-enc")
