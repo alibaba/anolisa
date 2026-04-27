@@ -120,7 +120,7 @@ def _keys_exist() -> bool:
     xdg_data = os.environ.get("XDG_DATA_HOME", "")
     if not xdg_data:
         xdg_data = str(Path.home() / ".local" / "share")
-    data_dir = Path(xdg_data) / "skill-ledger"
+    data_dir = Path(xdg_data) / "agent-sec" / "skill-ledger"
     return (data_dir / "key.pub").is_file() and (data_dir / "key.enc").is_file()
 
 

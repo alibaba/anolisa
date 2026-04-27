@@ -609,7 +609,7 @@ def test_certify_all_multiple_skills(ws: Workspace):
     for name in ("skill-x", "skill-y", "skill-z"):
         make_skill(batch_root, name, {"main.py": f"# {name}\n"})
 
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -628,7 +628,7 @@ def test_certify_all_multiple_skills(ws: Workspace):
 def test_certify_all_no_skill_dirs(ws: Workspace):
     """--all with empty skillDirs → exit 1."""
     env = ws.env()
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -733,7 +733,7 @@ def test_status_human_readable_output(ws: Workspace):
     for name in ("sa-skill-1", "sa-skill-2"):
         make_skill(batch_root, name, {"run.sh": f"echo {name}\n"})
 
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -773,7 +773,7 @@ def test_status_drifted_shows_details(ws: Workspace):
         {"orig.txt": "original"},
     )
 
-    config_dir = ws.xdg_config / "skill-ledger"
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -851,7 +851,7 @@ def test_contract_init_keys_empty_passphrase_env(ws: Workspace):
     assert (
         out.get("encrypted") is False
     ), f"Empty passphrase should produce unencrypted keys, got {out}"
-    key_pub = Path(alt_data) / "skill-ledger" / "key.pub"
+    key_pub = Path(alt_data) / "agent-sec" / "skill-ledger" / "key.pub"
     assert key_pub.exists(), f"key.pub not at expected path: {key_pub}"
 
 
@@ -1306,7 +1306,7 @@ def test_key_rotation_old_sigs_verifiable(ws: Workspace):
     r = run_skill_ledger(["certify", str(s), "--findings", str(fp)], env_extra=env)
     assert r.returncode == 0, f"certify failed: {r.stderr}"
 
-    pub_path = Path(env["XDG_DATA_HOME"]) / "skill-ledger" / "key.pub"
+    pub_path = Path(env["XDG_DATA_HOME"]) / "agent-sec" / "skill-ledger" / "key.pub"
     old_fp = "sha256:" + hashlib.sha256(pub_path.read_bytes()).hexdigest()
 
     r = run_skill_ledger(["check", str(s)], env_extra=env)

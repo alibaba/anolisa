@@ -9,7 +9,7 @@ class SigningBackend(ABC):
 
     The default backend is :class:`NativeEd25519Backend`.  Additional backends
     (GPG, PKCS#11) can be implemented against this interface and selected via
-    ``~/.config/skill-ledger/config.json``.
+    ``~/.config/agent-sec/skill-ledger/config.json``.
     """
 
     @property
