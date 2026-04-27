@@ -16,10 +16,8 @@ python-code-pretty: ## Format Python code using black and isort
 test-python: ## Run Python unit and integration tests
 	@echo "🧪 Running Python tests..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ --ignore=tests/integration-test/skill-ledger/ -v
+	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
-	@echo "🧪 Running skill-ledger integration tests..."
-	uv run --project agent-sec-cli python3 tests/integration-test/skill-ledger/test_skill_ledger_integration.py
 	@echo "🧪 Running skill-ledger e2e tests..."
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
