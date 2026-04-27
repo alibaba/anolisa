@@ -149,18 +149,19 @@ export const skillLedger: SecurityCapability = {
           { timeout: DEFAULT_TIMEOUT_MS },
         );
 
-        // CLI error → fail-open
-        if (result.exitCode !== 0) {
-          api.logger.warn(`[skill-ledger] CLI error (exit ${result.exitCode}): ${result.stderr}`);
-          return undefined;
-        }
-
-        // Parse JSON output
+        // Parse JSON output — CLI may return exit code 1 for deny/tampered states,
+        // but stdout still contains valid check result with status field.
+        // We should parse stdout even if exit code is non-zero.
         let checkResult: CheckResult;
         try {
           checkResult = JSON.parse(result.stdout) as CheckResult;
         } catch {
-          api.logger.warn(`[skill-ledger] failed to parse CLI output: ${result.stdout}`);
+          // Only log warning if parsing fails AND exit code is non-zero
+          if (result.exitCode !== 0) {
+            api.logger.warn(`[skill-ledger] CLI error (exit ${result.exitCode}): ${result.stderr}`);
+          } else {
+            api.logger.warn(`[skill-ledger] failed to parse CLI output: ${result.stdout}`);
+          }
           return undefined;
         }
 
