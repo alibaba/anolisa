@@ -31,6 +31,7 @@
 - Aligned skill-ledger tool name and added path validation. (#317)
 - Reworked skill-ledger status, output, and check signing. (#335)
 - Skill-ledger hook hardening, e2e suite, and posture integration. (#339)
+- **Known limitation:** skill directory resolution assumes dir name matches SKILL.md `name` field; see #381.
 
 **Security Middleware & Event System**
 
