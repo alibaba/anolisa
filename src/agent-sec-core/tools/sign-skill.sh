@@ -187,19 +187,41 @@ ensure_config_dir_entry() {
         return 0
     fi
 
-    # Already registered?
-    if grep -qF "$dir_to_add" "$config_file" 2>/dev/null; then
+    # Already registered?  Use awk to check only inside the skills_dir
+    # array for an exact (whitespace-trimmed) match, avoiding substring
+    # false positives from grep -F.
+    if awk -v target="$dir_to_add" '
+        /skills_dir[[:space:]]*=/ { in_list=1; next }
+        in_list && /^[[:space:]]*\]/ { exit 1 }
+        in_list {
+            line=$0; gsub(/^[[:space:]]+|[[:space:],]+$/, "", line)
+            if (line == target) { found=1; exit 0 }
+        }
+        END { exit (found ? 0 : 1) }
+    ' "$config_file" 2>/dev/null; then
         echo "Skills directory already in config.conf: $dir_to_add"
         return 0
     fi
 
-    # Insert entry before the first ']' (end of skills_dir array)
+    # Preserve original file permissions across the temp-file swap.
+    local orig_mode
+    orig_mode=$(stat -c '%a' "$config_file" 2>/dev/null) \
+        || orig_mode=$(stat -f '%Lp' "$config_file" 2>/dev/null) \
+        || orig_mode=""
+
+    # Insert entry before the first ']' (end of skills_dir array).
+    # The pattern tolerates an optionally-indented closing bracket.
     local tmp_file
     tmp_file=$(mktemp)
     awk -v entry="    $dir_to_add" '
-        /^]/ && !done { print entry; done=1 }
+        /^[[:space:]]*\]/ && !done { print entry; done=1 }
         { print }
     ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
+
+    # Restore original permissions if we captured them.
+    if [[ -n "$orig_mode" ]]; then
+        chmod "$orig_mode" "$config_file" 2>/dev/null
+    fi
 
     if grep -qF "$dir_to_add" "$config_file" 2>/dev/null; then
         echo -e "${GREEN}Added skills directory to config.conf: $dir_to_add${NC}"
