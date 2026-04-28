@@ -399,7 +399,7 @@ impl GenAISqliteStore {
     /// if the agent crashes before the response is received.
     pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        let instance = crate::genai::sls::SlsUploader::get_instance_id();
+        let instance = crate::genai::instance_id::get_instance_id();
         conn.execute(
             "INSERT INTO genai_events (
                 event_type, status, call_id, trace_id, conversation_id, session_id, instance,
@@ -1597,7 +1597,7 @@ impl GenAISqliteStore {
                 };
 
                 // Get instance ID (same logic as SLS uploader)
-                let instance = crate::genai::sls::SlsUploader::get_instance_id();
+                let instance = crate::genai::instance_id::get_instance_id();
 
                 conn.execute(
                     "INSERT INTO genai_events (

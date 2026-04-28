@@ -98,6 +98,6 @@ pub use discovery::{AgentInfo, AgentMatcher, AgentScanner, DiscoveredAgent, Proc
 pub use genai::{
     GenAIBuilder, GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
     MessagePart, InputMessage, OutputMessage, ToolUse, AgentInteraction, StreamChunk, ToolDefinition,
-    GenAIStore, GenAIStoreStats, SlsUploader, GenAIExporter,
+    GenAIStore, GenAIStoreStats, SlsUploader, LogtailExporter, GenAIExporter,
 };
 

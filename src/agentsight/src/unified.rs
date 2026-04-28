@@ -30,7 +30,7 @@ use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
-use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
+use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader, LogtailExporter};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::interruption::{InterruptionDetector, DetectorConfig};
 use crate::parser::Parser;
@@ -155,10 +155,7 @@ impl AgentSight {
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
 
-        // Always add local JSONL exporter
-        genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
-
-        // Add SLS exporter if configured, otherwise fallback to SQLite
+        // Add SLS exporter if configured; skip local storage when SLS is on
         if config.sls_enabled() {
             match SlsUploader::new(&config) {
                 Ok(uploader) => {
@@ -170,7 +167,9 @@ impl AgentSight {
                 }
             }
         } else {
-            // No SLS credentials configured, use SQLite as local storage
+            // SLS not configured: use local JSONL + SQLite
+            genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
+
             match GenAISqliteStore::new() {
                 Ok(store) => {
                     log::info!("SQLite GenAI exporter enabled (SLS not configured)");
@@ -182,6 +181,12 @@ impl AgentSight {
                     log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
                 }
             }
+        }
+
+        // Add Logtail file exporter if SLS_LOGTAIL_FILE env var is set
+        if let Some(exporter) = LogtailExporter::new() {
+            log::info!("Logtail file exporter enabled ({})", exporter.path().display());
+            genai_exporters.push(Box::new(exporter));
         }
 
         // Create analyzer with tokenizer if configured

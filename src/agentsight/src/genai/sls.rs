@@ -4,6 +4,7 @@
 //! to Aliyun SLS via a background thread with its own tokio runtime.
 
 use crossbeam_channel::{Sender, Receiver, bounded};
+use std::collections::BTreeMap;
 use std::thread;
 
 use crate::config::AgentsightConfig;
@@ -151,222 +152,27 @@ impl SlsUploader {
         log::info!("SLS upload thread exiting (channel closed)");
     }
 
-    /// 获取实例ID：优先请求阿里云 ECS metadata（超时1秒），失败则回退到 hostname
-    pub fn get_instance_id() -> String {
-        // 尝试从 ECS metadata service 获取 instance-id
-        match ureq::get("http://100.100.100.200/latest/meta-data/instance-id")
-            .timeout(std::time::Duration::from_secs(1))
-            .call()
-        {
-            Ok(resp) => {
-                if let Ok(body) = resp.into_string() {
-                    let id = body.trim().to_string();
-                    if !id.is_empty() {
-                        log::debug!("Got ECS instance-id: {}", id);
-                        return id;
-                    }
-                }
-            }
-            Err(e) => {
-                log::debug!("ECS metadata not available, falling back to hostname: {}", e);
-            }
-        }
-        // 回退: /etc/hostname -> $HOSTNAME -> "unknown"
-        std::fs::read_to_string("/etc/hostname")
-            .map(|s| s.trim().to_string())
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "unknown".to_string())
-    }
-
     /// Convert GenAI semantic events to SLS LogGroup
     ///
-    /// One LLM request = one SLS log entry, all fields flattened with OTel GenAI naming.
-    /// No nested JSON wrappers.
+    /// Thin wrapper: calls `events_to_flat_records()` then converts to protobuf LogGroup.
     fn events_to_log_group(events: &[GenAISemanticEvent]) -> aliyun_log_sdk_protobuf::LogGroup {
         use aliyun_log_sdk_protobuf::{Log, LogGroup};
 
         let mut log_group = LogGroup::new();
+        let records = events_to_flat_records(events);
 
-        // 获取实例ID：优先从阿里云 ECS metadata 获取 instance-id，失败则用 hostname
-        let hostname = Self::get_instance_id();
-
-        for event in events {
-            let timestamp = chrono::Utc::now().timestamp() as u32;
+        for record in &records {
+            let timestamp = record.get("__time__")
+                .and_then(|t| t.parse::<u32>().ok())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() as u32);
             let mut log = Log::from_unixtime(timestamp);
 
-            // 每条日志都写入 instance (hostname)
-            log.add_content_kv("instance", &hostname);
-
-            match event {
-                GenAISemanticEvent::LLMCall(call) => {
-                    // ── OTel GenAI Required ──
-                    log.add_content_kv("gen_ai.provider.name", &call.provider);
-                    log.add_content_kv("gen_ai.request.model", &call.model);
-                    log.add_content_kv("gen_ai.operation.name",
-                        call.metadata.get("operation_name").map(|s| s.as_str()).unwrap_or("chat"));
-
-                    // ── OTel GenAI Conditionally Required ──
-                    if let Some(ref error) = call.error {
-                        log.add_content_kv("error.type", error);
-                    }
-                    if let Some(port) = call.metadata.get("server.port") {
-                        log.add_content_kv("server.port", port);
-                    }
-
-                    // ── OTel GenAI Recommended ──
-                    if let Some(rid) = call.metadata.get("response_id") {
-                        log.add_content_kv("gen_ai.response.id", rid);
-                    } else {
-                        log.add_content_kv("gen_ai.response.id", &call.call_id);
-                    }
-                    log.add_content_kv("gen_ai.response.model", &call.model);
-                    // finish_reason is now inside OutputMessage, extract from first output
-                    if let Some(reason) = call.response.messages.first().and_then(|m| m.finish_reason.as_ref()) {
-                        log.add_content_kv("gen_ai.response.finish_reasons", &format!("[\"{}\"]", reason));
-                    }
-                    if let Some(temp) = call.request.temperature {
-                        log.add_content_kv("gen_ai.request.temperature", &temp.to_string());
-                    }
-                    if let Some(max) = call.request.max_tokens {
-                        log.add_content_kv("gen_ai.request.max_tokens", &max.to_string());
-                    }
-                    if let Some(fp) = call.request.frequency_penalty {
-                        log.add_content_kv("gen_ai.request.frequency_penalty", &fp.to_string());
-                    }
-                    if let Some(pp) = call.request.presence_penalty {
-                        log.add_content_kv("gen_ai.request.presence_penalty", &pp.to_string());
-                    }
-                    if let Some(tp) = call.request.top_p {
-                        log.add_content_kv("gen_ai.request.top_p", &tp.to_string());
-                    }
-                    if let Some(tk) = call.request.top_k {
-                        log.add_content_kv("gen_ai.request.top_k", &tk.to_string());
-                    }
-                    if let Some(seed) = call.request.seed {
-                        log.add_content_kv("gen_ai.request.seed", &seed.to_string());
-                    }
-                    if let Some(ref stops) = call.request.stop_sequences {
-                        if let Ok(json) = serde_json::to_string(stops) {
-                            log.add_content_kv("gen_ai.request.stop_sequences", &json);
-                        }
-                    }
-                    if let Some(ref usage) = call.token_usage {
-                        log.add_content_kv("gen_ai.usage.input_tokens", &usage.input_tokens.to_string());
-                        log.add_content_kv("gen_ai.usage.output_tokens", &usage.output_tokens.to_string());
-                        if let Some(cache_create) = usage.cache_creation_input_tokens {
-                            log.add_content_kv("gen_ai.usage.cache_creation.input_tokens", &cache_create.to_string());
-                        }
-                        if let Some(cache_read) = usage.cache_read_input_tokens {
-                            log.add_content_kv("gen_ai.usage.cache_read.input_tokens", &cache_read.to_string());
-                        }
-                    }
-                    if let Some(addr) = call.metadata.get("server.address") {
-                        log.add_content_kv("server.address", addr);
-                    }
-                    // Output type
-                    log.add_content_kv("gen_ai.output.type", "text");
-
-                    // ── gen_ai.system_instructions (system role messages) ──
-                    let system_msgs: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
-                        .filter(|m| m.role == "system")
-                        .collect();
-                    if !system_msgs.is_empty() {
-                        if let Ok(json) = serde_json::to_string(&system_msgs) {
-                            log.add_content_kv("gen_ai.system_instructions", &json);
-                        }
-                    }
-
-                    // ── gen_ai.input.messages (增量：只取最新一轮) ──
-                    // 从后往前找最后一条 user message，取它及之后的所有非 system 消息
-                    let non_system: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
-                        .filter(|m| m.role != "system")
-                        .collect();
-                    let latest_msgs = if let Some(last_user_idx) = non_system.iter().rposition(|m| m.role == "user") {
-                        &non_system[last_user_idx..]
-                    } else {
-                        &non_system[..]
-                    };
-                    if !latest_msgs.is_empty() {
-                        if let Ok(json) = serde_json::to_string(&latest_msgs) {
-                            log.add_content_kv("gen_ai.input.messages", &json);
-                        }
-                    }
-
-                    // ── gen_ai.output.messages (parts-based with finish_reason) ──
-                    if !call.response.messages.is_empty() {
-                        if let Ok(json) = serde_json::to_string(&call.response.messages) {
-                            log.add_content_kv("gen_ai.output.messages", &json);
-                        }
-                    }
-
-                    // ── AgentSight extensions ──
-                    log.add_content_kv("agentsight.pid", &call.pid.to_string());
-                    log.add_content_kv("agentsight.process_name", &call.process_name);
-                    if let Some(ref name) = call.agent_name {
-                        log.add_content_kv("agentsight.agent.name", name);
-                    }
-                    log.add_content_kv("agentsight.duration_ns", &call.duration_ns.to_string());
-                    log.add_content_kv("agentsight.start_timestamp_ns", &call.start_timestamp_ns.to_string());
-                    log.add_content_kv("agentsight.end_timestamp_ns", &call.end_timestamp_ns.to_string());
-                    if let Some(method) = call.metadata.get("method") {
-                        log.add_content_kv("agentsight.http.method", method);
-                    }
-                    if let Some(path) = call.metadata.get("path") {
-                        log.add_content_kv("agentsight.http.path", path);
-                    }
-                    if let Some(status) = call.metadata.get("status_code") {
-                        log.add_content_kv("agentsight.http.status_code", status);
-                    }
-                    if call.request.stream || call.metadata.get("is_sse").map(|v| v == "true").unwrap_or(false) {
-                        log.add_content_kv("agentsight.stream", "true");
-                        if let Some(cnt) = call.metadata.get("sse_event_count") {
-                            log.add_content_kv("agentsight.sse_event_count", cnt);
-                        }
-                    }
-                    if let Some(cid) = call.metadata.get("conversation_id") {
-                        log.add_content_kv("traceId", cid);
-                        log.add_content_kv("gen_ai.conversation.id", cid);
-                    }
-                    if let Some(uq) = call.metadata.get("user_query") {
-                        log.add_content_kv("agentsight.user_query", uq);
-                    }
-                    if let Some(sid) = call.metadata.get("session_id") {
-                        log.add_content_kv("gen_ai.session.id", sid);
-                    }
+            for (key, value) in record {
+                // Skip iLogtail reserved fields for PutLogs path
+                if key.starts_with("__") {
+                    continue;
                 }
-                GenAISemanticEvent::ToolUse(tool) => {
-                    log.add_content_kv("gen_ai.operation.name", "tool_use");
-                    log.add_content_kv("gen_ai.tool.name", &tool.tool_name);
-                    if let Some(ref parent_id) = tool.parent_llm_call_id {
-                        log.add_content_kv("gen_ai.response.id", parent_id);
-                    }
-                    if let Ok(json) = serde_json::to_string(&tool.arguments) {
-                        log.add_content_kv("gen_ai.tool.call.arguments", &json);
-                    }
-                    if let Some(ref result) = tool.result {
-                        log.add_content_kv("gen_ai.tool.call.result", result);
-                    }
-                    log.add_content_kv("agentsight.tool.success", &tool.success.to_string());
-                    log.add_content_kv("agentsight.pid", &tool.pid.to_string());
-                    if let Some(ref dur) = tool.duration_ns {
-                        log.add_content_kv("agentsight.duration_ns", &dur.to_string());
-                    }
-                    if let Some(ref error) = tool.error {
-                        log.add_content_kv("error.type", error);
-                    }
-                }
-                GenAISemanticEvent::AgentInteraction(interaction) => {
-                    log.add_content_kv("gen_ai.operation.name", "agent_interaction");
-                    log.add_content_kv("agentsight.agent.name", &interaction.agent_name);
-                    log.add_content_kv("agentsight.agent.interaction_type", &interaction.interaction_type);
-                    log.add_content_kv("agentsight.pid", &interaction.pid.to_string());
-                }
-                GenAISemanticEvent::StreamChunk(chunk) => {
-                    log.add_content_kv("gen_ai.operation.name", "stream_chunk");
-                    log.add_content_kv("agentsight.stream.id", &chunk.stream_id);
-                    log.add_content_kv("agentsight.stream.chunk_index", &chunk.chunk_index.to_string());
-                    log.add_content_kv("agentsight.pid", &chunk.pid.to_string());
-                }
+                log.add_content_kv(key, value);
             }
 
             log_group.add_log(log);
@@ -374,4 +180,160 @@ impl SlsUploader {
 
         log_group
     }
+}
+
+/// 将 GenAI 语义事件转换为扁平化 key-value 记录
+///
+/// 返回 `Vec<BTreeMap<String, String>>`，每个 BTreeMap 代表一条日志记录。
+/// 字段命名遵循 OTel GenAI 标准和 AgentSight 扩展规范。
+/// 包含 iLogtail 保留字段：`__time__`、`__source__`、`__topic__`。
+///
+/// 此函数被 SLS PutLogs 上传器和 Logtail 文件导出器共享使用。
+pub fn events_to_flat_records(events: &[GenAISemanticEvent]) -> Vec<BTreeMap<String, String>> {
+    let hostname = super::instance_id::get_instance_id();
+    let mut records = Vec::with_capacity(events.len());
+
+    for event in events {
+        let mut m = BTreeMap::new();
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // iLogtail 保留字段
+        m.insert("__time__".to_string(), timestamp.to_string());
+        m.insert("__source__".to_string(), hostname.clone());
+        m.insert("__topic__".to_string(), "agentsight".to_string());
+
+        // 每条日志都写入 instance
+        m.insert("instance".to_string(), hostname.clone());
+
+        match event {
+            GenAISemanticEvent::LLMCall(call) => {
+                // ── OTel GenAI Required ──
+                m.insert("gen_ai.provider.name".to_string(), call.provider.clone());
+                m.insert("gen_ai.request.model".to_string(), call.model.clone());
+                m.insert("gen_ai.operation.name".to_string(),
+                    call.metadata.get("operation_name").cloned().unwrap_or_else(|| "chat".to_string()));
+
+                // ── OTel GenAI Conditionally Required ──
+                if let Some(ref error) = call.error {
+                    m.insert("error.type".to_string(), error.clone());
+                }
+                if let Some(port) = call.metadata.get("server.port") {
+                    m.insert("server.port".to_string(), port.clone());
+                }
+
+                // ── OTel GenAI Recommended ──
+                if let Some(rid) = call.metadata.get("response_id") {
+                    m.insert("gen_ai.response.id".to_string(), rid.clone());
+                } else {
+                    m.insert("gen_ai.response.id".to_string(), call.call_id.clone());
+                }
+                m.insert("gen_ai.response.model".to_string(), call.model.clone());
+                if let Some(reason) = call.response.messages.first().and_then(|msg| msg.finish_reason.as_ref()) {
+                    m.insert("gen_ai.response.finish_reasons".to_string(), format!("[\"{}\"]", reason));
+                }
+                if let Some(temp) = call.request.temperature {
+                    m.insert("gen_ai.request.temperature".to_string(), temp.to_string());
+                }
+                if let Some(max) = call.request.max_tokens {
+                    m.insert("gen_ai.request.max_tokens".to_string(), max.to_string());
+                }
+                if let Some(fp) = call.request.frequency_penalty {
+                    m.insert("gen_ai.request.frequency_penalty".to_string(), fp.to_string());
+                }
+                if let Some(pp) = call.request.presence_penalty {
+                    m.insert("gen_ai.request.presence_penalty".to_string(), pp.to_string());
+                }
+                if let Some(tp) = call.request.top_p {
+                    m.insert("gen_ai.request.top_p".to_string(), tp.to_string());
+                }
+                if let Some(tk) = call.request.top_k {
+                    m.insert("gen_ai.request.top_k".to_string(), tk.to_string());
+                }
+                if let Some(seed) = call.request.seed {
+                    m.insert("gen_ai.request.seed".to_string(), seed.to_string());
+                }
+                if let Some(ref usage) = call.token_usage {
+                    m.insert("gen_ai.usage.input_tokens".to_string(), usage.input_tokens.to_string());
+                    m.insert("gen_ai.usage.output_tokens".to_string(), usage.output_tokens.to_string());
+                    if let Some(cache_create) = usage.cache_creation_input_tokens {
+                        m.insert("gen_ai.usage.cache_creation.input_tokens".to_string(), cache_create.to_string());
+                    }
+                    if let Some(cache_read) = usage.cache_read_input_tokens {
+                        m.insert("gen_ai.usage.cache_read.input_tokens".to_string(), cache_read.to_string());
+                    }
+                }
+                if let Some(addr) = call.metadata.get("server.address") {
+                    m.insert("server.address".to_string(), addr.clone());
+                }
+                m.insert("gen_ai.output.type".to_string(), "text".to_string());
+
+                // ── AgentSight extensions ──
+                m.insert("agentsight.pid".to_string(), call.pid.to_string());
+                m.insert("agentsight.process_name".to_string(), call.process_name.clone());
+                if let Some(ref name) = call.agent_name {
+                    m.insert("agentsight.agent.name".to_string(), name.clone());
+                }
+                m.insert("agentsight.duration_ns".to_string(), call.duration_ns.to_string());
+                m.insert("agentsight.start_timestamp_ns".to_string(), call.start_timestamp_ns.to_string());
+                m.insert("agentsight.end_timestamp_ns".to_string(), call.end_timestamp_ns.to_string());
+                if let Some(method) = call.metadata.get("method") {
+                    m.insert("agentsight.http.method".to_string(), method.clone());
+                }
+                if let Some(path) = call.metadata.get("path") {
+                    m.insert("agentsight.http.path".to_string(), path.clone());
+                }
+                if let Some(status) = call.metadata.get("status_code") {
+                    m.insert("agentsight.http.status_code".to_string(), status.clone());
+                }
+                if call.request.stream || call.metadata.get("is_sse").map(|v| v == "true").unwrap_or(false) {
+                    m.insert("agentsight.stream".to_string(), "true".to_string());
+                    if let Some(cnt) = call.metadata.get("sse_event_count") {
+                        m.insert("agentsight.sse_event_count".to_string(), cnt.clone());
+                    }
+                }
+                if let Some(rid) = call.metadata.get("response_id") {
+                    m.insert("trace_id".to_string(), rid.clone());
+                } else {
+                    m.insert("trace_id".to_string(), call.call_id.clone());
+                }
+                if let Some(cid) = call.metadata.get("conversation_id") {
+                    m.insert("gen_ai.conversation.id".to_string(), cid.clone());
+                }
+                if let Some(sid) = call.metadata.get("session_id") {
+                    m.insert("gen_ai.session.id".to_string(), sid.clone());
+                }
+            }
+            GenAISemanticEvent::ToolUse(tool) => {
+                m.insert("gen_ai.operation.name".to_string(), "tool_use".to_string());
+                m.insert("gen_ai.tool.name".to_string(), tool.tool_name.clone());
+                if let Some(ref parent_id) = tool.parent_llm_call_id {
+                    m.insert("gen_ai.response.id".to_string(), parent_id.clone());
+                }
+                m.insert("agentsight.tool.success".to_string(), tool.success.to_string());
+                m.insert("agentsight.pid".to_string(), tool.pid.to_string());
+                if let Some(ref dur) = tool.duration_ns {
+                    m.insert("agentsight.duration_ns".to_string(), dur.to_string());
+                }
+                if let Some(ref error) = tool.error {
+                    m.insert("error.type".to_string(), error.clone());
+                }
+            }
+            GenAISemanticEvent::AgentInteraction(interaction) => {
+                m.insert("gen_ai.operation.name".to_string(), "agent_interaction".to_string());
+                m.insert("agentsight.agent.name".to_string(), interaction.agent_name.clone());
+                m.insert("agentsight.agent.interaction_type".to_string(), interaction.interaction_type.clone());
+                m.insert("agentsight.pid".to_string(), interaction.pid.to_string());
+            }
+            GenAISemanticEvent::StreamChunk(chunk) => {
+                m.insert("gen_ai.operation.name".to_string(), "stream_chunk".to_string());
+                m.insert("agentsight.stream.id".to_string(), chunk.stream_id.clone());
+                m.insert("agentsight.stream.chunk_index".to_string(), chunk.chunk_index.to_string());
+                m.insert("agentsight.pid".to_string(), chunk.pid.to_string());
+            }
+        }
+
+        records.push(m);
+    }
+
+    records
 }
