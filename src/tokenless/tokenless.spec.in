@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 3
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -127,6 +127,13 @@ if [ $1 -eq 0 ] && [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Tue Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-3
+- fix: remove duplicate PID from agent_id, use source_pid exclusively
+- fix: RTK patch now records source_pid (was NULL) and clean agent_id
+- fix: copilot-shell PostToolUse now passes tool_use_id to hook payload
+- fix: copilot-shell BeforeModel now passes tool_use_id to hook payload
+- refactor: rename install.sh --hooks to --cosh for clarity
+
 * Mon Apr 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-2
 - Restructure dirs: /usr/share/tokenless/{core,adapters/{openclaw,cosh}}
 

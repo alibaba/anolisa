@@ -248,7 +248,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 After RPM installation, the following configurations are performed automatically:
 
 1. **Binaries**: Installed to `/usr/bin/tokenless` and `/usr/bin/rtk`
-2. **Hook Scripts**: Installed to `/usr/share/tokenless/hooks/copilot-shell/`
+2. **Hook Scripts**: Installed to `/usr/share/tokenless/adapters/cosh/`
 3. **OpenClaw Plugin**: Auto-detected and configured (if OpenClaw is installed)
 4. **Copilot Shell**: Auto-detected and configured (if Copilot Shell is installed)
 
@@ -261,7 +261,7 @@ which tokenless
 tokenless --version
 
 # Check hook scripts (RPM installation path)
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 
 # Check OpenClaw plugin configuration
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
@@ -292,6 +292,12 @@ make setup
 
 # Uninstall cleanup
 ./scripts/install.sh --uninstall
+
+# Manual OpenClaw plugin setup only
+./scripts/install.sh --openclaw
+
+# Manual copilot-shell hooks setup only
+./scripts/install.sh --cosh
 ```
 
 ### 4.4 Method 4: Step-by-Step Installation
@@ -339,9 +345,9 @@ cp -r openclaw/ /usr/share/tokenless/openclaw/
 make copilot-shell-install
 
 # Manual installation
-mkdir -p /usr/share/tokenless/hooks/copilot-shell
-cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/hooks/copilot-shell/
-chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
+mkdir -p /usr/share/tokenless/adapters/cosh
+cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/adapters/cosh/
+chmod +x /usr/share/tokenless/adapters/cosh/tokenless-*.sh
 ```
 
 ---
@@ -415,8 +421,12 @@ After RPM installation, the installation script automatically detects and config
 If reconfiguration is needed after RPM installation, run:
 
 ```bash
-# Use system path configuration
+# Full auto-detection and configuration
 /usr/share/tokenless/scripts/install.sh --install
+
+# Or configure individual platforms only
+/usr/share/tokenless/scripts/install.sh --cosh      # copilot-shell hooks only
+/usr/share/tokenless/scripts/install.sh --openclaw  # OpenClaw plugin only
 ```
 
 #### 5.2.3 Verify Auto-Configuration
@@ -431,7 +441,7 @@ cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
 # Should contain PreToolUse, PostToolUse, BeforeModel
 
 # Check hook scripts
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 ```
 
 ### 5.3 Copilot Shell Configuration
@@ -442,8 +452,8 @@ Hook script locations depend on the installation method:
 
 | Installation Method | Hook Script Location |
 |---------------------|---------------------|
-| RPM Installation | `/usr/share/tokenless/hooks/copilot-shell/` |
-| Source Installation | `/usr/share/tokenless/hooks/copilot-shell/` |
+| RPM Installation | `/usr/share/tokenless/adapters/cosh/` |
+| Source Installation | `/usr/share/tokenless/adapters/cosh/` |
 
 | Script | Function | Hook Event |
 |--------|----------|------------|
@@ -465,7 +475,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -477,7 +487,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -489,7 +499,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -510,7 +520,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -522,7 +532,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -534,7 +544,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -707,7 +717,7 @@ echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output
 echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash hooks/copilot-shell/tokenless-compress-schema.sh
 
 # Test installed hook (RPM installation)
-echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh
 ```
 
 ### 6.2 CLI Testing
@@ -747,10 +757,10 @@ tokenless --version
 rtk --version
 
 # Check hook scripts (RPM installation)
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 
 # Check hook scripts (Source installation)
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 ```
 
 ---

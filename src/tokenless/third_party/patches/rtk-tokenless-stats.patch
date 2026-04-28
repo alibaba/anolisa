@@ -12,7 +12,7 @@ index 982c937..5eb93c1 100644
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1355,6 +1358,160 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1355,6 +1358,157 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
  
@@ -25,16 +25,13 @@ index 982c937..5eb93c1 100644
 +/// Resolve caller context from environment variables (primary) or
 +/// .rewrite-context file (fallback for backwards compatibility).
 +fn resolve_tokenless_context() -> (String, Option<String>, Option<String>) {
-+    let pid = std::process::id();
-+
 +    // Primary: environment variables set by the hook
 +    let env_agent = std::env::var("TOKENLESS_AGENT_ID").ok();
 +    let env_session = std::env::var("TOKENLESS_SESSION_ID").ok();
 +    let env_toolcall = std::env::var("TOKENLESS_TOOL_USE_ID").ok();
 +
 +    if env_agent.is_some() || env_session.is_some() || env_toolcall.is_some() {
-+        let agent = env_agent.map(|a| format!("{}({})", a, pid))
-+            .unwrap_or_else(|| format!("cli({})", pid));
++        let agent = env_agent.unwrap_or_else(|| "cli".to_string());
 +        let sid = env_session.filter(|s| !s.is_empty());
 +        let tuid = env_toolcall.filter(|t| !t.is_empty());
 +        return (agent, sid, tuid);
@@ -55,17 +52,17 @@ index 982c937..5eb93c1 100644
 +            .map(|d| d.join(".tokenless/.rewrite-context"))
 +            .as_ref()
 +            .map(std::fs::remove_file);
-+        let agent_with_pid = if !agent.is_empty() {
-+            format!("{}({})", agent, pid)
++        let agent = if !agent.is_empty() {
++            agent
 +        } else {
-+            format!("cli({})", pid)
++            "cli".to_string()
 +        };
 +        let sid = if session.is_empty() { None } else { Some(session) };
 +        let tuid = if toolcall.is_empty() { None } else { Some(toolcall) };
-+        return (agent_with_pid, sid, tuid);
++        return (agent, sid, tuid);
 +    }
 +
-+    (format!("cli({})", pid), None::<String>, None::<String>)
++    ("cli".to_string(), None::<String>, None::<String>)
 +}
 +
 +/// Check if tokenless stats are enabled.
@@ -155,7 +152,7 @@ index 982c937..5eb93c1 100644
 +                chrono::Utc::now().to_rfc3339(),
 +                "rewrite-command",
 +                agent_id,
-+                None::<i64>,
++                Some(std::process::id() as i64),
 +                session_id,
 +                tool_use_id,
 +                before_chars as i64,

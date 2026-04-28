@@ -63,7 +63,14 @@ All hooks are **fail-open**: if dependencies are missing or processing fails, th
 
 ## Installation
 
-### Automatic
+### Automatic (via install script)
+
+```bash
+# RPM post-install or manual configuration
+bash /usr/share/tokenless/scripts/install.sh --cosh
+```
+
+### Via Makefile
 
 ```bash
 make copilot-shell-install
@@ -73,9 +80,9 @@ make copilot-shell-install
 
 1. Copy the hook scripts:
 ```bash
-mkdir -p /usr/share/tokenless/hooks/copilot-shell
-cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/hooks/copilot-shell/
-chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
+mkdir -p /usr/share/tokenless/adapters/cosh
+cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/adapters/cosh/
+chmod +x /usr/share/tokenless/adapters/cosh/tokenless-*.sh
 ```
 
 2. Add the following to your settings file (`~/.copilot-shell/settings.json` or `~/.qwen-code/settings.json`):
@@ -88,7 +95,7 @@ chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -100,7 +107,7 @@ chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -112,7 +119,7 @@ chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -131,13 +138,13 @@ Test each hook manually:
 
 ```bash
 # Command rewriting
-echo '{"tool_input":{"command":"cargo test"}}' | bash hooks/copilot-shell/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh
 
 # Response compression → TOON pipeline
-echo '{"tool_name":"Shell","tool_response":"{\"users\":[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}],\"debug\":\"info\"}"}' | bash hooks/copilot-shell/tokenless-compress-response.sh
+echo '{"tool_name":"Shell","tool_response":"{\"users\":[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}],\"debug\":\"info\"}"}' | bash /usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh
 
 # Schema compression (currently no-op until protocol adds tools support)
-echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash hooks/copilot-shell/tokenless-compress-schema.sh
+echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh
 ```
 
 ## Token Savings Examples

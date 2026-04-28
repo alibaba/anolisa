@@ -248,7 +248,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 RPM 包安装后会自动执行以下配置：
 
 1. **二进制文件**：安装到 `/usr/bin/tokenless` 和 `/usr/bin/rtk`
-2. **Hook 脚本**：安装到 `/usr/share/tokenless/hooks/copilot-shell/`
+2. **Hook 脚本**：安装到 `/usr/share/tokenless/adapters/cosh/`
 3. **OpenClaw 插件**：自动检测并配置（如果已安装 OpenClaw）
 4. **Copilot Shell**：自动检测并配置（如果已安装 Copilot Shell）
 
@@ -261,7 +261,7 @@ which tokenless
 tokenless --version
 
 # 检查 Hook 脚本（RPM 安装位置）
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 
 # 检查 OpenClaw 插件配置
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
@@ -292,6 +292,12 @@ make setup
 
 # 卸载清理
 ./scripts/install.sh --uninstall
+
+# 仅手动配置 OpenClaw 插件
+./scripts/install.sh --openclaw
+
+# 仅手动配置 copilot-shell hooks
+./scripts/install.sh --cosh
 ```
 
 ### 4.4 方法四：分步安装
@@ -339,9 +345,9 @@ cp -r openclaw/ /usr/share/tokenless/openclaw/
 make copilot-shell-install
 
 # 手动安装
-mkdir -p /usr/share/tokenless/hooks/copilot-shell
-cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/hooks/copilot-shell/
-chmod +x /usr/share/tokenless/hooks/copilot-shell/tokenless-*.sh
+mkdir -p /usr/share/tokenless/adapters/cosh
+cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/adapters/cosh/
+chmod +x /usr/share/tokenless/adapters/cosh/tokenless-*.sh
 ```
 
 ---
@@ -415,8 +421,12 @@ RPM 包安装后，安装脚本会自动检测并配置已安装的平台。
 如果 RPM 安装后需要重新配置，运行：
 
 ```bash
-# 使用系统路径的配置
+# 完整自动检测和配置
 /usr/share/tokenless/scripts/install.sh --install
+
+# 或仅配置单个平台
+/usr/share/tokenless/scripts/install.sh --cosh      # 仅 copilot-shell hooks
+/usr/share/tokenless/scripts/install.sh --openclaw  # 仅 OpenClaw 插件
 ```
 
 #### 5.2.3 验证自动配置
@@ -431,7 +441,7 @@ cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
 # 应包含 PreToolUse, PostToolUse, BeforeModel
 
 # 检查 Hook 脚本
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 ```
 
 ### 5.3 Copilot Shell 配置
@@ -442,8 +452,8 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
 
 | 安装方式 | Hook 脚本位置 |
 |---------|--------------|
-| RPM 安装 | `/usr/share/tokenless/hooks/copilot-shell/` |
-| 源码安装 | `/usr/share/tokenless/hooks/copilot-shell/` |
+| RPM 安装 | `/usr/share/tokenless/adapters/cosh/` |
+| 源码安装 | `/usr/share/tokenless/adapters/cosh/` |
 
 | 脚本 | 功能 | Hook 事件 |
 |------|------|----------|
@@ -465,7 +475,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -477,7 +487,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -489,7 +499,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -510,7 +520,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -522,7 +532,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -534,7 +544,7 @@ ls -la /usr/share/tokenless/hooks/copilot-shell/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -707,7 +717,7 @@ echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output
 echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash hooks/copilot-shell/tokenless-compress-schema.sh
 
 # 测试已安装的 Hook（RPM 安装）
-echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh
 ```
 
 ### 6.2 测试 CLI
@@ -747,10 +757,10 @@ tokenless --version
 rtk --version
 
 # 检查 Hook 脚本（RPM 安装）
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 
 # 检查 Hook 脚本（源码安装）
-ls -la /usr/share/tokenless/hooks/copilot-shell/
+ls -la /usr/share/tokenless/adapters/cosh/
 ```
 
 ---

@@ -11,7 +11,7 @@ set -euo pipefail
 #   ./install.sh --uninstall        # RPM pre-uninstall cleanup (full removal)
 #   ./install.sh --upgrade          # RPM pre-uninstall cleanup (upgrade — no-op)
 #   ./install.sh --openclaw         # Manually install OpenClaw plugin
-#   ./install.sh --hooks            # Manually install copilot-shell hooks
+#   ./install.sh --cosh              # Manually install copilot-shell hooks
 #   ./install.sh --help             # Show help
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -529,7 +529,7 @@ OPTIONS:
     --uninstall       RPM pre-uninstallation cleanup
     --upgrade         RPM pre-uninstallation cleanup (upgrade scenario)
     --openclaw        Manually setup OpenClaw plugin only
-    --hooks           Manually setup copilot-shell hooks only
+    --cosh             Manually setup copilot-shell hooks only
     --help, -h        Show this help message
 
 EXAMPLES:
@@ -578,7 +578,7 @@ main() {
         --openclaw)
             setup_openclaw "$(detect_installation_source)"
             ;;
-        --hooks)
+        --cosh)
             if [ -f "$HOME/.copilot-shell/settings.json" ] || [ -f "$HOME/.qwen-code/settings.json" ]; then
                 configure_cosh_hooks "$SYS_SHARE_DIR/adapters/cosh"
             else

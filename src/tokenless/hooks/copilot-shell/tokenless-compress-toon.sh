@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# tokenless-hook-version: 3
+# tokenless-hook-version: 7
 # Token-Less copilot-shell hook — compresses JSON tool responses to TOON format.
-# Requires: toon, jq
+# Stats are recorded automatically by tokenless compress-toon.
+# Requires: tokenless, toon, jq
 #
 # Hook event: PostToolUse
-# Records: timestamp, Agent(pid), sessionID, toolCallID, before/after chars & tokens, before/after text
 
 set -euo pipefail
 
@@ -15,16 +15,14 @@ if ! command -v jq &>/dev/null; then
   exit 0
 fi
 
-if ! command -v toon &>/dev/null; then
-  echo "[tokenless] WARNING: toon is not installed or not in PATH. TOON compression hook disabled." >&2
+if ! command -v tokenless &>/dev/null; then
+  echo "[tokenless] WARNING: tokenless is not installed. TOON compression hook disabled." >&2
   exit 0
 fi
 
-if ! command -v tokenless &>/dev/null; then
-  echo "[tokenless] WARNING: tokenless is not installed. Stats recording disabled." >&2
-  TOKENLESS_AVAILABLE=false
-else
-  TOKENLESS_AVAILABLE=true
+if ! command -v toon &>/dev/null; then
+  echo "[tokenless] WARNING: toon is not installed or not in PATH. TOON compression hook disabled." >&2
+  exit 0
 fi
 
 # --- Read input (fail-open) ---
@@ -66,21 +64,21 @@ if ! echo "$TOOL_RESPONSE" | jq -e '.' &>/dev/null 2>&1; then
   exit 0
 fi
 
-# --- Calculate before metrics ---
+# --- Extract caller context for auto-stats ---
 
-BEFORE_CHARS=$RESPONSE_LEN
-BEFORE_TOKENS=$(( (BEFORE_CHARS + 3) / 4 ))
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo '')
+TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // .toolCallId // empty' 2>/dev/null || echo '')
 
 # --- Encode JSON to TOON ---
 
-START_TIME=$(date +%s%3N 2>/dev/null || echo "0")
-
-TOON_OUTPUT=$(echo "$TOOL_RESPONSE" | toon -e 2>/dev/null) || {
+TOON_OUTPUT=$(echo "$TOOL_RESPONSE" | tokenless compress-toon \
+  --agent-id copilot-shell \
+  ${SESSION_ID:+--session-id "$SESSION_ID"} \
+  ${TOOL_USE_ID:+--tool-use-id "$TOOL_USE_ID"} \
+  2>/dev/null) || {
   echo "[tokenless] WARNING: TOON encoding failed. Passing through unchanged." >&2
   exit 0
 }
-
-END_TIME=$(date +%s%3N 2>/dev/null || echo "0")
 
 # Validate non-empty output
 if [ -z "$TOON_OUTPUT" ]; then
@@ -93,33 +91,8 @@ fi
 AFTER_CHARS=${#TOON_OUTPUT}
 AFTER_TOKENS=$(( (AFTER_CHARS + 3) / 4 ))
 
-# --- Record statistics ---
-
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo 'unknown')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo '')
-TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || echo '')
-AGENT_ID="copilot-shell"
-AGENT_PID=$$
-
-if [ "$TOKENLESS_AVAILABLE" = true ]; then
-  RECORD_CMD=(
-    tokenless stats record
-    --operation compress-toon
-    --agent-id "$AGENT_ID"
-    --before-chars "$BEFORE_CHARS"
-    --before-tokens "$BEFORE_TOKENS"
-    --after-chars "$AFTER_CHARS"
-    --after-tokens "$AFTER_TOKENS"
-    --pid "$AGENT_PID"
-    --before-text "$TOOL_RESPONSE"
-    --after-text "$TOON_OUTPUT"
-  )
-
-  [ -n "$SESSION_ID" ] && RECORD_CMD+=(--session-id "$SESSION_ID")
-  [ -n "$TOOL_USE_ID" ] && RECORD_CMD+=(--tool-use-id "$TOOL_USE_ID")
-
-  "${RECORD_CMD[@]}" 2>/dev/null || true
-fi
+BEFORE_CHARS=$RESPONSE_LEN
 
 # --- Build copilot-shell response ---
 

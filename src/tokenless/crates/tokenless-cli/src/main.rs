@@ -419,8 +419,8 @@ fn record_compression_stats(
     let pid = std::process::id();
     let agent = agent_id
         .as_deref()
-        .map(|a| format!("{}({})", a, pid))
-        .unwrap_or_else(|| format!("cli({})", pid));
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "cli".to_string());
     let mut record = StatsRecord::new(
         op,
         agent,
@@ -437,6 +437,7 @@ fn record_compression_stats(
     if let Some(tuid) = tool_use_id {
         record = record.with_tool_use_id(tuid);
     }
+    record = record.with_source_pid(pid as i64);
 
     // Record silently — stats failures must not break compression
     if let Ok(recorder) = open_recorder() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tokenless-hook-version: 7
+# tokenless-hook-version: 11
 # Token-Less copilot-shell hook — compresses tool call responses,
 # then optionally re-encodes to TOON format for additional token savings.
 #
@@ -106,6 +106,11 @@ if [ "$RESPONSE_LEN" -lt 200 ]; then
   exit 0
 fi
 
+# --- Extract caller context for auto-stats ---
+
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo '')
+TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // .toolCallId // empty' 2>/dev/null || echo '')
+
 # --- Step 1: Response Compression ---
 # tokenless compress-response expects a JSON object/array. If TOOL_RESPONSE
 # is a JSON string (plain text), compression will fail — we skip to TOON.
@@ -113,7 +118,11 @@ fi
 COMPRESSED=""
 USED_RESP_COMPRESSION=false
 if echo "$TOOL_RESPONSE" | jq -e 'type == "object" or type == "array"' &>/dev/null 2>&1; then
-  COMPRESSED=$(echo "$TOOL_RESPONSE" | tokenless compress-response 2>/dev/null) || true
+  COMPRESSED=$(echo "$TOOL_RESPONSE" | tokenless compress-response \
+    --agent-id copilot-shell \
+    ${SESSION_ID:+--session-id "$SESSION_ID"} \
+    ${TOOL_USE_ID:+--tool-use-id "$TOOL_USE_ID"} \
+    2>/dev/null) || true
   if [ -n "$COMPRESSED" ]; then
     USED_RESP_COMPRESSION=true
   fi
@@ -168,34 +177,6 @@ fi
 BEFORE_CHARS=$RESPONSE_LEN
 BEFORE_TOKENS=$(( (BEFORE_CHARS + 3) / 4 ))
 AFTER_TOKENS=$(( (AFTER_CHARS + 3) / 4 ))
-
-# --- Record statistics ---
-
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo 'unknown')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo '')
-TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || echo '')
-AGENT_ID="copilot-shell"
-AGENT_PID=$$
-
-if command -v tokenless &>/dev/null; then
-  RECORD_CMD=(
-    tokenless stats record
-    --operation compress-response
-    --agent-id "$AGENT_ID"
-    --before-chars "$BEFORE_CHARS"
-    --before-tokens "$BEFORE_TOKENS"
-    --after-chars "$AFTER_CHARS"
-    --after-tokens "$AFTER_TOKENS"
-    --pid "$AGENT_PID"
-    --before-text "$TOOL_RESPONSE"
-    --after-text "$FINAL_OUTPUT"
-  )
-
-  [ -n "$SESSION_ID" ] && RECORD_CMD+=(--session-id "$SESSION_ID")
-  [ -n "$TOOL_USE_ID" ] && RECORD_CMD+=(--tool-use-id "$TOOL_USE_ID")
-
-  "${RECORD_CMD[@]}" 2>/dev/null || true
-fi
 
 # --- Build copilot-shell response ---
 
