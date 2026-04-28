@@ -1514,6 +1514,16 @@ export default {
     '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel',
   "Set up Copilot Shell's status line UI":
     "Set up Copilot Shell's status line UI",
+  'Show current status line configuration':
+    'Show current status line configuration',
+  'Clear status line configuration': 'Clear status line configuration',
+  'Current status line command: {{command}}':
+    'Current status line command: {{command}}',
+  'No status line command is currently set.':
+    'No status line command is currently set.',
+  'Status line command cleared.': 'Status line command cleared.',
+  'Status line command set to: {{command}}':
+    'Status line command set to: {{command}}',
   'Toggle compact mode': 'Toggle compact mode',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)':
     'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)',

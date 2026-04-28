@@ -1344,6 +1344,12 @@ export default {
   '↑↓ or j/k to navigate · 1/2/3 select · Enter confirm · Esc cancel':
     '↑↓ 或 j/k 导航 · 1/2/3 选择 · Enter 确认 · Esc 取消',
   "Set up Copilot Shell's status line UI": '设置 Copilot Shell 的状态栏 UI',
+  'Show current status line configuration': '显示当前状态栏配置',
+  'Clear status line configuration': '清除状态栏配置',
+  'Current status line command: {{command}}': '当前状态栏命令：{{command}}',
+  'No status line command is currently set.': '当前未设置状态栏命令。',
+  'Status line command cleared.': '状态栏命令已清除。',
+  'Status line command set to: {{command}}': '状态栏命令已设置为：{{command}}',
   'Toggle compact mode': '切换紧凑模式',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O)':
     '隐藏工具输出和思考过程，获得更清晰的视图（通过 Ctrl+O 切换）',

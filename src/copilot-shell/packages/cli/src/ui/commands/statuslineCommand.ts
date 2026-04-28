@@ -16,57 +16,70 @@ type StatusLineActionReturn =
       content: Array<{ text: string }>;
     };
 
+const showSubCommand: SlashCommand = {
+  name: 'show',
+  get description() {
+    return t('Show current status line configuration');
+  },
+  kind: CommandKind.BUILT_IN,
+  action: (context): StatusLineActionReturn => {
+    const currentConfig = context.services.settings.merged.ui?.statusLine as
+      | { command: string }
+      | undefined;
+    if (currentConfig) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Current status line command: {{command}}', {
+          command: currentConfig.command,
+        }),
+      };
+    }
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t('No status line command is currently set.'),
+    };
+  },
+};
+
+const clearSubCommand: SlashCommand = {
+  name: 'clear',
+  altNames: ['off'],
+  get description() {
+    return t('Clear status line configuration');
+  },
+  kind: CommandKind.BUILT_IN,
+  action: async (context): Promise<StatusLineActionReturn> => {
+    await context.services.settings.setValue(
+      SettingScope.User,
+      'ui.statusLine',
+      undefined,
+    );
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t('Status line command cleared.'),
+    };
+  },
+};
+
 export const statuslineCommand: SlashCommand = {
   name: 'statusline',
   get description() {
     return t("Set up Copilot Shell's status line UI");
   },
   kind: CommandKind.BUILT_IN,
+  subCommands: [showSubCommand, clearSubCommand],
   action: async (context, args): Promise<StatusLineActionReturn> => {
-    // Split the command and arguments
     const trimmedArgs = args.trim();
 
-    // If no arguments, show current status or usage info
+    // No arguments: show current configuration
     if (!trimmedArgs) {
-      // Show current status line configuration
-      const currentConfig = context.services.settings.merged.ui?.statusLine as
-        | { command: string }
-        | undefined;
-      if (currentConfig) {
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: t('Current status line command: {{command}}', {
-            command: currentConfig.command,
-          }),
-        };
-      } else {
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: t('No status line command is currently set.'),
-        };
-      }
+      return showSubCommand.action!(context, '') as StatusLineActionReturn;
     }
 
-    // Check if the command is 'clear' or 'off' to remove the configuration
-    if (
-      trimmedArgs.toLowerCase() === 'clear' ||
-      trimmedArgs.toLowerCase() === 'off'
-    ) {
-      await context.services.settings.setValue(
-        SettingScope.User,
-        'ui.statusLine',
-        undefined,
-      );
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('Status line command cleared.'),
-      };
-    }
-
-    // Otherwise, set the status line command
+    // Set the status line command
     const statusLineConfig = {
       type: 'command',
       command: trimmedArgs,
