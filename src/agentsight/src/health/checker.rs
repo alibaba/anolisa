@@ -219,8 +219,13 @@ impl HealthChecker {
 
         for agent in &agents {
             let ports = detect_listening_ports(agent.pid);
-            // 构造重启命令：exe + 原始 cmdline args
-            let restart_cmd = build_restart_cmd(&agent.exe_path, &agent.cmdline_args);
+            // Cosh has no daemon process and does not support keepalive/restart.
+            // Build restart_cmd only for agents that support it.
+            let restart_cmd = if agent.agent_info.name == "Cosh" {
+                None
+            } else {
+                Some(build_restart_cmd(&agent.exe_path, &agent.cmdline_args))
+            };
             let status = if ports.is_empty() {
                 AgentHealthStatus {
                     pid: agent.pid,
@@ -232,7 +237,7 @@ impl HealthChecker {
                     last_check_time: now_ms(),
                     latency_ms: None,
                     error_message: None,
-                    restart_cmd: Some(restart_cmd),
+                    restart_cmd,
                 }
             } else {
                 self.probe_agent(agent, &ports, restart_cmd)
@@ -254,7 +259,7 @@ impl HealthChecker {
         &self,
         agent: &crate::discovery::DiscoveredAgent,
         ports: &[u16],
-        restart_cmd: Vec<String>,
+        restart_cmd: Option<Vec<String>>,
     ) -> AgentHealthStatus {
         let mut last_error = String::new();
         // 标记是否遇到了超时错误（区分 hung vs unreachable）
@@ -285,7 +290,7 @@ impl HealthChecker {
                         last_check_time: now_ms(),
                         latency_ms: Some(latency),
                         error_message: None,
-                        restart_cmd: Some(restart_cmd),
+                        restart_cmd,
                     };
                 }
                 Err(ureq::Error::Status(_code, _resp)) => {
@@ -300,7 +305,7 @@ impl HealthChecker {
                         last_check_time: now_ms(),
                         latency_ms: Some(latency),
                         error_message: None,
-                        restart_cmd: Some(restart_cmd),
+                        restart_cmd,
                     };
                 }
                 Err(ureq::Error::Transport(e)) => {
@@ -337,7 +342,7 @@ impl HealthChecker {
             last_check_time: now_ms(),
             latency_ms: None,
             error_message: Some(last_error),
-            restart_cmd: Some(restart_cmd),
+            restart_cmd,
         }
     }
 

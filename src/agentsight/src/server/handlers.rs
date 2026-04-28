@@ -316,11 +316,19 @@ pub struct AgentHealthResponse {
 /// GET /api/agent-health
 ///
 /// Returns the latest health check results for all discovered agent processes.
+/// Cosh is excluded from the response: it has no HTTP port and no daemon process,
+/// so there is nothing meaningful to display in the UI. Agent-crash interruption
+/// detection for Cosh still works via the health checker background scan.
 #[get("/api/agent-health")]
 pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
     let store = data.health_store.read().unwrap();
+    let agents = store
+        .all_agents()
+        .into_iter()
+        .filter(|a| a.agent_name != "Cosh")
+        .collect();
     HttpResponse::Ok().json(AgentHealthResponse {
-        agents: store.all_agents(),
+        agents,
         last_scan_time: store.last_scan_time,
     })
 }
