@@ -1,6 +1,6 @@
 //! Audit query subcommand
 
-use agentsight::{AuditEventType, AuditStore};
+use agentsight::{AuditEventType, AuditStore, SqliteConfig};
 use structopt::StructOpt;
 
 /// Audit query subcommand
@@ -29,7 +29,7 @@ pub struct AuditCommand {
 
 impl AuditCommand {
     pub fn execute(&self) {
-        let db_path = AuditStore::default_path();
+        let db_path = SqliteConfig::default().db_path();
 
         if !db_path.exists() {
             eprintln!("Database file not found: {:?}", db_path);
