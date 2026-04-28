@@ -2,14 +2,16 @@
 //!
 //! Cosh (OS Copilot) is a shell terminal agent that runs via Node.js.
 //! This matcher identifies it by checking if the process is node with
-//! `/usr/bin/co` in its command line arguments.
+//! a Cosh-related path in its command line arguments.
 
 use crate::discovery::agent::AgentInfo;
 use crate::discovery::matcher::{AgentMatcher, ProcessContext, match_name_with_version_suffix};
 
 /// Custom matcher for Cosh (OS Copilot)
 ///
-/// Matches by: comm is "node" (or node-XX) and cmdline contains "/usr/bin/co"
+/// Matches by: comm is "node" (or node-XX) and cmdline contains Cosh paths.
+/// Variant comm names like "cosh"/"os-copilot" are handled by
+/// `normalize_agent_name()` as a fallback in `resolve_agent_name_from_comm`.
 pub struct CoshMatcher {
     info: AgentInfo,
 }
@@ -35,16 +37,16 @@ impl AgentMatcher for CoshMatcher {
     fn matches(&self, ctx: &ProcessContext) -> bool {
         let comm_lower = ctx.comm.to_lowercase();
 
-        // Match: node runtime with "/usr/bin/co", "/usr/bin/cosh" or "/usr/bin/copliot" in cmdline args
+        // Match: node runtime with Cosh-related paths in cmdline args
         let is_node = match_name_with_version_suffix(&comm_lower, "node");
-        let has_co = ctx.cmdline_args.iter().any(|arg| {
-            arg == "/usr/bin/co" 
-                || arg == "/usr/bin/cosh" 
-                || arg == "/usr/bin/copliot" 
+        let has_cosh_path = ctx.cmdline_args.iter().any(|arg| {
+            arg == "/usr/bin/co"
+                || arg == "/usr/bin/cosh"
+                || arg == "/usr/bin/copilot"
                 || arg == "/usr/local/lib/copilot-shell/cli.js"
                 || arg == "/usr/lib/copilot-shell/cli.js"
         });
 
-        is_node && has_co
+        is_node && has_cosh_path
     }
 }

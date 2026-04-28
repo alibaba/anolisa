@@ -71,7 +71,17 @@ pub fn recover_oom_events(
         }
 
         // Match against known agent process name prefixes
-        let agent_name = match_agent_name(&ev.process_name);
+        // Use normalize_agent_name for known Cosh/OpenClaw variants,
+        // and also track node processes as "node(unknown-agent)" for OOM monitoring.
+        let comm_lower = ev.process_name.to_lowercase();
+        let agent_name = crate::discovery::normalize_agent_name(&ev.process_name)
+            .or_else(|| {
+                if comm_lower.starts_with("node") {
+                    Some("node(unknown-agent)")
+                } else {
+                    None
+                }
+            });
 
         // Try to correlate with genai_events to find active session/conversation
         // Use 5-minute lookback window to avoid false positives from old data
@@ -243,19 +253,3 @@ fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     Some(ns)
 }
 
-/// Match a process comm name to a known agent name.
-/// Returns Some(agent_name) if matched, None otherwise.
-fn match_agent_name(comm: &str) -> Option<&'static str> {
-    let comm_lower = comm.to_lowercase();
-    if comm_lower.starts_with("openclaw-gatewa") || comm_lower.starts_with("openclaw") {
-        Some("OpenClaw")
-    } else if comm_lower == "co" || comm_lower == "cosh" || comm_lower.starts_with("copilot") {
-        Some("Cosh")
-    } else if comm_lower.starts_with("node") {
-        // Node processes could be either; record with unknown agent but still track
-        Some("node(unknown-agent)")
-    } else {
-        // Non-agent processes — skip
-        None
-    }
-}

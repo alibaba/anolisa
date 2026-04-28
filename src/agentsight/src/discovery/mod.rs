@@ -31,6 +31,6 @@ pub mod registry;
 pub mod scanner;
 
 pub use agent::{AgentInfo, DiscoveredAgent};
-pub use matcher::{AgentMatcher, ProcessContext};
+pub use matcher::{AgentMatcher, ProcessContext, normalize_agent_name};
 pub use registry::known_agents;
 pub use scanner::AgentScanner;

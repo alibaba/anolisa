@@ -1224,6 +1224,7 @@ impl GenAIBuilder {
             .iter()
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
+            .or_else(|| crate::discovery::normalize_agent_name(comm).map(String::from))
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
@@ -1257,6 +1258,7 @@ impl GenAIBuilder {
             .iter()
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
+            .or_else(|| crate::discovery::normalize_agent_name(comm).map(String::from))
     }
 
     /// Convert OpenAI ChatMessage to parts-based InputMessage

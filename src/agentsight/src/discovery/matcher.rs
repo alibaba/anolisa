@@ -66,6 +66,26 @@ impl AgentMatcher for AgentInfo {
     }
 }
 
+/// Normalize a raw process name (comm) to a canonical agent name.
+///
+/// This function handles the case where a process's `comm` is one of the
+/// agent's alternative binary names (e.g. "cosh", "os-copilot") rather than
+/// its runtime process name (e.g. "node"). Without normalization, these
+/// variants appear as separate agents in statistics and dashboards.
+///
+/// Returns the canonical agent name if the comm matches a known variant,
+/// or `None` if the comm doesn't map to any known agent.
+pub fn normalize_agent_name(comm: &str) -> Option<&'static str> {
+    let comm_lower = comm.to_lowercase();
+    if comm_lower.starts_with("openclaw-gatewa") || comm_lower.starts_with("openclaw") {
+        Some("OpenClaw")
+    } else if comm_lower == "co" || comm_lower.contains("cosh") || comm_lower.contains("copilot") {
+        Some("Cosh")
+    } else {
+        None
+    }
+}
+
 /// Match process name against a known name, allowing version suffixes
 ///
 /// This is useful for matching runtime processes like "node-22", "python3.11",

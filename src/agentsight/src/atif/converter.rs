@@ -256,11 +256,17 @@ fn build_agent_metadata(
     events: &[TraceEventDetail],
     parsed: &[Option<LLMCall>],
 ) -> AtifAgent {
-    // Agent name: first non-None agent_name, fallback to process_name
+    // Agent name: first non-None agent_name, fallback to normalized process_name
     let name = events
         .iter()
         .find_map(|e| e.agent_name.clone())
-        .or_else(|| events.iter().find_map(|e| e.process_name.clone()))
+        .or_else(|| {
+            events.iter().find_map(|e| {
+                e.process_name.clone().and_then(|pn| {
+                    crate::discovery::normalize_agent_name(&pn).map(String::from).or(Some(pn))
+                })
+            })
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     // Model name: most frequent model
