@@ -122,17 +122,6 @@ export const DialogManager = ({
     }
   }, [uiState.isAuthenticating]);
 
-  // 当 idle 状态下所有 Agent 均已失败，自动跳转到手动配置（避免在渲染期间 setState）
-  useEffect(() => {
-    if (
-      agentShareState === 'idle' &&
-      failedAgents.has('openclaw') &&
-      failedAgents.has('qwencode')
-    ) {
-      setAgentShareState('done');
-    }
-  }, [agentShareState, failedAgents]);
-
   // 在顶层缓存文件探测结果（只在对应状态激活时读取文件，避免每次重渲染触发 IO）
   const openclawConfig = useMemo(
     () => (agentShareState === 'openclaw' ? readOpenClawConfig() : null),
@@ -143,16 +132,43 @@ export const DialogManager = ({
     [agentShareState],
   );
 
-  // 静默检测配置目录是否存在，决定是否展示流程一（只检查目录，不读取 Key）
-  // 仅在进入 USE_OPENAI 认证流程时执行一次
-  const hasAnyAgentConfigDir = useMemo(
+  // 静默分别探测每个 Agent 的配置目录是否存在，用于过滤 Agent Key Sharing 列表项
+  // （只检查目录，不读取 Key）。仅在进入 USE_OPENAI 认证流程时执行一次。
+  const hasOpenclawDir = useMemo(
     () =>
       uiState.isAuthenticating &&
       uiState.pendingAuthType === AuthType.USE_OPENAI
-        ? hasOpenClawConfigDir() || hasQwenCodeConfigDir()
+        ? hasOpenClawConfigDir()
         : false,
     [uiState.isAuthenticating, uiState.pendingAuthType],
   );
+  const hasQwenCodeDir = useMemo(
+    () =>
+      uiState.isAuthenticating &&
+      uiState.pendingAuthType === AuthType.USE_OPENAI
+        ? hasQwenCodeConfigDir()
+        : false,
+    [uiState.isAuthenticating, uiState.pendingAuthType],
+  );
+  const hasAnyAgentConfigDir = hasOpenclawDir || hasQwenCodeDir;
+
+  // 当 idle 状态下所有"可探测到的" Agent 均已失败时，自动跳转到手动配置
+  // （避免在渲染期间 setState）。不可探测到的 Agent 不应计入"全部失败"的判断。
+  useEffect(() => {
+    if (agentShareState !== 'idle' || !hasAnyAgentConfigDir) return;
+    const hasRemaining =
+      (hasOpenclawDir && !failedAgents.has('openclaw')) ||
+      (hasQwenCodeDir && !failedAgents.has('qwencode'));
+    if (!hasRemaining) {
+      setAgentShareState('done');
+    }
+  }, [
+    agentShareState,
+    failedAgents,
+    hasOpenclawDir,
+    hasQwenCodeDir,
+    hasAnyAgentConfigDir,
+  ]);
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -381,17 +397,23 @@ export const DialogManager = ({
       if (!defaults.apiKey && hasAnyAgentConfigDir) {
         // 流程一：展示 Agent 选择列表
         if (agentShareState === 'idle') {
-          // 计算剩余可用选项（排除已失败的 Agent）
+          // 排除：1) 已探测失败的 Agent；2) 配置目录不存在的 Agent
+          const excludedChoices: AgentChoice[] = [...failedAgents];
+          if (!hasOpenclawDir) excludedChoices.push('openclaw');
+          if (!hasQwenCodeDir) excludedChoices.push('qwencode');
+          // 计算剩余可用选项（仅包含配置目录存在且未失败的 Agent）
           const availableAgents = (['openclaw', 'qwencode'] as const).filter(
-            (a) => !failedAgents.has(a),
+            (a) =>
+              (a === 'openclaw' ? hasOpenclawDir : hasQwenCodeDir) &&
+              !failedAgents.has(a),
           );
-          // 两个都失败了：use Effect 会处理并跳转到 done，此处暂返回 null 等待下一次渲染
+          // 全部已失败：useEffect 会处理并跳转到 done，此处暂返回 null 等待下一次渲染
           if (availableAgents.length === 0) {
             return null;
           }
           return (
             <CustomAgentKeySharePrompt
-              excludedChoices={[...failedAgents]}
+              excludedChoices={excludedChoices}
               onSelect={(choice: AgentChoice) => {
                 if (choice === 'none') {
                   setAgentShareState('done');
