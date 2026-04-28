@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::interruption::types::{InterruptionEvent, InterruptionType};
-use crate::storage::sqlite::InterruptionStore;
 use crate::storage::sqlite::GenAISqliteStore;
+use crate::storage::sqlite::InterruptionStore;
 
 /// A parsed OOM kill event from dmesg
 #[derive(Debug)]
@@ -66,7 +66,11 @@ pub fn recover_oom_events(
 
         // Per-event dedup: skip if already recorded with same (pid, timestamp)
         if interruption_store.oom_event_exists(ev.pid, ev.timestamp_ns) {
-            log::debug!("OOM recovery: skip duplicate pid={} ts={}", ev.pid, ev.timestamp_ns);
+            log::debug!(
+                "OOM recovery: skip duplicate pid={} ts={}",
+                ev.pid,
+                ev.timestamp_ns
+            );
             continue;
         }
 
@@ -74,30 +78,37 @@ pub fn recover_oom_events(
         let agent_name = match_agent_name(&ev.process_name);
 
         // Try to correlate with genai_events to find active session/conversation
-        // Use 5-minute lookback window to avoid false positives from old data
-        let since_ns = ev.timestamp_ns.saturating_sub(300_000_000_000) as i64;
-        let (session_id, conversation_id, active_conversations): (Option<String>, Option<String>, Vec<String>) =
-            if let Some(gstore) = genai_store {
-                match gstore.list_incomplete_agentic_sessions_for_pid(ev.pid, since_ns) {
-                    Ok(pairs) => {
-                        let primary = pairs.first();
-                        let convs: Vec<String> = pairs.iter()
-                            .filter_map(|(_, _, _, cid)| cid.clone())
-                            .collect();
-                        (
-                            primary.and_then(|(_, sid, _, _)| sid.clone()),
-                            primary.and_then(|(_, _, _, cid)| cid.clone()),
-                            convs,
-                        )
-                    }
-                    Err(e) => {
-                        log::debug!("OOM recovery: failed to query genai for pid={}: {}", ev.pid, e);
-                        (None, None, Vec::new())
-                    }
+        // via pending (in-flight) LLM calls at OOM time.
+        let (session_id, conversation_id, active_conversations): (
+            Option<String>,
+            Option<String>,
+            Vec<String>,
+        ) = if let Some(gstore) = genai_store {
+            match gstore.list_pending_for_pid(ev.pid) {
+                Ok(pairs) => {
+                    let primary = pairs.first();
+                    let convs: Vec<String> = pairs
+                        .iter()
+                        .filter_map(|(_, _, _, cid)| cid.clone())
+                        .collect();
+                    (
+                        primary.and_then(|(_, sid, _, _)| sid.clone()),
+                        primary.and_then(|(_, _, _, cid)| cid.clone()),
+                        convs,
+                    )
                 }
-            } else {
-                (None, None, Vec::new())
-            };
+                Err(e) => {
+                    log::debug!(
+                        "OOM recovery: failed to query genai for pid={}: {}",
+                        ev.pid,
+                        e
+                    );
+                    (None, None, Vec::new())
+                }
+            }
+        } else {
+            (None, None, Vec::new())
+        };
 
         let mut detail = serde_json::json!({
             "pid": ev.pid,
@@ -126,19 +137,26 @@ pub fn recover_oom_events(
             Ok(_) => {
                 log::info!(
                     "OOM recovery: wrote agent_crash for pid={} name={} at {}",
-                    ev.pid, ev.process_name, ev.timestamp_ns,
+                    ev.pid,
+                    ev.process_name,
+                    ev.timestamp_ns,
                 );
                 written += 1;
             }
             Err(e) => {
-                log::warn!("OOM recovery: failed to insert event for pid={}: {}", ev.pid, e);
+                log::warn!(
+                    "OOM recovery: failed to insert event for pid={}: {}",
+                    ev.pid,
+                    e
+                );
             }
         }
     }
 
     log::info!(
         "OOM recovery: scanned {} OOM events, wrote {} new interruption records",
-        events.len(), written,
+        events.len(),
+        written,
     );
 }
 
@@ -208,7 +226,8 @@ fn parse_killed_process(line: &str) -> Option<(i32, String)> {
 
     // Extract name between first '(' and ')'
     let name = rest
-        .split('(').nth(1)
+        .split('(')
+        .nth(1)
         .and_then(|s| s.split(')').next())
         .unwrap_or("")
         .to_string();

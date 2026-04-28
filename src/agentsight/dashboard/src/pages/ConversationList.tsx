@@ -339,7 +339,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   if (loading)
     return (
       <tr>
-        <td colSpan={8} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
+        <td colSpan={10} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
           加载 Trace 列表...
         </td>
       </tr>
@@ -347,7 +347,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   if (error)
     return (
       <tr>
-        <td colSpan={8} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
+        <td colSpan={10} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
           ⚠️ {error}
         </td>
       </tr>
@@ -360,7 +360,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
-        <td colSpan={9} className="px-4 lg:px-8 py-2">
+        <td colSpan={10} className="px-4 lg:px-8 py-2">
           <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
             <div>Conversation ID</div>
             <div>用户请求</div>
@@ -375,7 +375,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
       {traces.length === 0 && (
         <tr className="bg-blue-50">
-          <td colSpan={9} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
+          <td colSpan={10} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
             该 Session 下暂无 Trace
           </td>
         </tr>
@@ -384,7 +384,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       {pageTraces.map((tr) => (
         <React.Fragment key={tr.conversation_id}>
           <tr className="bg-blue-50 hover:bg-blue-100 transition-colors">
-            <td colSpan={9} className="px-4 lg:px-8 py-2">
+            <td colSpan={10} className="px-4 lg:px-8 py-2">
               <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] items-center text-sm min-w-[800px]">
                 {/* Col 1: Conversation ID */}
                 <div className="min-w-0 pr-2">
@@ -447,7 +447,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
           {/* Trace interruption panel */}
           {expandedTracePanel === tr.trace_id && (
             <tr className="bg-blue-50">
-              <td colSpan={9} className="px-4 lg:px-8 pb-3 pt-0">
+              <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <InterruptionPanel
                     conversationId={tr.conversation_id}
@@ -464,7 +464,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       {/* 分页控制 */}
       {totalPages > 1 && (
         <tr className="bg-blue-50 border-t border-blue-100">
-          <td colSpan={8} className="px-4 lg:px-8 py-2">
+          <td colSpan={10} className="px-4 lg:px-8 py-2">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-xs text-gray-500">
                 {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length} 条
@@ -797,6 +797,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   // Which session row is expanded to show traces
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
 
+  // Session list pagination
+  const SESSION_PAGE_SIZE = 10;
+  const [sessionPage, setSessionPage] = useState(0);
+
   // Called when a single interruption event is resolved inside InterruptionPanel.
   // Decrements counts in all relevant state maps so badges update without re-query.
   const handleResolvedEvent = useCallback((info: ResolvedEventInfo) => {
@@ -927,6 +931,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setTimeseriesLoading(true);
     setError(null);
     setHasQueried(true);
+    setSessionPage(0); // reset to first page on new query
 
     const startNs = startMs * 1_000_000;
     const endNs = effectiveEnd * 1_000_000;
@@ -1193,7 +1198,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                     </tr>
                   )}
 
-                  {sessions.map((sess) => {
+                  {(() => {
+                    const sessionTotalPages = Math.max(1, Math.ceil(sessions.length / SESSION_PAGE_SIZE));
+                    const pageSessions = sessions.slice(sessionPage * SESSION_PAGE_SIZE, (sessionPage + 1) * SESSION_PAGE_SIZE);
+                    return pageSessions.map((sess) => {
                     const isExpanded = expandedSession === sess.session_id;
                     return (
                       <React.Fragment key={sess.session_id}>
@@ -1302,10 +1310,49 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                         )}
                       </React.Fragment>
                     );
-                  })}
+                  });
+                  })()}
                 </tbody>
                 </table>
               </div>
+              {/* Session pagination controls */}
+              {sessions.length > SESSION_PAGE_SIZE && (() => {
+                const sessionTotalPages = Math.ceil(sessions.length / SESSION_PAGE_SIZE);
+                return (
+                  <div className="flex items-center gap-2 justify-end px-4 py-3 border-t border-gray-100">
+                    <span className="text-xs text-gray-500">
+                      {sessionPage * SESSION_PAGE_SIZE + 1}–{Math.min((sessionPage + 1) * SESSION_PAGE_SIZE, sessions.length)} / {sessions.length} 条
+                    </span>
+                    <button
+                      onClick={() => setSessionPage((p) => Math.max(0, p - 1))}
+                      disabled={sessionPage === 0}
+                      className="px-2 py-0.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-40 transition-colors"
+                    >
+                      &lsaquo; 上一页
+                    </button>
+                    {Array.from({ length: sessionTotalPages }, (_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => setSessionPage(i)}
+                        className={`px-2 py-0.5 text-xs rounded transition-colors ${
+                          i === sessionPage
+                            ? 'bg-blue-600 text-white'
+                            : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
+                        }`}
+                      >
+                        {i + 1}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setSessionPage((p) => Math.min(sessionTotalPages - 1, p + 1))}
+                      disabled={sessionPage === sessionTotalPages - 1}
+                      className="px-2 py-0.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-40 transition-colors"
+                    >
+                      下一页 &rsaquo;
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           </>
         )}

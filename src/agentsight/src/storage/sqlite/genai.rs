@@ -9,13 +9,13 @@
 //! variable (default: 200 MB). When approaching 90% of the limit, old records are pruned
 //! automatically. The size check includes the main database file plus WAL and SHM files.
 
+use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use rusqlite::{params, Connection};
 
-use crate::genai::semantic::GenAISemanticEvent;
-use crate::genai::exporter::GenAIExporter;
 use super::connection::{create_connection, default_base_path};
+use crate::genai::exporter::GenAIExporter;
+use crate::genai::semantic::GenAISemanticEvent;
 
 // ─── Size limit configuration ──────────────────────────────────────────────────
 
@@ -34,7 +34,8 @@ fn get_max_db_size() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MAX_DB_SIZE_MB)
-        * 1024 * 1024
+        * 1024
+        * 1024
 }
 
 /// Get prune threshold (90% of max)
@@ -221,7 +222,7 @@ impl GenAISqliteStore {
             db_path: path.to_path_buf(),
         };
         store.init_tables()?;
-        
+
         // Log current database size on startup
         let current_size = store.get_total_db_size();
         let max_size = get_max_db_size();
@@ -232,7 +233,7 @@ impl GenAISqliteStore {
             threshold / 1024 / 1024,
             max_size / 1024 / 1024
         );
-        
+
         Ok(store)
     }
 
@@ -328,9 +329,7 @@ impl GenAISqliteStore {
 
         // Query existing columns once to avoid repeated PRAGMA calls
         let existing_cols: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare(
-                "SELECT name FROM pragma_table_info('genai_events')"
-            )?;
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('genai_events')")?;
             stmt.query_map([], |row| row.get::<_, String>(0))?
                 .filter_map(|r| r.ok())
                 .collect()
@@ -341,42 +340,49 @@ impl GenAISqliteStore {
             // Column with no index
             ($col:literal, $def:literal) => {
                 if !existing_cols.contains($col) {
-                    conn.execute_batch(
-                        &format!("ALTER TABLE genai_events ADD COLUMN {} {};", $col, $def)
-                    )?;
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE genai_events ADD COLUMN {} {};",
+                        $col, $def
+                    ))?;
                     log::info!("Migrated genai_events: added '{}' column", $col);
                 }
             };
             // Column + index
             ($col:literal, $def:literal, $idx:literal) => {
                 if !existing_cols.contains($col) {
-                    conn.execute_batch(
-                        &format!("ALTER TABLE genai_events ADD COLUMN {} {};", $col, $def)
-                    )?;
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE genai_events ADD COLUMN {} {};",
+                        $col, $def
+                    ))?;
                     log::info!("Migrated genai_events: added '{}' column", $col);
                 }
                 // Always run CREATE INDEX IF NOT EXISTS — safe even if index already exists
-                conn.execute_batch(
-                    &format!("CREATE INDEX IF NOT EXISTS {} ON genai_events({});", $idx, $col)
-                )?;
+                conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON genai_events({});",
+                    $idx, $col
+                ))?;
             };
         }
 
         // v2: Anthropic prompt-cache token counters
         ensure_col!("cache_creation_tokens", "INTEGER");
-        ensure_col!("cache_read_tokens",     "INTEGER");
+        ensure_col!("cache_read_tokens", "INTEGER");
 
         // v3: two-phase write lifecycle status
-        ensure_col!("status", "TEXT NOT NULL DEFAULT 'complete'",
-                    "idx_genai_status");
+        ensure_col!(
+            "status",
+            "TEXT NOT NULL DEFAULT 'complete'",
+            "idx_genai_status"
+        );
 
         // v4: per-call interruption type
-        ensure_col!("interruption_type", "TEXT",
-                    "idx_genai_interruption_type");
-
+        ensure_col!("interruption_type", "TEXT", "idx_genai_interruption_type");
 
         // Migration: add conversation_id column for existing databases
-        let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE genai_events ADD COLUMN conversation_id TEXT",
+            [],
+        );
 
         // v5: tool_call_ids JSON array for output tool calls
         ensure_col!("tool_call_ids", "TEXT");
@@ -446,26 +452,56 @@ impl GenAISqliteStore {
                 let conn = self.conn.lock().unwrap();
                 let event_json = serde_json::to_string(event)?;
 
-                let (input_tokens, output_tokens, total_tokens) = call.token_usage.as_ref()
-                    .map(|u| (u.input_tokens as i64, u.output_tokens as i64, u.total_tokens as i64))
+                let (input_tokens, output_tokens, total_tokens) = call
+                    .token_usage
+                    .as_ref()
+                    .map(|u| {
+                        (
+                            u.input_tokens as i64,
+                            u.output_tokens as i64,
+                            u.total_tokens as i64,
+                        )
+                    })
                     .unwrap_or((0, 0, 0));
-                let cache_creation = call.token_usage.as_ref()
+                let cache_creation = call
+                    .token_usage
+                    .as_ref()
                     .and_then(|u| u.cache_creation_input_tokens.map(|v| v as i64));
-                let cache_read = call.token_usage.as_ref()
+                let cache_read = call
+                    .token_usage
+                    .as_ref()
                     .and_then(|u| u.cache_read_input_tokens.map(|v| v as i64));
 
                 let system_instructions: Option<String> = {
-                    let sys: Vec<_> = call.request.messages.iter()
-                        .filter(|m| m.role == "system").collect();
-                    if sys.is_empty() { None } else { serde_json::to_string(&sys).ok() }
+                    let sys: Vec<_> = call
+                        .request
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == "system")
+                        .collect();
+                    if sys.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&sys).ok()
+                    }
                 };
                 let input_messages: Option<String> = {
-                    let non_sys: Vec<_> = call.request.messages.iter()
-                        .filter(|m| m.role != "system").collect();
+                    let non_sys: Vec<_> = call
+                        .request
+                        .messages
+                        .iter()
+                        .filter(|m| m.role != "system")
+                        .collect();
                     let latest = if let Some(idx) = non_sys.iter().rposition(|m| m.role == "user") {
                         &non_sys[idx..]
-                    } else { &non_sys[..] };
-                    if latest.is_empty() { None } else { serde_json::to_string(&latest).ok() }
+                    } else {
+                        &non_sys[..]
+                    };
+                    if latest.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&latest).ok()
+                    }
                 };
                 let output_messages: Option<String> = if call.response.messages.is_empty() {
                     None
@@ -473,23 +509,42 @@ impl GenAISqliteStore {
                     serde_json::to_string(&call.response.messages).ok()
                 };
                 let finish_reasons: Option<String> = {
-                    let reasons: Vec<_> = call.response.messages.iter()
-                        .filter_map(|m| m.finish_reason.as_deref()).collect();
-                    if reasons.is_empty() { None } else { serde_json::to_string(&reasons).ok() }
+                    let reasons: Vec<_> = call
+                        .response
+                        .messages
+                        .iter()
+                        .filter_map(|m| m.finish_reason.as_deref())
+                        .collect();
+                    if reasons.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&reasons).ok()
+                    }
                 };
 
                 let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call.response.messages.iter()
+                    let ids: Vec<String> = call
+                        .response
+                        .messages
+                        .iter()
                         .flat_map(|m| m.parts.iter())
                         .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                            if let crate::genai::semantic::MessagePart::ToolCall {
+                                id: Some(tc_id),
+                                ..
+                            } = p
+                            {
                                 Some(tc_id.clone())
                             } else {
                                 None
                             }
                         })
                         .collect();
-                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&ids).ok()
+                    }
                 };
 
                 let updated = conn.execute(
@@ -549,8 +604,12 @@ impl GenAISqliteStore {
                         system_instructions,
                         input_messages,
                         output_messages,
-                        call.metadata.get("status_code").and_then(|s| s.parse::<i64>().ok()),
-                        call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
+                        call.metadata
+                            .get("status_code")
+                            .and_then(|s| s.parse::<i64>().ok()),
+                        call.metadata
+                            .get("sse_event_count")
+                            .and_then(|s| s.parse::<i64>().ok()),
                         event_json,
                         tool_call_ids,
                         call.call_id,
@@ -558,11 +617,17 @@ impl GenAISqliteStore {
                 )?;
 
                 if updated > 0 {
-                    log::debug!("[GenAI] Promoted pending→complete for call_id={}", call.call_id);
+                    log::debug!(
+                        "[GenAI] Promoted pending→complete for call_id={}",
+                        call.call_id
+                    );
                     return Ok(());
                 }
                 // No pending row found — fall through to plain insert below
-                log::debug!("[GenAI] No pending row for call_id={}, inserting directly", call.call_id);
+                log::debug!(
+                    "[GenAI] No pending row for call_id={}, inserting directly",
+                    call.call_id
+                );
             }
             // Fallback: store_event handles the full INSERT path
             self.store_event(event)
@@ -600,7 +665,10 @@ impl GenAISqliteStore {
             params![cutoff_ns],
         )?;
         if updated > 0 {
-            log::info!("[GenAI] Marked {} stale pending call(s) as interrupted", updated);
+            log::info!(
+                "[GenAI] Marked {} stale pending call(s) as interrupted",
+                updated
+            );
         }
         Ok(updated)
     }
@@ -629,7 +697,10 @@ impl GenAISqliteStore {
     pub fn list_pending_for_pid(
         &self,
         pid: i32,
-    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+    ) -> Result<
+        Vec<(String, Option<String>, Option<String>, Option<String>)>,
+        Box<dyn std::error::Error>,
+    > {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT call_id, session_id, trace_id, conversation_id
@@ -638,14 +709,17 @@ impl GenAISqliteStore {
                AND status = 'pending'
                AND pid = ?1",
         )?;
-        let rows = stmt.query_map(params![pid], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?.filter_map(|r| r.ok()).collect();
+        let rows = stmt
+            .query_map(params![pid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(rows)
     }
 
@@ -668,54 +742,59 @@ impl GenAISqliteStore {
             params![itype, pid],
         )?;
         if updated > 0 {
-            log::info!("Marked {} pending call(s) as interrupted for pid={}", updated, pid);
+            log::info!(
+                "Marked {} pending call(s) as interrupted for pid={}",
+                updated,
+                pid
+            );
         }
         Ok(updated)
     }
 
-    /// Find sessions whose agentic loop was cut short by a process crash.
-    ///
-    /// Looks for the most recent `complete` LLM call for each
-    /// (session, conversation) pair associated with the given PID where the
-    /// finish reason is `tool_calls` — meaning the model issued another tool
-    /// call and was still mid-loop when the process died.
-    ///
-    /// Returns `(call_id, session_id, trace_id, conversation_id)` tuples,
-    /// deduplicated by (session_id, conversation_id) so one interruption event
-    /// is emitted per conversation.
-    pub fn list_incomplete_agentic_sessions_for_pid(
+    /// Like `list_pending_for_pid` but accepts multiple PIDs at once.
+    pub fn list_pending_for_pids(
         &self,
-        pid: i32,
-        since_ns: i64,
-    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+        pids: &[i32],
+    ) -> Result<
+        Vec<(String, Option<String>, Option<String>, Option<String>)>,
+        Box<dyn std::error::Error>,
+    > {
+        if pids.is_empty() {
+            return Ok(vec![]);
+        }
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let placeholders: String = pids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
             "SELECT call_id, session_id, trace_id, conversation_id
-             FROM genai_events g1
-             WHERE g1.event_type = 'llm_call'
-               AND g1.status    = 'complete'
-               AND g1.pid       = ?1
-               AND g1.start_timestamp_ns >= ?2
-               AND g1.finish_reasons LIKE '%tool_calls%'
-               AND g1.start_timestamp_ns = (
-                   SELECT MAX(g2.start_timestamp_ns)
-                   FROM genai_events g2
-                   WHERE g2.event_type = 'llm_call'
-                     AND g2.status     = 'complete'
-                     AND g2.pid        = ?1
-                     AND g2.start_timestamp_ns >= ?2
-                     AND COALESCE(g2.session_id,      '') = COALESCE(g1.session_id,      '')
-                     AND COALESCE(g2.conversation_id,  '') = COALESCE(g1.conversation_id,  '')
-               )",
-        )?;
-        let rows = stmt.query_map(params![pid, since_ns], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?.filter_map(|r| r.ok()).collect();
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND status = 'pending'
+               AND pid IN ({})",
+            placeholders
+        );
+        let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = pids
+            .iter()
+            .map(|p| Box::new(*p) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(rows)
     }
 
@@ -1032,9 +1111,7 @@ impl GenAISqliteStore {
                AND start_timestamp_ns BETWEEN ?1 AND ?2
              ORDER BY agent_name ASC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
-            row.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(params![start_ns, end_ns], |row| row.get::<_, String>(0))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1093,7 +1170,8 @@ impl GenAISqliteStore {
                     output_tokens: row.get(3)?,
                     total_tokens: row.get(4)?,
                 })
-            })?.collect::<Result<Vec<_>, _>>()?
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
             stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
@@ -1103,7 +1181,8 @@ impl GenAISqliteStore {
                     output_tokens: row.get(3)?,
                     total_tokens: row.get(4)?,
                 })
-            })?.collect::<Result<Vec<_>, _>>()?
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
 
         Ok(rows)
@@ -1156,7 +1235,8 @@ impl GenAISqliteStore {
                     model: row.get(2)?,
                     total_tokens: row.get(3)?,
                 })
-            })?.collect::<Result<Vec<_>, _>>()?
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
             stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
@@ -1165,7 +1245,8 @@ impl GenAISqliteStore {
                     model: row.get(2)?,
                     total_tokens: row.get(3)?,
                 })
-            })?.collect::<Result<Vec<_>, _>>()?
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
 
         Ok(rows)
@@ -1192,10 +1273,10 @@ impl GenAISqliteStore {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(AgentTokenSummary {
-                agent_name:    row.get(0)?,
-                input_tokens:  row.get(1)?,
+                agent_name: row.get(0)?,
+                input_tokens: row.get(1)?,
                 output_tokens: row.get(2)?,
-                total_tokens:  row.get(3)?,
+                total_tokens: row.get(3)?,
                 request_count: row.get(4)?,
             })
         })?;
@@ -1378,13 +1459,15 @@ impl GenAISqliteStore {
                 }
                 Err(e) => {
                     // Check if it's SQLITE_FULL (extended code 13)
-                    if let Some(rusqlite::Error::SqliteFailure(err, _)) = 
-                        e.downcast_ref::<rusqlite::Error>() {
+                    if let Some(rusqlite::Error::SqliteFailure(err, _)) =
+                        e.downcast_ref::<rusqlite::Error>()
+                    {
                         if err.extended_code == 13 && retries < MAX_PRUNE_RETRIES {
                             retries += 1;
                             log::warn!(
                                 "Database full (SQLITE_FULL), pruning old records (attempt {}/{})",
-                                retries, MAX_PRUNE_RETRIES
+                                retries,
+                                MAX_PRUNE_RETRIES
                             );
                             self.prune_old_records()?;
                             self.checkpoint()?;
@@ -1398,41 +1481,69 @@ impl GenAISqliteStore {
     }
 
     /// Try to insert an event without size check
-    fn try_insert_event(&self, event: &GenAISemanticEvent) -> Result<(), Box<dyn std::error::Error>> {
+    fn try_insert_event(
+        &self,
+        event: &GenAISemanticEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let event_json = serde_json::to_string(event)?;
 
         match event {
             GenAISemanticEvent::LLMCall(call) => {
-                let (input_tokens, output_tokens, total_tokens) = call.token_usage.as_ref()
-                    .map(|u| (u.input_tokens as i64, u.output_tokens as i64, u.total_tokens as i64))
+                let (input_tokens, output_tokens, total_tokens) = call
+                    .token_usage
+                    .as_ref()
+                    .map(|u| {
+                        (
+                            u.input_tokens as i64,
+                            u.output_tokens as i64,
+                            u.total_tokens as i64,
+                        )
+                    })
                     .unwrap_or((0, 0, 0));
-                let cache_creation = call.token_usage.as_ref()
+                let cache_creation = call
+                    .token_usage
+                    .as_ref()
                     .and_then(|u| u.cache_creation_input_tokens.map(|v| v as i64));
-                let cache_read = call.token_usage.as_ref()
+                let cache_read = call
+                    .token_usage
+                    .as_ref()
                     .and_then(|u| u.cache_read_input_tokens.map(|v| v as i64));
 
                 // Extract system instructions
                 let system_instructions: Option<String> = {
-                    let sys_msgs: Vec<_> = call.request.messages.iter()
+                    let sys_msgs: Vec<_> = call
+                        .request
+                        .messages
+                        .iter()
                         .filter(|m| m.role == "system")
                         .collect();
-                    if sys_msgs.is_empty() { None }
-                    else { serde_json::to_string(&sys_msgs).ok() }
+                    if sys_msgs.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&sys_msgs).ok()
+                    }
                 };
 
                 // Extract input messages (incremental: latest round only)
                 let input_messages: Option<String> = {
-                    let non_system: Vec<_> = call.request.messages.iter()
+                    let non_system: Vec<_> = call
+                        .request
+                        .messages
+                        .iter()
                         .filter(|m| m.role != "system")
                         .collect();
-                    let latest = if let Some(idx) = non_system.iter().rposition(|m| m.role == "user") {
-                        &non_system[idx..]
+                    let latest =
+                        if let Some(idx) = non_system.iter().rposition(|m| m.role == "user") {
+                            &non_system[idx..]
+                        } else {
+                            &non_system[..]
+                        };
+                    if latest.is_empty() {
+                        None
                     } else {
-                        &non_system[..]
-                    };
-                    if latest.is_empty() { None }
-                    else { serde_json::to_string(&latest).ok() }
+                        serde_json::to_string(&latest).ok()
+                    }
                 };
 
                 // Extract output messages
@@ -1446,26 +1557,43 @@ impl GenAISqliteStore {
                 let finish_reasons: Option<String> = if call.response.messages.is_empty() {
                     None
                 } else {
-                    let reasons: Vec<_> = call.response.messages.iter()
+                    let reasons: Vec<_> = call
+                        .response
+                        .messages
+                        .iter()
                         .filter_map(|m| m.finish_reason.as_deref())
                         .collect();
-                    if reasons.is_empty() { None }
-                    else { serde_json::to_string(&reasons).ok() }
+                    if reasons.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&reasons).ok()
+                    }
                 };
 
                 // Extract tool_call_ids from response messages (outgoing tool calls)
                 let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call.response.messages.iter()
+                    let ids: Vec<String> = call
+                        .response
+                        .messages
+                        .iter()
                         .flat_map(|m| m.parts.iter())
                         .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                            if let crate::genai::semantic::MessagePart::ToolCall {
+                                id: Some(tc_id),
+                                ..
+                            } = p
+                            {
                                 Some(tc_id.clone())
                             } else {
                                 None
                             }
                         })
                         .collect();
-                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&ids).ok()
+                    }
                 };
 
                 // Get instance ID (same logic as SLS uploader)
@@ -1586,44 +1714,44 @@ impl GenAISqliteStore {
     /// Get total database size (main db + wal + shm)
     fn get_total_db_size(&self) -> u64 {
         let mut total = 0u64;
-        
+
         // Main database file
         if let Ok(meta) = std::fs::metadata(&self.db_path) {
             total += meta.len();
         }
-        
+
         // WAL file
         let wal_path = format!("{}-wal", self.db_path.display());
         if let Ok(meta) = std::fs::metadata(&wal_path) {
             total += meta.len();
         }
-        
+
         // SHM file
         let shm_path = format!("{}-shm", self.db_path.display());
         if let Ok(meta) = std::fs::metadata(&shm_path) {
             total += meta.len();
         }
-        
+
         total
     }
 
     /// Check database size and prune if approaching limit
-    /// 
+    ///
     /// Keeps pruning until size drops below threshold to avoid repeated triggers.
     fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut current_size = self.get_total_db_size();
         let threshold = get_prune_threshold();
-        
+
         if current_size < threshold {
             return Ok(());
         }
-        
+
         log::info!(
             "Database size {}MB exceeding threshold {}MB, pruning old records",
             current_size / 1024 / 1024,
             threshold / 1024 / 1024
         );
-        
+
         // Keep pruning until below threshold (max 5 iterations to prevent infinite loop)
         let mut iterations = 0;
         while current_size >= threshold && iterations < 5 {
@@ -1631,7 +1759,7 @@ impl GenAISqliteStore {
             self.prune_old_records()?;
             self.checkpoint()?;
             current_size = self.get_total_db_size();
-            
+
             if current_size >= threshold {
                 log::info!(
                     "Database still {}MB (threshold {}MB), continue pruning (iteration {})",
@@ -1641,72 +1769,71 @@ impl GenAISqliteStore {
                 );
             }
         }
-        
+
         log::info!(
             "Pruning complete, database size now {}MB",
             current_size / 1024 / 1024
         );
-        
+
         Ok(())
     }
 
     /// Prune old records to free up space
-    /// 
+    ///
     /// Deletes a percentage of oldest records based on id.
     fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        
+
         // Get total count
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM genai_events",
-            [],
-            |row| row.get(0)
-        )?;
-        
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))?;
+
         if count == 0 {
             return Ok(());
         }
-        
+
         // Calculate how many to delete (5% of total)
         let delete_count = ((count as f64) * PRUNE_PERCENT).max(1.0) as i64;
-        
+
         log::info!(
             "Pruning {} of {} records ({:.1}%)",
-            delete_count, count, PRUNE_PERCENT * 100.0
+            delete_count,
+            count,
+            PRUNE_PERCENT * 100.0
         );
-        
+
         // Delete oldest records by id
         let deleted = conn.execute(
             "DELETE FROM genai_events WHERE id IN (
                 SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1
             )",
-            params![delete_count]
+            params![delete_count],
         )?;
-        
+
         log::info!("Deleted {} records", deleted);
-        
+
         Ok(())
     }
 
     /// Execute WAL checkpoint and VACUUM to reclaim disk space
-    /// 
+    ///
     /// 1. VACUUM: rebuild database to compact data
     /// 2. Checkpoint: flush and truncate WAL file
-    /// 
+    ///
     /// Note: VACUUM in WAL mode creates a new db file, so we need to
     /// re-enable WAL and checkpoint after VACUUM.
     fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        
+
         // VACUUM rebuilds the database (works better before checkpoint in WAL mode)
         conn.execute_batch("VACUUM;")?;
-        
+
         // Re-enable WAL mode (VACUUM may reset it)
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        
+
         // Checkpoint with TRUNCATE to shrink WAL file
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        
+
         Ok(())
     }
 }
