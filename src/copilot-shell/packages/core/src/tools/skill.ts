@@ -192,6 +192,22 @@ ${skillDescriptions}
   getAvailableSkillNames(): string[] {
     return this.availableSkills.map((skill) => skill.name);
   }
+
+  /**
+   * Resolve a skill name to its SkillConfig for PreToolUse hook enrichment.
+   * Returns undefined if the skill cannot be found.
+   */
+  async resolveSkillConfig(
+    skillName: string,
+  ): Promise<SkillConfig | undefined> {
+    try {
+      return (
+        (await this.skillManager.loadSkillForRuntime(skillName)) ?? undefined
+      );
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {

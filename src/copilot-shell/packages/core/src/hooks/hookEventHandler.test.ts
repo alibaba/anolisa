@@ -275,4 +275,67 @@ describe('HookEventHandler', () => {
       expect(result.errors[0].message).toBe('Runner error');
     });
   });
+
+  describe('firePreToolUseEvent', () => {
+    it('should include skill_context in hook input when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const skillContext = {
+        skill_name: 'linux-admin',
+        file_path: '/home/user/.copilot-shell/skills/alinux-admin/SKILL.md',
+      };
+      await hookEventHandler.firePreToolUseEvent(
+        'Skill',
+        { skill: 'linux-admin' },
+        skillContext,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        skill_context?: { skill_name: string; file_path: string };
+      };
+      expect(input.tool_name).toBe('Skill');
+      expect(input.tool_input).toEqual({ skill: 'linux-admin' });
+      expect(input.skill_context).toEqual(skillContext);
+    });
+
+    it('should omit skill_context from hook input when not provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent('Bash', {
+        command: 'ls',
+      });
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as Record<string, unknown>;
+      expect(input['tool_name']).toBe('Bash');
+      expect(input).not.toHaveProperty('skill_context');
+    });
+  });
 });

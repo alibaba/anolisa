@@ -399,11 +399,22 @@ export interface McpToolContext {
   tcp?: string; // For WebSocket transport
 }
 
+/**
+ * Context for Skill tool executions.
+ * Contains the resolved skill metadata so hooks can locate the skill on disk
+ * even when the SKILL.md `name` differs from the directory name.
+ */
+export interface SkillToolContext {
+  skill_name: string;
+  file_path: string;
+}
+
 export interface PreToolUseInput extends HookInput {
   permission_mode?: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
   mcp_context?: McpToolContext;
+  skill_context?: SkillToolContext;
   original_request_name?: string;
 }
 

@@ -834,9 +834,34 @@ export class CoreToolScheduler {
           const hookSystem = this.config.getHookSystem();
           if (hookSystem) {
             try {
+              // For Skill tool, resolve the skill file path so hooks can
+              // locate the skill on disk even when the SKILL.md `name`
+              // differs from the directory name.
+              let skillContext:
+                | import('../hooks/types.js').SkillToolContext
+                | undefined;
+              if (
+                reqInfo.name === ToolNames.SKILL &&
+                typeof reqInfo.args['skill'] === 'string'
+              ) {
+                const skillTool = this.toolRegistry.getTool(ToolNames.SKILL);
+                if (skillTool instanceof SkillTool) {
+                  const skillConfig = await skillTool.resolveSkillConfig(
+                    reqInfo.args['skill'],
+                  );
+                  if (skillConfig) {
+                    skillContext = {
+                      skill_name: skillConfig.name,
+                      file_path: skillConfig.filePath,
+                    };
+                  }
+                }
+              }
+
               const hookOutput = await hookSystem.firePreToolUseEvent(
                 reqInfo.name,
                 reqInfo.args,
+                skillContext,
               );
 
               if (hookOutput) {
