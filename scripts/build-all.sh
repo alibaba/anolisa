@@ -836,17 +836,17 @@ install_tokenless() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "Installing tokenless, rtk, and toon binaries..."
+    info "Installing tokenless, rtk, and toon..."
     if [[ -f Makefile ]] && grep -q 'install' Makefile; then
         make install
     else
-        # Install all three binaries
-        install -d -m 0755 /usr/local/bin
-        install -p -m 0755 target/release/tokenless /usr/local/bin/
-        install -p -m 0755 third_party/rtk/target/release/rtk /usr/local/bin/
-        install -p -m 0755 third_party/toon/target/release/toon /usr/local/bin/
+        # Install all three binaries to user-local path
+        install -d -m 0755 "$HOME/.local/bin"
+        install -p -m 0755 target/release/tokenless "$HOME/.local/bin/"
+        install -p -m 0755 third_party/rtk/target/release/rtk "$HOME/.local/bin/"
+        install -p -m 0755 third_party/toon/target/release/toon "$HOME/.local/bin/"
     fi
-    ok "tokenless, rtk, and toon installed to /usr/local/bin/"
+    ok "tokenless, rtk, and toon installed to $HOME/.local/bin/"
 }
 
 do_install() {

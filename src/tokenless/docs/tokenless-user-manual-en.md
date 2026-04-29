@@ -248,7 +248,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 After RPM installation, the following configurations are performed automatically:
 
 1. **Binaries**: Installed to `/usr/bin/tokenless` and `/usr/bin/rtk`
-2. **Hook Scripts**: Installed to `/usr/share/tokenless/adapters/cosh/`
+2. **Hook Scripts**: RPM installs to `/usr/share/tokenless/adapters/cosh/`, source installs to `~/.local/share/tokenless/adapters/cosh/`
 3. **OpenClaw Plugin**: Auto-detected and configured (if OpenClaw is installed)
 4. **Copilot Shell**: Auto-detected and configured (if Copilot Shell is installed)
 
@@ -318,11 +318,11 @@ make build-rtk
 #### 4.4.2 Install Binaries
 
 ```bash
-# Install to /usr/share/tokenless/bin (default)
+# Install to ~/.local/bin (default)
 make install
 
 # Custom installation path
-make install INSTALL_DIR=/usr/local/bin
+make install BIN_DIR=/usr/local/bin
 ```
 
 #### 4.4.3 Deploy OpenClaw Plugin
@@ -345,9 +345,9 @@ cp -r openclaw/ /usr/share/tokenless/openclaw/
 make copilot-shell-install
 
 # Manual installation
-mkdir -p /usr/share/tokenless/adapters/cosh
-cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/adapters/cosh/
-chmod +x /usr/share/tokenless/adapters/cosh/tokenless-*.sh
+mkdir -p ~/.local/share/tokenless/adapters/cosh
+cp hooks/copilot-shell/tokenless-*.sh ~/.local/share/tokenless/adapters/cosh/
+chmod +x ~/.local/share/tokenless/adapters/cosh/tokenless-*.sh
 ```
 
 ---
@@ -453,7 +453,7 @@ Hook script locations depend on the installation method:
 | Installation Method | Hook Script Location |
 |---------------------|---------------------|
 | RPM Installation | `/usr/share/tokenless/adapters/cosh/` |
-| Source Installation | `/usr/share/tokenless/adapters/cosh/` |
+| Source Installation | `~/.local/share/tokenless/adapters/cosh/` |
 
 | Script | Function | Hook Event |
 |--------|----------|------------|
@@ -520,7 +520,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -532,7 +532,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -544,7 +544,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -760,7 +760,7 @@ rtk --version
 ls -la /usr/share/tokenless/adapters/cosh/
 
 # Check hook scripts (Source installation)
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la ~/.local/share/tokenless/adapters/cosh/
 ```
 
 ---
@@ -820,7 +820,7 @@ jq --version
 | `make build-tokenless` | Build tokenless only |
 | `make build-rtk` | Build rtk only |
 | `make build-toon` | Build TOON codec from submodule |
-| `make install` | Install binaries to INSTALL_DIR |
+| `make install` | Install binaries to BIN_DIR (default: ~/.local/bin) |
 | `make test` | Run tests |
 | `make test-toon` | Run TOON-specific tests |
 | `make lint` | Run clippy checks |

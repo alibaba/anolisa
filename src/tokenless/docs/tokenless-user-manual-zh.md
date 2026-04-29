@@ -248,7 +248,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 RPM 包安装后会自动执行以下配置：
 
 1. **二进制文件**：安装到 `/usr/bin/tokenless` 和 `/usr/bin/rtk`
-2. **Hook 脚本**：安装到 `/usr/share/tokenless/adapters/cosh/`
+2. **Hook 脚本**：RPM 安装到 `/usr/share/tokenless/adapters/cosh/`，源码安装到 `~/.local/share/tokenless/adapters/cosh/`
 3. **OpenClaw 插件**：自动检测并配置（如果已安装 OpenClaw）
 4. **Copilot Shell**：自动检测并配置（如果已安装 Copilot Shell）
 
@@ -318,11 +318,11 @@ make build-rtk
 #### 4.4.2 安装二进制文件
 
 ```bash
-# 安装到 /usr/share/tokenless/bin（默认）
+# 安装到 ~/.local/bin（默认）
 make install
 
 # 自定义安装路径
-make install INSTALL_DIR=/usr/local/bin
+make install BIN_DIR=/usr/local/bin
 ```
 
 #### 4.4.3 部署 OpenClaw 插件
@@ -345,9 +345,9 @@ cp -r openclaw/ /usr/share/tokenless/openclaw/
 make copilot-shell-install
 
 # 手动安装
-mkdir -p /usr/share/tokenless/adapters/cosh
-cp hooks/copilot-shell/tokenless-*.sh /usr/share/tokenless/adapters/cosh/
-chmod +x /usr/share/tokenless/adapters/cosh/tokenless-*.sh
+mkdir -p ~/.local/share/tokenless/adapters/cosh
+cp hooks/copilot-shell/tokenless-*.sh ~/.local/share/tokenless/adapters/cosh/
+chmod +x ~/.local/share/tokenless/adapters/cosh/tokenless-*.sh
 ```
 
 ---
@@ -453,7 +453,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
 | 安装方式 | Hook 脚本位置 |
 |---------|--------------|
 | RPM 安装 | `/usr/share/tokenless/adapters/cosh/` |
-| 源码安装 | `/usr/share/tokenless/adapters/cosh/` |
+| 源码安装 | `~/.local/share/tokenless/adapters/cosh/` |
 
 | 脚本 | 功能 | Hook 事件 |
 |------|------|----------|
@@ -520,7 +520,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -532,7 +532,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -544,7 +544,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -760,7 +760,7 @@ rtk --version
 ls -la /usr/share/tokenless/adapters/cosh/
 
 # 检查 Hook 脚本（源码安装）
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la ~/.local/share/tokenless/adapters/cosh/
 ```
 
 ---
@@ -820,7 +820,7 @@ jq --version
 | `make build-tokenless` | 仅编译 tokenless |
 | `make build-rtk` | 仅编译 rtk |
 | `make build-toon` | 从子模块编译 TOON 编解码器 |
-| `make install` | 安装二进制到 INSTALL_DIR |
+| `make install` | 安装二进制到 BIN_DIR（默认 ~/.local/bin） |
 | `make test` | 运行测试 |
 | `make test-toon` | 运行 TOON 专项测试 |
 | `make lint` | 运行 clippy 检查 |

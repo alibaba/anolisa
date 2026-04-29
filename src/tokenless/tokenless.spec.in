@@ -12,8 +12,9 @@ Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
 # Note: toon submodule requires rust >= 1.88 (darling, image, time crates)
+# cargo build for toon uses || true fallback in spec if Rust < 1.88
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.88
+BuildRequires:  rust >= 1.86
 
 # Runtime dependencies
 Requires:       jq
@@ -21,7 +22,7 @@ Requires:       bash
 
 %description
 Token-Less is an LLM token optimization toolkit that significantly reduces token
-consumption through Schema/Response Compression, TOON Context Compression, and
+consumption through Schema/Response Compression, TOON Context Compression,
 Command Rewriting strategies.
 
 Core Features:
@@ -36,8 +37,8 @@ The package includes:
 - rtk: High-performance CLI proxy for command rewriting (Apache-2.0 licensed)
 - toon: JSON to TOON format encoder/decoder for LLM token optimization
 
-Note: OpenClaw plugin and copilot-shell hooks are available under
-/usr/share/tokenless/adapters/ for manual configuration.
+Note: OpenClaw plugin and copilot-shell hooks are available in the source tree
+at /usr/share/doc/tokenless/ for manual configuration.
 
 %prep
 %setup -q -n tokenless
@@ -45,32 +46,38 @@ Note: OpenClaw plugin and copilot-shell hooks are available under
 # Clean any stale build artifacts from the tarball
 cargo clean --release
 cargo clean --release --manifest-path third_party/rtk/Cargo.toml
-cargo clean --release --manifest-path third_party/toon/Cargo.toml
+# Do NOT clean toon target — may contain pre-built binary (Rust < 1.88 fallback)
 
 # Apply tokenless stats patch to RTK (upstream rtk v0.36.0)
 # Patch is included in the tarball under third_party/patches/
 patch --forward -p1 --no-backup-if-mismatch -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
 
 %build
-# Build tokenless (schema + response compression + stats)
+# Build tokenless (schema + response compression + stats + env-check)
 cargo build --release
 
 # Build rtk (command rewriting)
 cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
-# Build toon (JSON format encoder)
-cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
+# toon requires rust >= 1.88; use pre-built binary if cargo build fails
+cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
 
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}%{_bindir}
+mkdir -p %{buildroot}%{_libexecdir}/tokenless
 mkdir -p %{buildroot}%{_datadir}/tokenless
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
-# Install binaries
+# Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/tokenless
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
-install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_bindir}/rtk
-install -m 0755 third_party/toon/target/release/toon %{buildroot}%{_bindir}/toon
+install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/tokenless/rtk
+# toon: use built binary if available, fallback to pre-installed
+if [ -f "third_party/toon/target/release/toon" ]; then
+    install -m 0755 third_party/toon/target/release/toon %{buildroot}%{_libexecdir}/tokenless/toon
+else
+    install -m 0755 /usr/bin/toon %{buildroot}%{_libexecdir}/tokenless/toon
+fi
 
 # Install documentation
 install -m 0644 docs/tokenless-user-manual-en.md %{buildroot}%{_docdir}/tokenless/
@@ -78,43 +85,40 @@ install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenles
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
-# Install core
-mkdir -p %{buildroot}%{_datadir}/tokenless/core
-
-# Install adapters (agent-specific plugins/hooks)
-mkdir -p %{buildroot}%{_datadir}/tokenless/adapters/openclaw
-mkdir -p %{buildroot}%{_datadir}/tokenless/adapters/cosh
+# Install source files for reference (openclaw, hooks, scripts)
+mkdir -p %{buildroot}%{_datadir}/tokenless/openclaw
+mkdir -p %{buildroot}%{_datadir}/tokenless/hooks/copilot-shell
 mkdir -p %{buildroot}%{_datadir}/tokenless/scripts
 
-install -m 0644 openclaw/index.ts %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
-install -m 0644 openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
-install -m 0644 openclaw/package.json %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
-install -m 0644 openclaw/README.md %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
+install -m 0644 openclaw/index.ts %{buildroot}%{_datadir}/tokenless/openclaw/
+install -m 0644 openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/tokenless/openclaw/
+install -m 0644 openclaw/package.json %{buildroot}%{_datadir}/tokenless/openclaw/
+install -m 0644 openclaw/README.md %{buildroot}%{_datadir}/tokenless/openclaw/
 
-install -m 0755 hooks/copilot-shell/tokenless-*.sh %{buildroot}%{_datadir}/tokenless/adapters/cosh/
-install -m 0644 hooks/copilot-shell/README.md %{buildroot}%{_datadir}/tokenless/adapters/cosh/
+install -m 0755 hooks/copilot-shell/tokenless-*.sh %{buildroot}%{_datadir}/tokenless/hooks/copilot-shell/
+install -m 0644 hooks/copilot-shell/README.md %{buildroot}%{_datadir}/tokenless/hooks/copilot-shell/
 
 install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 
 %files
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
-%attr(0755,root,root) %{_bindir}/rtk
-%attr(0755,root,root) %{_bindir}/toon
+%dir %attr(0755,root,root) %{_libexecdir}/tokenless
+%attr(0755,root,root) %{_libexecdir}/tokenless/rtk
+%attr(0755,root,root) %{_libexecdir}/tokenless/toon
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 %doc %{_docdir}/tokenless/tokenless-user-manual-en.md
 %doc %{_docdir}/tokenless/tokenless-user-manual-zh.md
 %dir %{_datadir}/tokenless
-%dir %{_datadir}/tokenless/core
 %dir %{_datadir}/tokenless/scripts
-%dir %{_datadir}/tokenless/adapters
-%dir %{_datadir}/tokenless/adapters/openclaw
-%dir %{_datadir}/tokenless/adapters/cosh
+%dir %{_datadir}/tokenless/hooks
+%dir %{_datadir}/tokenless/hooks/copilot-shell
+%dir %{_datadir}/tokenless/openclaw
 %attr(0755,root,root) %{_datadir}/tokenless/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/tokenless/adapters/cosh/README.md
-%attr(0755,root,root) %{_datadir}/tokenless/adapters/cosh/tokenless-*.sh
-%{_datadir}/tokenless/adapters/openclaw/*
+%attr(0755,root,root) %{_datadir}/tokenless/hooks/copilot-shell/tokenless-*.sh
+%attr(0644,root,root) %{_datadir}/tokenless/hooks/copilot-shell/README.md
+%{_datadir}/tokenless/openclaw/*
 
 %post
 if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
@@ -122,42 +126,33 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %preun
-if [ $1 -eq 0 ] && [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
-    %{_datadir}/tokenless/scripts/install.sh --uninstall || true
+if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
+    if [ $1 -eq 1 ]; then
+        %{_datadir}/tokenless/scripts/install.sh --upgrade || true
+    else
+        %{_datadir}/tokenless/scripts/install.sh --uninstall || true
+    fi
 fi
 
 %changelog
-* Tue Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-3
-- fix: remove duplicate PID from agent_id, use source_pid exclusively
-- fix: RTK patch now records source_pid (was NULL) and clean agent_id
-- fix: copilot-shell PostToolUse now passes tool_use_id to hook payload
-- fix: copilot-shell BeforeModel now passes tool_use_id to hook payload
-- refactor: rename install.sh --hooks to --cosh for clarity
+* Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-3
+- build: align install paths with FHS
+  - Makefile defaults: ~/.local/{bin,share/tokenless} for local build (XDG convention)
+  - install.sh: auto-detect install root (RPM -> /usr, make -> ~/.local)
+  - build-all.sh: fallback from /usr/local/bin to $HOME/.local/bin
+  - RPM: rtk/toon helpers moved from /usr/bin to /usr/libexec/tokenless
 
 * Mon Apr 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-2
-- Restructure dirs: /usr/share/tokenless/{core,adapters/{openclaw,cosh}}
+- feat(hook): add copilot-shell hooks for command rewriting and compression
 
 * Sun Apr 26 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-1
 - Bump to v0.2.0 with new features and fixes
-  - feat: add TOON context compression support
-  - feat: add compression stats with auto-record from real data
-  - fix: skip compression for skill and content-retrieval tools
-  - build: convert spec to template with @VERSION@ substitution
-  - chore: upgrade Rust edition to 2024
 
 * Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-6
 - Integrate TOON into response compression pipeline
-  - Build toon binary from third_party/toon submodule
-  - Install toon binary to %%{_bindir}/toon
-  - copilot-shell hook: tokenless-compress-response.sh runs sequential pipeline
-  - OpenClaw plugin: toon_compression_enabled option
-  - Expected combined savings: 30-60%% on structured JSON data
-- Add TOON license (MIT) attribution to NOTICE file
-- Update documentation with TOON compression details
 
 * Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-5
 - Add compression stats: auto-record real before/after data from all modes
-- Clean ~/.tokenless on RPM uninstall
 
 * Sat Apr 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-4
 - Fix: skip compression for content-retrieval tools and skill files

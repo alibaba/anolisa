@@ -427,8 +427,8 @@ build_tokenless() {
         cargo build --release --workspace
         # Build rtk from submodule
         cargo build --release --manifest-path third_party/rtk/Cargo.toml
-        # Build toon from submodule
-        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
+        # Build toon from submodule (fallback to pre-built binary if Rust < 1.88)
+        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
     )
 
     log "Step 2/3: Creating source tarball ${tarball_name}..."

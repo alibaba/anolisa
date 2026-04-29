@@ -1,9 +1,10 @@
 # Token-Less Unified Build System
 # Builds tokenless (schema/response compression), rtk (command rewriting), and toon (JSON encoding)
 
-INSTALL_DIR ?= /usr/share/tokenless/bin
-OPENCLAW_DIR ?= /usr/share/tokenless/openclaw
-COPILOT_SHELL_HOOK_DIR ?= /usr/share/tokenless/hooks/copilot-shell
+SHARE_DIR ?= $(HOME)/.local/share/tokenless
+BIN_DIR ?= $(HOME)/.local/bin
+OPENCLAW_DIR ?= $(SHARE_DIR)/openclaw
+COPILOT_SHELL_HOOK_DIR ?= $(SHARE_DIR)/hooks/copilot-shell
 RTK_DIR := third_party/rtk
 TOON_DIR := third_party/toon
 
@@ -31,12 +32,12 @@ build-toon:
 
 # Install binaries
 install: build
-	@echo "==> Installing binaries to $(INSTALL_DIR)..."
-	@mkdir -p $(INSTALL_DIR)
-	cp target/release/tokenless $(INSTALL_DIR)/
-	cp $(RTK_DIR)/target/release/rtk $(INSTALL_DIR)/
-	cp $(TOON_DIR)/target/release/toon $(INSTALL_DIR)/
-	@echo "==> Installed tokenless, rtk, and toon to $(INSTALL_DIR)"
+	@echo "==> Installing binaries to $(BIN_DIR)..."
+	@mkdir -p $(BIN_DIR)
+	cp target/release/tokenless $(BIN_DIR)/
+	cp $(RTK_DIR)/target/release/rtk $(BIN_DIR)/
+	cp $(TOON_DIR)/target/release/toon $(BIN_DIR)/
+	@echo "==> Installed tokenless, rtk, and toon to $(BIN_DIR)"
 
 # Run tests
 test: test-tokenless test-rtk test-toon
@@ -138,9 +139,9 @@ setup: install openclaw-install copilot-shell-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
-	@echo "  - tokenless: $(INSTALL_DIR)/tokenless"
-	@echo "  - rtk:       $(INSTALL_DIR)/rtk"
-	@echo "  - toon:      $(INSTALL_DIR)/toon"
+	@echo "  - tokenless: $(BIN_DIR)/tokenless"
+	@echo "  - rtk:       $(BIN_DIR)/rtk"
+	@echo "  - toon:      $(BIN_DIR)/toon"
 	@echo "  - OpenClaw:  $(OPENCLAW_DIR)/"
 	@echo "  - Hooks:     $(COPILOT_SHELL_HOOK_DIR)/tokenless-*.sh"
 	@echo "============================================"
@@ -159,7 +160,7 @@ help:
 	@echo "  build-tokenless   Build tokenless only"
 	@echo "  build-rtk         Build rtk only"
 	@echo "  build-toon        Build toon only"
-	@echo "  install           Install binaries to INSTALL_DIR (default: /usr/share/tokenless/bin)"
+	@echo "  install           Install binaries to BIN_DIR (default: ~/.local/bin)"
 	@echo "  test              Run all tests"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
@@ -172,6 +173,7 @@ help:
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
-	@echo "  INSTALL_DIR       Binary install path (default: /usr/share/tokenless/bin)"
-	@echo "  OPENCLAW_DIR      OpenClaw plugin path (default: /usr/share/tokenless/openclaw)"
-	@echo "  COPILOT_SHELL_HOOK_DIR  Hook install path (default: /usr/share/tokenless/hooks/copilot-shell)"
+	@echo "  SHARE_DIR         Data install root (default: ~/.local/share/tokenless)"
+	@echo "  BIN_DIR           Binary install path (default: ~/.local/bin)"
+	@echo "  OPENCLAW_DIR      OpenClaw plugin path (default: ~/.local/share/tokenless/openclaw)"
+	@echo "  COPILOT_SHELL_HOOK_DIR  Hook install path (default: ~/.local/share/tokenless/hooks/copilot-shell)"

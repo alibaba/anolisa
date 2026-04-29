@@ -56,7 +56,7 @@ Or use the install script directly:
 ./scripts/install.sh
 ```
 
-Both methods install `tokenless` and `rtk` to `/usr/share/tokenless/bin`, deploy the OpenClaw plugin, and install the copilot-shell hook.
+Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, deploy the OpenClaw plugin, and install the copilot-shell hook.
 
 ## CLI Usage
 
@@ -133,7 +133,7 @@ Then add the hook configs to your `~/.copilot-shell/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
+            "command": "~/.local/share/tokenless/hooks/copilot-shell/tokenless-rewrite.sh",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -145,7 +145,7 @@ Then add the hook configs to your `~/.copilot-shell/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
+            "command": "~/.local/share/tokenless/hooks/copilot-shell/tokenless-compress-response.sh",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -157,7 +157,7 @@ Then add the hook configs to your `~/.copilot-shell/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
+            "command": "~/.local/share/tokenless/hooks/copilot-shell/tokenless-compress-schema.sh",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -206,7 +206,7 @@ Options in `openclaw.plugin.json`:
 | `make build-tokenless` | Build `tokenless` only |
 | `make build-rtk` | Build `rtk` only |
 | `make build-toon` | Build `toon` only |
-| `make install` | Build and install binaries to `INSTALL_DIR` |
+| `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
@@ -220,7 +220,7 @@ Options in `openclaw.plugin.json`:
 Override install paths:
 
 ```bash
-make install INSTALL_DIR=/usr/local/bin
+make install BIN_DIR=/usr/local/bin
 make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 ```
 

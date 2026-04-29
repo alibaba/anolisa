@@ -12,17 +12,78 @@ set -euo pipefail
 #   ./install.sh --upgrade          # RPM pre-uninstall cleanup (upgrade — no-op)
 #   ./install.sh --openclaw         # Manually install OpenClaw plugin
 #   ./install.sh --cosh              # Manually install copilot-shell hooks
+#   ./install.sh --uninstall-openclaw # Uninstall OpenClaw plugin only
+#   ./install.sh --uninstall-cosh    # Uninstall copilot-shell hooks only
 #   ./install.sh --help             # Show help
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-INSTALL_DIR="${INSTALL_DIR:-/usr/share/tokenless/bin}"
-OPENCLAW_DIR="${OPENCLAW_DIR:-/usr/share/tokenless/adapters/openclaw}"
-COSH_DIR="${COSH_DIR:-/usr/share/tokenless/adapters/cosh}"
 
-# System-wide paths (RPM package)
-SYS_BIN_DIR="/usr/bin"
-SYS_SHARE_DIR="/usr/share/tokenless"
+# ── Path auto-detection ──
+# Derive all paths from where this script / tokenless binary is installed:
+#   /usr/share/tokenless  (RPM)  → system paths (/usr/bin, /usr/libexec/tokenless, /usr/share/tokenless)
+#   ~/.local/share/tokenless (make) → local paths  (~/.local/bin, ~/.local/share/tokenless)
+# Environment variables (BIN_DIR, OPENCLAW_DIR, COSH_DIR) still override.
+
+SHARE_DIR=""
+BIN_DIR=""
+LIBEXEC_DIR=""
+
+detect_install_root() {
+    # 1. Check where tokenless binary is installed
+    local tokenless_path
+    if tokenless_path="$(command -v tokenless 2>/dev/null)"; then
+        case "$tokenless_path" in
+            /usr/bin/tokenless)
+                SHARE_DIR="/usr/share/tokenless"
+                BIN_DIR="/usr/bin"
+                LIBEXEC_DIR="/usr/libexec/tokenless"
+                SOURCE_TYPE="system"
+                return
+                ;;
+            */.local/bin/tokenless)
+                SHARE_DIR="$HOME/.local/share/tokenless"
+                BIN_DIR="$HOME/.local/bin"
+                LIBEXEC_DIR="$HOME/.local/bin"
+                SOURCE_TYPE="local"
+                return
+                ;;
+        esac
+    fi
+
+    # 2. Check where this script itself resides
+    case "$SCRIPT_DIR" in
+        /usr/share/tokenless/scripts)
+            SHARE_DIR="/usr/share/tokenless"
+            BIN_DIR="/usr/bin"
+            LIBEXEC_DIR="/usr/libexec/tokenless"
+            SOURCE_TYPE="system"
+            return
+            ;;
+        */.local/share/tokenless/scripts)
+            SHARE_DIR="$HOME/.local/share/tokenless"
+            BIN_DIR="$HOME/.local/bin"
+            LIBEXEC_DIR="$HOME/.local/bin"
+            SOURCE_TYPE="local"
+            return
+            ;;
+    esac
+
+    # 3. Default: local installation
+    SHARE_DIR="$HOME/.local/share/tokenless"
+    BIN_DIR="$HOME/.local/bin"
+    LIBEXEC_DIR="$HOME/.local/bin"
+    SOURCE_TYPE="local"
+}
+
+# Call directly (not in subshell) so global variables persist
+detect_install_root
+
+# Derived paths (overridable via environment variables)
+# BIN_DIR and LIBEXEC_DIR are already set by detect_install_root;
+# only OPENCLAW_DIR and COSH_DIR need fallback derivation.
+OPENCLAW_DIR="${OPENCLAW_DIR:-${SHARE_DIR}/adapters/openclaw}"
+COSH_DIR="${COSH_DIR:-${SHARE_DIR}/adapters/cosh}"
 
 # Colors
 RED='\033[0;31m'
@@ -40,22 +101,11 @@ step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 # Installation Source Detection
 # ============================================================================
 
-detect_installation_source() {
-    local tokenless_path
-    if tokenless_path="$(command -v tokenless 2>/dev/null)"; then
-        if [ "$tokenless_path" = "${SYS_BIN_DIR}/tokenless" ]; then
-            echo "system"
-            return
-        fi
-    fi
-    echo "local"
-}
-
 get_openclaw_source() {
     local source_type="$1"
     case "$source_type" in
         system)
-            echo "${SYS_SHARE_DIR}/adapters/openclaw"
+            echo "${SHARE_DIR}/adapters/openclaw"
             ;;
         local)
             echo "${PROJECT_DIR}/openclaw"
@@ -192,20 +242,14 @@ configure_cosh_hooks() {
 
     info "Configuring copilot-shell hooks from: $hook_source_dir"
 
-    # Copy hook scripts - handle both RPM and source installation paths
-    if [ -d "$hook_source_dir" ]; then
+    # Copy hook scripts only if source differs from destination
+    if [ "$hook_source_dir" != "$COSH_DIR" ] && [ -d "$hook_source_dir" ]; then
         mkdir -p "$COSH_DIR"
         cp "$hook_source_dir"/tokenless-*.sh "$COSH_DIR/" 2>/dev/null || true
         chmod +x "$COSH_DIR"/tokenless-*.sh 2>/dev/null || true
         info "  Copied hook scripts to $COSH_DIR"
-    elif [ -d "$SYS_SHARE_DIR/adapters/cosh" ]; then
-        # Fallback to system-wide path for RPM installation
-        mkdir -p "$COSH_DIR"
-        cp "$SYS_SHARE_DIR/adapters/cosh"/tokenless-*.sh "$COSH_DIR/" 2>/dev/null || true
-        chmod +x "$COSH_DIR"/tokenless-*.sh 2>/dev/null || true
-        info "  Copied hook scripts from system path to $COSH_DIR"
-    else
-        warn "Hook source directory not found: $hook_source_dir"
+    elif [ ! -d "$COSH_DIR" ]; then
+        warn "Hook directory not found: $COSH_DIR"
     fi
 
     # Configure settings.json using jq
@@ -325,12 +369,9 @@ cleanup_cosh_hooks() {
     done
 
     # Remove hook scripts directory (only for local installation)
-    if [ "$is_upgrade" -eq 0 ] && [ -d "$COSH_DIR" ]; then
-        # Only delete if not managed by RPM (RPM handles its own files)
-        if ! rpm -q tokenless &>/dev/null 2>&1; then
-            rm -rf "$COSH_DIR"
-            info "  Removed hook scripts directory: $COSH_DIR"
-        fi
+    if [ "$is_upgrade" -eq 0 ] && [ -d "$COSH_DIR" ] && [ "$SOURCE_TYPE" = "local" ]; then
+        rm -rf "$COSH_DIR"
+        info "  Removed hook scripts directory: $COSH_DIR"
     fi
 }
 
@@ -369,12 +410,16 @@ install_from_source() {
     cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
 
     # Install binaries
-    info "Installing binaries to $INSTALL_DIR..."
-    mkdir -p "$INSTALL_DIR"
-    cp target/release/tokenless "$INSTALL_DIR/"
-    cp third_party/rtk/target/release/rtk "$INSTALL_DIR/"
-    cp third_party/toon/target/release/toon "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/tokenless" "$INSTALL_DIR/rtk" "$INSTALL_DIR/toon"
+    info "Installing tokenless to $BIN_DIR..."
+    mkdir -p "$BIN_DIR"
+    cp target/release/tokenless "$BIN_DIR/"
+    chmod +x "$BIN_DIR/tokenless"
+
+    info "Installing rtk and toon helpers to $LIBEXEC_DIR..."
+    mkdir -p "$LIBEXEC_DIR"
+    cp third_party/rtk/target/release/rtk "$LIBEXEC_DIR/"
+    cp third_party/toon/target/release/toon "$LIBEXEC_DIR/"
+    chmod +x "$LIBEXEC_DIR/rtk" "$LIBEXEC_DIR/toon"
 
     # Setup OpenClaw (guarded internally)
     setup_openclaw "local" || true
@@ -431,19 +476,10 @@ verify_installation() {
     local tokenless_path
     local rtk_path
     local toon_path
-    local install_mode="local"
 
-    # Check system-wide installation first
-    if [ -x "${SYS_BIN_DIR}/tokenless" ]; then
-        tokenless_path="${SYS_BIN_DIR}/tokenless"
-        rtk_path="${SYS_BIN_DIR}/rtk"
-        toon_path="${SYS_BIN_DIR}/toon"
-        install_mode="system"
-    else
-        tokenless_path="${INSTALL_DIR}/tokenless"
-        rtk_path="${INSTALL_DIR}/rtk"
-        toon_path="${INSTALL_DIR}/toon"
-    fi
+    tokenless_path="${BIN_DIR}/tokenless"
+    rtk_path="${LIBEXEC_DIR}/rtk"
+    toon_path="${LIBEXEC_DIR}/toon"
 
     if "$tokenless_path" --version &>/dev/null; then
         info "  tokenless: $($tokenless_path --version)"
@@ -467,10 +503,10 @@ verify_installation() {
     fi
 
     # PATH check (only for local installation)
-    if [ "$install_mode" = "local" ]; then
-        if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-            warn "$INSTALL_DIR is not in your PATH. Add it:"
-            warn "  echo 'export PATH=\"\$INSTALL_DIR:\$PATH\"' >> ~/.zshrc"
+    if [ "$SOURCE_TYPE" = "local" ]; then
+        if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+            warn "$BIN_DIR is not in your PATH. Add it:"
+            warn "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.bashrc"
         fi
     fi
 
@@ -479,21 +515,16 @@ verify_installation() {
     echo "  Token-Less Installation Complete!"
     echo "============================================"
     echo ""
-    if [ "$install_mode" = "system" ]; then
+    if [ "$SOURCE_TYPE" = "system" ]; then
         echo "  Installation Mode: System-wide (RPM)"
-        echo ""
-        echo "  Binaries:"
-        echo "    tokenless -> ${SYS_BIN_DIR}/tokenless"
-        echo "    rtk       -> ${SYS_BIN_DIR}/rtk"
-        echo "    toon      -> ${SYS_BIN_DIR}/toon"
     else
         echo "  Installation Mode: Local (Source)"
-        echo ""
-        echo "  Binaries:"
-        echo "    tokenless -> ${INSTALL_DIR}/tokenless"
-        echo "    rtk       -> ${INSTALL_DIR}/rtk"
-        echo "    toon      -> ${INSTALL_DIR}/toon"
     fi
+    echo ""
+    echo "  Binaries:"
+    echo "    tokenless -> ${BIN_DIR}/tokenless"
+    echo "    rtk       -> ${LIBEXEC_DIR}/rtk"
+    echo "    toon      -> ${LIBEXEC_DIR}/toon"
     echo ""
     echo "  OpenClaw Plugin:"
     echo "    ${OPENCLAW_DIR}/"
@@ -523,14 +554,16 @@ USAGE:
     $(basename "$0") [OPTIONS]
 
 OPTIONS:
-    (no argument)     Auto-detect installation source and install
-    --source          Force source installation (build + install + plugins)
-    --install         RPM post-installation configuration (%post scriptlet)
-    --uninstall       RPM pre-uninstallation cleanup
-    --upgrade         RPM pre-uninstallation cleanup (upgrade scenario)
-    --openclaw        Manually setup OpenClaw plugin only
-    --cosh             Manually setup copilot-shell hooks only
-    --help, -h        Show this help message
+    (no argument)       Auto-detect installation source and install
+    --source            Force source installation (build + install + plugins)
+    --install           RPM post-installation configuration (%post scriptlet)
+    --uninstall         RPM pre-uninstallation cleanup (full removal)
+    --upgrade           RPM pre-uninstallation cleanup (upgrade scenario)
+    --openclaw          Manually setup OpenClaw plugin only
+    --cosh              Manually setup copilot-shell hooks only
+    --uninstall-openclaw  Uninstall OpenClaw plugin only
+    --uninstall-cosh    Uninstall copilot-shell hooks only
+    --help, -h          Show this help message
 
 EXAMPLES:
     # Auto-detect and install
@@ -547,9 +580,10 @@ EXAMPLES:
     ./install.sh --upgrade
 
 ENVIRONMENT VARIABLES:
-    INSTALL_DIR           Installation directory (default: /usr/share/tokenless/bin)
-    OPENCLAW_DIR          OpenClaw plugin directory (default: /usr/share/tokenless/adapters/openclaw)
-    COSH_DIR              copilot-shell hooks directory (default: /usr/share/tokenless/adapters/cosh)
+    BIN_DIR              tokenless binary dir (auto-detected: /usr/bin for RPM, ~/.local/bin for local)
+    LIBEXEC_DIR          helper binary dir (auto-detected: /usr/libexec/tokenless for RPM, ~/.local/bin for local)
+    OPENCLAW_DIR         OpenClaw plugin dir (auto-detected from installation root)
+    COSH_DIR             copilot-shell hooks dir (auto-detected from installation root)
 
 EOF
 }
@@ -563,6 +597,13 @@ main() {
 
     case "$mode" in
         --source)
+            # Force local installation paths for source build
+            SOURCE_TYPE="local"
+            SHARE_DIR="$HOME/.local/share/tokenless"
+            BIN_DIR="$HOME/.local/bin"
+            LIBEXEC_DIR="$HOME/.local/bin"
+            OPENCLAW_DIR="${SHARE_DIR}/adapters/openclaw"
+            COSH_DIR="${SHARE_DIR}/adapters/cosh"
             install_from_source
             verify_installation
             ;;
@@ -572,15 +613,21 @@ main() {
         --uninstall)
             rpm_preuninstall
             ;;
+        --uninstall-openclaw)
+            cleanup_openclaw 0
+            ;;
+        --uninstall-cosh)
+            cleanup_cosh_hooks 0
+            ;;
         --upgrade)
             info "Upgrade scenario — preserving existing configuration and stats."
             ;;
         --openclaw)
-            setup_openclaw "$(detect_installation_source)"
+            setup_openclaw "$SOURCE_TYPE"
             ;;
         --cosh)
             if [ -f "$HOME/.copilot-shell/settings.json" ] || [ -f "$HOME/.qwen-code/settings.json" ]; then
-                configure_cosh_hooks "$SYS_SHARE_DIR/adapters/cosh"
+                configure_cosh_hooks "${SHARE_DIR}/adapters/cosh"
             else
                 warn "copilot-shell/qwen-code not installed, nothing to configure"
             fi
@@ -590,10 +637,7 @@ main() {
             exit 0
             ;;
         "")
-            local source_type
-            source_type="$(detect_installation_source)"
-
-            case "$source_type" in
+            case "$SOURCE_TYPE" in
                 system)
                     info "Detected system-wide installation."
                     if command -v openclaw &>/dev/null; then
@@ -602,7 +646,7 @@ main() {
                         info "OpenClaw not installed, skipping plugin configuration"
                     fi
                     if [ -f "$HOME/.copilot-shell/settings.json" ] || [ -f "$HOME/.qwen-code/settings.json" ]; then
-                        configure_cosh_hooks "$SYS_SHARE_DIR/adapters/cosh" || true
+                        configure_cosh_hooks "${SHARE_DIR}/adapters/cosh" || true
                     else
                         info "copilot-shell/qwen-code not installed, skipping hooks configuration"
                     fi
