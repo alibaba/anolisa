@@ -124,7 +124,11 @@ export class SkillManager {
 
     // Initialize cache if it doesn't exist or we're forcing a refresh
     if (!shouldUseCache) {
-      await this.refreshCache();
+      // Suppress notification when refresh is triggered from listSkills:
+      // the caller (typically SkillTool / TaskTool) is already in the middle
+      // of consuming the new state, so a re-entrant notify would just queue
+      // a redundant refreshSkills() round-trip.
+      await this.refreshCache(false);
     }
 
     // Pre-load disabled state once when excludeDisabled is requested
@@ -325,8 +329,13 @@ export class SkillManager {
 
   /**
    * Refreshes the skills cache by loading all skills from disk.
+   *
+   * @param notify - When true (default), invokes registered change listeners
+   *   after the cache is rebuilt. Pass `false` for internal call sites that
+   *   are themselves reacting to a listener invocation, to avoid re-entrant
+   *   refresh storms.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(notify: boolean = true): Promise<void> {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
@@ -338,13 +347,18 @@ export class SkillManager {
       'system',
     ];
 
+    // Scan levels sequentially. They touch disjoint directories, but tests
+    // assert deterministic readdir ordering, and per-level latency is small
+    // enough that parallelism is not worth the contract change.
     for (const level of levels) {
       const levelSkills = await this.listSkillsAtLevel(level);
       skillsCache.set(level, levelSkills);
     }
 
     this.skillsCache = skillsCache;
-    this.notifyChangeListeners();
+    if (notify) {
+      this.notifyChangeListeners();
+    }
   }
 
   /**

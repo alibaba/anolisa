@@ -46,6 +46,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
+import { SkillTool } from '../tools/skill.js';
 import { TaskTool } from '../tools/task.js';
 
 // Telemetry
@@ -220,6 +221,28 @@ export class GeminiClient {
     this.hasFailedCompressionAttempt = false;
 
     const toolRegistry = this.config.getToolRegistry();
+
+    // Defensive: ensure SkillTool / TaskTool first-load completes before
+    // building the function declarations. createToolRegistry already awaits
+    // these, but startChat may also be reached through paths that bypass it
+    // (e.g. resetChat / tryCompressChat / session resume).
+    const skillToolInstance = toolRegistry.getTool(SkillTool.Name);
+    if (skillToolInstance instanceof SkillTool) {
+      try {
+        await skillToolInstance.initPromise;
+      } catch {
+        // Already logged inside SkillTool; continue with whatever is loaded.
+      }
+    }
+    const taskToolInstance = toolRegistry.getTool(TaskTool.Name);
+    if (taskToolInstance instanceof TaskTool) {
+      try {
+        await taskToolInstance.initPromise;
+      } catch {
+        // Already logged inside TaskTool; continue with whatever is loaded.
+      }
+    }
+
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
 

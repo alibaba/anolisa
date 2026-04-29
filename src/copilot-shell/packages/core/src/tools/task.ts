@@ -52,6 +52,27 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
   private subagentManager: SubagentManager;
   private availableSubagents: SubagentConfig[] = [];
 
+  /**
+   * Monotonic counter to discard stale `refreshSubagents` results when a
+   * newer refresh starts before an older one resolves.
+   */
+  private refreshSeq = 0;
+
+  /**
+   * Tracks whether the initial discovery has produced a result at least
+   * once. Once `true`, transient failures will keep the last-known-good
+   * `availableSubagents` instead of clobbering it with an empty list.
+   */
+  private hasLoadedOnce = false;
+
+  /**
+   * Resolves once the initial subagent discovery has completed.
+   * Callers that need an accurate tool description for the very first LLM
+   * request (e.g. `Config.createToolRegistry`, `GeminiClient.startChat`)
+   * MUST await this promise before reading `tool.schema`.
+   */
+  readonly initPromise: Promise<void>;
+
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
     const initialSchema = {
@@ -90,27 +111,48 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
       void this.refreshSubagents();
     });
 
-    // Initialize the tool asynchronously
-    this.refreshSubagents();
+    // Initialize the tool asynchronously, exposed via initPromise so the
+    // tool registry creation can block on it (mirrors SkillTool).
+    this.initPromise = this.refreshSubagents();
   }
 
   /**
    * Asynchronously initializes the tool by loading available subagents
    * and updating the description and schema.
+   *
+   * Race-safe: if invoked multiple times concurrently (e.g. by the change
+   * listener), only the LATEST invocation overwrites `availableSubagents`.
    */
   async refreshSubagents(): Promise<void> {
+    const seq = ++this.refreshSeq;
     try {
-      this.availableSubagents = await this.subagentManager.listSubagents();
+      const subagents = await this.subagentManager.listSubagents();
+      if (seq !== this.refreshSeq) return;
+      // Defensive: a misbehaving SubagentManager (or a test mock that has
+      // been cleared by `vi.clearAllMocks`) may return undefined; never let
+      // that propagate into `availableSubagents`, which is required to be
+      // an array by every consumer (`getAvailableSubagentNames`, etc.).
+      this.availableSubagents = subagents ?? [];
+      this.hasLoadedOnce = true;
       this.updateDescriptionAndSchema();
     } catch (error) {
       console.warn('Failed to load subagents for Task tool:', error);
-      this.availableSubagents = [];
-      this.updateDescriptionAndSchema();
+      if (seq !== this.refreshSeq) return;
+      // Keep the last-known-good list on transient errors.
+      if (!this.hasLoadedOnce) {
+        this.availableSubagents = [];
+        this.hasLoadedOnce = true;
+        this.updateDescriptionAndSchema();
+      }
     } finally {
-      // Update the client with the new tools
+      // Update the client with the new tools (best-effort).
       const geminiClient = this.config.getGeminiClient();
       if (geminiClient && geminiClient.isInitialized()) {
-        await geminiClient.setTools();
+        try {
+          await geminiClient.setTools();
+        } catch (error) {
+          console.warn('Failed to push refreshed tools to chat:', error);
+        }
       }
     }
   }

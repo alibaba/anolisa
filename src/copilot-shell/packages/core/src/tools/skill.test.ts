@@ -169,6 +169,53 @@ describe('SkillTool', () => {
     });
   });
 
+  describe('cold-start race conditions', () => {
+    it('should expose initPromise that resolves after first load completes', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue(mockSkills);
+      const tool = new SkillTool(config);
+
+      expect(tool.initPromise).toBeInstanceOf(Promise);
+      await tool.initPromise;
+      await vi.runAllTimersAsync();
+
+      // After awaiting initPromise, the description must already contain
+      // real skill metadata, not the placeholder string.
+      expect(tool.description).not.toContain('Loading available skills');
+      expect(tool.description).toContain('code-review');
+    });
+
+    it('should call listSkills with includeRemote=false on cold start', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue(mockSkills);
+      const tool = new SkillTool(config);
+      await tool.initPromise;
+
+      // The very first call must be local-only so a slow remote registry
+      // never blocks the cold-start path.
+      const firstCallArgs = vi.mocked(mockSkillManager.listSkills).mock
+        .calls[0]?.[0];
+      expect(firstCallArgs).toMatchObject({ includeRemote: false });
+    });
+
+    it('should preserve previously loaded skills when a refresh fails', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue(mockSkills);
+      const tool = new SkillTool(config);
+      await tool.initPromise;
+      await vi.runAllTimersAsync();
+      expect(tool.description).toContain('code-review');
+
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.mocked(mockSkillManager.listSkills).mockRejectedValue(
+        new Error('transient failure'),
+      );
+      await tool.refreshSkills({ includeRemote: true });
+
+      // The transient failure must NOT wipe out the previously loaded
+      // skills, otherwise the next request would see an empty description.
+      expect(tool.description).toContain('code-review');
+      consoleSpy.mockRestore();
+    });
+  });
+
   describe('schema generation', () => {
     it('should expose static schema without dynamic enums', () => {
       const schema = skillTool.schema;

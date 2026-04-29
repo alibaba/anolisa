@@ -28,6 +28,31 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
 
+  /**
+   * Monotonic counter used to discard stale `refreshSkills` results when a
+   * newer refresh starts before an older one resolves (e.g. a watcher
+   * debounce burst on slow disks).
+   */
+  private refreshSeq = 0;
+
+  /**
+   * Tracks whether the initial discovery has produced a result at least
+   * once. Once `true`, transient failures will keep the last-known-good
+   * `availableSkills` instead of clobbering it with an empty list.
+   */
+  private hasLoadedOnce = false;
+
+  /**
+   * Resolves once the *local* skill discovery has completed. Remote skills
+   * are loaded in the background AFTER this resolves so the CLI cold start
+   * is never blocked by the remote registry's network round-trip.
+   *
+   * Callers that need an accurate tool description for the very first LLM
+   * request (e.g. `Config.createToolRegistry`, `GeminiClient.startChat`)
+   * MUST await this promise before reading `tool.schema`.
+   */
+  readonly initPromise: Promise<void>;
+
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
     const initialSchema = {
@@ -55,35 +80,76 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     this.skillManager = config.getSkillManager()!;
     this.skillManager.addChangeListener(() => {
-      void this.refreshSkills();
+      // Watcher / state-toggle triggered: refresh both local + remote.
+      void this.refreshSkills({ includeRemote: true });
     });
 
-    // Initialize the tool asynchronously
-    this.refreshSkills();
+    // Cold start path:
+    //   1. First load LOCAL skills only (fast, never blocks on network).
+    //   2. After initPromise resolves, asynchronously enrich with REMOTE
+    //      skills so the LLM can see them on subsequent requests.
+    this.initPromise = this.refreshSkills({ includeRemote: false }).then(() => {
+      // Fire-and-forget remote enrichment; failures are swallowed inside.
+      void this.refreshSkills({ includeRemote: true });
+    });
   }
 
   /**
    * Asynchronously initializes the tool by loading available skills
    * and updating the description and schema.
+   *
+   * Race-safe: if invoked multiple times concurrently (e.g. by the change
+   * listener during a watcher burst), only the LATEST invocation is allowed
+   * to overwrite `availableSkills` / description.
    */
-  async refreshSkills(): Promise<void> {
+  async refreshSkills(
+    options: { includeRemote?: boolean } = { includeRemote: true },
+  ): Promise<void> {
+    const seq = ++this.refreshSeq;
     try {
-      // Include remote skills in the listing so agent knows about them
-      // Exclude disabled skills so they are hidden from the LLM
-      this.availableSkills = await this.skillManager.listSkills({
-        includeRemote: true,
+      // Exclude disabled skills so they are hidden from the LLM.
+      const skills = await this.skillManager.listSkills({
+        includeRemote: options.includeRemote ?? true,
         excludeDisabled: true,
       });
+
+      // Stale guard: a newer refresh has started; drop our result.
+      if (seq !== this.refreshSeq) {
+        return;
+      }
+
+      // Defensive: a misbehaving SkillManager (or a test mock that has
+      // been cleared by `vi.clearAllMocks`) may return undefined; never let
+      // that propagate into `availableSkills`, which every consumer expects
+      // to be an array.
+      this.availableSkills = skills ?? [];
+      this.hasLoadedOnce = true;
       this.updateDescriptionAndSchema();
     } catch (error) {
       console.warn('Failed to load skills for Skills tool:', error);
-      this.availableSkills = [];
-      this.updateDescriptionAndSchema();
+      if (seq !== this.refreshSeq) {
+        return;
+      }
+      // IMPORTANT: do NOT clobber a previously-good list with an empty one.
+      // Only on the very first load do we initialize to [] so the description
+      // gets a proper "No skills are currently configured" message.
+      if (!this.hasLoadedOnce) {
+        this.availableSkills = [];
+        this.hasLoadedOnce = true;
+        this.updateDescriptionAndSchema();
+      }
     } finally {
-      // Update the client with the new tools
+      // Update the client with the new tools. setTools() is cheap and safe
+      // to call as soon as a chat exists; if the chat isn't ready yet,
+      // startChat() will pick up the latest description by reading
+      // tool.schema directly.
       const geminiClient = this.config.getGeminiClient();
       if (geminiClient && geminiClient.isInitialized()) {
-        await geminiClient.setTools();
+        try {
+          await geminiClient.setTools();
+        } catch (error) {
+          console.warn('Failed to push refreshed tools to chat:', error);
+        }
       }
     }
   }

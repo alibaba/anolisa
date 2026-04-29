@@ -1833,6 +1833,26 @@ export class Config {
       registerCoreTool(LspTool, this);
     }
 
+    // Wait for SkillTool / TaskTool first-load to settle so that the
+    // initial chat request sees populated skill/subagent descriptions
+    // instead of the "Loading available skills..." placeholder.
+    const skillToolInstance = registry.getTool(SkillTool.Name);
+    if (skillToolInstance instanceof SkillTool) {
+      try {
+        await skillToolInstance.initPromise;
+      } catch (error) {
+        console.warn('[Config] SkillTool initial discovery failed:', error);
+      }
+    }
+    const taskToolInstance = registry.getTool(TaskTool.Name);
+    if (taskToolInstance instanceof TaskTool) {
+      try {
+        await taskToolInstance.initPromise;
+      } catch (error) {
+        console.warn('[Config] TaskTool initial discovery failed:', error);
+      }
+    }
+
     await registry.discoverAllTools();
     console.debug('ToolRegistry created', registry.getAllToolNames());
     return registry;

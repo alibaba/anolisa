@@ -70,7 +70,8 @@ interface IndexCache {
 }
 
 const DEFAULT_CACHE_TTL = 3600000; // 1 hour
-const DEFAULT_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_INDEX_TIMEOUT = 10000; // 10 seconds, used for fast metadata calls
+const DEFAULT_DOWNLOAD_TIMEOUT = 60000; // 60 seconds, used for skill package downloads
 const COPILOT_CONFIG_DIR = '.copilot-shell';
 const REMOTE_SKILLS_DIR = 'remote-skills';
 const INDEX_CACHE_FILE = 'index.json';
@@ -88,7 +89,8 @@ export class RemoteSkillRegistry {
   private readonly baseUrl: string;
   private readonly cacheDir: string;
   private readonly cacheTTL: number;
-  private readonly timeout: number;
+  private readonly indexTimeout: number;
+  private readonly downloadTimeout: number;
   private readonly authToken?: string;
 
   private indexCache: IndexCache | null = null;
@@ -99,7 +101,17 @@ export class RemoteSkillRegistry {
       config.cacheDir ??
       path.join(os.homedir(), COPILOT_CONFIG_DIR, REMOTE_SKILLS_DIR);
     this.cacheTTL = config.cacheTTL ?? DEFAULT_CACHE_TTL;
-    this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
+    // When `timeout` is explicitly provided, honour it for both phases to
+    // preserve backward compatibility. Otherwise, use a short timeout for
+    // metadata calls (index/readme) and a longer one for downloads so that a
+    // slow Skill-OS server cannot block the cold-start path for 30s.
+    if (config.timeout !== undefined) {
+      this.indexTimeout = config.timeout;
+      this.downloadTimeout = config.timeout;
+    } else {
+      this.indexTimeout = DEFAULT_INDEX_TIMEOUT;
+      this.downloadTimeout = DEFAULT_DOWNLOAD_TIMEOUT;
+    }
     this.authToken = config.authToken;
   }
 
@@ -140,7 +152,7 @@ export class RemoteSkillRegistry {
     } catch (error) {
       const isAbort = error instanceof Error && error.name === 'AbortError';
       const message = isAbort
-        ? `Remote skill server timed out after ${this.timeout}ms. The server may be unreachable.`
+        ? `Remote skill server timed out after ${this.indexTimeout}ms. The server may be unreachable.`
         : `Failed to connect to remote skill server: ${error instanceof Error ? error.message : String(error)}`;
       throw new Error(message);
     }
@@ -224,7 +236,9 @@ export class RemoteSkillRegistry {
     const zipPath = path.join(skillDir, 'skill.zip');
     const downloadUrl = `${this.baseUrl}/skills/api/v1/skills/${skillPath}/download`;
 
-    const response = await this.fetchWithTimeout(downloadUrl);
+    const response = await this.fetchWithTimeout(downloadUrl, {
+      timeoutOverride: this.downloadTimeout,
+    });
     if (!response.ok) {
       throw new Error(`Failed to download skill: ${response.status}`);
     }
@@ -357,10 +371,14 @@ export class RemoteSkillRegistry {
     return path.join(this.cacheDir, skillPath);
   }
 
-  private async fetchWithTimeout(url: string): Promise<Response> {
+  private async fetchWithTimeout(
+    url: string,
+    options: { timeoutOverride?: number } = {},
+  ): Promise<Response> {
     console.debug(`[RemoteSkillRegistry] Fetching: ${url}`);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutMs = options.timeoutOverride ?? this.indexTimeout;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const headers: Record<string, string> = {
