@@ -1,4 +1,4 @@
-%define anolis_release 3
+%define anolis_release 4
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -135,12 +135,11 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-4
+- fix: preserve tool result message structure in TOON encoding
+
 * Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-3
 - build: align install paths with FHS
-  - Makefile defaults: ~/.local/{bin,share/tokenless} for local build (XDG convention)
-  - install.sh: auto-detect install root (RPM -> /usr, make -> ~/.local)
-  - build-all.sh: fallback from /usr/local/bin to $HOME/.local/bin
-  - RPM: rtk/toon helpers moved from /usr/bin to /usr/libexec/tokenless
 
 * Mon Apr 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-2
 - feat(hook): add copilot-shell hooks for command rewriting and compression

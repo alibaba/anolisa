@@ -303,7 +303,20 @@ export default {
           savingsLabel = usedResponseCompression
             ? "response compressed + TOON encoded"
             : "TOON encoded";
-          finalMessage = `[TOON format, ${totalSavingsPct}% token savings]\n${toonText}`;
+          // Wrap TOON text in the original tool result message structure.
+          // If we return a raw string, OpenClaw's tool_result_persist hook
+          // replaces the entire message body, dropping role/toolCallId/toolName.
+          // That causes session-transcript-repair to inject a synthetic
+          // "missing tool result" error on the next run, breaking the session.
+          const toonWrapped = `[TOON format, ${totalSavingsPct}% token savings]\n${toonText}`;
+          if (typeof event.message === "object" && event.message?.role === "toolResult") {
+            finalMessage = {
+              ...event.message,
+              content: [{ type: "text" as const, text: toonWrapped }],
+            };
+          } else {
+            finalMessage = toonWrapped;
+          }
         } else {
           const before = JSON.stringify(event.message).length;
           const after = JSON.stringify(currentMessage).length;
