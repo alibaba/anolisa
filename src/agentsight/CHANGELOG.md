@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Fix simplify agent_crash detection and fix multi-process dedup. (#411)
+- Fix use SqliteConfig for audit CLI db path. (#399)
+- Fix hide Cosh from agent health UI and remove keepalive support. (#401)
+- Fix API endpoint table in AGENTS.md. (#397)
+
 ## 0.3.0
 
 - Add interruption detection system with drain mechanism and dashboard integration. (#315)
