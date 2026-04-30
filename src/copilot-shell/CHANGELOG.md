@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.1
+
+- Fixed initial chat being blocked during skill/subagent first-load discovery. (#418)
+- Fixed missing tool_use_id in PostToolUse hook event payload. (#414)
+- Fixed missing skill_context in PreToolUse hook input for resolved skill path. (#409)
+- Fixed missing auto-completion for `/statusline` subcommands. (#408)
+- Fixed unavailable agents appearing in the key sharing prompt. (#394)
+- Fixed bash option not being restored after canceling from the provider screen. (#393)
+- Fixed hook systemMessages to be concatenated with a `[name]` prefix for clarity. (#387)
+
 ## 2.2.0
 
 - Added `ask` decision support for UserPromptSubmit hook. (#328)
