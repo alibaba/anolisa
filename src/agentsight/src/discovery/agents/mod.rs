@@ -6,4 +6,5 @@
 //! Each agent is defined in its own submodule and implements `AgentMatcher`.
 
 pub mod cosh;
+pub mod hermes;
 pub mod openclaw;

@@ -4,6 +4,7 @@
 //! that can be automatically discovered on the system.
 
 use super::agents::cosh::CoshMatcher;
+use super::agents::hermes::HermesMatcher;
 use super::agents::openclaw::OpenClawMatcher;
 use super::matcher::AgentMatcher;
 
@@ -17,5 +18,6 @@ pub fn known_agents() -> Vec<Box<dyn AgentMatcher>> {
         Box::new(OpenClawMatcher::new()),
         // Cosh (custom matcher: node + /usr/bin/co)
         Box::new(CoshMatcher::new()),
+        Box::new(HermesMatcher::new()),
     ]
 }
