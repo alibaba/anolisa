@@ -9,6 +9,22 @@ python-code-pretty: ## Format Python code using black and isort
 	@uv run --project agent-sec-cli black --force-exclude "backend-skill/templates/" .
 
 # =============================================================================
+# BENCHMARK
+# =============================================================================
+
+PROMPT_SCAN_MODE ?= standard
+
+.PHONY: benchmark-prompt-scan
+benchmark-prompt-scan: ## Run prompt-scan benchmark (Chinese dataset)
+	@echo "🔥 Warming up prompt-scanner (downloading ML model if not cached)..."
+	@uv run --project agent-sec-cli agent-sec-cli scan-prompt warmup
+	@echo "📊 Running prompt-scan benchmark (mode=$(PROMPT_SCAN_MODE))..."
+	@uv run --project agent-sec-cli python3 benchmarks/prompt-scan/scripts/run_benchmark.py --mode $(PROMPT_SCAN_MODE)
+
+.PHONY: benchmark
+benchmark: benchmark-prompt-scan ## Run all benchmarks (currently: prompt-scan only)
+
+# =============================================================================
 # TEST
 # =============================================================================
 
