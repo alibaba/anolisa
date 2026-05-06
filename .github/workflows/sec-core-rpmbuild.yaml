@@ -3,8 +3,12 @@ name: sec-core-rpmbuild
 on:
   pull_request:
     branches:
+      - main
       - 'release/agent-sec-core/**'
-  workflow_dispatch:       # 支持手动触发
+    paths:
+      - 'src/agent-sec-core/**'
+      - '.github/workflows/sec-core-rpmbuild.yaml'
+  workflow_dispatch:       # 手动触发不受 paths 限制
 
 permissions:
   contents: read
