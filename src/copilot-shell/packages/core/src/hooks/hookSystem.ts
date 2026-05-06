@@ -126,6 +126,11 @@ export class HookSystem {
           result.finalOutput,
         ) as PreToolUseHookOutput)
       : undefined;
+    // Carry per-hook notifications from the aggregator so the scheduler can
+    // emit them as structured data to the UI layer.
+    if (output && result.notifications?.length) {
+      output.notifications = result.notifications;
+    }
     debugLogger.info(
       `[Hook Debug] hookSystem.firePreToolUseEvent: facade returning, hasOutput=${!!output}`,
     );

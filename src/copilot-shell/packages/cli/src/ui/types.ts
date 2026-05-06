@@ -6,6 +6,7 @@
 
 import type {
   CompressionStatus,
+  HookDecision,
   MCPServerConfig,
   ThoughtSummary,
   ToolCallConfirmationDetails,
@@ -49,6 +50,23 @@ export enum ToolCallStatus {
   Error = 'Error',
 }
 
+/** A single hook notification with the hook's display name and message. */
+export interface HookNotificationItem {
+  hookName: string;
+  message: string;
+  /**
+   * This single hook's original decision. Drives the per-box color / icon
+   * (allow/approve → success, ask → warning, block/deny → error, undef → neutral).
+   */
+  decision?: HookDecision;
+  /**
+   * Aggregated final decision across all hooks fired for this event. When it
+   * is block/deny while `decision` is not, the UI dims this box to neutral
+   * to avoid “green allow box + rejected execution” visual conflict.
+   */
+  mergedDecision?: HookDecision;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   status: ToolCallStatus;
@@ -69,6 +87,13 @@ export interface IndividualToolCallDisplay {
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
   outputFile?: string;
+  /**
+   * Hook pre-execution notifications (from PreToolUse hook's systemMessage / reason).
+   * Each element represents one hook's notification with its name and message.
+   * Persists across all tool call states so notifications remain visible after completion.
+   * Rendered as separate bordered boxes, one per hook.
+   */
+  hookNotification?: HookNotificationItem[];
 }
 
 export interface CompressionProps {

@@ -12,6 +12,7 @@ import {
   useReactToolScheduler,
   mapToDisplay,
 } from './useReactToolScheduler.js';
+import type { TrackedToolCall } from './useReactToolScheduler.js';
 import type { PartUnion, FunctionResponse } from '@google/genai';
 import type {
   Config,
@@ -780,5 +781,94 @@ describe('mapToDisplay', () => {
     expect(display.tools[1].status).toBe(ToolCallStatus.Executing);
     expect(display.tools[1].resultDisplay).toBe('markdown output');
     expect(display.tools[1].renderOutputAsMarkdown).toBe(true);
+  });
+
+  it('should render hookSystemMessage as hookNotification for validating status', () => {
+    // Regression: hook pre-execution notifications (e.g. "signature could not
+    // be verified") must be visible even for auto-allowed tools that never
+    // enter awaiting_approval. The notification now lives in hookNotification
+    // (not resultDisplay) so it persists after the tool completes.
+    // Each hook's message is stored as a separate structured element for
+    // independent box rendering.
+    const toolCall = {
+      request: baseRequest,
+      status: 'validating',
+      tool: baseTool,
+      invocation: baseInvocation,
+      hookSystemMessage: [
+        {
+          hookName: 'my-hook',
+          message: 'Warning: skill signature could not be verified',
+        },
+      ],
+    } as unknown as TrackedToolCall;
+
+    const display = mapToDisplay(toolCall);
+    expect(display.tools[0].status).toBe(ToolCallStatus.Executing);
+    expect(display.tools[0].resultDisplay).toBeUndefined();
+    expect(display.tools[0].hookNotification).toEqual([
+      {
+        hookName: 'my-hook',
+        message: 'Warning: skill signature could not be verified',
+      },
+    ]);
+  });
+
+  it('should show hookNotification independently of liveOutput for executing tool', () => {
+    // Both liveOutput and hookNotification are now independent fields.
+    // A tool with no streaming output still shows the hook warning via hookNotification.
+    const toolCall = {
+      request: baseRequest,
+      status: 'executing',
+      tool: baseTool,
+      invocation: baseInvocation,
+      liveOutput: undefined,
+      hookSystemMessage: [
+        {
+          hookName: 'my-hook',
+          message: 'Warning: skill signature could not be verified',
+        },
+      ],
+    } as unknown as TrackedToolCall;
+
+    const display = mapToDisplay(toolCall);
+    expect(display.tools[0].status).toBe(ToolCallStatus.Executing);
+    expect(display.tools[0].resultDisplay).toBeUndefined();
+    expect(display.tools[0].hookNotification).toEqual([
+      {
+        hookName: 'my-hook',
+        message: 'Warning: skill signature could not be verified',
+      },
+    ]);
+  });
+
+  it('should show both liveOutput and hookNotification simultaneously for executing tool', () => {
+    // liveOutput (real-time streaming) and hook notification are now both
+    // visible at the same time — hookNotification no longer falls back to
+    // liveOutput; they are rendered as separate UI elements.
+    const toolCall = {
+      request: baseRequest,
+      status: 'executing',
+      tool: baseTool,
+      invocation: baseInvocation,
+      liveOutput: 'streaming output...',
+      hookSystemMessage: [
+        {
+          hookName: 'hook-a',
+          message: 'Warning: skill signature could not be verified',
+        },
+        { hookName: 'hook-b', message: 'Another hook message' },
+      ],
+    } as unknown as TrackedToolCall;
+
+    const display = mapToDisplay(toolCall);
+    expect(display.tools[0].resultDisplay).toBe('streaming output...');
+    expect(display.tools[0].hookNotification).toEqual([
+      {
+        hookName: 'hook-a',
+        message: 'Warning: skill signature could not be verified',
+      },
+      { hookName: 'hook-b', message: 'Another hook message' },
+    ]);
   });
 });

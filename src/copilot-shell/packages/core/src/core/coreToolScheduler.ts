@@ -32,6 +32,7 @@ import {
   SkillTool,
 } from '../index.js';
 import type { SandboxBypassApprovalRequest } from '../index.js';
+import type { HookDecision } from '../hooks/types.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -66,8 +67,6 @@ export type ValidatingToolCall = {
   invocation: AnyToolInvocation;
   startTime?: number;
   outcome?: ToolConfirmationOutcome;
-  /** Hook systemMessage emitted during pre-execution validation phase */
-  liveOutput?: ToolResultDisplay;
 };
 
 export type ScheduledToolCall = {
@@ -865,11 +864,46 @@ export class CoreToolScheduler {
               );
 
               if (hookOutput) {
-                // Block: abort the tool call immediately
-                if (
+                // Compute the merged decision once so every notification shares
+                // the same context. 'block'/'deny'/'ask' come from the hook
+                // decision itself; shouldStopExecution() (continue=false) is
+                // also treated as a blocking context for UI dimming purposes.
+                const isBlocking =
                   hookOutput.isBlockingDecision() ||
-                  hookOutput.shouldStopExecution()
+                  hookOutput.shouldStopExecution();
+                const isAsk = hookOutput.isAskDecision();
+                const mergedDecision: HookDecision | undefined = isBlocking
+                  ? hookOutput.decision === 'deny'
+                    ? 'deny'
+                    : 'block'
+                  : isAsk
+                    ? 'ask'
+                    : hookOutput.decision;
+
+                // Emit hook notifications FIRST, regardless of the final
+                // decision, so every hook's voice is preserved in the UI
+                // (principle: “expose as much as possible unless denied”).
+                // UI uses mergedDecision to dim per-hook boxes when the
+                // overall outcome is block/deny, avoiding “green allow box
+                // + rejected execution” visual conflict.
+                if (
+                  this.outputUpdateHandler &&
+                  hookOutput.notifications?.length
                 ) {
+                  for (const n of hookOutput.notifications) {
+                    this.outputUpdateHandler(reqInfo.callId, {
+                      hookName: n.hookName,
+                      hookMessage: n.message,
+                      decision: n.decision,
+                      mergedDecision,
+                    });
+                  }
+                }
+
+                // Block: abort the tool call immediately. Execution rule
+                // block > ask > allow is preserved (this branch runs after
+                // notifications are already emitted above).
+                if (isBlocking) {
                   const reason = hookOutput.getEffectiveReason();
                   this.setStatusInternal(
                     reqInfo.callId,
@@ -884,7 +918,7 @@ export class CoreToolScheduler {
                 }
 
                 // Ask: force user confirmation regardless of YOLO/allowlist
-                if (hookOutput.isAskDecision()) {
+                if (isAsk) {
                   hookForceAsk = true;
                   hookAskMessage = hookOutput.systemMessage;
                 }
@@ -912,19 +946,6 @@ export class CoreToolScheduler {
                     }
                     this.notifyToolCallsUpdate();
                   }
-                }
-
-                // Emit systemMessage notification to UI (only for non-ask decisions;
-                // for ask decisions the message is shown in the confirmation dialog)
-                if (
-                  hookOutput.systemMessage &&
-                  !hookForceAsk &&
-                  this.outputUpdateHandler
-                ) {
-                  this.outputUpdateHandler(
-                    reqInfo.callId,
-                    hookOutput.systemMessage + '\n',
-                  );
                 }
               }
             } catch (error) {
@@ -965,9 +986,18 @@ export class CoreToolScheduler {
             | ToolCallConfirmationDetails
             | false = confirmationDetails;
           if (hookForceAsk) {
-            const askPrompt =
-              hookAskMessage ||
-              'A hook has requested confirmation before executing this tool.';
+            // Fixed prompt text. The actual per-hook messages are already
+            // rendered above the dialog as structured HookNotificationDisplay
+            // boxes (emitted before this point, regardless of decision). The
+            // dialog only needs to ask the user to make a decision; showing
+            // the merged systemMessage here would duplicate those boxes.
+            // `hookAskMessage` is intentionally unused in the prompt body.
+            void hookAskMessage;
+            // NOTE: This English string is used as a stable i18n key on the UI
+            // side (see ToolConfirmationMessage.tsx, which wraps `prompt` with
+            // t()). Keep both locales/en.js and locales/zh.js entries in sync
+            // when editing this text.
+            const askPrompt = 'A hook requires your confirmation to proceed.';
             // Always synthesize an 'info' dialog so the hook message is shown
             // prominently in the prompt body rather than buried in the title.
             // If the tool has a native confirmation, forward its onConfirm so

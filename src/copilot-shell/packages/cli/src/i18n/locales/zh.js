@@ -1419,4 +1419,6 @@ export default {
   // ============================================================================
   '⚠️  **Hook Safety Check**': '⚠️  **Hook 安全检查提示**',
   'Send this prompt or cancel?': '是否继续发送这条 prompt？',
+  'A hook requires your confirmation to proceed.':
+    '有 Hook 需要您的确认方可继续。',
 };

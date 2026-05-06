@@ -330,7 +330,7 @@ export const ToolConfirmationMessage: React.FC<
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <Text color={theme.text.link}>
-          <RenderInline text={infoProps.prompt} />
+          <RenderInline text={t(infoProps.prompt)} />
         </Text>
         {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
           <Box flexDirection="column" marginTop={1}>

@@ -20,12 +20,14 @@ import type {
   Status as CoreStatus,
   EditorType,
   SandboxBypassApprovalRequest,
+  HookNotificationDisplay,
 } from '@copilot-shell/core';
 import { CoreToolScheduler } from '@copilot-shell/core';
-import { useCallback, useState, useMemo } from 'react';
+import { useCallback, useState, useMemo, useRef } from 'react';
 import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
+  HookNotificationItem,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
@@ -37,28 +39,28 @@ export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
 export type TrackedScheduledToolCall = ScheduledToolCall & {
   responseSubmittedToGemini?: boolean;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 export type TrackedValidatingToolCall = ValidatingToolCall & {
   responseSubmittedToGemini?: boolean;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 export type TrackedWaitingToolCall = WaitingToolCall & {
   responseSubmittedToGemini?: boolean;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToGemini?: boolean;
   pid?: number;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
   responseSubmittedToGemini?: boolean;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
   responseSubmittedToGemini?: boolean;
-  hookSystemMessage?: string;
+  hookSystemMessage?: HookNotificationItem[];
 };
 
 export type TrackedToolCall =
@@ -68,6 +70,18 @@ export type TrackedToolCall =
   | TrackedExecutingToolCall
   | TrackedCompletedToolCall
   | TrackedCancelledToolCall;
+
+/**
+ * Type guard: checks if an outputChunk is a structured HookNotificationDisplay.
+ */
+function isHookNotification(chunk: unknown): chunk is HookNotificationDisplay {
+  return (
+    typeof chunk === 'object' &&
+    chunk !== null &&
+    'hookName' in chunk &&
+    'hookMessage' in chunk
+  );
+}
 
 export function useReactToolScheduler(
   onComplete: (tools: CompletedToolCall[]) => Promise<void>,
@@ -83,22 +97,49 @@ export function useReactToolScheduler(
     TrackedToolCall[]
   >([]);
 
+  // Synchronous registry of hook notifications keyed by callId.
+  // React state updates (setToolCallsForDisplay) are asynchronous, so when
+  // allToolCallsCompleteHandler fires it may see stale state. This ref is
+  // updated synchronously inside outputUpdateHandler and is always current
+  // when the history snapshot is created.
+  const hookNotificationsRef = useRef<Map<string, HookNotificationItem[]>>(
+    new Map(),
+  );
+
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      // Structured hook notification from the core scheduler.
+      if (isHookNotification(outputChunk)) {
+        const item: HookNotificationItem = {
+          hookName: outputChunk.hookName,
+          message: outputChunk.hookMessage,
+          decision: outputChunk.decision,
+          mergedDecision: outputChunk.mergedDecision,
+        };
+        // Synchronous ref update for history snapshots.
+        const existing = hookNotificationsRef.current.get(toolCallId) ?? [];
+        hookNotificationsRef.current.set(toolCallId, [...existing, item]);
+        // React state update for live display.
+        setToolCallsForDisplay((prevCalls) =>
+          prevCalls.map((tc) => {
+            if (tc.request.callId === toolCallId) {
+              return {
+                ...tc,
+                hookSystemMessage: [...(tc.hookSystemMessage ?? []), item],
+              } as typeof tc;
+            }
+            return tc;
+          }),
+        );
+        return;
+      }
+
+      // Live streaming output (executing phase).
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
-          if (tc.request.callId === toolCallId) {
-            if (tc.status === 'executing') {
-              const executingTc = tc as TrackedExecutingToolCall;
-              return { ...executingTc, liveOutput: outputChunk };
-            }
-            // Hook systemMessage is emitted during the 'validating' phase,
-            // before execution starts. Store as hookSystemMessage so it
-            // persists across state transitions (validating -> awaiting_approval).
-            if (tc.status === 'validating' && typeof outputChunk === 'string') {
-              const validatingTc = tc as TrackedValidatingToolCall;
-              return { ...validatingTc, hookSystemMessage: outputChunk.trim() };
-            }
+          if (tc.request.callId === toolCallId && tc.status === 'executing') {
+            const executingTc = tc as TrackedExecutingToolCall;
+            return { ...executingTc, liveOutput: outputChunk };
           }
           return tc;
         }),
@@ -109,7 +150,19 @@ export function useReactToolScheduler(
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
     async (completedToolCalls) => {
-      await onComplete(completedToolCalls);
+      // completedToolCalls comes from the core scheduler (CompletedToolCall[])
+      // and does NOT carry the UI-only hookSystemMessage field. Enrich each
+      // entry from the synchronous ref before handing off to onComplete so
+      // that the history snapshot preserves hook notifications.
+      const enriched = completedToolCalls.map((tc) => ({
+        ...tc,
+        hookSystemMessage: hookNotificationsRef.current.get(tc.request.callId),
+      }));
+      // Clean up processed entries to avoid unbounded growth.
+      completedToolCalls.forEach((tc) =>
+        hookNotificationsRef.current.delete(tc.request.callId),
+      );
+      await onComplete(enriched as CompletedToolCall[]);
     },
     [onComplete],
   );
@@ -276,6 +329,9 @@ export function mapToDisplay(
             resultDisplay: trackedCall.response.resultDisplay,
             confirmationDetails: undefined,
             outputFile: trackedCall.response.outputFile,
+            hookNotification: trackedCall.hookSystemMessage?.length
+              ? trackedCall.hookSystemMessage
+              : undefined,
           };
         case 'error':
           return {
@@ -283,6 +339,9 @@ export function mapToDisplay(
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: trackedCall.response.resultDisplay,
             confirmationDetails: undefined,
+            hookNotification: trackedCall.hookSystemMessage?.length
+              ? trackedCall.hookSystemMessage
+              : undefined,
           };
         case 'cancelled':
           return {
@@ -290,36 +349,48 @@ export function mapToDisplay(
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: trackedCall.response.resultDisplay,
             confirmationDetails: undefined,
+            hookNotification: trackedCall.hookSystemMessage?.length
+              ? trackedCall.hookSystemMessage
+              : undefined,
           };
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay:
-              (trackedCall as TrackedWaitingToolCall).hookSystemMessage ??
-              undefined,
+            resultDisplay: undefined,
             confirmationDetails: trackedCall.confirmationDetails,
+            hookNotification: (trackedCall as TrackedWaitingToolCall)
+              .hookSystemMessage?.length
+              ? (trackedCall as TrackedWaitingToolCall).hookSystemMessage
+              : undefined,
           };
         case 'executing':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
+            // Show live streaming output if available. The hook pre-execution
+            // notification is rendered separately via hookNotification so it
+            // remains visible alongside live output.
             resultDisplay:
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            hookNotification: trackedCall.hookSystemMessage?.length
+              ? trackedCall.hookSystemMessage
+              : undefined,
           };
         case 'validating': // Fallthrough
         case 'scheduled':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay:
-              trackedCall.status === 'validating'
-                ? ((trackedCall as TrackedValidatingToolCall).liveOutput ??
-                  undefined)
-                : undefined,
+            resultDisplay: undefined,
             confirmationDetails: undefined,
+            // Hook pre-execution notification shown via hookNotification so it
+            // persists through all subsequent states.
+            hookNotification: trackedCall.hookSystemMessage?.length
+              ? trackedCall.hookSystemMessage
+              : undefined,
           };
         default: {
           const exhaustiveCheck: never = trackedCall;

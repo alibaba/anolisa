@@ -161,6 +161,12 @@ export class DefaultHookOutput implements HookOutput {
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
+  /** Per-hook UI notifications passed through from the aggregator. */
+  notifications?: Array<{
+    hookName: string;
+    message: string;
+    decision?: HookDecision;
+  }>;
 
   constructor(data: Partial<HookOutput> = {}) {
     this.continue = data.continue;

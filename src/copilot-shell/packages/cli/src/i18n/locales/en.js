@@ -1602,4 +1602,6 @@ export default {
   // ============================================================================
   '⚠️  **Hook Safety Check**': '⚠️  **Hook Safety Check**',
   'Send this prompt or cancel?': 'Send this prompt or cancel?',
+  'A hook requires your confirmation to proceed.':
+    'A hook requires your confirmation to proceed.',
 };

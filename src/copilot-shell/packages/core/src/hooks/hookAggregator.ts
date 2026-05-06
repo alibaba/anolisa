@@ -20,6 +20,7 @@ import type {
   HookConfig,
   HookExecutionResult,
   BeforeToolSelectionOutput,
+  HookDecision,
 } from './types.js';
 
 /**
@@ -48,6 +49,17 @@ function getHookDisplayName(config: HookConfig | undefined): string {
 }
 
 /**
+ * Per-hook notification for UI display (hookName + message pair).
+ * The optional `decision` field lets the UI choose color and icon based on
+ * the hook's outcome (allow / approve / ask / block / deny / undefined).
+ */
+export interface HookNotification {
+  hookName: string;
+  message: string;
+  decision?: HookDecision;
+}
+
+/**
  * Aggregated result from multiple hook executions
  */
 export interface AggregatedHookResult {
@@ -56,6 +68,8 @@ export interface AggregatedHookResult {
   errors: Error[];
   totalDuration: number;
   finalOutput?: HookOutput;
+  /** Per-hook UI notifications (hookName + message). */
+  notifications?: HookNotification[];
 }
 
 /**
@@ -96,12 +110,29 @@ export class HookAggregator {
     const success = errors.length === 0;
     const finalOutput = this.mergeOutputs(namedOutputs, eventName);
 
+    // Build per-hook notifications for UI display. Each hook that provides a
+    // systemMessage (or falls back to reason) gets its own notification entry
+    // so the UI can render them as independent visual elements with the hook
+    // name clearly attributed.
+    const notifications: HookNotification[] = [];
+    for (const { name, output } of namedOutputs) {
+      const msg = output.systemMessage ?? output.reason;
+      if (msg) {
+        notifications.push({
+          hookName: name,
+          message: msg,
+          decision: output.decision,
+        });
+      }
+    }
+
     return {
       success,
       allOutputs,
       errors,
       totalDuration,
       finalOutput,
+      notifications: notifications.length > 0 ? notifications : undefined,
     };
   }
 
@@ -226,6 +257,10 @@ export class HookAggregator {
     }
 
     // Set merged decision
+    // Note: 'approve' is a Claude-Code-compatible single-hook value that no
+    // merge branch produces here; it is treated as equivalent to 'allow' at
+    // the scheduler level (neither blocking nor ask). Per-hook 'approve' is
+    // still forwarded verbatim in notifications so the UI can render it.
     if (hasBlock) {
       merged.decision = 'block';
     } else if (hasAsk) {

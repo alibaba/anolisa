@@ -11,6 +11,7 @@ import type { ShellExecutionConfig } from '../services/shellExecutionService.js'
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+import type { HookDecision } from '../hooks/types.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -468,13 +469,34 @@ export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
 }
 
+/**
+ * Structured hook notification for UI display.
+ * Sent via OutputUpdateHandler during the validating phase so that the UI can
+ * render the hook name and message as distinct visual elements.
+ *
+ * Two decision fields:
+ *  - `decision`: this single hook's original decision. Drives the per-box
+ *    color / icon (allow=green, ask=yellow, deny/block=red, undef=neutral).
+ *  - `mergedDecision`: the aggregated final decision across all hooks fired
+ *    for this event. When it is block/deny while this hook's decision is
+ *    not, the UI dims this box to neutral to avoid “green box + rejected
+ *    execution” visual conflict.
+ */
+export interface HookNotificationDisplay {
+  hookName: string;
+  hookMessage: string;
+  decision?: HookDecision;
+  mergedDecision?: HookDecision;
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | TaskResultDisplay
-  | AnsiOutputDisplay;
+  | AnsiOutputDisplay
+  | HookNotificationDisplay;
 
 export interface FileDiff {
   fileDiff: string;

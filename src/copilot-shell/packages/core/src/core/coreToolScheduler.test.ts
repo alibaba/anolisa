@@ -2326,12 +2326,14 @@ describe('CoreToolScheduler Sequential Execution', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Regression: hookForceAsk must always synthesize an 'info' dialog that
-  //   shows the hook message in the prompt body (not just the title), while
-  //   still forwarding the original onConfirm so native side-effects
-  //   (e.g. setApprovalMode, allowlisting) are preserved.
+  // Regression: hookForceAsk must always synthesize an 'info' dialog with a
+  //   fixed confirmation prompt, while still forwarding the original
+  //   onConfirm so native side-effects (e.g. setApprovalMode, allowlisting)
+  //   are preserved. The per-hook messages are rendered separately as
+  //   structured HookNotificationDisplay boxes above the dialog, so the
+  //   dialog prompt no longer embeds the hook's systemMessage.
   // ─────────────────────────────────────────────────────────────────────────
-  it('hookForceAsk should synthesize an info dialog with hook message in prompt, preserving original onConfirm side-effects', async () => {
+  it('hookForceAsk should synthesize an info dialog with a fixed prompt, preserving original onConfirm side-effects', async () => {
     let approvalMode = ApprovalMode.DEFAULT;
 
     // Hook always returns 'ask'
@@ -2441,14 +2443,17 @@ describe('CoreToolScheduler Sequential Execution', () => {
     });
 
     // ── Key assertions ──────────────────────────────────────────────────────
-    // 1. Confirmation type must be 'info' — hook message shown in prompt body,
-    //    not buried in a title augmented onto the native 'edit' dialog.
+    // 1. Confirmation type must be 'info' — dialog simply asks the user to
+    //    decide; the per-hook messages render separately as notification
+    //    boxes above this dialog.
     expect(capturedWaitingCall!.confirmationDetails.type).toBe('info');
 
-    // 2. The hook warning must appear in the prompt (not just the title).
+    // 2. The prompt should be the fixed confirmation ask, NOT the merged
+    //    hook systemMessage (which would duplicate the notification boxes).
+    //    The English string here is also used as the i18n key on the UI side.
     expect(
       (capturedWaitingCall!.confirmationDetails as { prompt?: string }).prompt,
-    ).toContain('Hook inspection required');
+    ).toBe('A hook requires your confirmation to proceed.');
 
     // 3. The title should be the generic hook header.
     expect(capturedWaitingCall!.confirmationDetails.title).toBe(
@@ -2473,6 +2478,138 @@ describe('CoreToolScheduler Sequential Execution', () => {
         .calls[0][0] as ToolCall[];
       expect(completedCalls[0].status).toBe('success');
     });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Regression: Bug #421 — PreToolUse allow decision reason field is silently
+  //   ignored and not displayed in UI.
+  //   After the structured-notification refactor, aggregator always produces
+  //   `notifications[]` when any hook supplies systemMessage or reason, and
+  //   the scheduler emits those as HookNotificationDisplay objects.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('allow decision with reason should emit a structured notification to outputUpdateHandler', async () => {
+    const executeFn = vi.fn().mockResolvedValue({
+      llmContent: 'done',
+      returnDisplay: 'done',
+    });
+    const allowReasonTool = new MockTool({
+      name: 'allowReasonTool',
+      execute: executeFn,
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    // Hook returns allow with reason. Aggregator would forward this as one
+    // entry in notifications[]; we mock the aggregated shape directly.
+    const hookAllowReasonOutput = {
+      decision: 'allow' as const,
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => false,
+      systemMessage: undefined,
+      reason: 'Warning: skill signature could not be verified',
+      getModifiedToolInput: () => null,
+      getEffectiveReason: () =>
+        'Warning: skill signature could not be verified',
+      notifications: [
+        {
+          hookName: 'skill-verifier',
+          message: 'Warning: skill signature could not be verified',
+          decision: 'allow' as const,
+        },
+      ],
+    };
+    const mockHookAllowReason = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(hookAllowReasonOutput),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const toolRegistryAllowReason = {
+      getTool: () => allowReasonTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => allowReasonTool,
+      getToolByDisplayName: () => allowReasonTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsCompleteAllowReason = vi.fn();
+    const outputUpdateHandlerMock = vi.fn();
+
+    const mockConfigAllowReason = {
+      getSessionId: () => 'test-session-allow-reason',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistryAllowReason,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookAllowReason,
+    } as unknown as Config;
+
+    const schedulerAllowReason = new CoreToolScheduler({
+      config: mockConfigAllowReason,
+      onAllToolCallsComplete: onAllToolCallsCompleteAllowReason,
+      onToolCallsUpdate: vi.fn(),
+      outputUpdateHandler: outputUpdateHandlerMock,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortControllerAllowReason = new AbortController();
+    await schedulerAllowReason.schedule(
+      [
+        {
+          callId: 'allow-reason-1',
+          name: 'allowReasonTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-allow-reason',
+        },
+      ],
+      abortControllerAllowReason.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsCompleteAllowReason).toHaveBeenCalled();
+    });
+
+    // The notification must have been emitted via outputUpdateHandler as a
+    // structured HookNotificationDisplay so that the terminal UI renders it
+    // with the hook's name, icon and color.
+    expect(outputUpdateHandlerMock).toHaveBeenCalledWith('allow-reason-1', {
+      hookName: 'skill-verifier',
+      hookMessage: 'Warning: skill signature could not be verified',
+      decision: 'allow',
+      mergedDecision: 'allow',
+    });
+
+    // The tool must still execute successfully — allow means proceed.
+    const completedCalls = onAllToolCallsCompleteAllowReason.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
   });
 });
 

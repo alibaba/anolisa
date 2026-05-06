@@ -20,6 +20,7 @@ import type {
   PlanResultDisplay,
   AnsiOutput,
   Config,
+  HookDecision,
 } from '@copilot-shell/core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
@@ -37,6 +38,47 @@ const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const STATUS_INDICATOR_WIDTH = 3;
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+
+/**
+ * Map a hook decision to a (color token, leading icon) pair so that the hook
+ * notification block can be color-coded by outcome:
+ *   allow / approve  → success (green)  ✓
+ *   ask              → warning (yellow) ?
+ *   block / deny     → error   (red)    ✗
+ *   undefined        → neutral (dim)    ●  (pure informational)
+ *
+ * When `mergedDecision` (the aggregated final decision across all hooks)
+ * indicates block/deny, any per-hook box whose own decision is NOT block/deny
+ * is dimmed to neutral gray. This avoids the visual conflict of a green
+ * “allow” box sitting alongside a red “deny” box when the overall execution
+ * is rejected. merged=ask does not trigger dimming — ask is not a rejection.
+ */
+function decisionToStyle(
+  decision?: HookDecision,
+  mergedDecision?: HookDecision,
+): {
+  color: string;
+  icon: string;
+} {
+  const mergedIsBlocking =
+    mergedDecision === 'block' || mergedDecision === 'deny';
+  const selfIsBlocking = decision === 'block' || decision === 'deny';
+  if (mergedIsBlocking && !selfIsBlocking) {
+    return { color: theme.text.secondary, icon: '●' };
+  }
+  switch (decision) {
+    case 'allow':
+    case 'approve':
+      return { color: theme.status.success, icon: '✓' };
+    case 'ask':
+      return { color: theme.status.warning, icon: '?' };
+    case 'block':
+    case 'deny':
+      return { color: theme.status.error, icon: '✗' };
+    default:
+      return { color: theme.text.secondary, icon: '●' };
+  }
+}
 
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
@@ -237,6 +279,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  hookNotification,
   status,
   availableTerminalHeight,
   contentWidth,
@@ -327,6 +370,43 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         )}
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {hookNotification && hookNotification.length > 0 && (
+        <Box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          marginTop={1}
+          flexDirection="column"
+        >
+          {hookNotification.map((item, i) => {
+            const { color, icon } = decisionToStyle(
+              item.decision,
+              item.mergedDecision,
+            );
+            return (
+              <Box
+                key={i}
+                borderStyle="single"
+                borderTop={false}
+                borderRight={false}
+                borderBottom={false}
+                borderLeft={true}
+                borderColor={color}
+                paddingLeft={1}
+                marginTop={i === 0 ? 0 : 1}
+                flexDirection="column"
+              >
+                <Text color={color} bold>
+                  {icon} {item.hookName}
+                </Text>
+                {item.message && (
+                  <Box paddingLeft={2} flexDirection="column">
+                    <Text color={theme.text.primary}>{item.message}</Text>
+                  </Box>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
       {displayRenderer.type !== 'none' && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">

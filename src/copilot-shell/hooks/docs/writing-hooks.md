@@ -88,9 +88,11 @@ echo '{"decision": "allow"}'
 exit 0
 ```
 
-For `PreToolUse`, use `systemMessage` for any warning or informational text you
-want users to see on `allow`, `approve`, or `ask` paths. Reserve `reason` for
-deny or block outcomes.
+For `PreToolUse`, put any user-facing text in `systemMessage` — it is rendered
+as a per-hook notification box labeled with the hook name, independent of the
+final decision. Use `reason` for the denial/error message on `deny` or `block`
+outcomes; if `systemMessage` is omitted, `reason` is used as the fallback text
+for the notification.
 
 **Configuration:**
 
