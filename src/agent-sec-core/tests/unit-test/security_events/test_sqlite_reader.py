@@ -1,10 +1,8 @@
 """Unit tests for security_events.sqlite_reader — SqliteEventReader."""
 
 import io
-import json
 import sqlite3
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +28,12 @@ def _make_event(
 @pytest.fixture()
 def db_path(tmp_path: Path) -> str:
     return str(tmp_path / "test.db")
+
+
+@pytest.fixture()
+def tilde_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return "~/events.db"
 
 
 @pytest.fixture()
@@ -280,3 +284,33 @@ class TestSqliteEventReader:
         assert reader.query() == []
         assert reader.count() == 0
         assert reader.count_by("category") == {}
+
+    def test_reader_reopens_after_db_file_replaced(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event(event_type="before_replace"))
+        writer.close()
+
+        reader = SqliteEventReader(path=db_path)
+        assert [event.event_type for event in reader.query()] == ["before_replace"]
+
+        db = Path(db_path)
+        db.unlink()
+        Path(f"{db_path}-wal").unlink(missing_ok=True)
+        Path(f"{db_path}-shm").unlink(missing_ok=True)
+
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event(event_type="after_replace"))
+        writer.close()
+
+        assert [event.event_type for event in reader.query()] == ["after_replace"]
+
+    def test_tilde_path_is_normalized_for_reader_and_writer(
+        self, tilde_db_path: str
+    ) -> None:
+        writer = SqliteEventWriter(path=tilde_db_path)
+        writer.write(_make_event(event_type="tilde_path"))
+        writer.close()
+
+        reader = SqliteEventReader(path=tilde_db_path)
+        assert [event.event_type for event in reader.query()] == ["tilde_path"]
+        assert not Path("~").exists()

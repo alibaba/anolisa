@@ -32,6 +32,8 @@ fsspec==2026.3.0
     # via
     #   huggingface-hub
     #   torch
+greenlet==3.5.0 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
+    # via sqlalchemy
 h11==0.16.0
     # via httpcore
 hf-xet==1.4.3 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
@@ -97,6 +99,8 @@ setuptools==81.0.0
     #   torch
 shellingham==1.5.4
     # via typer
+sqlalchemy==2.0.49
+    # via agent-sec-cli
 sympy==1.14.0
     # via torch
 tokenizers==0.22.2
@@ -123,6 +127,7 @@ typing-extensions==4.15.0
     #   huggingface-hub
     #   pydantic
     #   pydantic-core
+    #   sqlalchemy
     #   torch
     #   typing-inspection
 typing-inspection==0.4.2

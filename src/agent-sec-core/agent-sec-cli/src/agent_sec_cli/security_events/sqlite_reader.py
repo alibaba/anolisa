@@ -1,40 +1,117 @@
-"""Read-only SQLite reader for querying security events."""
+"""SQLAlchemy-backed reader for querying security events."""
 
 import json
-import re
-import sqlite3
 import sys
-import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from agent_sec_cli.security_events.config import get_db_path
+from agent_sec_cli.security_events.orm_store import (
+    SecurityEventRecord,
+    create_sqlite_engine,
+    normalize_sqlite_path,
+)
 from agent_sec_cli.security_events.schema import SecurityEvent
+from sqlalchemy import Select, func, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
 
 class SqliteEventReader:
-    """Read-only SQLite reader for security events.
+    """Read-only SQLAlchemy reader for security events.
 
-    Uses per-call connections via URI mode (?mode=ro).
-    Thread-safe by design — no shared state between calls.
+    Uses pooled SQLAlchemy connections and per-call sessions. The engine applies
+    SQLite query-only mode for reader connections.
     """
 
+    _COUNT_BY_COLUMNS = {
+        "category": SecurityEventRecord.category,
+        "event_type": SecurityEventRecord.event_type,
+        "trace_id": SecurityEventRecord.trace_id,
+    }
+
     def __init__(self, path: str | Path | None = None) -> None:
-        self._path = Path(path) if path else Path(get_db_path())
+        self._path = normalize_sqlite_path(path or get_db_path())
+        self._engine_lock = threading.Lock()
+        self._engine: Engine | None = None
+        self._session_factory: sessionmaker[Session] | None = None
+        self._db_identity: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a read-only connection. Raises OperationalError if DB missing."""
-        conn = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
-        conn.execute("PRAGMA query_only=ON")
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _ensure_session_factory(self) -> sessionmaker[Session] | None:
+        """Return a lazily initialized read-only session factory."""
+        db_identity = self._current_db_identity()
+        if db_identity is None:
+            with self._engine_lock:
+                self._dispose_engine()
+            return None
 
-    def _build_where(
+        if self._has_current_session_factory(db_identity):
+            return self._session_factory
+
+        with self._engine_lock:
+            db_identity = self._current_db_identity()
+            if db_identity is None:
+                self._dispose_engine()
+                return None
+
+            if self._has_current_session_factory(db_identity):
+                return self._session_factory
+
+            self._dispose_engine()
+
+            try:
+                engine = create_sqlite_engine(self._path, read_only=True)
+                self._engine = engine
+                self._db_identity = db_identity
+                self._session_factory = sessionmaker(
+                    bind=engine,
+                    expire_on_commit=False,
+                    future=True,
+                )
+            except SQLAlchemyError:
+                self._dispose_engine()
+                return None
+
+        return self._session_factory
+
+    def _has_current_session_factory(self, db_identity: tuple[int, int]) -> bool:
+        """Return True when cached reader state matches the current DB file."""
+        return self._session_factory is not None and self._db_identity == db_identity
+
+    def _current_db_identity(self) -> tuple[int, int] | None:
+        """Return the current DB file identity, or None if it is unavailable."""
+        try:
+            stat_result = self._path.stat()
+        except OSError:
+            return None
+        return (stat_result.st_dev, stat_result.st_ino)
+
+    def _dispose_engine(self) -> None:
+        """Dispose SQLAlchemy engine state and clear session factory."""
+        if self._engine is not None:
+            try:
+                self._engine.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        self._engine = None
+        self._session_factory = None
+        self._db_identity = None
+
+    @staticmethod
+    def _timestamp_epoch(value: str) -> float:
+        """Parse an ISO timestamp as UTC when timezone information is absent."""
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+
+    def _build_filters(
         self,
         *,
         event_type: str | None = None,
@@ -42,52 +119,41 @@ class SqliteEventReader:
         trace_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
-    ) -> tuple[str, list[Any]]:
-        """Build WHERE clause and params list from non-None filters."""
-        conditions: list[str] = []
-        params: list[Any] = []
+    ) -> list[object]:
+        """Build SQLAlchemy filter expressions from non-None filters."""
+        conditions: list[object] = []
         if event_type is not None:
-            conditions.append("event_type = ?")
-            params.append(event_type)
+            conditions.append(SecurityEventRecord.event_type == event_type)
         if category is not None:
-            conditions.append("category = ?")
-            params.append(category)
+            conditions.append(SecurityEventRecord.category == category)
         if trace_id is not None:
-            conditions.append("trace_id = ?")
-            params.append(trace_id)
+            conditions.append(SecurityEventRecord.trace_id == trace_id)
         if since is not None:
-            conditions.append("timestamp_epoch >= ?")
-            dt = datetime.fromisoformat(since)
-            # If naive (no timezone), assume UTC to match event storage
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            params.append(dt.timestamp())
+            conditions.append(
+                SecurityEventRecord.timestamp_epoch >= self._timestamp_epoch(since)
+            )
         if until is not None:
-            conditions.append("timestamp_epoch < ?")
-            dt = datetime.fromisoformat(until)
-            # If naive (no timezone), assume UTC to match event storage
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            params.append(dt.timestamp())
-        where = " WHERE " + " AND ".join(conditions) if conditions else ""
-        return where, params
+            conditions.append(
+                SecurityEventRecord.timestamp_epoch < self._timestamp_epoch(until)
+            )
+        return conditions
 
-    def _row_to_event(self, row: sqlite3.Row) -> SecurityEvent | None:
-        """Convert a DB row to SecurityEvent. Returns None on parse error."""
+    def _record_to_event(self, record: SecurityEventRecord) -> SecurityEvent | None:
+        """Convert an ORM record to SecurityEvent. Returns None on parse error."""
         try:
             return SecurityEvent(
-                event_id=row["event_id"],
-                event_type=row["event_type"],
-                category=row["category"],
-                result=row["result"],
-                timestamp=row["timestamp"],
-                trace_id=row["trace_id"],
-                pid=row["pid"],
-                uid=row["uid"],
-                session_id=row["session_id"],
-                details=json.loads(row["details"]),
+                event_id=record.event_id,
+                event_type=record.event_type,
+                category=record.category,
+                result=record.result,
+                timestamp=record.timestamp,
+                trace_id=record.trace_id,
+                pid=record.pid,
+                uid=record.uid,
+                session_id=record.session_id,
+                details=json.loads(record.details),
             )
-        except (json.JSONDecodeError, IndexError, KeyError, TypeError) as exc:
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
             print(f"[security_events] malformed row skipped: {exc}", file=sys.stderr)
             return None
 
@@ -129,34 +195,33 @@ class SqliteEventReader:
         list[SecurityEvent]
             Matching events ordered by timestamp descending.
         """
+        conditions = self._build_filters(
+            event_type=event_type,
+            category=category,
+            trace_id=trace_id,
+            since=since,
+            until=until,
+        )
+        session_factory = self._ensure_session_factory()
+        if session_factory is None:
+            return []
+
         try:
-            conn = self._connect()
-            try:
-                where, params = self._build_where(
-                    event_type=event_type,
-                    category=category,
-                    trace_id=trace_id,
-                    since=since,
-                    until=until,
-                )
-                sql = (
-                    "SELECT event_id, event_type, category, result, timestamp, "
-                    "timestamp_epoch, trace_id, pid, uid, session_id, details "
-                    f"FROM security_events{where} "
-                    "ORDER BY timestamp_epoch DESC "
-                    "LIMIT ? OFFSET ?"
-                )
-                params.extend([limit, offset])
-                cursor = conn.execute(sql, params)
-                rows = cursor.fetchall()
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+            stmt = (
+                select(SecurityEventRecord)
+                .where(*conditions)
+                .order_by(SecurityEventRecord.timestamp_epoch.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            with session_factory() as session:
+                records = session.scalars(stmt).all()
+        except SQLAlchemyError:
             return []
 
         events: list[SecurityEvent] = []
-        for row in rows:
-            event = self._row_to_event(row)
+        for record in records:
+            event = self._record_to_event(record)
             if event is not None:
                 events.append(event)
         return events
@@ -189,29 +254,37 @@ class SqliteEventReader:
         int
             Number of matching events after applying offset.
         """
+        conditions = self._build_filters(
+            event_type=event_type,
+            category=category,
+            since=since,
+            until=until,
+        )
+        session_factory = self._ensure_session_factory()
+        if session_factory is None:
+            return 0
+
         try:
-            conn = self._connect()
-            try:
-                where, params = self._build_where(
-                    event_type=event_type,
-                    category=category,
-                    since=since,
-                    until=until,
+            if offset == 0:
+                stmt: Select[tuple[int]] = (
+                    select(func.count())
+                    .select_from(SecurityEventRecord)
+                    .where(*conditions)
                 )
-                # Use subquery to apply OFFSET before counting
-                # COUNT(*) on the full set returns 1 row, which OFFSET would skip
-                sql = (
-                    f"SELECT COUNT(*) FROM ("
-                    f"SELECT 1 FROM security_events{where} "
-                    f"LIMIT -1 OFFSET ?)"
+            else:
+                subquery = (
+                    select(SecurityEventRecord.event_id)
+                    .where(*conditions)
+                    .limit(-1)
+                    .offset(offset)
+                    .subquery()
                 )
-                params.append(offset)
-                cursor = conn.execute(sql, params)
-                result = cursor.fetchone()
-                return result[0] if result else 0
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+                stmt = select(func.count()).select_from(subquery)
+
+            with session_factory() as session:
+                result = session.execute(stmt).scalar_one()
+                return int(result)
+        except SQLAlchemyError:
             return 0
 
     def count_by(
@@ -244,51 +317,34 @@ class SqliteEventReader:
         ValueError
             If group_field is not in the allowlist.
         """
-        # Explicit column mapping for defense-in-depth — prevents SQL injection
-        # even if allowlist validation is accidentally bypassed
-        allowed_columns = {"category", "event_type", "trace_id"}
-        if group_field not in allowed_columns:
+        column = self._COUNT_BY_COLUMNS.get(group_field)
+        if column is None:
             raise ValueError(
                 f"Invalid group_field: {group_field!r}. "
                 "Must be one of: category, event_type, trace_id"
             )
 
-        # Validate column name is a safe identifier
-        # This is a belt-and-suspenders check — the allowlist above already
-        # guarantees safety, but this prevents future regressions if the
-        # allowlist is modified incorrectly
-        if not re.match(r"^[a-z_]+$", group_field):
-            raise ValueError(
-                f"group_field contains invalid characters: {group_field!r}"
-            )
+        conditions = self._build_filters(since=since, until=until)
+        session_factory = self._ensure_session_factory()
+        if session_factory is None:
+            return {}
 
         try:
-            conn = self._connect()
-            try:
-                where, params = self._build_where(since=since, until=until)
+            if offset == 0:
+                stmt = select(column, func.count()).where(*conditions).group_by(column)
+            else:
+                subquery = (
+                    select(column.label(group_field))
+                    .where(*conditions)
+                    .limit(-1)
+                    .offset(offset)
+                    .subquery()
+                )
+                subquery_column = getattr(subquery.c, group_field)
+                stmt = select(subquery_column, func.count()).group_by(subquery_column)
 
-                if offset == 0:
-                    # No offset: use simple GROUP BY
-                    sql = (
-                        f"SELECT {group_field}, COUNT(*) "
-                        f"FROM security_events{where} "
-                        f"GROUP BY {group_field}"
-                    )
-                else:
-                    # With offset: apply offset to individual events before grouping
-                    # Use subquery to skip 'offset' events, then group the remainder
-                    sql = (
-                        f"SELECT {group_field}, COUNT(*) FROM ("
-                        f"SELECT {group_field} FROM security_events{where} "
-                        f"LIMIT -1 OFFSET ?) "
-                        f"GROUP BY {group_field}"
-                    )
-                    params.append(offset)
-
-                cursor = conn.execute(sql, params)
-                rows = cursor.fetchall()
-                return {row[0]: row[1] for row in rows}
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+            with session_factory() as session:
+                rows = session.execute(stmt).all()
+                return {row[0]: int(row[1]) for row in rows}
+        except SQLAlchemyError:
             return {}

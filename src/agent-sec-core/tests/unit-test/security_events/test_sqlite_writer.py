@@ -2,13 +2,12 @@
 
 import io
 import json
-import os
 import sqlite3
 import stat
 import sys
-import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -242,6 +241,44 @@ class TestSqliteEventWriter:
         assert count == 100
         writer.close()
 
+    def test_concurrent_writes_from_independent_writers(self, db_path: str) -> None:
+        writer_count = 8
+        events_per_writer = 25
+
+        def write_events(writer_id: int) -> None:
+            writer = SqliteEventWriter(path=db_path)
+            try:
+                for event_num in range(events_per_writer):
+                    writer.write(
+                        SecurityEvent(
+                            event_id=f"writer-{writer_id}-event-{event_num}",
+                            event_type="concurrent_event",
+                            category="test",
+                            trace_id=f"writer-{writer_id}",
+                            details={"writer_id": writer_id, "event_num": event_num},
+                        )
+                    )
+            finally:
+                writer.close()
+
+        with ThreadPoolExecutor(max_workers=writer_count) as executor:
+            futures = [
+                executor.submit(write_events, writer_id)
+                for writer_id in range(writer_count)
+            ]
+            for future in as_completed(futures):
+                future.result()
+
+        conn = sqlite3.connect(db_path)
+        total, distinct_ids = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT event_id) FROM security_events"
+        ).fetchone()
+        conn.close()
+
+        expected = writer_count * events_per_writer
+        assert total == expected
+        assert distinct_ids == expected
+
     def test_pruning_at_close(self, db_path: str) -> None:
         """Pruning happens in close(), not during writes.
 
@@ -308,13 +345,51 @@ class TestSqliteEventWriter:
         assert "timestamp_epoch" in columns
         writer.close()
 
+    def test_schema_repairs_missing_indexes(self, db_path: str) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE security_events ("
+            "event_id TEXT PRIMARY KEY, "
+            "event_type TEXT NOT NULL, "
+            "category TEXT NOT NULL, "
+            "result TEXT NOT NULL DEFAULT 'succeeded', "
+            "timestamp TEXT NOT NULL, "
+            "timestamp_epoch FLOAT NOT NULL, "
+            "trace_id TEXT NOT NULL DEFAULT '', "
+            "pid INTEGER NOT NULL, "
+            "uid INTEGER NOT NULL, "
+            "session_id TEXT, "
+            "details TEXT NOT NULL"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event())
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        index_names = {
+            row[1] for row in conn.execute("PRAGMA index_list(security_events)")
+        }
+        conn.close()
+
+        assert {
+            "idx_event_type",
+            "idx_category_epoch",
+            "idx_trace_id",
+            "idx_timestamp_epoch",
+        }.issubset(index_names)
+
     def test_close_performs_checkpoint(self, db_path: str) -> None:
         writer = SqliteEventWriter(path=db_path)
         writer.write(_make_event())
         writer.write(_make_event())
 
         writer.close()
-        assert writer._conn is None
+        assert writer._engine is None
+        assert writer._session_factory is None
 
     def test_disabled_after_delete_failure(self, db_path: str) -> None:
         writer = SqliteEventWriter(path=db_path)
