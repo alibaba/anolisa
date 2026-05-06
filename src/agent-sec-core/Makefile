@@ -48,14 +48,37 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	@# skill-signing e2e skipped: imports Python source code
 	@# linux-sandbox e2e skipped: requires privileged container
 
+.PHONY: test-python-coverage
+test-python-coverage: ## Run Python tests with coverage report
+	@echo "🧪 Running Python tests with coverage..."
+	cd agent-sec-cli && uv sync
+	uv run --project agent-sec-cli pytest tests/ \
+		--ignore=tests/integration-test/skill-ledger \
+		--ignore=tests/e2e/linux-sandbox \
+		--ignore=tests/e2e/prompt-scanner \
+		--ignore=tests/e2e/skill-ledger \
+		--ignore=tests/e2e/skill-signing \
+		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
+
 .PHONY: test-rust
 test-rust: ## Run Rust sandbox tests
 	@echo "🧪 Running Rust tests..."
 	cd linux-sandbox && cargo test -- --skip bwrap_seccomp
 
-test-openclaw-plugin:
-	@echo "🧪 Running Rust tests..."
-	cd openclaw-plugin && npm run test & npm run smoke
+.PHONY: test-rust-coverage
+test-rust-coverage: ## Run Rust sandbox tests with coverage report
+	@echo "🧪 Running Rust tests with coverage..."
+	cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp
+
+.PHONY: test-openclaw-plugin
+test-openclaw-plugin: ## Run openclaw-plugin tests
+	@echo "🧪 Running openclaw-plugin tests..."
+	cd openclaw-plugin && npm run test && npm run smoke
+
+.PHONY: test-openclaw-plugin-coverage
+test-openclaw-plugin-coverage: ## Run openclaw-plugin tests with coverage report
+	@echo "🧪 Running openclaw-plugin tests with coverage..."
+	cd openclaw-plugin && npm run test:coverage && npm run smoke
 
 .PHONY: test
 test: test-python test-rust test-openclaw-plugin ## Run all tests

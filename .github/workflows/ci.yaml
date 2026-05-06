@@ -245,6 +245,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.93.0'
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: astral-sh/setup-uv
         uses: astral-sh/setup-uv@v8.0.0
@@ -271,6 +275,37 @@ jobs:
           fi
           echo "Code style check passed."
 
+      - name: Run Python tests with coverage
+        run: |
+          cd src/agent-sec-core
+          make test-python-coverage
+
+      - name: Generate coverage summary
+        if: always()
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          if [ -f coverage.xml ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' coverage.xml | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' coverage.xml | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' coverage.xml | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' coverage.xml | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' coverage.xml | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' coverage.xml | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core (Python) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ Coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Check uv.lock in sync with pyproject.toml
         run: |
           cd src/agent-sec-core/agent-sec-cli
@@ -288,15 +323,71 @@ jobs:
           fi
           echo "requirements.txt is in sync with uv.lock."
 
-      - name: Run Python tests
+      - name: Run Rust tests with coverage
         run: |
           cd src/agent-sec-core
-          make test-python
+          make test-rust-coverage
 
-      - name: Run Rust tests
+      - name: Generate Rust coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agent-sec-core/rust-coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core/linux-sandbox (Rust) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo ""
+              echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ linux-sandbox Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run openclaw-plugin tests with coverage
         run: |
           cd src/agent-sec-core
-          make test-rust
+          cd openclaw-plugin && npm install
+          cd ..
+          make test-openclaw-plugin-coverage
+
+      - name: Generate openclaw-plugin coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # =========================================================================
   # Step 5: Test agentsight (Linux only)

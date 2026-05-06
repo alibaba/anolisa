@@ -75,6 +75,32 @@ include = [
 # Native module name (must match lib.rs function name)
 module-name = "agent_sec_cli._native"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.coverage.run]
+branch = true
+source = ["agent_sec_cli"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/backend-skill/templates/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]

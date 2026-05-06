@@ -175,7 +175,7 @@ describe("scan-code", () => {
       assert.equal(result, undefined);
     });
 
-    it("deny with 1 finding → { block: true, blockReason }", async () => {
+    it("deny with 1 finding → { requireApproval } (unified ask strategy)", async () => {
       const { handler } = registerAndGetHandler();
       mockCli({
         exitCode: 0,
@@ -185,13 +185,15 @@ describe("scan-code", () => {
 
       const result = await handler(execEvent("rm -rf /"), {});
 
-      assert.equal(result.block, true);
-      assert.ok(result.blockReason.includes("[code-scanner] Detected 1 issue(s):"));
-      assert.ok(result.blockReason.includes("- 危险命令"));
-      assert.ok(result.blockReason.includes("Command: rm -rf /"));
+      assert.ok(result.requireApproval);
+      assert.equal(result.requireApproval.title, "Code Scanner Security Warning");
+      assert.equal(result.requireApproval.severity, "warning");
+      assert.ok(result.requireApproval.description.includes("[code-scanner] Detected 1 issue(s):"));
+      assert.ok(result.requireApproval.description.includes("- 危险命令"));
+      assert.ok(result.requireApproval.description.includes("Command: rm -rf /"));
     });
 
-    it("deny with 2 findings → blockReason contains both", async () => {
+    it("deny with 2 findings → requireApproval.description contains both", async () => {
       const { handler } = registerAndGetHandler();
       mockCli({
         exitCode: 0,
@@ -201,10 +203,10 @@ describe("scan-code", () => {
 
       const result = await handler(execEvent("bad-cmd"), {});
 
-      assert.equal(result.block, true);
-      assert.ok(result.blockReason.includes("Detected 2 issue(s):"));
-      assert.ok(result.blockReason.includes("- A"));
-      assert.ok(result.blockReason.includes("- B"));
+      assert.ok(result.requireApproval);
+      assert.ok(result.requireApproval.description.includes("Detected 2 issue(s):"));
+      assert.ok(result.requireApproval.description.includes("- A"));
+      assert.ok(result.requireApproval.description.includes("- B"));
     });
 
     it("warn with findings → { requireApproval }", async () => {
