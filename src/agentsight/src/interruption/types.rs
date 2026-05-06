@@ -148,3 +148,139 @@ fn new_id() -> String {
     let addr = &stack_var as *const u64 as u64;
     format!("{:016x}{:016x}", ns as u64 ^ addr, ns as u64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interruption_type_as_str() {
+        assert_eq!(InterruptionType::LlmError.as_str(), "llm_error");
+        assert_eq!(InterruptionType::SseTruncated.as_str(), "sse_truncated");
+        assert_eq!(InterruptionType::AgentCrash.as_str(), "agent_crash");
+        assert_eq!(InterruptionType::TokenLimit.as_str(), "token_limit");
+        assert_eq!(InterruptionType::ContextOverflow.as_str(), "context_overflow");
+    }
+
+    #[test]
+    fn test_interruption_type_from_str() {
+        assert_eq!(InterruptionType::from_str("llm_error"), Some(InterruptionType::LlmError));
+        assert_eq!(InterruptionType::from_str("sse_truncated"), Some(InterruptionType::SseTruncated));
+        assert_eq!(InterruptionType::from_str("agent_crash"), Some(InterruptionType::AgentCrash));
+        assert_eq!(InterruptionType::from_str("token_limit"), Some(InterruptionType::TokenLimit));
+        assert_eq!(InterruptionType::from_str("context_overflow"), Some(InterruptionType::ContextOverflow));
+        assert_eq!(InterruptionType::from_str("unknown"), None);
+        assert_eq!(InterruptionType::from_str(""), None);
+    }
+
+    #[test]
+    fn test_interruption_type_default_severity() {
+        assert_eq!(InterruptionType::AgentCrash.default_severity(), Severity::Critical);
+        assert_eq!(InterruptionType::LlmError.default_severity(), Severity::High);
+        assert_eq!(InterruptionType::SseTruncated.default_severity(), Severity::High);
+        assert_eq!(InterruptionType::ContextOverflow.default_severity(), Severity::High);
+        assert_eq!(InterruptionType::TokenLimit.default_severity(), Severity::Medium);
+    }
+
+    #[test]
+    fn test_severity_as_str() {
+        assert_eq!(Severity::Critical.as_str(), "critical");
+        assert_eq!(Severity::High.as_str(), "high");
+        assert_eq!(Severity::Medium.as_str(), "medium");
+        assert_eq!(Severity::Low.as_str(), "low");
+    }
+
+    #[test]
+    fn test_severity_weight_ordering() {
+        assert!(Severity::Critical.weight() > Severity::High.weight());
+        assert!(Severity::High.weight() > Severity::Medium.weight());
+        assert!(Severity::Medium.weight() > Severity::Low.weight());
+    }
+
+    #[test]
+    fn test_severity_weight_values() {
+        assert_eq!(Severity::Critical.weight(), 4);
+        assert_eq!(Severity::High.weight(), 3);
+        assert_eq!(Severity::Medium.weight(), 2);
+        assert_eq!(Severity::Low.weight(), 1);
+    }
+
+    #[test]
+    fn test_interruption_event_new() {
+        let event = InterruptionEvent::new(
+            InterruptionType::LlmError,
+            Some("session-1".to_string()),
+            Some("trace-1".to_string()),
+            Some("conv-1".to_string()),
+            Some("call-1".to_string()),
+            Some(1234),
+            Some("my-agent".to_string()),
+            1_000_000_000,
+            Some(serde_json::json!({"status_code": 500})),
+        );
+        assert_eq!(event.interruption_type, InterruptionType::LlmError);
+        assert_eq!(event.severity, Severity::High);
+        assert_eq!(event.session_id, Some("session-1".to_string()));
+        assert_eq!(event.trace_id, Some("trace-1".to_string()));
+        assert_eq!(event.conversation_id, Some("conv-1".to_string()));
+        assert_eq!(event.call_id, Some("call-1".to_string()));
+        assert_eq!(event.pid, Some(1234));
+        assert_eq!(event.agent_name, Some("my-agent".to_string()));
+        assert_eq!(event.occurred_at_ns, 1_000_000_000);
+        assert!(!event.resolved);
+        assert!(event.detail.is_some());
+        assert_eq!(event.interruption_id.len(), 32);
+    }
+
+    #[test]
+    fn test_interruption_event_new_no_detail() {
+        let event = InterruptionEvent::new(
+            InterruptionType::AgentCrash,
+            None, None, None, None, None, None,
+            500_000,
+            None,
+        );
+        assert_eq!(event.interruption_type, InterruptionType::AgentCrash);
+        assert_eq!(event.severity, Severity::Critical);
+        assert!(event.session_id.is_none());
+        assert!(event.detail.is_none());
+        assert!(!event.resolved);
+    }
+
+    #[test]
+    fn test_new_id_uniqueness() {
+        let id1 = new_id();
+        let id2 = new_id();
+        // IDs should be 32 chars hex
+        assert_eq!(id1.len(), 32);
+        assert_eq!(id2.len(), 32);
+        // All hex chars
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_interruption_type_serde_roundtrip() {
+        let types = vec![
+            InterruptionType::LlmError,
+            InterruptionType::SseTruncated,
+            InterruptionType::AgentCrash,
+            InterruptionType::TokenLimit,
+            InterruptionType::ContextOverflow,
+        ];
+        for t in types {
+            let json = serde_json::to_string(&t).unwrap();
+            let back: InterruptionType = serde_json::from_str(&json).unwrap();
+            assert_eq!(t, back);
+        }
+    }
+
+    #[test]
+    fn test_severity_serde_roundtrip() {
+        let severities = vec![Severity::Critical, Severity::High, Severity::Medium, Severity::Low];
+        for s in severities {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: Severity = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, back);
+        }
+    }
+}

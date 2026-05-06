@@ -846,4 +846,236 @@ mod tests {
         };
         assert_eq!(anthropic_msg.provider(), "anthropic");
     }
+
+    #[test]
+    fn test_openai_request_serde_roundtrip() {
+        let json_str = r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "temperature": 0.7,
+            "max_tokens": 1024,
+            "stream": true
+        }"#;
+        let req: OpenAIRequest = serde_json::from_str(json_str).unwrap();
+        assert_eq!(req.model, "gpt-4");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.max_tokens, Some(1024));
+        assert_eq!(req.stream, Some(true));
+        // roundtrip
+        let serialized = serde_json::to_string(&req).unwrap();
+        let req2: OpenAIRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(req2.model, "gpt-4");
+    }
+
+    #[test]
+    fn test_openai_response_serde() {
+        let json_str = r#"{
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+        let resp: OpenAIResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(resp.id, "chatcmpl-abc");
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_openai_content_parts_with_image() {
+        let parts = OpenAIContent::Parts(vec![
+            OpenAIContentPart::Text { text: "Look at this:".to_string() },
+            OpenAIContentPart::ImageUrl {
+                image_url: OpenAIImageUrl {
+                    url: "https://example.com/img.png".to_string(),
+                    detail: Some("high".to_string()),
+                },
+            },
+        ]);
+        // as_text should only extract text parts
+        assert_eq!(parts.as_text(), "Look at this:");
+    }
+
+    #[test]
+    fn test_anthropic_request_serde() {
+        let json_str = r#"{
+            "model": "claude-3-opus-20240229",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 4096,
+            "system": "You are helpful.",
+            "temperature": 0.5
+        }"#;
+        let req: AnthropicRequest = serde_json::from_str(json_str).unwrap();
+        assert_eq!(req.model, "claude-3-opus-20240229");
+        assert_eq!(req.max_tokens, 4096);
+        assert_eq!(req.temperature, Some(0.5));
+        match req.system.unwrap() {
+            AnthropicSystemPrompt::Text(s) => assert_eq!(s, "You are helpful."),
+            _ => panic!("expected text system prompt"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_system_prompt_blocks() {
+        let json_str = r#"[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}]"#;
+        let blocks: Vec<AnthropicSystemBlock> = serde_json::from_str(json_str).unwrap();
+        let prompt = AnthropicSystemPrompt::Blocks(blocks);
+        assert_eq!(prompt.as_text(), "Part 1\nPart 2");
+    }
+
+    #[test]
+    fn test_anthropic_response_serde() {
+        let json_str = r#"{
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello!"}],
+            "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 10}
+        }"#;
+        let resp: AnthropicResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(resp.id, "msg_123");
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.usage.input_tokens, 20);
+        assert_eq!(resp.usage.total_tokens(), 30);
+    }
+
+    #[test]
+    fn test_anthropic_content_blocks() {
+        let json_str = r#"[
+            {"type": "text", "text": "Let me search."},
+            {"type": "tool_use", "id": "tu_1", "name": "search", "input": {"q": "rust"}}
+        ]"#;
+        let blocks: Vec<AnthropicContentBlock> = serde_json::from_str(json_str).unwrap();
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_anthropic_message_content_as_text() {
+        let text = AnthropicMessageContent::Text("simple".to_string());
+        assert_eq!(text.as_text(), "simple");
+
+        let blocks = AnthropicMessageContent::Blocks(vec![
+            AnthropicContentBlock::Text { text: "part1".to_string(), cache_control: None },
+            AnthropicContentBlock::Text { text: "part2".to_string(), cache_control: None },
+        ]);
+        assert_eq!(blocks.as_text(), "part1part2");
+    }
+
+    #[test]
+    fn test_openai_sse_chunk_serde() {
+        let json_str = r#"{
+            "id": "chatcmpl-chunk",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Hello"},
+                "finish_reason": null
+            }]
+        }"#;
+        let chunk: OpenAiSseChunk = serde_json::from_str(json_str).unwrap();
+        assert_eq!(chunk.id, "chatcmpl-chunk");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hello"));
+        assert!(chunk.choices[0].finish_reason.is_none());
+    }
+
+    #[test]
+    fn test_anthropic_sse_event_message_start() {
+        let json_str = r#"{
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-3-opus",
+                "usage": {"input_tokens": 25, "output_tokens": 1},
+                "content": []
+            }
+        }"#;
+        let event: AnthropicSseEvent = serde_json::from_str(json_str).unwrap();
+        match event {
+            AnthropicSseEvent::MessageStart { message } => {
+                assert_eq!(message.id, "msg_1");
+                assert_eq!(message.usage.input_tokens, 25);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_sse_delta_text() {
+        let json_str = r#"{"type": "text_delta", "text": "world"}"#;
+        let delta: AnthropicSseDelta = serde_json::from_str(json_str).unwrap();
+        match delta {
+            AnthropicSseDelta::TextDelta { text } => assert_eq!(text, "world"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_parsed_api_message_model() {
+        let msg = ParsedApiMessage::OpenAICompletion {
+            request: Some(OpenAIRequest {
+                model: "gpt-4".to_string(),
+                messages: vec![],
+                temperature: None, max_tokens: None, stream: None,
+                top_p: None, n: None, stop: None,
+                presence_penalty: None, frequency_penalty: None,
+                user: None, tools: None, tool_choice: None,
+                response_format: None, seed: None, logprobs: None,
+                top_logprobs: None, parallel_tool_calls: None,
+            }),
+            response: None,
+        };
+        assert_eq!(msg.model(), Some("gpt-4"));
+        assert_eq!(msg.is_streaming(), None);
+    }
+
+    #[test]
+    fn test_parsed_api_message_response_id() {
+        let msg = ParsedApiMessage::OpenAICompletion {
+            request: None,
+            response: Some(OpenAIResponse {
+                id: "chatcmpl-xyz".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0, model: "gpt-4".to_string(),
+                choices: vec![], usage: None, system_fingerprint: None,
+            }),
+        };
+        assert_eq!(msg.response_id(), Some("chatcmpl-xyz"));
+        assert_eq!(msg.model(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn test_message_role_default() {
+        let role = MessageRole::default();
+        assert_eq!(role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_openai_chat_message_with_tool_calls() {
+        let json_str = r#"{
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "tc_1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]
+        }"#;
+        let msg: OpenAIChatMessage = serde_json::from_str(json_str).unwrap();
+        assert!(msg.content.is_none());
+        assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
+    }
 }

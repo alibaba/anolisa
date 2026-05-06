@@ -284,3 +284,327 @@ impl LLMCall {
         self.error = Some(error);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_request() -> LLMRequest {
+        LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Hello".to_string() }],
+                name: None,
+            }],
+            temperature: Some(0.7),
+            max_tokens: Some(1024),
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        }
+    }
+
+    #[test]
+    fn test_llm_call_new() {
+        let req = make_request();
+        let call = LLMCall::new(
+            "call-1".to_string(), 1000, "openai".to_string(),
+            "gpt-4".to_string(), req, 100, "test".to_string(),
+        );
+        assert_eq!(call.call_id, "call-1");
+        assert_eq!(call.end_timestamp_ns, 0);
+        assert_eq!(call.duration_ns, 0);
+        assert!(call.response.messages.is_empty());
+        assert!(call.token_usage.is_none());
+        assert!(call.error.is_none());
+        assert!(call.agent_name.is_none());
+    }
+
+    #[test]
+    fn test_llm_call_set_response() {
+        let req = make_request();
+        let mut call = LLMCall::new(
+            "call-2".to_string(), 1000, "anthropic".to_string(),
+            "claude-3".to_string(), req, 200, "agent".to_string(),
+        );
+        let resp = LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text { content: "Hi".to_string() }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: false,
+            raw_body: None,
+        };
+        call.set_response(resp, 5000);
+        assert_eq!(call.end_timestamp_ns, 5000);
+        assert_eq!(call.duration_ns, 4000);
+        assert_eq!(call.response.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_llm_call_set_token_usage() {
+        let req = make_request();
+        let mut call = LLMCall::new(
+            "call-3".to_string(), 0, "openai".to_string(),
+            "gpt-4".to_string(), req, 1, "p".to_string(),
+        );
+        let usage = TokenUsage {
+            input_tokens: 100, output_tokens: 50, total_tokens: 150,
+            cache_creation_input_tokens: None, cache_read_input_tokens: Some(10),
+        };
+        call.set_token_usage(usage);
+        assert_eq!(call.token_usage.as_ref().unwrap().total_tokens, 150);
+        assert_eq!(call.token_usage.as_ref().unwrap().cache_read_input_tokens, Some(10));
+    }
+
+    #[test]
+    fn test_llm_call_set_error() {
+        let req = make_request();
+        let mut call = LLMCall::new(
+            "call-4".to_string(), 0, "openai".to_string(),
+            "gpt-4".to_string(), req, 1, "p".to_string(),
+        );
+        call.set_error("timeout".to_string());
+        assert_eq!(call.error.as_ref().unwrap(), "timeout");
+    }
+
+    #[test]
+    fn test_message_part_serde_text() {
+        let part = MessagePart::Text { content: "hello world".to_string() };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        let parsed: MessagePart = serde_json::from_str(&json).unwrap();
+        match parsed {
+            MessagePart::Text { content } => assert_eq!(content, "hello world"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_part_serde_reasoning() {
+        let part = MessagePart::Reasoning { content: "thinking...".to_string() };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"reasoning\""));
+        let parsed: MessagePart = serde_json::from_str(&json).unwrap();
+        match parsed {
+            MessagePart::Reasoning { content } => assert_eq!(content, "thinking..."),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_part_serde_tool_call() {
+        let part = MessagePart::ToolCall {
+            id: Some("tc-1".to_string()),
+            name: "search".to_string(),
+            arguments: Some(json!({"query": "rust"})),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        let parsed: MessagePart = serde_json::from_str(&json).unwrap();
+        match parsed {
+            MessagePart::ToolCall { id, name, arguments } => {
+                assert_eq!(id.unwrap(), "tc-1");
+                assert_eq!(name, "search");
+                assert_eq!(arguments.unwrap()["query"], "rust");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_message_part_serde_tool_call_response() {
+        let part = MessagePart::ToolCallResponse {
+            id: Some("tc-1".to_string()),
+            response: json!({"result": "found 10 items"}),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        let parsed: MessagePart = serde_json::from_str(&json).unwrap();
+        match parsed {
+            MessagePart::ToolCallResponse { id, response } => {
+                assert_eq!(id.unwrap(), "tc-1");
+                assert_eq!(response["result"], "found 10 items");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_token_usage_serde_roundtrip() {
+        let usage = TokenUsage {
+            input_tokens: 500, output_tokens: 200, total_tokens: 700,
+            cache_creation_input_tokens: Some(100), cache_read_input_tokens: Some(50),
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let parsed: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_tokens, 500);
+        assert_eq!(parsed.output_tokens, 200);
+        assert_eq!(parsed.total_tokens, 700);
+        assert_eq!(parsed.cache_creation_input_tokens, Some(100));
+        assert_eq!(parsed.cache_read_input_tokens, Some(50));
+    }
+
+    #[test]
+    fn test_tool_use_serde_roundtrip() {
+        let tool = ToolUse {
+            tool_use_id: "tu-1".to_string(),
+            timestamp_ns: 999,
+            tool_name: "calculator".to_string(),
+            arguments: json!({"expr": "1+1"}),
+            result: Some("2".to_string()),
+            duration_ns: Some(500),
+            success: true,
+            error: None,
+            parent_llm_call_id: Some("call-1".to_string()),
+            pid: 42,
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let parsed: ToolUse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tool_name, "calculator");
+        assert!(parsed.success);
+        assert_eq!(parsed.result.unwrap(), "2");
+    }
+
+    #[test]
+    fn test_agent_interaction_serde() {
+        let interaction = AgentInteraction {
+            interaction_id: "ai-1".to_string(),
+            timestamp_ns: 1000,
+            agent_name: "coder".to_string(),
+            interaction_type: "think".to_string(),
+            content: "analyzing code".to_string(),
+            parent_llm_call_id: None,
+            pid: 10,
+        };
+        let json = serde_json::to_string(&interaction).unwrap();
+        let parsed: AgentInteraction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_name, "coder");
+        assert_eq!(parsed.interaction_type, "think");
+    }
+
+    #[test]
+    fn test_stream_chunk_serde() {
+        let chunk = StreamChunk {
+            stream_id: "s-1".to_string(),
+            chunk_index: 3,
+            timestamp_ns: 5000,
+            content: "partial response".to_string(),
+            parent_llm_call_id: "call-1".to_string(),
+            pid: 7,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let parsed: StreamChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.chunk_index, 3);
+        assert_eq!(parsed.content, "partial response");
+    }
+
+    #[test]
+    fn test_genai_semantic_event_enum_serde() {
+        let event = GenAISemanticEvent::ToolUse(ToolUse {
+            tool_use_id: "tu-2".to_string(),
+            timestamp_ns: 100,
+            tool_name: "grep".to_string(),
+            arguments: json!({}),
+            result: None,
+            duration_ns: None,
+            success: false,
+            error: Some("not found".to_string()),
+            parent_llm_call_id: None,
+            pid: 1,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: GenAISemanticEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            GenAISemanticEvent::ToolUse(t) => {
+                assert_eq!(t.tool_name, "grep");
+                assert!(!t.success);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_definition_serde() {
+        let tool = ToolDefinition {
+            name: "search".to_string(),
+            description: "Search the web".to_string(),
+            parameters: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let parsed: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "search");
+        assert_eq!(parsed.parameters["type"], "object");
+    }
+
+    #[test]
+    fn test_input_output_message_serde() {
+        let input = InputMessage {
+            role: "user".to_string(),
+            parts: vec![
+                MessagePart::Text { content: "Hello".to_string() },
+                MessagePart::ToolCallResponse {
+                    id: Some("tc".to_string()),
+                    response: json!("ok"),
+                },
+            ],
+            name: Some("alice".to_string()),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: InputMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.role, "user");
+        assert_eq!(parsed.parts.len(), 2);
+        assert_eq!(parsed.name.unwrap(), "alice");
+
+        let output = OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text { content: "Hi".to_string() }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: OutputMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.finish_reason.unwrap(), "stop");
+    }
+
+    #[test]
+    fn test_llm_call_full_serde_roundtrip() {
+        let req = make_request();
+        let mut call = LLMCall::new(
+            "call-rt".to_string(), 1000, "openai".to_string(),
+            "gpt-4o".to_string(), req, 42, "agent".to_string(),
+        );
+        call.set_response(LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text { content: "world".to_string() }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        }, 5000);
+        call.set_token_usage(TokenUsage {
+            input_tokens: 10, output_tokens: 5, total_tokens: 15,
+            cache_creation_input_tokens: None, cache_read_input_tokens: None,
+        });
+        call.metadata.insert("key".to_string(), "value".to_string());
+
+        let json = serde_json::to_string(&call).unwrap();
+        let parsed: LLMCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.call_id, "call-rt");
+        assert_eq!(parsed.duration_ns, 4000);
+        assert_eq!(parsed.model, "gpt-4o");
+        assert_eq!(parsed.response.messages.len(), 1);
+        assert!(parsed.response.streamed);
+        assert_eq!(parsed.token_usage.unwrap().total_tokens, 15);
+        assert_eq!(parsed.metadata["key"], "value");
+    }
+}

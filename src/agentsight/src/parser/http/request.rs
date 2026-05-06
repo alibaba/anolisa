@@ -193,3 +193,166 @@ fn format_body(data: &[u8]) -> String {
         format!("(binary, {} bytes)\n{}", data.len(), base64::encode(data))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ssl_event(data: &[u8]) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 100,
+            tid: 100,
+            uid: 1000,
+            len: data.len() as u32,
+            rw: 0,
+            comm: "test".to_string(),
+            buf: data.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x1000,
+        })
+    }
+
+    #[test]
+    fn test_parsed_request_body_str() {
+        let body = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let event = make_ssl_event(body);
+        let req = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/api".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: body.len() - 5,
+            body_len: 5,
+            source_event: event,
+        };
+        assert_eq!(req.body_str(), "hello");
+        assert_eq!(req.body(), b"hello");
+    }
+
+    #[test]
+    fn test_parsed_request_json_body() {
+        let json_str = r#"{"key":"value"}"#;
+        let full = format!("POST / HTTP/1.1\r\n\r\n{}", json_str);
+        let bytes = full.as_bytes();
+        let event = make_ssl_event(bytes);
+        let body_offset = bytes.len() - json_str.len();
+        let req = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset,
+            body_len: json_str.len(),
+            source_event: event,
+        };
+        let val = req.json_body().unwrap();
+        assert_eq!(val["key"], "value");
+    }
+
+    #[test]
+    fn test_parsed_request_json_body_empty() {
+        let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
+        let req = ParsedRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        assert!(req.json_body().is_none());
+    }
+
+    #[test]
+    fn test_decode_chunked_json() {
+        // Standard chunked encoding: "e\r\n{"key":"val"}\r\n0\r\n\r\n"
+        let chunked = "e\r\n{\"key\":\"val\"}\r\n0\r\n\r\n";
+        let val = ParsedRequest::decode_chunked_json(chunked).unwrap();
+        assert_eq!(val["key"], "val");
+    }
+
+    #[test]
+    fn test_decode_chunked_json_invalid() {
+        assert!(ParsedRequest::decode_chunked_json("not chunked").is_none());
+    }
+
+    #[test]
+    fn test_trace_args() {
+        let body = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"m\":1}";
+        let event = make_ssl_event(body);
+        let mut headers = HashMap::new();
+        headers.insert("Host".to_string(), "api.openai.com".to_string());
+        let req = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 1,
+            headers,
+            body_offset: body.len() - 7,
+            body_len: 7,
+            source_event: event,
+        };
+        let args = req.to_trace_args();
+        assert_eq!(args["method"], "POST");
+        assert_eq!(args["path"], "/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_to_chrome_trace_events() {
+        let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
+        let req = ParsedRequest {
+            method: "GET".to_string(),
+            path: "/health".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        let events = req.to_chrome_trace_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "GET /health");
+        assert_eq!(events[0].ph, "X");
+    }
+
+    #[test]
+    fn test_format_body_json() {
+        let data = b"{\"hello\":\"world\"}";
+        let result = format_body(data);
+        assert!(result.contains("json"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_format_body_text() {
+        let data = b"plain text content";
+        let result = format_body(data);
+        assert!(result.contains("text"));
+    }
+
+    #[test]
+    fn test_format_body_binary() {
+        let data: &[u8] = &[0xFF, 0xFE, 0xFD, 0x00, 0x01];
+        let result = format_body(data);
+        assert!(result.contains("binary"));
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let event = make_ssl_event(b"GET / HTTP/1.1\r\n\r\n");
+        let req = ParsedRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        let debug_str = format!("{:?}", req);
+        assert!(debug_str.contains("GET"));
+    }
+}

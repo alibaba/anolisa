@@ -133,4 +133,66 @@ mod tests {
         assert_eq!(record.cache_creation_tokens, Some(10));
         assert_eq!(record.cache_read_tokens, Some(20));
     }
+
+    #[test]
+    fn test_token_record_new_defaults() {
+        let record = TokenRecord::new(999, "node".to_string(), "openai".to_string(), 200, 100);
+        assert_eq!(record.id, 0);
+        assert!(record.timestamp_ns > 0);
+        assert_eq!(record.pid, 999);
+        assert_eq!(record.comm, "node");
+        assert!(record.agent.is_none());
+        assert!(record.model.is_none());
+        assert_eq!(record.provider, "openai");
+        assert_eq!(record.input_tokens, 200);
+        assert_eq!(record.output_tokens, 100);
+        assert!(record.cache_creation_tokens.is_none());
+        assert!(record.cache_read_tokens.is_none());
+        assert!(record.request_id.is_none());
+        assert!(record.endpoint.is_none());
+        assert!(record.tool_calls.is_empty());
+        assert!(record.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn test_with_request_id() {
+        let record = TokenRecord::new(1, "p".to_string(), "o".to_string(), 0, 0)
+            .with_request_id("req-123");
+        assert_eq!(record.request_id, Some("req-123".to_string()));
+    }
+
+    #[test]
+    fn test_with_endpoint() {
+        let record = TokenRecord::new(1, "p".to_string(), "o".to_string(), 0, 0)
+            .with_endpoint("/v1/chat/completions");
+        assert_eq!(record.endpoint, Some("/v1/chat/completions".to_string()));
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let record = TokenRecord::new(42, "agent".to_string(), "anthropic".to_string(), 500, 200)
+            .with_agent("Claude Code")
+            .with_model("claude-3")
+            .with_cache_tokens(50, 100)
+            .with_request_id("req-abc")
+            .with_endpoint("/v1/messages");
+        let json = serde_json::to_string(&record).unwrap();
+        let back: TokenRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pid, 42);
+        assert_eq!(back.comm, "agent");
+        assert_eq!(back.provider, "anthropic");
+        assert_eq!(back.input_tokens, 500);
+        assert_eq!(back.output_tokens, 200);
+        assert_eq!(back.total_tokens(), 700);
+        assert_eq!(back.agent, Some("Claude Code".to_string()));
+        assert_eq!(back.model, Some("claude-3".to_string()));
+    }
+
+    #[test]
+    fn test_serde_skip_empty_tool_calls() {
+        let record = TokenRecord::new(1, "p".to_string(), "o".to_string(), 0, 0);
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("tool_calls"));
+        assert!(!json.contains("reasoning_content"));
+    }
 }

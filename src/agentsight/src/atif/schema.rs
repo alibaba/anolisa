@@ -155,3 +155,164 @@ pub struct AtifFinalMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_version_constant() {
+        assert_eq!(SCHEMA_VERSION, "ATIF-v1.6");
+    }
+
+    #[test]
+    fn test_atif_document_roundtrip() {
+        let doc = AtifDocument {
+            schema_version: SCHEMA_VERSION.to_string(),
+            session_id: "session-001".to_string(),
+            agent: AtifAgent {
+                name: "TestAgent".to_string(),
+                version: "1.0.0".to_string(),
+                model_name: Some("gpt-4".to_string()),
+                tool_definitions: None,
+                extra: None,
+            },
+            steps: vec![
+                AtifStep {
+                    step_id: 1,
+                    timestamp: Some("2024-01-01T00:00:00Z".to_string()),
+                    source: "user".to_string(),
+                    message: Some("Hello".to_string()),
+                    model_name: None,
+                    reasoning_content: None,
+                    tool_calls: None,
+                    observation: None,
+                    metrics: None,
+                    extra: None,
+                },
+                AtifStep {
+                    step_id: 2,
+                    timestamp: Some("2024-01-01T00:00:01Z".to_string()),
+                    source: "agent".to_string(),
+                    message: Some("Hi there!".to_string()),
+                    model_name: Some("gpt-4".to_string()),
+                    reasoning_content: Some("User greeted me".to_string()),
+                    tool_calls: None,
+                    observation: None,
+                    metrics: Some(AtifStepMetrics {
+                        prompt_tokens: Some(100),
+                        completion_tokens: Some(10),
+                        cached_tokens: None,
+                        extra: None,
+                    }),
+                    extra: None,
+                },
+            ],
+            final_metrics: Some(AtifFinalMetrics {
+                total_prompt_tokens: Some(100),
+                total_completion_tokens: Some(10),
+                total_cached_tokens: None,
+                total_steps: Some(2),
+                extra: None,
+            }),
+            extra: None,
+        };
+
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: AtifDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, "ATIF-v1.6");
+        assert_eq!(back.session_id, "session-001");
+        assert_eq!(back.agent.name, "TestAgent");
+        assert_eq!(back.steps.len(), 2);
+        assert_eq!(back.steps[0].source, "user");
+        assert_eq!(back.steps[1].source, "agent");
+        assert_eq!(back.final_metrics.unwrap().total_steps, Some(2));
+    }
+
+    #[test]
+    fn test_atif_tool_call_roundtrip() {
+        let tc = AtifToolCall {
+            tool_call_id: "call-001".to_string(),
+            function_name: "get_weather".to_string(),
+            arguments: serde_json::json!({"location": "Tokyo"}),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let back: AtifToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_call_id, "call-001");
+        assert_eq!(back.function_name, "get_weather");
+    }
+
+    #[test]
+    fn test_atif_observation_roundtrip() {
+        let obs = AtifObservation {
+            results: vec![AtifObservationResult {
+                source_call_id: Some("call-001".to_string()),
+                content: Some("Sunny, 25C".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&obs).unwrap();
+        let back: AtifObservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.results.len(), 1);
+        assert_eq!(back.results[0].content, Some("Sunny, 25C".to_string()));
+    }
+
+    #[test]
+    fn test_step_with_tool_calls() {
+        let step = AtifStep {
+            step_id: 3,
+            timestamp: None,
+            source: "agent".to_string(),
+            message: None,
+            model_name: Some("claude-3".to_string()),
+            reasoning_content: None,
+            tool_calls: Some(vec![
+                AtifToolCall {
+                    tool_call_id: "tc1".to_string(),
+                    function_name: "search".to_string(),
+                    arguments: serde_json::json!({"query": "rust"}),
+                },
+            ]),
+            observation: Some(AtifObservation {
+                results: vec![AtifObservationResult {
+                    source_call_id: Some("tc1".to_string()),
+                    content: Some("Found 10 results".to_string()),
+                }],
+            }),
+            metrics: Some(AtifStepMetrics {
+                prompt_tokens: Some(500),
+                completion_tokens: Some(50),
+                cached_tokens: Some(200),
+                extra: None,
+            }),
+            extra: None,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        let back: AtifStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_calls.unwrap().len(), 1);
+        assert_eq!(back.observation.unwrap().results.len(), 1);
+        assert_eq!(back.metrics.unwrap().cached_tokens, Some(200));
+    }
+
+    #[test]
+    fn test_skip_serializing_none_fields() {
+        let step = AtifStep {
+            step_id: 1,
+            timestamp: None,
+            source: "user".to_string(),
+            message: Some("Hello".to_string()),
+            model_name: None,
+            reasoning_content: None,
+            tool_calls: None,
+            observation: None,
+            metrics: None,
+            extra: None,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        // None fields should not be present in JSON
+        assert!(!json.contains("model_name"));
+        assert!(!json.contains("reasoning_content"));
+        assert!(!json.contains("tool_calls"));
+        assert!(!json.contains("observation"));
+        assert!(!json.contains("metrics"));
+    }
+}

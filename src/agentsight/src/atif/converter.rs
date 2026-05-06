@@ -744,3 +744,106 @@ fn ns_to_iso8601(ns: u64) -> String {
     let dt = DateTime::from_timestamp_nanos(ns as i64);
     dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genai::semantic::{InputMessage, OutputMessage, MessagePart};
+
+    #[test]
+    fn test_ns_to_iso8601() {
+        // 0 ns = Unix epoch
+        let s = ns_to_iso8601(0);
+        assert_eq!(s, "1970-01-01T00:00:00Z");
+        // 1 second in nanoseconds
+        let s = ns_to_iso8601(1_000_000_000);
+        assert_eq!(s, "1970-01-01T00:00:01Z");
+    }
+
+    #[test]
+    fn test_extract_text_by_role() {
+        let messages = vec![
+            InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text { content: "You are helpful.".to_string() }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Hello".to_string() }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "World".to_string() }],
+                name: None,
+            },
+        ];
+        assert_eq!(extract_text_by_role(&messages, "system"), "You are helpful.");
+        assert_eq!(extract_text_by_role(&messages, "user"), "Hello\nWorld");
+        assert_eq!(extract_text_by_role(&messages, "assistant"), "");
+    }
+
+    #[test]
+    fn test_extract_last_user_text() {
+        let messages = vec![
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "First".to_string() }],
+                name: None,
+            },
+            InputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text { content: "Response".to_string() }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Second".to_string() }],
+                name: None,
+            },
+        ];
+        assert_eq!(extract_last_user_text(&messages), Some("Second".to_string()));
+    }
+
+    #[test]
+    fn test_extract_last_user_text_empty() {
+        let messages = vec![
+            InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text { content: "sys".to_string() }],
+                name: None,
+            },
+        ];
+        assert_eq!(extract_last_user_text(&messages), None);
+    }
+
+    #[test]
+    fn test_extract_text_from_input_messages() {
+        let messages = vec![
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Query".to_string() }],
+                name: None,
+            },
+        ];
+        assert_eq!(extract_text_from_input_messages(&messages, "user"), "Query");
+    }
+
+    #[test]
+    fn test_extract_last_user_text_from_input() {
+        let messages = vec![
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Q1".to_string() }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "Q2".to_string() }],
+                name: None,
+            },
+        ];
+        assert_eq!(extract_last_user_text_from_input(&messages), Some("Q2".to_string()));
+    }
+}

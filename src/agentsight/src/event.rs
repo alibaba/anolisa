@@ -95,3 +95,128 @@ impl Event {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ssl_event() -> SslEvent {
+        SslEvent {
+            source: 0,
+            timestamp_ns: 100,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1234,
+            uid: 1000,
+            len: 5,
+            rw: 0,
+            comm: "test".to_string(),
+            buf: b"hello".to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x1000,
+        }
+    }
+
+    fn make_filewrite_event() -> FileWriteEvent {
+        FileWriteEvent {
+            pid: 5678,
+            tid: 5678,
+            uid: 1000,
+            timestamp_ns: 200,
+            write_size: 10,
+            comm: "writer".to_string(),
+            filename: "test.jsonl".to_string(),
+            buf: b"content".to_vec(),
+        }
+    }
+
+    fn make_filewatch_event() -> FileWatchEvent {
+        FileWatchEvent {
+            pid: 9999,
+            tid: 9999,
+            uid: 0,
+            timestamp_ns: 300,
+            flags: 0,
+            comm: "watcher".to_string(),
+            filename: "data.jsonl".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_event_type_ssl() {
+        let e = Event::Ssl(make_ssl_event());
+        assert_eq!(e.event_type(), "Ssl");
+    }
+
+    #[test]
+    fn test_event_type_filewrite() {
+        let e = Event::FileWrite(make_filewrite_event());
+        assert_eq!(e.event_type(), "FileWrite");
+    }
+
+    #[test]
+    fn test_event_type_filewatch() {
+        let e = Event::FileWatch(make_filewatch_event());
+        assert_eq!(e.event_type(), "FileWatch");
+    }
+
+    #[test]
+    fn test_is_ssl() {
+        let e = Event::Ssl(make_ssl_event());
+        assert!(e.is_ssl());
+        assert!(!e.is_proc());
+        assert!(!e.is_procmon());
+        assert!(!e.is_filewatch());
+        assert!(!e.is_filewrite());
+    }
+
+    #[test]
+    fn test_is_filewrite() {
+        let e = Event::FileWrite(make_filewrite_event());
+        assert!(e.is_filewrite());
+        assert!(!e.is_ssl());
+    }
+
+    #[test]
+    fn test_is_filewatch() {
+        let e = Event::FileWatch(make_filewatch_event());
+        assert!(e.is_filewatch());
+        assert!(!e.is_ssl());
+    }
+
+    #[test]
+    fn test_as_ssl_some() {
+        let e = Event::Ssl(make_ssl_event());
+        let ssl = e.as_ssl().unwrap();
+        assert_eq!(ssl.pid, 1234);
+    }
+
+    #[test]
+    fn test_as_ssl_none() {
+        let e = Event::FileWrite(make_filewrite_event());
+        assert!(e.as_ssl().is_none());
+    }
+
+    #[test]
+    fn test_as_filewrite_some() {
+        let e = Event::FileWrite(make_filewrite_event());
+        let fw = e.as_filewrite().unwrap();
+        assert_eq!(fw.pid, 5678);
+    }
+
+    #[test]
+    fn test_as_filewatch_some() {
+        let e = Event::FileWatch(make_filewatch_event());
+        let fw = e.as_filewatch().unwrap();
+        assert_eq!(fw.pid, 9999);
+    }
+
+    #[test]
+    fn test_as_proc_none_for_ssl() {
+        let e = Event::Ssl(make_ssl_event());
+        assert!(e.as_proc().is_none());
+        assert!(e.as_procmon().is_none());
+        assert!(e.as_filewatch().is_none());
+        assert!(e.as_filewrite().is_none());
+    }
+}

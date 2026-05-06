@@ -159,3 +159,184 @@ pub struct ChatMLTokenBreakdown {
     /// Ordered array of trace events (request, response, ...)
     pub events: Vec<EventNode>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conversation_turn_type_eq() {
+        assert_eq!(ConversationTurnType::UserMessage, ConversationTurnType::UserMessage);
+        assert_ne!(ConversationTurnType::ToolCall, ConversationTurnType::ToolResponse);
+    }
+
+    #[test]
+    fn test_chatml_block_debug() {
+        let block = ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "Hello".to_string(),
+        };
+        let debug = format!("{:?}", block);
+        assert!(debug.contains("user"));
+    }
+
+    #[test]
+    fn test_response_data_serde() {
+        let resp = ResponseData {
+            content: vec!["Hello!".to_string()],
+            reasoning_content: Some("thinking...".to_string()),
+            tool_calls: vec!["search: {}".to_string()],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ResponseData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.len(), 1);
+        assert_eq!(back.reasoning_content, Some("thinking...".to_string()));
+        assert_eq!(back.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn test_summary_item_serde() {
+        let item = SummaryItem {
+            count: 3,
+            tokens: 100,
+            percentage: 25.5,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: SummaryItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.count, 3);
+        assert_eq!(back.tokens, 100);
+        assert!((back.percentage - 25.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_event_node_serde() {
+        let node = EventNode {
+            event_type: "request".to_string(),
+            label: "请求".to_string(),
+            tokens: 500,
+            percentage: 80.0,
+            char_count: 1000,
+            summary: None,
+            children: vec![],
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains("\"type\":\"request\""));
+        let back: EventNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type, "request");
+    }
+
+    #[test]
+    fn test_token_breakdown_node_skip_none() {
+        let node = TokenBreakdownNode {
+            name: "system_prompt".to_string(),
+            label: "系统提示词".to_string(),
+            tokens: 50,
+            percentage: 10.0,
+            char_count: 100,
+            is_history: None,
+            content: None,
+            children: None,
+            response_items: None,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(!json.contains("is_history"));
+        assert!(!json.contains("content"));
+        assert!(!json.contains("children"));
+        assert!(!json.contains("response_items"));
+    }
+
+    #[test]
+    fn test_token_breakdown_node_with_children() {
+        let child = TokenBreakdownNode {
+            name: "msg".to_string(),
+            label: "消息".to_string(),
+            tokens: 20,
+            percentage: 4.0,
+            char_count: 40,
+            is_history: Some(true),
+            content: Some("hello".to_string()),
+            children: None,
+            response_items: None,
+        };
+        let parent = TokenBreakdownNode {
+            name: "request".to_string(),
+            label: "请求".to_string(),
+            tokens: 50,
+            percentage: 10.0,
+            char_count: 100,
+            is_history: None,
+            content: None,
+            children: Some(vec![child]),
+            response_items: None,
+        };
+        let json = serde_json::to_string(&parent).unwrap();
+        let back: TokenBreakdownNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.children.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_response_item_serde() {
+        let item = ResponseItem {
+            index: 0,
+            tokens: 10,
+            char_count: 20,
+            content: "hello world".to_string(),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: ResponseItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.index, 0);
+        assert_eq!(back.content, "hello world");
+    }
+
+    #[test]
+    fn test_chatml_token_breakdown_serde() {
+        let breakdown = ChatMLTokenBreakdown {
+            model_name: "gpt-4".to_string(),
+            total_tokens: 1000,
+            summary: None,
+            events: vec![EventNode {
+                event_type: "request".to_string(),
+                label: "请求".to_string(),
+                tokens: 1000,
+                percentage: 100.0,
+                char_count: 2000,
+                summary: None,
+                children: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&breakdown).unwrap();
+        let back: ChatMLTokenBreakdown = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model_name, "gpt-4");
+        assert_eq!(back.total_tokens, 1000);
+        assert_eq!(back.events.len(), 1);
+    }
+
+    #[test]
+    fn test_classified_document() {
+        let doc = ClassifiedDocument {
+            system_content: "Be helpful".to_string(),
+            messages: vec![ConversationTurn {
+                turn_type: ConversationTurnType::UserMessage,
+                content: "Hello".to_string(),
+                is_history: false,
+            }],
+            response: None,
+        };
+        assert_eq!(doc.system_content, "Be helpful");
+        assert_eq!(doc.messages.len(), 1);
+        assert!(!doc.messages[0].is_history);
+    }
+
+    #[test]
+    fn test_chatml_document() {
+        let doc = ChatMLDocument {
+            blocks: vec![ChatMLBlock {
+                role: "system".to_string(),
+                raw_content: "prompt".to_string(),
+            }],
+            raw_text: "<|im_start|>system\nprompt\n<|im_end|>".to_string(),
+        };
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(doc.raw_text.contains("im_start"));
+    }
+}

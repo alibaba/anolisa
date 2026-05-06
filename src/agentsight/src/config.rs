@@ -399,3 +399,139 @@ pub fn ktime_to_unix_ns(ktime_ns: u64) -> u64 {
 
     boot_time_ns.saturating_add(ktime_ns)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_constants() {
+        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 24);
+        assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
+        assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
+        assert_eq!(DEFAULT_MAX_BODY_LEN, 64 * 1024);
+        assert_eq!(DEFAULT_MAX_HEADERS, 64);
+        assert_eq!(DEFAULT_DB_NAME, "agentsight.db");
+        assert_eq!(DEFAULT_AUDIT_TABLE, "audit_events");
+        assert_eq!(DEFAULT_TOKEN_TABLE, "token_records");
+        assert_eq!(DEFAULT_HTTP_TABLE, "http_records");
+        assert_eq!(DEFAULT_RETENTION_DAYS, 30);
+        assert_eq!(DEFAULT_PURGE_INTERVAL, 1000);
+    }
+
+    #[test]
+    fn test_hf_home() {
+        let path = hf_home();
+        assert!(path.to_str().unwrap().contains(".agentsight/tokenizers"));
+    }
+
+    #[test]
+    fn test_default_base_path() {
+        let path = default_base_path();
+        assert_eq!(path, PathBuf::from("/var/log/sysak/.agentsight"));
+    }
+
+    #[test]
+    fn test_ktime_to_unix_ns_nonzero() {
+        // ktime_to_unix_ns should return a value > ktime_ns (boot time offset)
+        let result = ktime_to_unix_ns(1_000_000);
+        assert!(result >= 1_000_000);
+    }
+
+    #[test]
+    fn test_ktime_to_unix_ns_zero() {
+        let result = ktime_to_unix_ns(0);
+        // Should return the boot time itself
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn test_config_new_defaults() {
+        let config = AgentsightConfig::new();
+        assert_eq!(config.db_name, "agentsight.db");
+        assert_eq!(config.connection_capacity, 24);
+        assert_eq!(config.poll_timeout_ms, 100);
+        assert_eq!(config.min_duration_us, 10_000);
+        assert_eq!(config.max_headers, 64);
+        assert_eq!(config.max_body_len, 64 * 1024);
+        assert!(!config.verbose);
+        assert!(config.log_path.is_none());
+        assert!(config.target_uid.is_none());
+        assert!(!config.enable_filewatch);
+        assert_eq!(config.retention_days, 30);
+        assert_eq!(config.purge_interval, 1000);
+    }
+
+    #[test]
+    fn test_config_with_storage_path() {
+        let config = AgentsightConfig::with_storage_path(PathBuf::from("/tmp/test"));
+        assert_eq!(config.storage_base_path, PathBuf::from("/tmp/test"));
+        assert_eq!(config.db_name, "agentsight.db");
+    }
+
+    #[test]
+    fn test_config_db_path() {
+        let config = AgentsightConfig::with_storage_path(PathBuf::from("/tmp/mydata"));
+        assert_eq!(config.db_path(), PathBuf::from("/tmp/mydata/agentsight.db"));
+    }
+
+    #[test]
+    fn test_config_table_names() {
+        let config = AgentsightConfig::new();
+        assert_eq!(config.audit_table_name(), "audit_events");
+        assert_eq!(config.token_table_name(), "token_records");
+    }
+
+    #[test]
+    fn test_config_builder_methods() {
+        let config = AgentsightConfig::new()
+            .set_verbose(true)
+            .set_storage_path(PathBuf::from("/custom"))
+            .set_target_uid(Some(1000))
+            .set_enable_filewatch(true)
+            .set_connection_capacity(48);
+        assert!(config.verbose);
+        assert_eq!(config.storage_base_path, PathBuf::from("/custom"));
+        assert_eq!(config.target_uid, Some(1000));
+        assert!(config.enable_filewatch);
+        assert_eq!(config.connection_capacity, 48);
+    }
+
+    #[test]
+    fn test_sls_enabled_all_set() {
+        let config = AgentsightConfig::new()
+            .set_sls_endpoint(Some("endpoint".into()))
+            .set_sls_access_key(Some("id".into()), Some("secret".into()))
+            .set_sls_project(Some("proj".into()))
+            .set_sls_logstore(Some("store".into()));
+        assert!(config.sls_enabled());
+    }
+
+    #[test]
+    fn test_sls_enabled_incomplete() {
+        let config = AgentsightConfig::new()
+            .set_sls_endpoint(Some("endpoint".into()));
+        assert!(!config.sls_enabled());
+    }
+
+    #[test]
+    fn test_set_tokenizer_path() {
+        let config = AgentsightConfig::new()
+            .set_tokenizer_path(Some(PathBuf::from("/path/to/tokenizer.json")));
+        assert_eq!(config.tokenizer_path, Some(PathBuf::from("/path/to/tokenizer.json")));
+    }
+
+    #[test]
+    fn test_set_tokenizer_url() {
+        let config = AgentsightConfig::new()
+            .set_tokenizer_url(Some("https://example.com/tok.json".into()));
+        assert_eq!(config.tokenizer_url, Some("https://example.com/tok.json".to_string()));
+    }
+
+    #[test]
+    fn test_verbose_default_false() {
+        // verbose() reads from global static; default should be false
+        // Note: other tests might have set it, so just check it doesn't panic
+        let _ = verbose();
+    }
+}

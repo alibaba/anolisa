@@ -385,3 +385,190 @@ impl SSEEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_event(data: &[u8]) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0, timestamp_ns: 5000, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: data.len() as u32,
+            rw: 1, comm: "test".to_string(),
+            buf: data.to_vec(), is_handshake: false, ssl_ptr: 0x1,
+        })
+    }
+
+    #[test]
+    fn test_parsed_sse_event_new() {
+        let data = b"data: hello\n\n";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 6, 5, ev);
+        assert_eq!(parsed.body_str(), "hello");
+        assert_eq!(parsed.data_len(), 5);
+        assert!(!parsed.is_done());
+    }
+
+    #[test]
+    fn test_parsed_sse_event_done_marker() {
+        let ev = make_event(b"");
+        let parsed = ParsedSseEvent::new_done_marker(ev);
+        assert!(parsed.is_done());
+        assert_eq!(parsed.data_len(), 0);
+    }
+
+    #[test]
+    fn test_parsed_sse_event_is_done_text() {
+        let data = b"[DONE]";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, 6, ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_parsed_sse_event_is_done_end() {
+        let data = b"[END]";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, 5, ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_parsed_sse_event_json_body() {
+        let data = b"{\"key\":\"value\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        let json = parsed.json_body().unwrap();
+        assert_eq!(json["key"], "value");
+    }
+
+    #[test]
+    fn test_parsed_sse_event_source_event() {
+        let ev = make_event(b"test");
+        let parsed = ParsedSseEvent::new(None, None, None, 0, 4, ev);
+        assert_eq!(parsed.source_event().pid, 1);
+    }
+
+    #[test]
+    fn test_sse_event_new() {
+        let e = SSEEvent::new("hello world");
+        assert_eq!(e.data, "hello world");
+        assert!(e.id.is_none());
+        assert!(e.event.is_none());
+    }
+
+    #[test]
+    fn test_sse_event_is_keepalive() {
+        let e = SSEEvent { id: None, event: None, data: String::new(), retry: None };
+        assert!(e.is_keepalive());
+
+        let e2 = SSEEvent::new("data");
+        assert!(!e2.is_keepalive());
+    }
+
+    #[test]
+    fn test_sse_event_to_sse_string() {
+        let e = SSEEvent {
+            id: Some("123".to_string()),
+            event: Some("update".to_string()),
+            data: "line1\nline2".to_string(),
+            retry: Some(5000),
+        };
+        let s = e.to_sse_string();
+        assert!(s.contains("id:123"));
+        assert!(s.contains("event:update"));
+        assert!(s.contains("retry:5000"));
+        assert!(s.contains("data:line1"));
+        assert!(s.contains("data:line2"));
+    }
+
+    #[test]
+    fn test_sse_event_to_chrome_trace_event() {
+        let e = SSEEvent {
+            id: Some("1".to_string()),
+            event: Some("delta".to_string()),
+            data: "content".to_string(),
+            retry: None,
+        };
+        let trace = e.to_chrome_trace_event(10, 20, 1000);
+        assert_eq!(trace.name, "SSE delta");
+        assert_eq!(trace.cat, "sse");
+        assert_eq!(trace.ph, "i");
+        assert_eq!(trace.ts, 1); // 1000ns = 1us
+    }
+
+    #[test]
+    fn test_sse_events_container() {
+        let mut container = SSEEvents::new();
+        assert!(container.is_empty());
+        assert_eq!(container.len(), 0);
+
+        container.events.push(SSEEvent::new("event1"));
+        container.events.push(SSEEvent::new("event2"));
+        assert!(!container.is_empty());
+        assert_eq!(container.len(), 2);
+    }
+
+    #[test]
+    fn test_sse_events_take_events() {
+        let mut container = SSEEvents::new();
+        container.events.push(SSEEvent::new("data"));
+        let events = container.take_events();
+        assert_eq!(events.len(), 1);
+        assert!(container.is_empty());
+    }
+
+    #[test]
+    fn test_sse_events_to_chrome_trace_event() {
+        let mut container = SSEEvents::new();
+        assert!(container.to_chrome_trace_event(1, 1, 1000).is_none());
+
+        container.events.push(SSEEvent::new("data1"));
+        container.events.push(SSEEvent {
+            id: None, event: Some("delta".to_string()),
+            data: "data2".to_string(), retry: None,
+        });
+        container.consumed_bytes = 100;
+
+        let trace = container.to_chrome_trace_event(1, 2, 2000).unwrap();
+        assert!(trace.name.contains("2 events"));
+        assert_eq!(trace.cat, "sse_stream");
+    }
+
+    #[test]
+    fn test_sse_events_to_chrome_trace_events() {
+        let mut container = SSEEvents::new();
+        container.events.push(SSEEvent::new("e1"));
+        container.events.push(SSEEvent::new("e2"));
+        let traces = container.to_chrome_trace_events(1, 1, 0);
+        assert_eq!(traces.len(), 2);
+    }
+
+    #[test]
+    fn test_format_sse_data_json() {
+        let data = b"{\"model\":\"gpt-4\"}";
+        let result = format_sse_data(data);
+        assert!(result.contains("json"));
+    }
+
+    #[test]
+    fn test_format_sse_data_text() {
+        let result = format_sse_data(b"plain text");
+        assert!(result.contains("text"));
+    }
+
+    #[test]
+    fn test_parsed_sse_event_debug() {
+        let data = b"{\"k\":\"v\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(
+            Some("id1".to_string()),
+            Some("message".to_string()),
+            Some(3000),
+            0, data.len(), ev,
+        );
+        let debug = format!("{:?}", parsed);
+        assert!(debug.contains("id1"));
+        assert!(debug.contains("message"));
+    }
+}

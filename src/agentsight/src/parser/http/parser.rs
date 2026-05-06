@@ -134,3 +134,204 @@ impl HttpParser {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ssl_event(data: &[u8]) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 100,
+            tid: 100,
+            uid: 1000,
+            len: data.len() as u32,
+            rw: 0,
+            comm: "test".to_string(),
+            buf: data.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x1000,
+        })
+    }
+
+    #[test]
+    fn test_parse_http_request() {
+        let data = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4\"}";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ParsedHttpMessage::Request(req) => {
+                assert_eq!(req.method, "POST");
+                assert_eq!(req.path, "/v1/chat/completions");
+                assert_eq!(req.headers.get("host").unwrap(), "api.openai.com");
+                assert_eq!(req.headers.get("content-type").unwrap(), "application/json");
+                assert!(req.body_len > 0);
+            }
+            _ => panic!("Expected Request"),
+        }
+    }
+
+    #[test]
+    fn test_parse_http_response() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"chatcmpl-123\"}";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ParsedHttpMessage::Response(resp) => {
+                assert_eq!(resp.status_code, 200);
+                assert_eq!(resp.reason, "OK");
+                assert_eq!(resp.headers.get("content-type").unwrap(), "application/json");
+                assert!(resp.body_len > 0);
+            }
+            _ => panic!("Expected Response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_get_request() {
+        let data = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ParsedHttpMessage::Request(req) => {
+                assert_eq!(req.method, "GET");
+                assert_eq!(req.path, "/health");
+            }
+            _ => panic!("Expected Request"),
+        }
+    }
+
+    #[test]
+    fn test_parse_404_response() {
+        let data = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ParsedHttpMessage::Response(resp) => {
+                assert_eq!(resp.status_code, 404);
+                assert_eq!(resp.reason, "Not Found");
+            }
+            _ => panic!("Expected Response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_data() {
+        let data = b"not http at all";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_multiple_headers() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+        let event = make_ssl_event(data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ParsedHttpMessage::Response(resp) => {
+                assert_eq!(resp.headers.get("content-type").unwrap(), "text/event-stream");
+                assert_eq!(resp.headers.get("transfer-encoding").unwrap(), "chunked");
+                assert_eq!(resp.headers.get("connection").unwrap(), "keep-alive");
+            }
+            _ => panic!("Expected Response"),
+        }
+    }
+
+    #[test]
+    fn test_ssl_event_is_http_request() {
+        let event = SslEvent {
+            source: 0, timestamp_ns: 0, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: 10, rw: 1,
+            comm: String::new(),
+            buf: b"POST /api HTTP/1.1\r\n".to_vec(),
+            is_handshake: false, ssl_ptr: 0,
+        };
+        assert!(event.is_http_request());
+        assert!(event.is_http());
+        assert!(!event.is_http_response());
+    }
+
+    #[test]
+    fn test_ssl_event_is_http_response() {
+        let event = SslEvent {
+            source: 0, timestamp_ns: 0, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: 15, rw: 0,
+            comm: String::new(),
+            buf: b"HTTP/1.1 200 OK\r\n".to_vec(),
+            is_handshake: false, ssl_ptr: 0,
+        };
+        assert!(event.is_http_response());
+        assert!(event.is_http());
+        assert!(!event.is_http_request());
+    }
+
+    #[test]
+    fn test_ssl_event_is_http2_preface() {
+        let event = SslEvent {
+            source: 0, timestamp_ns: 0, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: 24, rw: 1,
+            comm: String::new(),
+            buf: b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec(),
+            is_handshake: false, ssl_ptr: 0,
+        };
+        assert!(event.is_http2_preface());
+        assert!(event.is_http2());
+    }
+
+    #[test]
+    fn test_ssl_event_is_http2_frame() {
+        // Valid HTTP/2 frame: length=0, type=4(SETTINGS), flags=0, stream_id=0
+        let event = SslEvent {
+            source: 0, timestamp_ns: 0, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: 9, rw: 0,
+            comm: String::new(),
+            buf: vec![0, 0, 0, 4, 0, 0, 0, 0, 0],
+            is_handshake: false, ssl_ptr: 0,
+        };
+        assert!(event.is_http2_frame());
+        assert!(event.is_http2());
+    }
+
+    #[test]
+    fn test_ssl_event_not_http2_frame_bad_type() {
+        // Frame type > 9 is invalid
+        let event = SslEvent {
+            source: 0, timestamp_ns: 0, delta_ns: 0,
+            pid: 1, tid: 1, uid: 0, len: 9, rw: 0,
+            comm: String::new(),
+            buf: vec![0, 0, 0, 10, 0, 0, 0, 0, 0],
+            is_handshake: false, ssl_ptr: 0,
+        };
+        assert!(!event.is_http2_frame());
+    }
+
+    #[test]
+    fn test_ssl_event_payload_and_helpers() {
+        let event = SslEvent {
+            source: 0, timestamp_ns: 100, delta_ns: 0,
+            pid: 42, tid: 42, uid: 0, len: 5, rw: 0,
+            comm: "curl".to_string(),
+            buf: b"hello".to_vec(),
+            is_handshake: false, ssl_ptr: 0x2000,
+        };
+        assert_eq!(event.payload(), Some("hello"));
+        assert_eq!(event.comm_str(), "curl");
+        assert_eq!(event.ssl_ptr(), 0x2000);
+        assert_eq!(event.connection_id(), (42, 0x2000));
+        assert_eq!(event.buf_size(), 5);
+    }
+}

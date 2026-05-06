@@ -414,3 +414,168 @@ pub fn export_trace_events<T: ToChromeTraceEvent>(result: &T) {
         append_trace_event(&event);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_next_flow_id_increments() {
+        let id1 = next_flow_id();
+        let id2 = next_flow_id();
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn test_ns_to_us() {
+        assert_eq!(ns_to_us(1000), 1);
+        assert_eq!(ns_to_us(0), 0);
+        assert_eq!(ns_to_us(999), 0);
+        assert_eq!(ns_to_us(1_000_000), 1000);
+    }
+
+    #[test]
+    fn test_trace_file_header_footer() {
+        assert_eq!(trace_file_header(), "[\n");
+        assert_eq!(trace_file_footer(), "\n]");
+    }
+
+    #[test]
+    fn test_instant_event() {
+        let e = ChromeTraceEvent::instant("test", "cat", 1, 2, 100);
+        assert_eq!(e.ph, "i");
+        assert_eq!(e.name, "test");
+        assert_eq!(e.cat, "cat");
+        assert_eq!(e.pid, 1);
+        assert_eq!(e.tid, 2);
+        assert_eq!(e.ts, 100);
+        assert!(e.dur.is_none());
+    }
+
+    #[test]
+    fn test_complete_event() {
+        let e = ChromeTraceEvent::complete("req", "http", 10, 20, 500, 100);
+        assert_eq!(e.ph, "X");
+        assert_eq!(e.dur, Some(100));
+    }
+
+    #[test]
+    fn test_flow_start_event() {
+        let e = ChromeTraceEvent::flow_start("flow", "net", 1, 1, 0, 42);
+        assert_eq!(e.ph, "s");
+        assert_eq!(e.id, Some(42));
+        assert!(e.bp.is_none());
+    }
+
+    #[test]
+    fn test_flow_end_event() {
+        let e = ChromeTraceEvent::flow_end("flow", "net", 1, 1, 100, 42);
+        assert_eq!(e.ph, "f");
+        assert_eq!(e.id, Some(42));
+        assert_eq!(e.bp.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn test_flow_step_event() {
+        let e = ChromeTraceEvent::flow_step("mid", "net", 1, 1, 50, 42);
+        assert_eq!(e.ph, "f");
+        assert_eq!(e.id, Some(42));
+        assert!(e.bp.is_none());
+    }
+
+    #[test]
+    fn test_flow_from_events() {
+        let start = ChromeTraceEvent::complete("start", "c", 1, 1, 0, 10);
+        let end = ChromeTraceEvent::complete("end", "c", 2, 2, 100, 10);
+        let (fs, fe, fid) = ChromeTraceEvent::flow_from_events(&start, &end);
+        assert_eq!(fs.ph, "s");
+        assert_eq!(fe.ph, "f");
+        assert_eq!(fs.id, Some(fid));
+        assert_eq!(fe.id, Some(fid));
+        assert_eq!(fs.pid, 1);
+        assert_eq!(fe.pid, 2);
+    }
+
+    #[test]
+    fn test_flow_from_events_with_id() {
+        let start = ChromeTraceEvent::instant("a", "c", 1, 1, 0);
+        let end = ChromeTraceEvent::instant("b", "c", 2, 2, 50);
+        let (fs, fe) = ChromeTraceEvent::flow_from_events_with_id(&start, &end, 99);
+        assert_eq!(fs.id, Some(99));
+        assert_eq!(fe.id, Some(99));
+        assert_eq!(fe.bp.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn test_with_args() {
+        let mut map = serde_json::Map::new();
+        map.insert("key".to_string(), json!("value"));
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_args(map);
+        assert_eq!(e.args.unwrap()["key"], "value");
+    }
+
+    #[test]
+    fn test_with_arg_multiple() {
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0)
+            .with_arg("a", json!(1))
+            .with_arg("b", json!("two"));
+        let args = e.args.unwrap();
+        assert_eq!(args["a"], 1);
+        assert_eq!(args["b"], "two");
+    }
+
+    #[test]
+    fn test_with_trace_args_value() {
+        let val = json!({"method": "GET", "path": "/api"});
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_trace_args_value(val);
+        assert_eq!(e.args.unwrap()["method"], "GET");
+    }
+
+    #[test]
+    fn test_with_trace_args_value_non_object() {
+        // Non-object values should not be set
+        let val = json!("string");
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_trace_args_value(val);
+        assert!(e.args.is_none());
+    }
+
+    #[test]
+    fn test_chrome_trace_event_serde() {
+        let e = ChromeTraceEvent::complete("test", "cat", 1, 2, 100, 50);
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: ChromeTraceEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.ph, "X");
+        assert_eq!(parsed.dur, Some(50));
+    }
+
+    struct MockTraceArgs;
+    impl TraceArgs for MockTraceArgs {
+        fn to_trace_args(&self) -> serde_json::Value {
+            json!({"custom": true})
+        }
+    }
+
+    #[test]
+    fn test_with_trace_args_trait() {
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0)
+            .with_trace_args(&MockTraceArgs);
+        assert_eq!(e.args.unwrap()["custom"], true);
+    }
+
+    struct EmptyTraceArgs;
+    impl TraceArgs for EmptyTraceArgs {
+        fn to_trace_args(&self) -> serde_json::Value {
+            json!({})
+        }
+    }
+
+    #[test]
+    fn test_with_trace_args_empty_object() {
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0)
+            .with_trace_args(&EmptyTraceArgs);
+        // Empty object should not be set
+        assert!(e.args.is_none());
+    }
+}

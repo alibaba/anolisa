@@ -334,4 +334,160 @@ mod tests {
         let evt = &events[0];
         assert_eq!(evt.data(), b"hello");
     }
+
+    #[test]
+    fn test_parse_retry_field() {
+        let parser = SseParser::new();
+        let data = b"retry: 5000\ndata: reconnect\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].retry, Some(5000));
+    }
+
+    #[test]
+    fn test_parse_empty_data() {
+        let parser = SseParser::new();
+        let data = b"data:\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_end_marker() {
+        let parser = SseParser::new();
+        let data = b"data: [END]\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_done());
+    }
+
+    #[test]
+    fn test_parse_json_body() {
+        let parser = SseParser::new();
+        let data = b"data: {\"key\":\"value\"}\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+        let json = events[0].json_body().unwrap();
+        assert_eq!(json["key"], "value");
+    }
+
+    #[test]
+    fn test_parse_no_terminator() {
+        let parser = SseParser::new();
+        // Event without double newline at end
+        let data = b"data: incomplete\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        // Should still emit the event at end
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data(), b"incomplete");
+    }
+
+    #[test]
+    fn test_parse_synthetic_done_marker() {
+        let event = create_test_event(b"dummy".to_vec());
+        let done = ParsedSseEvent::new_done_marker(event);
+        assert!(done.is_done());
+        assert_eq!(done.data_len(), 0);
+    }
+
+    #[test]
+    fn test_body_str() {
+        let parser = SseParser::new();
+        let data = b"data: text content\n\n".to_vec();
+        let event = create_test_event(data);
+        let events = parser.parse(event);
+        assert_eq!(events[0].body_str(), "text content");
+    }
+
+    // Legacy SSEParser tests
+    #[test]
+    fn test_legacy_parse_stream_single_event() {
+        let result = SSEParser::parse_stream("data: hello\n\n");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.events[0].data, "hello");
+        assert!(result.remaining.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_multiple_events() {
+        let result = SSEParser::parse_stream("data: first\n\ndata: second\n\n");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.events[0].data, "first");
+        assert_eq!(result.events[1].data, "second");
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_with_id_event_retry() {
+        let result = SSEParser::parse_stream("id: 42\nevent: update\nretry: 1000\ndata: payload\n\n");
+        assert_eq!(result.len(), 1);
+        let evt = &result.events[0];
+        assert_eq!(evt.id, Some("42".to_string()));
+        assert_eq!(evt.event, Some("update".to_string()));
+        assert_eq!(evt.retry, Some(1000));
+        assert_eq!(evt.data, "payload");
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_multiline_data() {
+        let result = SSEParser::parse_stream("data: line1\ndata: line2\ndata: line3\n\n");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.events[0].data, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_comment_ignored() {
+        let result = SSEParser::parse_stream(": comment\ndata: value\n\n");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.events[0].data, "value");
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_incomplete() {
+        let result = SSEParser::parse_stream("data: partial");
+        // No double newline means no complete event
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_legacy_sse_event_is_keepalive() {
+        let evt = SSEEvent::new("");
+        assert!(evt.is_keepalive());
+        let evt = SSEEvent::new("data");
+        assert!(!evt.is_keepalive());
+    }
+
+    #[test]
+    fn test_legacy_sse_event_to_sse_string() {
+        let mut evt = SSEEvent::new("hello world");
+        evt.id = Some("1".to_string());
+        evt.event = Some("message".to_string());
+        let s = evt.to_sse_string();
+        assert!(s.contains("id:1\n"));
+        assert!(s.contains("event:message\n"));
+        assert!(s.contains("data:hello world\n"));
+        assert!(s.ends_with("\n"));
+    }
+
+    #[test]
+    fn test_sse_events_container() {
+        let mut container = SSEEvents::new();
+        assert!(container.is_empty());
+        assert_eq!(container.len(), 0);
+        container.events.push(SSEEvent::new("test"));
+        assert!(!container.is_empty());
+        assert_eq!(container.len(), 1);
+        let taken = container.take_events();
+        assert_eq!(taken.len(), 1);
+        assert!(container.is_empty());
+    }
 }

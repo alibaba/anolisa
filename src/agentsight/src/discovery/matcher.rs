@@ -89,3 +89,110 @@ pub fn match_name_with_version_suffix(process_name: &str, known_name: &str) -> b
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exact_match() {
+        assert!(match_name_with_version_suffix("node", "node"));
+        assert!(match_name_with_version_suffix("python3", "python3"));
+    }
+
+    #[test]
+    fn test_version_suffix_dash() {
+        assert!(match_name_with_version_suffix("node-22", "node"));
+        assert!(match_name_with_version_suffix("node-18.0", "node"));
+    }
+
+    #[test]
+    fn test_version_suffix_dot() {
+        assert!(match_name_with_version_suffix("python3.11", "python3"));
+        assert!(match_name_with_version_suffix("ruby.3.2", "ruby"));
+    }
+
+    #[test]
+    fn test_version_suffix_underscore() {
+        assert!(match_name_with_version_suffix("agent_v2", "agent"));
+    }
+
+    #[test]
+    fn test_reject_alphanumeric_continuation() {
+        // "nodejs" should NOT match "node" because 'j' is alphanumeric
+        assert!(!match_name_with_version_suffix("nodejs", "node"));
+        assert!(!match_name_with_version_suffix("codeium", "code"));
+        assert!(!match_name_with_version_suffix("python3x", "python3"));
+    }
+
+    #[test]
+    fn test_no_match() {
+        assert!(!match_name_with_version_suffix("ruby", "node"));
+        assert!(!match_name_with_version_suffix("", "node"));
+        assert!(!match_name_with_version_suffix("nod", "node"));
+    }
+
+    #[test]
+    fn test_process_context_matches_default() {
+        let info = AgentInfo {
+            name: "TestAgent".to_string(),
+            process_names: vec!["test-agent".to_string(), "testagent".to_string()],
+            description: "Test".to_string(),
+            category: "test".to_string(),
+        };
+        let ctx = ProcessContext {
+            comm: "test-agent".to_string(),
+            cmdline_args: vec![],
+            exe_path: "/usr/bin/test-agent".to_string(),
+        };
+        assert!(info.matches(&ctx));
+    }
+
+    #[test]
+    fn test_process_context_matches_case_insensitive() {
+        let info = AgentInfo {
+            name: "TestAgent".to_string(),
+            process_names: vec!["MyAgent".to_string()],
+            description: "Test".to_string(),
+            category: "test".to_string(),
+        };
+        let ctx = ProcessContext {
+            comm: "myagent".to_string(),
+            cmdline_args: vec![],
+            exe_path: "".to_string(),
+        };
+        assert!(info.matches(&ctx));
+    }
+
+    #[test]
+    fn test_process_context_no_match() {
+        let info = AgentInfo {
+            name: "TestAgent".to_string(),
+            process_names: vec!["agent-x".to_string()],
+            description: "Test".to_string(),
+            category: "test".to_string(),
+        };
+        let ctx = ProcessContext {
+            comm: "other-process".to_string(),
+            cmdline_args: vec![],
+            exe_path: "".to_string(),
+        };
+        assert!(!info.matches(&ctx));
+    }
+
+    #[test]
+    fn test_version_suffix_with_case_insensitive() {
+        let info = AgentInfo {
+            name: "NodeAgent".to_string(),
+            process_names: vec!["node".to_string()],
+            description: "Node-based agent".to_string(),
+            category: "test".to_string(),
+        };
+        let ctx = ProcessContext {
+            comm: "Node-22".to_string(),
+            cmdline_args: vec![],
+            exe_path: "".to_string(),
+        };
+        assert!(info.matches(&ctx));
+    }
+}

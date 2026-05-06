@@ -1485,3 +1485,443 @@ impl GenAIBuilder {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_generate_id_unique() {
+        let builder = GenAIBuilder::new();
+        let id1 = builder.generate_id();
+        let id2 = builder.generate_id();
+        assert_ne!(id1, id2);
+        assert!(id1.contains('_'));
+    }
+
+    #[test]
+    fn test_is_llm_api_path() {
+        let builder = GenAIBuilder::new();
+        assert!(builder.is_llm_api_path("/v1/chat/completions"));
+        assert!(builder.is_llm_api_path("/v1/completions"));
+        assert!(builder.is_llm_api_path("/v1/messages"));
+        assert!(builder.is_llm_api_path("/api/v1/copilot/generate_copilot"));
+        assert!(builder.is_llm_api_path("/proxy/v1/chat/completions"));
+        assert!(!builder.is_llm_api_path("/api/health"));
+        assert!(!builder.is_llm_api_path("/v1/models"));
+    }
+
+    #[test]
+    fn test_is_sysom_pop_request() {
+        assert!(GenAIBuilder::is_sysom_pop_request(&Some(r#"{"llmParamString":"{}"}"#.to_string())));
+        assert!(!GenAIBuilder::is_sysom_pop_request(&Some("{}".to_string())));
+        assert!(!GenAIBuilder::is_sysom_pop_request(&None));
+    }
+
+    #[test]
+    fn test_extract_provider_from_path() {
+        let builder = GenAIBuilder::new();
+        assert_eq!(builder.extract_provider_from_path("/v1/chat/completions"), Some("openai".to_string()));
+        assert_eq!(builder.extract_provider_from_path("/v1/messages"), Some("anthropic".to_string()));
+        assert_eq!(builder.extract_provider_from_path("/api/v1/copilot/generate_copilot"), Some("sysom".to_string()));
+        assert_eq!(builder.extract_provider_from_path("/unknown"), None);
+    }
+
+    #[test]
+    fn test_extract_provider_from_body() {
+        assert_eq!(
+            GenAIBuilder::extract_provider_from_body(&Some(r#"{"llmParamString":"{}"} "#.to_string())),
+            Some("sysom".to_string())
+        );
+        assert_eq!(GenAIBuilder::extract_provider_from_body(&Some("{}".to_string())), None);
+    }
+
+    #[test]
+    fn test_extract_model_from_body_request() {
+        let body = Some(r#"{"model": "gpt-4", "messages": []}"#.to_string());
+        assert_eq!(GenAIBuilder::extract_model_from_body(&body, &None), Some("gpt-4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_from_body_sysom() {
+        let body = Some(r#"{"llmParamString": "{\"model\":\"qwen-max\"}"} "#.to_string());
+        assert_eq!(GenAIBuilder::extract_model_from_body(&body, &None), Some("qwen-max".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_from_body_response() {
+        let resp = Some(r#"{"model": "claude-3"}"#.to_string());
+        assert_eq!(GenAIBuilder::extract_model_from_body(&None, &resp), Some("claude-3".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_from_body_sse_array() {
+        let resp = Some(r#"[{"model": "gpt-4o"}, {"model": "gpt-4o"}]"#.to_string());
+        assert_eq!(GenAIBuilder::extract_model_from_body(&None, &resp), Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_from_body_none() {
+        assert_eq!(GenAIBuilder::extract_model_from_body(&None, &None), None);
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_with_timestamp() {
+        let text = "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-03-31 17:19 GMT+8] hello world";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_no_timestamp() {
+        let text = "plain user input";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "plain user input");
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_bracket_no_datetime() {
+        let text = "[not a timestamp] content";
+        // No ':' and digit in bracket content -> returns original
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "[not a timestamp] content");
+    }
+
+    #[test]
+    fn test_compute_session_id_deterministic() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "hello".to_string() }],
+                name: None,
+            }],
+            temperature: None, max_tokens: None, frequency_penalty: None,
+            presence_penalty: None, top_p: None, top_k: None, seed: None,
+            stop_sequences: None, stream: false, tools: None, raw_body: None,
+        };
+        let id1 = GenAIBuilder::compute_session_id(&req);
+        let id2 = GenAIBuilder::compute_session_id(&req);
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 32);
+    }
+
+    #[test]
+    fn test_compute_session_id_no_user() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text { content: "sys".to_string() }],
+                name: None,
+            }],
+            temperature: None, max_tokens: None, frequency_penalty: None,
+            presence_penalty: None, top_p: None, top_k: None, seed: None,
+            stop_sequences: None, stream: false, tools: None, raw_body: None,
+        };
+        let id = GenAIBuilder::compute_session_id(&req);
+        assert_eq!(id.len(), 32); // still produces 32-char hash of empty string
+    }
+
+    #[test]
+    fn test_compute_user_query_fingerprint() {
+        let req = LLMRequest {
+            messages: vec![
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text { content: "first".to_string() }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text { content: "second".to_string() }],
+                    name: None,
+                },
+            ],
+            temperature: None, max_tokens: None, frequency_penalty: None,
+            presence_penalty: None, top_p: None, top_k: None, seed: None,
+            stop_sequences: None, stream: false, tools: None, raw_body: None,
+        };
+        let fp = GenAIBuilder::compute_user_query_fingerprint(&req);
+        assert_eq!(fp.len(), 32);
+        // fingerprint uses last user message
+        let req2 = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text { content: "second".to_string() }],
+                name: None,
+            }],
+            temperature: None, max_tokens: None, frequency_penalty: None,
+            presence_penalty: None, top_p: None, top_k: None, seed: None,
+            stop_sequences: None, stream: false, tools: None, raw_body: None,
+        };
+        assert_eq!(fp, GenAIBuilder::compute_user_query_fingerprint(&req2));
+    }
+
+    #[test]
+    fn test_extract_last_user_query() {
+        let req = LLMRequest {
+            messages: vec![
+                InputMessage {
+                    role: "system".to_string(),
+                    parts: vec![MessagePart::Text { content: "sys".to_string() }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text { content: "[Mon 2026-01-01 10:00 GMT+8] hi".to_string() }],
+                    name: None,
+                },
+            ],
+            temperature: None, max_tokens: None, frequency_penalty: None,
+            presence_penalty: None, top_p: None, top_k: None, seed: None,
+            stop_sequences: None, stream: false, tools: None, raw_body: None,
+        };
+        assert_eq!(GenAIBuilder::extract_last_user_query(&req), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn test_parse_request_body_openai() {
+        let body = r#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1024,
+            "stream": true
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.messages[0].role, "system");
+        assert_eq!(req.messages[1].role, "user");
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.max_tokens, Some(1024));
+        assert!(req.stream);
+    }
+
+    #[test]
+    fn test_parse_request_body_with_tool_calls() {
+        let body = r#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "tc_1", "function": {"name": "search", "arguments": "{\"q\":\"rust\"}"}}]},
+                {"role": "tool", "tool_call_id": "tc_1", "content": "found 10 results"}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.messages.len(), 2);
+        // assistant message has ToolCall part
+        let parts = &req.messages[0].parts;
+        assert!(parts.iter().any(|p| matches!(p, MessagePart::ToolCall { name, .. } if name == "search")));
+        // tool message has ToolCallResponse part
+        let tool_parts = &req.messages[1].parts;
+        assert!(tool_parts.iter().any(|p| matches!(p, MessagePart::ToolCallResponse { .. })));
+    }
+
+    #[test]
+    fn test_parse_request_body_empty_messages() {
+        let body = r#"{"model": "gpt-4", "messages": []}"#;
+        assert!(GenAIBuilder::parse_request_body(body).is_none());
+    }
+
+    #[test]
+    fn test_parse_request_body_invalid_json() {
+        assert!(GenAIBuilder::parse_request_body("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_tool_call_value() {
+        let tc = json!({
+            "id": "call_abc",
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"city\":\"Beijing\"}"
+            }
+        });
+        let part = GenAIBuilder::parse_openai_tool_call_value(&tc).unwrap();
+        match part {
+            MessagePart::ToolCall { id, name, arguments } => {
+                assert_eq!(id.unwrap(), "call_abc");
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments.unwrap()["city"], "Beijing");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_tool_call_value_no_function() {
+        let tc = json!({"id": "call_abc"});
+        assert!(GenAIBuilder::parse_openai_tool_call_value(&tc).is_none());
+    }
+
+    #[test]
+    fn test_extract_parts_from_sse_body_content() {
+        let body = r#"[{"choices":[{"delta":{"content":"Hello "}}]},{"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            _ => panic!("expected Text"),
+        }
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parts_from_sse_body_reasoning() {
+        let body = r#"[{"choices":[{"delta":{"reasoning_content":"thinking..."}}]},{"choices":[{"delta":{"content":"answer"}}]}]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], MessagePart::Reasoning { content } if content == "thinking..."));
+        assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+    }
+
+    #[test]
+    fn test_extract_parts_from_sse_body_tool_calls() {
+        let body = r#"[
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc_1","function":{"name":"search","arguments":""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \"rust\"}"}}]},"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::ToolCall { id, name, arguments } => {
+                assert_eq!(id.as_deref(), Some("tc_1"));
+                assert_eq!(name, "search");
+                assert_eq!(arguments.as_ref().unwrap()["q"], "rust");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parts_from_sse_body_empty() {
+        let body = r#"[{"choices":[{"delta":{}}]}]"#;
+        assert!(GenAIBuilder::extract_parts_from_sse_body(body).is_none());
+    }
+
+    #[test]
+    fn test_extract_parts_from_sse_body_invalid() {
+        assert!(GenAIBuilder::extract_parts_from_sse_body("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_response_body() {
+        let body = r#"[{"choices":[{"delta":{"content":"Hi"}}]}]"#;
+        let msgs = GenAIBuilder::parse_sse_response_body(body, Some("stop")).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn test_openai_msg_to_input_basic() {
+        let msg = OpenAIChatMessage {
+            role: crate::analyzer::message::types::MessageRole::User,
+            content: Some(crate::analyzer::message::types::OpenAIContent::Text("Hello".to_string())),
+            reasoning_content: None,
+            refusal: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            annotations: None,
+            audio: None,
+        };
+        let input = GenAIBuilder::openai_msg_to_input(&msg);
+        assert_eq!(input.role, "user");
+        assert_eq!(input.parts.len(), 1);
+        match &input.parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_openai_msg_to_input_tool_role() {
+        let msg = OpenAIChatMessage {
+            role: crate::analyzer::message::types::MessageRole::Tool,
+            content: Some(crate::analyzer::message::types::OpenAIContent::Text("result data".to_string())),
+            reasoning_content: None,
+            refusal: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: Some("tc_1".to_string()),
+            name: None,
+            annotations: None,
+            audio: None,
+        };
+        let input = GenAIBuilder::openai_msg_to_input(&msg);
+        assert_eq!(input.role, "tool");
+        assert!(matches!(&input.parts[0], MessagePart::ToolCallResponse { id, .. } if id.as_deref() == Some("tc_1")));
+    }
+
+    #[test]
+    fn test_openai_msg_to_output() {
+        let msg = OpenAIChatMessage {
+            role: crate::analyzer::message::types::MessageRole::Assistant,
+            content: Some(crate::analyzer::message::types::OpenAIContent::Text("Response".to_string())),
+            reasoning_content: Some("thinking".to_string()),
+            refusal: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            annotations: None,
+            audio: None,
+        };
+        let output = GenAIBuilder::openai_msg_to_output(&msg, Some("stop"));
+        assert_eq!(output.role, "assistant");
+        assert_eq!(output.finish_reason.as_deref(), Some("stop"));
+        // Should have reasoning + text = 2 parts
+        assert_eq!(output.parts.len(), 2);
+        assert!(matches!(&output.parts[0], MessagePart::Reasoning { content } if content == "thinking"));
+        assert!(matches!(&output.parts[1], MessagePart::Text { content } if content == "Response"));
+    }
+
+    #[test]
+    fn test_resolve_agent_name_from_comm_with_cache() {
+        let mut cache = HashMap::new();
+        cache.insert(42u32, "CachedAgent".to_string());
+        let result = GenAIBuilder::resolve_agent_name_from_comm("unknown", 42, &cache);
+        assert_eq!(result, Some("CachedAgent".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_agent_name_from_comm_no_match() {
+        let cache = HashMap::new();
+        let result = GenAIBuilder::resolve_agent_name_from_comm("random_process", 99, &cache);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_model_from_message() {
+        let builder = GenAIBuilder::new();
+        let msg = Some(ParsedApiMessage::OpenAICompletion {
+            request: Some(crate::analyzer::message::types::OpenAIRequest {
+                model: "gpt-4-turbo".to_string(),
+                messages: vec![],
+                temperature: None, max_tokens: None, stream: None,
+                top_p: None, n: None, stop: None,
+                presence_penalty: None, frequency_penalty: None,
+                user: None, tools: None, tool_choice: None,
+                response_format: None, seed: None, logprobs: None,
+                top_logprobs: None, parallel_tool_calls: None,
+            }),
+            response: None,
+        });
+        assert_eq!(builder.extract_model_from_message(&msg), Some("gpt-4-turbo".to_string()));
+        assert_eq!(builder.extract_model_from_message(&None), None);
+    }
+
+    #[test]
+    fn test_default_builder() {
+        let b1 = GenAIBuilder::default();
+        let b2 = GenAIBuilder::new();
+        // Both should have different session prefixes (different timestamps)
+        // But both should generate valid IDs
+        let id1 = b1.generate_id();
+        let id2 = b2.generate_id();
+        assert!(id1.contains('_'));
+        assert!(id2.contains('_'));
+    }
+}
+
