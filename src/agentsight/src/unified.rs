@@ -30,7 +30,7 @@ use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
-use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader, LogtailExporter};
+use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::interruption::{InterruptionDetector, DetectorConfig};
 use crate::parser::Parser;
@@ -155,24 +155,18 @@ impl AgentSight {
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
 
-        // Add SLS exporter if configured; skip local storage when SLS is on
-        if config.sls_enabled() {
-            match SlsUploader::new(&config) {
-                Ok(uploader) => {
-                    log::info!("SLS exporter enabled");
-                    genai_exporters.push(Box::new(uploader));
-                }
-                Err(e) => {
-                    log::warn!("Failed to initialize SLS exporter: {}", e);
-                }
-            }
+        // When SLS_LOGTAIL_FILE is set, use Logtail file exporter only (skip local storage)
+        // — the Logtail file will be collected by iLogtail and uploaded to SLS.
+        if let Some(exporter) = LogtailExporter::new() {
+            log::info!("Logtail file exporter enabled ({})", exporter.path().display());
+            genai_exporters.push(Box::new(exporter));
         } else {
-            // SLS not configured: use local JSONL + SQLite
+            // No Logtail: use local JSONL + SQLite
             genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
 
             match GenAISqliteStore::new() {
                 Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled (SLS not configured)");
+                    log::info!("SQLite GenAI exporter enabled");
                     let store = Arc::new(store);
                     genai_sqlite_store = Some(Arc::clone(&store));
                     genai_exporters.push(Box::new(store));
@@ -181,12 +175,6 @@ impl AgentSight {
                     log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
                 }
             }
-        }
-
-        // Add Logtail file exporter if SLS_LOGTAIL_FILE env var is set
-        if let Some(exporter) = LogtailExporter::new() {
-            log::info!("Logtail file exporter enabled ({})", exporter.path().display());
-            genai_exporters.push(Box::new(exporter));
         }
 
         // Create analyzer with tokenizer if configured

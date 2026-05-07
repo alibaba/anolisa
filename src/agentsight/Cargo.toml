@@ -68,10 +68,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
 # llm = { version = "1.2", features = ["openai"] }
 thiserror = "1.0.63"
 typed-arena = "2.0.2"
-tokio = { version = "1", features = ["rt"] }
 uname = "0.1.1"
-aliyun-log-rust-sdk = "0.1"
-aliyun-log-sdk-protobuf = "0.1"
 # Static link OpenSSL to avoid runtime dependency on libssl.so.1.1
 openssl = { version = "0.10", features = ["vendored"] }
 # HTTP API server (optional, enabled by "server" feature)

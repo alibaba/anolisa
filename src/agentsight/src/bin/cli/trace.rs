@@ -21,23 +21,6 @@ pub struct TraceCommand {
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     #[structopt(long)]
     pub enable_filewatch: bool,
-
-    // --- SLS (Aliyun Log Service) Configuration ---
-    /// SLS endpoint (e.g. cn-hangzhou.log.aliyuncs.com)
-    #[structopt(long, env = "SLS_ENDPOINT")]
-    pub sls_endpoint: Option<String>,
-    /// SLS access key ID
-    #[structopt(long, env = "SLS_ACCESS_KEY_ID")]
-    pub sls_access_key_id: Option<String>,
-    /// SLS access key secret
-    #[structopt(long, env = "SLS_ACCESS_KEY_SECRET")]
-    pub sls_access_key_secret: Option<String>,
-    /// SLS project name
-    #[structopt(long, env = "SLS_PROJECT")]
-    pub sls_project: Option<String>,
-    /// SLS logstore name
-    #[structopt(long, env = "SLS_LOGSTORE")]
-    pub sls_logstore: Option<String>,
 }
 
 impl TraceCommand {
@@ -78,11 +61,7 @@ impl TraceCommand {
         // Build AgentSight config (empty target_pids means trace all processes)
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
-            .set_enable_filewatch(self.enable_filewatch)
-            .set_sls_endpoint(self.sls_endpoint.clone())
-            .set_sls_access_key(self.sls_access_key_id.clone(), self.sls_access_key_secret.clone())
-            .set_sls_project(self.sls_project.clone())
-            .set_sls_logstore(self.sls_logstore.clone());
+            .set_enable_filewatch(self.enable_filewatch);
         
         // Create AgentSight (auto-attaches probes and starts polling)
         let mut sight = match AgentSight::new(config) {

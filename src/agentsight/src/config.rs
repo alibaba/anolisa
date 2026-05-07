@@ -162,18 +162,6 @@ pub struct AgentsightConfig {
     /// Log file path (None = stderr)
     pub log_path: Option<String>,
 
-    // --- SLS (Aliyun Log Service) Configuration ---
-    /// SLS endpoint (e.g. "cn-hangzhou.log.aliyuncs.com")
-    pub sls_endpoint: Option<String>,
-    /// SLS access key ID
-    pub sls_access_key_id: Option<String>,
-    /// SLS access key secret
-    pub sls_access_key_secret: Option<String>,
-    /// SLS project name
-    pub sls_project: Option<String>,
-    /// SLS logstore name
-    pub sls_logstore: Option<String>,
-
     // --- Tokenizer Configuration ---
     /// Path to tokenizer file for accurate token counting (e.g., "/path/to/tokenizer.json")
     pub tokenizer_path: Option<PathBuf>,
@@ -211,13 +199,6 @@ impl Default for AgentsightConfig {
             // Logging defaults
             verbose: false,
             log_path: None,
-
-            // SLS defaults (read from env vars)
-            sls_endpoint: std::env::var("SLS_ENDPOINT").ok(),
-            sls_access_key_id: std::env::var("SLS_ACCESS_KEY_ID").ok(),
-            sls_access_key_secret: std::env::var("SLS_ACCESS_KEY_SECRET").ok(),
-            sls_project: std::env::var("SLS_PROJECT").ok(),
-            sls_logstore: std::env::var("SLS_LOGSTORE").ok(),
 
             // Tokenizer defaults (read from env vars)
             tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH").ok().map(PathBuf::from),
@@ -288,50 +269,6 @@ impl AgentsightConfig {
     /// Apply verbose setting to the global state
     pub fn apply_verbose(&self) {
         init_logging(self.verbose, self.log_path.as_deref());
-    }
-
-    /// Check if SLS configuration is complete
-    pub fn sls_enabled(&self) -> bool {
-        self.sls_endpoint.is_some()
-            && self.sls_access_key_id.is_some()
-            && self.sls_access_key_secret.is_some()
-            && self.sls_project.is_some()
-            && self.sls_logstore.is_some()
-    }
-
-    /// Set SLS endpoint
-    pub fn set_sls_endpoint(mut self, endpoint: Option<String>) -> Self {
-        if endpoint.is_some() {
-            self.sls_endpoint = endpoint;
-        }
-        self
-    }
-
-    /// Set SLS access key
-    pub fn set_sls_access_key(mut self, key_id: Option<String>, key_secret: Option<String>) -> Self {
-        if key_id.is_some() {
-            self.sls_access_key_id = key_id;
-        }
-        if key_secret.is_some() {
-            self.sls_access_key_secret = key_secret;
-        }
-        self
-    }
-
-    /// Set SLS project
-    pub fn set_sls_project(mut self, project: Option<String>) -> Self {
-        if project.is_some() {
-            self.sls_project = project;
-        }
-        self
-    }
-
-    /// Set SLS logstore
-    pub fn set_sls_logstore(mut self, logstore: Option<String>) -> Self {
-        if logstore.is_some() {
-            self.sls_logstore = logstore;
-        }
-        self
     }
 
     /// Set tokenizer path
@@ -495,23 +432,6 @@ mod tests {
         assert_eq!(config.target_uid, Some(1000));
         assert!(config.enable_filewatch);
         assert_eq!(config.connection_capacity, 48);
-    }
-
-    #[test]
-    fn test_sls_enabled_all_set() {
-        let config = AgentsightConfig::new()
-            .set_sls_endpoint(Some("endpoint".into()))
-            .set_sls_access_key(Some("id".into()), Some("secret".into()))
-            .set_sls_project(Some("proj".into()))
-            .set_sls_logstore(Some("store".into()));
-        assert!(config.sls_enabled());
-    }
-
-    #[test]
-    fn test_sls_enabled_incomplete() {
-        let config = AgentsightConfig::new()
-            .set_sls_endpoint(Some("endpoint".into()));
-        assert!(!config.sls_enabled());
     }
 
     #[test]
