@@ -51,7 +51,6 @@ test-python-coverage: ## Run Python tests with coverage report
 	@echo "🧪 Running Python tests with coverage..."
 	cd agent-sec-cli && uv sync
 	uv run --project agent-sec-cli pytest tests/ \
-		--ignore=tests/integration-test/skill-ledger \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/prompt-scanner \
 		--ignore=tests/e2e/skill-ledger \
@@ -201,4 +200,3 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help
-
