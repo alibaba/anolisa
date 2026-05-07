@@ -20,9 +20,20 @@ if ! command -v tokenless &>/dev/null; then
   exit 0
 fi
 
+# --- Resolve toon binary path ---
+# RPM installs toon to /usr/libexec/tokenless/ (not on PATH).
+# Local installs place it in ~/.local/bin/ (on PATH).
+# Resolve: try PATH first, then fallback to libexec.
+
 if ! command -v toon &>/dev/null; then
-  echo "[tokenless] WARNING: toon is not installed or not in PATH. TOON compression hook disabled." >&2
-  exit 0
+  if [ -x /usr/libexec/tokenless/toon ]; then
+    TOON_BIN=/usr/libexec/tokenless/toon
+  else
+    echo "[tokenless] WARNING: toon is not installed or not in PATH. TOON compression hook disabled." >&2
+    exit 0
+  fi
+else
+  TOON_BIN="$(command -v toon)"
 fi
 
 # --- Read input (fail-open) ---

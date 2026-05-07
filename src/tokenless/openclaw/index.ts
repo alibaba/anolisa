@@ -33,13 +33,39 @@ let rtkAvailable: boolean | null = null;
 let tokenlessAvailable: boolean | null = null;
 let toonAvailable: boolean | null = null;
 
+// Resolved absolute paths — set by check*() functions so subprocess calls
+// use the correct path even when the binary is not on PATH (e.g. RPM installs
+// that place rtk/toon in /usr/libexec/tokenless/).
+let rtkPath: string = "rtk";
+let toonPath: string = "toon";
+
+const LIBEXEC_FALLBACK = "/usr/libexec/tokenless";
+
 function checkRtk(): boolean {
   if (rtkAvailable !== null) return rtkAvailable;
   try {
-    execSync("which rtk", { stdio: "ignore" });
-    rtkAvailable = true;
+    const result = execSync("which rtk 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
+    if (result && result !== "") {
+      rtkPath = result;
+      rtkAvailable = true;
+    } else if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/rtk`)) {
+      rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
+      rtkAvailable = true;
+    } else {
+      rtkAvailable = false;
+    }
   } catch {
-    rtkAvailable = false;
+    // which not available; check libexec directly
+    try {
+      if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/rtk`)) {
+        rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
+        rtkAvailable = true;
+      } else {
+        rtkAvailable = false;
+      }
+    } catch {
+      rtkAvailable = false;
+    }
   }
   return rtkAvailable;
 }
@@ -69,10 +95,27 @@ function checkTokenless(): boolean {
 function checkToon(): boolean {
   if (toonAvailable !== null) return toonAvailable;
   try {
-    execSync("which toon", { stdio: "ignore" });
-    toonAvailable = true;
+    const result = execSync("which toon 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
+    if (result && result !== "") {
+      toonPath = result;
+      toonAvailable = true;
+    } else if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/toon`)) {
+      toonPath = `${LIBEXEC_FALLBACK}/toon`;
+      toonAvailable = true;
+    } else {
+      toonAvailable = false;
+    }
   } catch {
-    toonAvailable = false;
+    try {
+      if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/toon`)) {
+        toonPath = `${LIBEXEC_FALLBACK}/toon`;
+        toonAvailable = true;
+      } else {
+        toonAvailable = false;
+      }
+    } catch {
+      toonAvailable = false;
+    }
   }
   return toonAvailable;
 }
@@ -81,7 +124,7 @@ function checkToon(): boolean {
 
 function tryRtkRewrite(command: string): string | null {
   try {
-    const result = spawnSync("rtk", ["rewrite", command], {
+    const result = spawnSync(rtkPath, ["rewrite", command], {
       encoding: "utf-8",
       timeout: 2000,
       stdio: ["ignore", "pipe", "pipe"],
@@ -131,7 +174,7 @@ function tryCompressToon(response: any): { toonText: string; savingsPct: number 
   try {
     const input = JSON.stringify(response);
     const beforeChars = input.length;
-    const toonText = execFileSync("toon", ["-e"], {
+    const toonText = execFileSync(toonPath, ["-e"], {
       encoding: "utf-8",
       timeout: 3000,
       input,
@@ -276,7 +319,7 @@ export default {
         if (toonCompressionEnabled && checkToon()) {
           try {
             const jsonInput = JSON.stringify(currentMessage);
-            const result = execFileSync("toon", ["-e"], {
+            const result = execFileSync(toonPath, ["-e"], {
               encoding: "utf-8",
               timeout: 3000,
               input: jsonInput,

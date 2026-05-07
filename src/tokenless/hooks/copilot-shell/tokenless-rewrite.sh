@@ -12,13 +12,24 @@ if ! command -v jq &>/dev/null; then
   exit 0
 fi
 
+# --- Resolve rtk binary path ---
+# RPM installs rtk to /usr/libexec/tokenless/ (not on PATH).
+# Local installs place it in ~/.local/bin/ (on PATH).
+# Resolve: try PATH first, then fallback to libexec.
+
 if ! command -v rtk &>/dev/null; then
-  echo "[tokenless] WARNING: rtk is not installed or not in PATH. Hook disabled." >&2
-  exit 0
+  if [ -x /usr/libexec/tokenless/rtk ]; then
+    RTK_BIN=/usr/libexec/tokenless/rtk
+  else
+    echo "[tokenless] WARNING: rtk is not installed or not in PATH. Hook disabled." >&2
+    exit 0
+  fi
+else
+  RTK_BIN="$(command -v rtk)"
 fi
 
 # Version guard
-RTK_VERSION=$(rtk --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+RTK_VERSION=$("$RTK_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 if [ -n "$RTK_VERSION" ]; then
   MAJOR=$(echo "$RTK_VERSION" | cut -d. -f1)
   MINOR=$(echo "$RTK_VERSION" | cut -d. -f2)
@@ -44,7 +55,7 @@ fi
 
 # --- Use rtk to rewrite ---
 
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+REWRITTEN=$("$RTK_BIN" rewrite "$CMD" 2>/dev/null)
 REWRITE_EXIT=$?
 
 # Handle rewrite result: exit 1/2 = no rewrite, exit 0 = same or rewritten

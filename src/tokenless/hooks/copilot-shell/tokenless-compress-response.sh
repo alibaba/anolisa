@@ -27,8 +27,13 @@ if ! command -v tokenless &>/dev/null; then
 fi
 
 TOON_AVAILABLE=false
+TOON_BIN=""
 if command -v toon &>/dev/null; then
   TOON_AVAILABLE=true
+  TOON_BIN="$(command -v toon)"
+elif [ -x /usr/libexec/tokenless/toon ]; then
+  TOON_AVAILABLE=true
+  TOON_BIN=/usr/libexec/tokenless/toon
 fi
 
 # --- Read input (fail-open) ---
@@ -142,7 +147,7 @@ TOON_OUTPUT=""
 if [ "$TOON_AVAILABLE" = true ]; then
   IS_JSON=$(echo "$COMPRESSED" | jq -e '.' &>/dev/null && echo "yes" || echo "no")
   if [ "$IS_JSON" = "yes" ]; then
-    TOON_OUTPUT=$(echo "$COMPRESSED" | toon -e 2>/dev/null) || true
+    TOON_OUTPUT=$(echo "$COMPRESSED" | "$TOON_BIN" -e 2>/dev/null) || true
     if [ -n "$TOON_OUTPUT" ]; then
       AFTER_TOON_CHARS=${#TOON_OUTPUT}
       if [ "$USED_RESP_COMPRESSION" = true ]; then
