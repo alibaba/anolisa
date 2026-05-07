@@ -526,6 +526,13 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     ) {
         return Some(SslLibKind::Boring);
     }
+    // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
+    // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
+    // (symbol-name uprobe) works directly. Only match python3.<ver> (with version
+    // suffix) to avoid matching bare "python3" symlinks from system Python.
+    if name.starts_with("python3.") {
+        return Some(SslLibKind::OpenSsl);
+    }
     None
 }
 
