@@ -19,6 +19,7 @@
  */
 
 import { execSync, execFileSync, spawnSync } from "child_process";
+import { existsSync, statSync } from "fs";
 
 // ---- Session ID mapping --------------------------------------------------------
 // OpenClaw's tool_result_persist ctx provides sessionKey ("agent:main:main")
@@ -37,9 +38,19 @@ let toonAvailable: boolean | null = null;
 // use the correct path even when the binary is not on PATH (e.g. RPM installs
 // that place rtk/toon in /usr/libexec/tokenless/).
 let rtkPath: string = "rtk";
+let tokenlessPath: string = "tokenless";
 let toonPath: string = "toon";
 
 const LIBEXEC_FALLBACK = "/usr/libexec/tokenless";
+
+// Check both existence and execute permission (mirrors shell `-x` test).
+function isExecutable(path: string): boolean {
+  try {
+    return existsSync(path) && (statSync(path).mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
 
 function checkRtk(): boolean {
   if (rtkAvailable !== null) return rtkAvailable;
@@ -48,7 +59,7 @@ function checkRtk(): boolean {
     if (result && result !== "") {
       rtkPath = result;
       rtkAvailable = true;
-    } else if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/rtk`)) {
+    } else if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
       rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
       rtkAvailable = true;
     } else {
@@ -56,16 +67,13 @@ function checkRtk(): boolean {
     }
   } catch {
     // which not available; check libexec directly
-    try {
-      if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/rtk`)) {
-        rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
-        rtkAvailable = true;
-      } else {
-        rtkAvailable = false;
-      }
-    } catch {
+    if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
+      rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
+      rtkAvailable = true;
+    } else {
       rtkAvailable = false;
     }
+    return rtkAvailable;
   }
   return rtkAvailable;
 }
@@ -84,10 +92,24 @@ function isSkillContent(message: any): boolean {
 function checkTokenless(): boolean {
   if (tokenlessAvailable !== null) return tokenlessAvailable;
   try {
-    execSync("which tokenless", { stdio: "ignore" });
-    tokenlessAvailable = true;
+    const result = execSync("which tokenless 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
+    if (result && result !== "") {
+      tokenlessPath = result;
+      tokenlessAvailable = true;
+    } else if (isExecutable(`${LIBEXEC_FALLBACK}/tokenless`)) {
+      tokenlessPath = `${LIBEXEC_FALLBACK}/tokenless`;
+      tokenlessAvailable = true;
+    } else {
+      tokenlessAvailable = false;
+    }
   } catch {
-    tokenlessAvailable = false;
+    if (isExecutable(`${LIBEXEC_FALLBACK}/tokenless`)) {
+      tokenlessPath = `${LIBEXEC_FALLBACK}/tokenless`;
+      tokenlessAvailable = true;
+    } else {
+      tokenlessAvailable = false;
+    }
+    return tokenlessAvailable;
   }
   return tokenlessAvailable;
 }
@@ -99,23 +121,20 @@ function checkToon(): boolean {
     if (result && result !== "") {
       toonPath = result;
       toonAvailable = true;
-    } else if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/toon`)) {
+    } else if (isExecutable(`${LIBEXEC_FALLBACK}/toon`)) {
       toonPath = `${LIBEXEC_FALLBACK}/toon`;
       toonAvailable = true;
     } else {
       toonAvailable = false;
     }
   } catch {
-    try {
-      if (require("fs").existsSync(`${LIBEXEC_FALLBACK}/toon`)) {
-        toonPath = `${LIBEXEC_FALLBACK}/toon`;
-        toonAvailable = true;
-      } else {
-        toonAvailable = false;
-      }
-    } catch {
+    if (isExecutable(`${LIBEXEC_FALLBACK}/toon`)) {
+      toonPath = `${LIBEXEC_FALLBACK}/toon`;
+      toonAvailable = true;
+    } else {
       toonAvailable = false;
     }
+    return toonAvailable;
   }
   return toonAvailable;
 }
@@ -145,7 +164,7 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
     const args = ["compress-response", "--agent-id", "openclaw"];
     if (sessionId) args.push("--session-id", sessionId);
     if (toolCallId) args.push("--tool-use-id", toolCallId);
-    const result = execFileSync("tokenless", args, {
+    const result = execFileSync(tokenlessPath, args, {
       encoding: "utf-8",
       timeout: 3000,
       input,
@@ -159,7 +178,7 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
 function tryCompressSchema(schema: Record<string, unknown>): Record<string, unknown> | null {
   try {
     const input = JSON.stringify(schema);
-    const result = execFileSync("tokenless", ["compress-schema"], {
+    const result = execFileSync(tokenlessPath, ["compress-schema"], {
       encoding: "utf-8",
       timeout: 3000,
       input,
