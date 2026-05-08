@@ -75,6 +75,8 @@ impl SchemaCompressor {
 
     /// Compress an OpenAI Function Calling schema
     pub fn compress(&self, tool: &Value) -> Value {
+        let original_text = serde_json::to_string(tool).unwrap_or_default();
+
         let mut result = tool.clone();
 
         // Check if this is a function wrapper or direct schema
@@ -120,6 +122,12 @@ impl SchemaCompressor {
             if result.get("type").is_some() || result.get("properties").is_some() {
                 self.compress_json_schema(&mut result, 0);
             }
+        }
+
+        // Compare with original to see if anything actually changed
+        let compressed_text = serde_json::to_string(&result).unwrap_or_default();
+        if original_text == compressed_text {
+            return tool.clone(); // Return original if no change
         }
 
         result

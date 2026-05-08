@@ -413,6 +413,12 @@ fn record_compression_stats(
 
     let before_chars = before_text.len();
     let after_chars = after_text.len();
+
+    // Skip recording if there was no actual compression (same content, same length)
+    if before_chars == after_chars && before_text == after_text {
+        return;
+    }
+
     let before_tokens = estimate_tokens_from_chars(before_chars);
     let after_tokens = estimate_tokens_from_chars(after_chars);
 

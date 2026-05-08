@@ -123,13 +123,18 @@ TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // .toolCallId // empty' 2>/de
 COMPRESSED=""
 USED_RESP_COMPRESSION=false
 if echo "$TOOL_RESPONSE" | jq -e 'type == "object" or type == "array"' &>/dev/null 2>&1; then
+  # Only perform compression if the content is different from what it would be compressed to
   COMPRESSED=$(echo "$TOOL_RESPONSE" | tokenless compress-response \
     --agent-id copilot-shell \
     ${SESSION_ID:+--session-id "$SESSION_ID"} \
     ${TOOL_USE_ID:+--tool-use-id "$TOOL_USE_ID"} \
     2>/dev/null) || true
-  if [ -n "$COMPRESSED" ]; then
+
+  # Check if compression actually changed the content
+  if [ -n "$COMPRESSED" ] && [ "$COMPRESSED" != "$TOOL_RESPONSE" ]; then
     USED_RESP_COMPRESSION=true
+  else
+    COMPRESSED=""
   fi
 fi
 

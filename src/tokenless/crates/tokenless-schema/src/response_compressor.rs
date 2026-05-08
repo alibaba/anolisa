@@ -85,7 +85,16 @@ impl ResponseCompressor {
 
     /// Compress a JSON response value
     pub fn compress(&self, response: &Value) -> Value {
-        self.compress_value(response, 0)
+        let original_text = serde_json::to_string(response).unwrap_or_default();
+        let result = self.compress_value(response, 0);
+
+        // Compare with original to see if anything actually changed
+        let compressed_text = serde_json::to_string(&result).unwrap_or_default();
+        if original_text == compressed_text {
+            return response.clone(); // Return original if no change
+        }
+
+        result
     }
 
     /// Recursively compress a JSON value

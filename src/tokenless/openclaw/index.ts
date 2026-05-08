@@ -169,6 +169,12 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
       timeout: 3000,
       input,
     }).trim();
+
+    // Only return the compressed result if it differs from the input
+    if (result === input) {
+      return null; // No actual compression occurred
+    }
+
     return JSON.parse(result);
   } catch {
     return null;
@@ -183,6 +189,12 @@ function tryCompressSchema(schema: Record<string, unknown>): Record<string, unkn
       timeout: 3000,
       input,
     }).trim();
+
+    // Only return the compressed result if it differs from the input
+    if (result === input) {
+      return null; // No actual compression occurred
+    }
+
     return JSON.parse(result);
   } catch {
     return null;
@@ -199,6 +211,10 @@ function tryCompressToon(response: any): { toonText: string; savingsPct: number 
       input,
     }).trim();
     if (!toonText) return null;
+
+    // Only return if TOON actually reduced the content (different from input)
+    if (toonText === input) return null;
+
     const afterChars = toonText.length;
     const savingsPct = beforeChars > 0 ? Math.round(((beforeChars - afterChars) / beforeChars) * 100) : 0;
     return { toonText, savingsPct };
