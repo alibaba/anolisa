@@ -4,13 +4,13 @@
 SHARE_DIR ?= $(HOME)/.local/share/tokenless
 BIN_DIR ?= $(HOME)/.local/bin
 OPENCLAW_DIR ?= $(SHARE_DIR)/adapters/openclaw
-COPILOT_SHELL_HOOK_DIR ?= $(SHARE_DIR)/adapters/cosh
+COSH_EXTENSION_DIR ?= $(HOME)/.copilot-shell/extensions/tokenless
 RTK_DIR := third_party/rtk
 TOON_DIR := third_party/toon
 
 .PHONY: build build-tokenless build-rtk build-toon install test lint clean \
         openclaw-install openclaw-uninstall \
-        copilot-shell-install copilot-shell-uninstall setup help
+        cosh-install cosh-uninstall setup help
 
 # Default target
 all: build
@@ -118,24 +118,25 @@ openclaw-uninstall:
 	rm -rf $(OPENCLAW_DIR)
 	@echo "==> OpenClaw plugin removed"
 
-# copilot-shell hook management
-copilot-shell-install:
-	@echo "==> Installing copilot-shell hooks..."
-	@mkdir -p $(COPILOT_SHELL_HOOK_DIR)
-	cp hooks/copilot-shell/tokenless-*.sh $(COPILOT_SHELL_HOOK_DIR)/
-	chmod +x $(COPILOT_SHELL_HOOK_DIR)/tokenless-*.sh
-	@echo "==> copilot-shell hooks installed to $(COPILOT_SHELL_HOOK_DIR)"
-	@echo "    Add hook configs to your copilot-shell settings.json."
-	@echo "    See hooks/copilot-shell/README.md for the full settings.json template."
+# copilot-shell extension management
+cosh-install:
+	@echo "==> Installing copilot-shell extension..."
+	@rm -rf $(COSH_EXTENSION_DIR) 2>/dev/null || true
+	@mkdir -p $(COSH_EXTENSION_DIR)
+	cp -r cosh-extension/hooks $(COSH_EXTENSION_DIR)/
+	cp -r cosh-extension/commands $(COSH_EXTENSION_DIR)/
+	cp cosh-extension/cosh-extension.json $(COSH_EXTENSION_DIR)/
+	cp cosh-extension/README.md $(COSH_EXTENSION_DIR)/
+	chmod +x $(COSH_EXTENSION_DIR)/hooks/*.py
+	@echo "==> copilot-shell extension installed to $(COSH_EXTENSION_DIR)"
 
-copilot-shell-uninstall:
-	@echo "==> Removing copilot-shell hooks..."
-	rm -f $(COPILOT_SHELL_HOOK_DIR)/tokenless-*.sh
-	@echo "==> copilot-shell hooks removed"
-	@echo "    Remember to remove the hook configs from your copilot-shell settings.json"
+cosh-uninstall:
+	@echo "==> Uninstalling copilot-shell extension..."
+	rm -rf $(COSH_EXTENSION_DIR)
+	@echo "==> copilot-shell extension removed"
 
-# One-step setup: build + install + openclaw plugin + copilot-shell hook
-setup: install openclaw-install copilot-shell-install
+# One-step setup: build + install + openclaw plugin + cosh extension
+setup: install openclaw-install cosh-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
@@ -143,7 +144,7 @@ setup: install openclaw-install copilot-shell-install
 	@echo "  - rtk:       $(BIN_DIR)/rtk"
 	@echo "  - toon:      $(BIN_DIR)/toon"
 	@echo "  - OpenClaw:  $(OPENCLAW_DIR)/"
-	@echo "  - Hooks:     $(COPILOT_SHELL_HOOK_DIR)/tokenless-*.sh"
+	@echo "  - Cosh Ext:  $(COSH_EXTENSION_DIR)/"
 	@echo "============================================"
 	@echo ""
 	@echo "Verify installation:"
@@ -167,13 +168,13 @@ help:
 	@echo "  clean             Clean build artifacts"
 	@echo "  openclaw-install  Install OpenClaw plugin"
 	@echo "  openclaw-uninstall Remove OpenClaw plugin"
-	@echo "  copilot-shell-install   Install copilot-shell hooks"
-	@echo "  copilot-shell-uninstall Remove copilot-shell hooks"
-	@echo "  setup             Full setup: build + install + openclaw + hook"
+	@echo "  cosh-install         Install copilot-shell extension"
+	@echo "  cosh-uninstall       Uninstall copilot-shell extension"
+	@echo "  setup                Full setup: build + install + openclaw + cosh extension"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
 	@echo "  SHARE_DIR         Data install root (default: ~/.local/share/tokenless)"
 	@echo "  BIN_DIR           Binary install path (default: ~/.local/bin)"
 	@echo "  OPENCLAW_DIR      OpenClaw plugin path (default: ~/.local/share/tokenless/adapters/openclaw)"
-	@echo "  COPILOT_SHELL_HOOK_DIR  Hook install path (default: ~/.local/share/tokenless/adapters/cosh)"
+	@echo "  COSH_EXTENSION_DIR  Cosh extension install path (default: ~/.copilot-shell/extensions/tokenless)"

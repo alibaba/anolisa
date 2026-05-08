@@ -1,0 +1,47 @@
+{
+  "name": "tokenless",
+  "version": "0.1.0",
+  "contextFileName": "COPILOT.md",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-rewrite",
+            "description": "Rewrites shell commands via rtk for token savings",
+            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-response",
+            "description": "Compresses tool responses and encodes to TOON format",
+            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-schema",
+            "description": "Compresses tool schema definitions for token savings",
+            "command": "python3 ${extensionPath}/hooks/compress_schema_hook.py",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

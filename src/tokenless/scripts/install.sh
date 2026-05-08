@@ -11,9 +11,9 @@ set -euo pipefail
 #   ./install.sh --uninstall        # RPM pre-uninstall cleanup (full removal)
 #   ./install.sh --upgrade          # RPM pre-uninstall cleanup (upgrade — no-op)
 #   ./install.sh --openclaw         # Manually install OpenClaw plugin
-#   ./install.sh --cosh              # Manually install copilot-shell hooks
+#   ./install.sh --cosh              # Manually install copilot-shell extension
 #   ./install.sh --uninstall-openclaw # Uninstall OpenClaw plugin only
-#   ./install.sh --uninstall-cosh    # Uninstall copilot-shell hooks only
+#   ./install.sh --uninstall-cosh    # Uninstall copilot-shell extension only
 #   ./install.sh --help             # Show help
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,9 +81,11 @@ detect_install_root
 
 # Derived paths (overridable via environment variables)
 # BIN_DIR and LIBEXEC_DIR are already set by detect_install_root;
-# only OPENCLAW_DIR and COSH_DIR need fallback derivation.
+# only OPENCLAW_DIR needs fallback derivation.
+# COSH_EXTENSION_SRC is the system-installed source of the extension;
+# for local installs we copy from the project's cosh-extension/ directory.
 OPENCLAW_DIR="${OPENCLAW_DIR:-${SHARE_DIR}/adapters/openclaw}"
-COSH_DIR="${COSH_DIR:-${SHARE_DIR}/adapters/cosh}"
+COSH_EXTENSION_SRC="${COSH_EXTENSION_SRC:-/usr/share/anolisa/extensions/tokenless}"
 
 # Colors
 RED='\033[0;31m'
@@ -220,113 +222,77 @@ cleanup_openclaw() {
 }
 
 # ============================================================================
-# Copilot-Shell Hooks Configuration (Shared)
+# Copilot-Shell Extension Setup
 # ============================================================================
 
-# Configure copilot-shell hooks (idempotent)
-configure_cosh_hooks() {
-    local hook_source_dir="${1:-$COSH_DIR}"
-    local settings_file=""
-
-    # Detect settings file
-    if [ -f "$HOME/.copilot-shell/settings.json" ]; then
-        settings_file="$HOME/.copilot-shell/settings.json"
-    elif [ -f "$HOME/.qwen-code/settings.json" ]; then
-        settings_file="$HOME/.qwen-code/settings.json"
-    fi
-
-    if [ -z "$settings_file" ]; then
-        warn "No copilot-shell settings file found"
-        return 1
-    fi
-
-    info "Configuring copilot-shell hooks from: $hook_source_dir"
-
-    # Copy hook scripts only if source differs from destination
-    if [ "$hook_source_dir" != "$COSH_DIR" ] && [ -d "$hook_source_dir" ]; then
-        mkdir -p "$COSH_DIR"
-        cp "$hook_source_dir"/tokenless-*.sh "$COSH_DIR/" 2>/dev/null || true
-        chmod +x "$COSH_DIR"/tokenless-*.sh 2>/dev/null || true
-        info "  Copied hook scripts to $COSH_DIR"
-    elif [ ! -d "$COSH_DIR" ]; then
-        warn "Hook directory not found: $COSH_DIR"
-    fi
-
-    # Configure settings.json using jq
-    if command -v jq &>/dev/null; then
-        local temp_file
-        temp_file=$(mktemp)
-
-        # Remove existing tokenless hooks first, then add fresh ones (idempotent)
-        jq '
-            .hooks.PreToolUse = (.hooks.PreToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-            .hooks.PostToolUse = (.hooks.PostToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-            .hooks.BeforeModel = (.hooks.BeforeModel // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-            .hooks = (.hooks // {}) |
-            .hooks.PreToolUse = .hooks.PreToolUse + [
-                {
-                    "matcher": "Shell",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "'"$COSH_DIR"'/tokenless-rewrite.sh",
-                            "name": "tokenless-rewrite",
-                            "timeout": 5000
-                        }
-                    ]
-                }
-            ] |
-            .hooks.PostToolUse = .hooks.PostToolUse + [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "'"$COSH_DIR"'/tokenless-compress-response.sh",
-                            "name": "tokenless-compress-response",
-                            "timeout": 10000
-                        }
-                    ]
-                }
-            ] |
-            .hooks.BeforeModel = .hooks.BeforeModel + [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "'"$COSH_DIR"'/tokenless-compress-schema.sh",
-                            "name": "tokenless-compress-schema",
-                            "timeout": 10000
-                        }
-                    ]
-                }
-            ]
-        ' "$settings_file" > "$temp_file" 2>/dev/null
-
-        if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-            mv "$temp_file" "$settings_file"
-            info "  Updated settings: $settings_file"
-        else
-            rm -f "$temp_file"
-            warn "jq processing failed"
-            return 1
+# Detect copilot-shell extensions directory
+_detect_cosh_extensions_dir() {
+    # copilot-shell and qwen-code store extensions in different locations.
+    # Return the first existing one, or the default copilot-shell path.
+    for dir in "$HOME/.copilot-shell/extensions" "$HOME/.qwen-code/extensions"; do
+        if [ -d "$dir" ]; then
+            echo "$dir"
+            return
         fi
-    else
-        warn "jq not available, skipping automatic configuration"
-        return 1
-    fi
+    done
+    # Default: use copilot-shell path (will be created if needed)
+    echo "$HOME/.copilot-shell/extensions"
 }
 
-# Clean up copilot-shell hooks
-cleanup_cosh_hooks() {
+# Install cosh extension (idempotent)
+install_cosh_extension() {
+    local extension_src="${1:-$COSH_EXTENSION_SRC}"
+
+    if [ ! -d "$extension_src" ]; then
+        warn "Extension source directory not found: $extension_src"
+        return 1
+    fi
+
+    local extensions_dir
+    extensions_dir="$(_detect_cosh_extensions_dir)"
+    local target_dir="${extensions_dir}/tokenless"
+
+    info "Installing copilot-shell extension..."
+    info "  Source: $extension_src"
+    info "  Target: $target_dir"
+
+    # Copy entire extension directory
+    rm -rf "$target_dir" 2>/dev/null || true
+    mkdir -p "$extensions_dir"
+    cp -r "$extension_src" "$target_dir"
+    chmod +x "$target_dir/hooks/"*.py 2>/dev/null || true
+    info "  Extension installed to $target_dir"
+
+    # Also clean up legacy bash hooks from settings.json (migration)
+    _cleanup_legacy_cosh_hooks
+}
+
+# Uninstall cosh extension
+uninstall_cosh_extension() {
     local is_upgrade="${1:-0}"
 
     if [ "$is_upgrade" -eq 1 ]; then
-        info "Upgrade operation detected, preserving configuration"
+        info "Upgrade operation detected, preserving extension"
         return 0
     fi
 
-    info "Cleaning up copilot-shell hooks configuration..."
+    info "Uninstalling copilot-shell extension..."
 
+    # Remove extension directories from all known locations
+    for extensions_dir in "$HOME/.copilot-shell/extensions" "$HOME/.qwen-code/extensions"; do
+        local target_dir="${extensions_dir}/tokenless"
+        if [ -d "$target_dir" ]; then
+            rm -rf "$target_dir"
+            info "  Removed $target_dir"
+        fi
+    done
+
+    # Also clean up legacy bash hooks from settings.json
+    _cleanup_legacy_cosh_hooks
+}
+
+# Clean up legacy bash hook entries from settings.json (migration helper)
+_cleanup_legacy_cosh_hooks() {
     for settings_file in "$HOME/.copilot-shell/settings.json" "$HOME/.qwen-code/settings.json"; do
         if [ ! -f "$settings_file" ]; then
             continue
@@ -336,42 +302,38 @@ cleanup_cosh_hooks() {
             continue
         fi
 
-        # Backup
-        local backup_file="${settings_file}.tokenless_backup.$(date +%Y%m%d%H%M%S)"
-        cp "$settings_file" "$backup_file"
-        info "  Backed up: $backup_file"
+        if ! command -v jq &>/dev/null; then
+            warn "jq not available, cannot clean up legacy hook entries in $settings_file"
+            continue
+        fi
 
-        # Clean up using jq
-        if command -v jq &>/dev/null; then
-            local temp_file
-            temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(mktemp)
 
-            jq '
-                .hooks.PreToolUse = (.hooks.PreToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-                .hooks.PostToolUse = (.hooks.PostToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-                .hooks.BeforeModel = (.hooks.BeforeModel // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
-                if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end |
-                if .hooks.PostToolUse == [] then del(.hooks.PostToolUse) else . end |
-                if .hooks.BeforeModel == [] then del(.hooks.BeforeModel) else . end |
-                if (.hooks | length) == 0 then del(.hooks) else . end
-            ' "$settings_file" > "$temp_file" 2>/dev/null
+        jq '
+            .hooks.PreToolUse = (.hooks.PreToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
+            .hooks.PostToolUse = (.hooks.PostToolUse // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
+            .hooks.BeforeModel = (.hooks.BeforeModel // [] | map(select(.hooks // [] | map(.command // "") | join("") | contains("tokenless") | not))) |
+            if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end |
+            if .hooks.PostToolUse == [] then del(.hooks.PostToolUse) else . end |
+            if .hooks.BeforeModel == [] then del(.hooks.BeforeModel) else . end |
+            if (.hooks | length) == 0 then del(.hooks) else . end
+        ' "$settings_file" > "$temp_file" 2>/dev/null
 
-            if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-                mv "$temp_file" "$settings_file"
-                info "  Cleaned up: $settings_file"
-            else
-                rm -f "$temp_file"
-                warn "jq processing failed for $settings_file"
-            fi
+        if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
+            mv "$temp_file" "$settings_file"
+            info "  Cleaned up legacy hook entries in $settings_file"
         else
-            warn "jq not available, cannot clean up $settings_file"
+            rm -f "$temp_file"
+            warn "  Failed to clean up $settings_file"
         fi
     done
 
-    # Remove hook scripts directory (only for local installation)
-    if [ "$is_upgrade" -eq 0 ] && [ -d "$COSH_DIR" ] && [ "$SOURCE_TYPE" = "local" ]; then
-        rm -rf "$COSH_DIR"
-        info "  Removed hook scripts directory: $COSH_DIR"
+    # Remove legacy hook scripts directory
+    local legacy_cosh_dir="${SHARE_DIR}/adapters/cosh"
+    if [ -d "$legacy_cosh_dir" ]; then
+        rm -rf "$legacy_cosh_dir"
+        info "  Removed legacy hook scripts directory: $legacy_cosh_dir"
     fi
 }
 
@@ -424,10 +386,10 @@ install_from_source() {
     # Setup OpenClaw (guarded internally)
     setup_openclaw "local" || true
 
-    # Setup copilot-shell hooks (guarded internally)
-    info "Installing copilot-shell hooks..."
-    if [ -d "$PROJECT_DIR/hooks/copilot-shell" ]; then
-        configure_cosh_hooks "$PROJECT_DIR/hooks/copilot-shell" || true
+    # Setup copilot-shell extension (guarded internally)
+    info "Installing copilot-shell extension..."
+    if [ -d "$PROJECT_DIR/cosh-extension" ]; then
+        install_cosh_extension "$PROJECT_DIR/cosh-extension" || true
     fi
 }
 
@@ -451,8 +413,8 @@ rpm_preuninstall() {
     # Clean up OpenClaw plugin
     cleanup_openclaw 0
 
-    # Clean up copilot-shell hooks
-    cleanup_cosh_hooks 0
+    # Clean up copilot-shell extension
+    uninstall_cosh_extension 0
 
     # Clean up stats data
     if [ -d "$HOME/.tokenless" ]; then
@@ -529,10 +491,11 @@ verify_installation() {
     echo "  OpenClaw Plugin:"
     echo "    ${OPENCLAW_DIR}/"
     echo ""
-    echo "  Copilot-Shell Hooks:"
-    echo "    ${COSH_DIR}/tokenless-rewrite.sh"
-    echo "    ${COSH_DIR}/tokenless-compress-response.sh (includes TOON encoding)"
-    echo "    ${COSH_DIR}/tokenless-compress-schema.sh"
+    local extensions_dir
+    extensions_dir="$(_detect_cosh_extensions_dir)"
+
+    echo "  Copilot-Shell Extension:"
+    echo "    ${extensions_dir}/tokenless/"
     echo ""
     if [ "$verify_ok" = true ]; then
         echo "  Status: All checks passed"
@@ -560,9 +523,9 @@ OPTIONS:
     --uninstall         RPM pre-uninstallation cleanup (full removal)
     --upgrade           RPM pre-uninstallation cleanup (upgrade scenario)
     --openclaw          Manually setup OpenClaw plugin only
-    --cosh              Manually setup copilot-shell hooks only
+    --cosh              Manually install copilot-shell extension
     --uninstall-openclaw  Uninstall OpenClaw plugin only
-    --uninstall-cosh    Uninstall copilot-shell hooks only
+    --uninstall-cosh    Uninstall copilot-shell extension only
     --help, -h          Show this help message
 
 EXAMPLES:
@@ -583,7 +546,7 @@ ENVIRONMENT VARIABLES:
     BIN_DIR              tokenless binary dir (auto-detected: /usr/bin for RPM, ~/.local/bin for local)
     LIBEXEC_DIR          helper binary dir (auto-detected: /usr/libexec/tokenless for RPM, ~/.local/bin for local)
     OPENCLAW_DIR         OpenClaw plugin dir (auto-detected from installation root)
-    COSH_DIR             copilot-shell hooks dir (auto-detected from installation root)
+    COSH_EXTENSION_SRC   copilot-shell extension source dir (auto-detected from installation root)
 
 EOF
 }
@@ -603,7 +566,6 @@ main() {
             BIN_DIR="$HOME/.local/bin"
             LIBEXEC_DIR="$HOME/.local/bin"
             OPENCLAW_DIR="${SHARE_DIR}/adapters/openclaw"
-            COSH_DIR="${SHARE_DIR}/adapters/cosh"
             install_from_source
             verify_installation
             ;;
@@ -617,7 +579,7 @@ main() {
             cleanup_openclaw 0
             ;;
         --uninstall-cosh)
-            cleanup_cosh_hooks 0
+            uninstall_cosh_extension 0
             ;;
         --upgrade)
             info "Upgrade scenario — preserving existing configuration and stats."
@@ -626,11 +588,7 @@ main() {
             setup_openclaw "$SOURCE_TYPE"
             ;;
         --cosh)
-            if [ -f "$HOME/.copilot-shell/settings.json" ] || [ -f "$HOME/.qwen-code/settings.json" ]; then
-                configure_cosh_hooks "${SHARE_DIR}/adapters/cosh"
-            else
-                warn "copilot-shell/qwen-code not installed, nothing to configure"
-            fi
+            install_cosh_extension "${COSH_EXTENSION_SRC}"
             ;;
         --help|-h)
             show_help
@@ -645,11 +603,7 @@ main() {
                     else
                         info "OpenClaw not installed, skipping plugin configuration"
                     fi
-                    if [ -f "$HOME/.copilot-shell/settings.json" ] || [ -f "$HOME/.qwen-code/settings.json" ]; then
-                        configure_cosh_hooks "${SHARE_DIR}/adapters/cosh" || true
-                    else
-                        info "copilot-shell/qwen-code not installed, skipping hooks configuration"
-                    fi
+                    install_cosh_extension "${COSH_EXTENSION_SRC}" || true
                     verify_installation
                     ;;
                 local)

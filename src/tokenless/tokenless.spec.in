@@ -17,7 +17,7 @@ BuildRequires:  cargo
 BuildRequires:  rust >= 1.86
 
 # Runtime dependencies
-Requires:       jq
+Requires:       python3
 Requires:       bash
 
 %description
@@ -37,8 +37,8 @@ The package includes:
 - rtk: High-performance CLI proxy for command rewriting (Apache-2.0 licensed)
 - toon: JSON to TOON format encoder/decoder for LLM token optimization
 
-Note: OpenClaw plugin and copilot-shell hooks are available under
-/usr/share/tokenless/adapters/ for manual configuration.
+Note: OpenClaw plugin is available under /usr/share/tokenless/adapters/.
+Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
 
 %prep
 %setup -q -n tokenless
@@ -89,9 +89,10 @@ install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenles
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
-# Install adapters (agent-specific plugins/hooks)
+# Install OpenClaw adapter and cosh extension (copilot-shell auto-discovery)
 mkdir -p %{buildroot}%{_datadir}/tokenless/adapters/openclaw
-mkdir -p %{buildroot}%{_datadir}/tokenless/adapters/cosh
+mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
+mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
 mkdir -p %{buildroot}%{_datadir}/tokenless/scripts
 
 install -m 0644 openclaw/index.ts %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
@@ -99,8 +100,11 @@ install -m 0644 openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/tokenless/
 install -m 0644 openclaw/package.json %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
 install -m 0644 openclaw/README.md %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
 
-install -m 0755 hooks/copilot-shell/tokenless-*.sh %{buildroot}%{_datadir}/tokenless/adapters/cosh/
-install -m 0644 hooks/copilot-shell/README.md %{buildroot}%{_datadir}/tokenless/adapters/cosh/
+install -m 0644 cosh-extension/cosh-extension.json %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
+install -m 0644 cosh-extension/COPILOT.md %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
+install -m 0644 cosh-extension/README.md %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
+install -m 0755 cosh-extension/hooks/*.py %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
+install -m 0644 cosh-extension/commands/*.toml %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands/
 
 install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 
@@ -120,10 +124,17 @@ install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 %dir %{_datadir}/tokenless/scripts
 %dir %{_datadir}/tokenless/adapters
 %dir %{_datadir}/tokenless/adapters/openclaw
-%dir %{_datadir}/tokenless/adapters/cosh
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/extensions
+%dir %{_datadir}/anolisa/extensions/tokenless
+%dir %{_datadir}/anolisa/extensions/tokenless/hooks
+%dir %{_datadir}/anolisa/extensions/tokenless/commands
 %attr(0755,root,root) %{_datadir}/tokenless/scripts/install.sh
-%attr(0755,root,root) %{_datadir}/tokenless/adapters/cosh/tokenless-*.sh
-%attr(0644,root,root) %{_datadir}/tokenless/adapters/cosh/README.md
+%attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.py
+%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/cosh-extension.json
+%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/COPILOT.md
+%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/README.md
+%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/commands/*.toml
 %{_datadir}/tokenless/adapters/openclaw/*
 
 %post
