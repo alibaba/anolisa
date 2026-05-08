@@ -304,6 +304,21 @@ class TestSqliteEventReader:
 
         assert [event.event_type for event in reader.query()] == ["after_replace"]
 
+    def test_reader_recovers_after_schema_created_in_existing_db(
+        self, db_path: str
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.close()
+
+        reader = SqliteEventReader(path=db_path)
+        assert reader.query() == []
+
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event(event_type="after_schema"))
+        writer.close()
+
+        assert [event.event_type for event in reader.query()] == ["after_schema"]
+
     def test_tilde_path_is_normalized_for_reader_and_writer(
         self, tilde_db_path: str
     ) -> None:
@@ -314,3 +329,29 @@ class TestSqliteEventReader:
         reader = SqliteEventReader(path=tilde_db_path)
         assert [event.event_type for event in reader.query()] == ["tilde_path"]
         assert not Path("~").exists()
+
+    def test_compatibility_helpers_delegate_to_store(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event(event_type="compat"))
+        writer.close()
+
+        reader = SqliteEventReader(path=db_path)
+        assert reader._ensure_session_factory() is not None
+        assert reader._engine is not None
+        assert reader._session_factory is not None
+
+        reader._dispose_engine()
+        assert reader._engine is None
+        assert reader._session_factory is None
+
+    def test_close_disposes_readonly_store(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event(event_type="close"))
+        writer.close()
+
+        reader = SqliteEventReader(path=db_path)
+        assert reader.query()
+
+        reader.close()
+        assert reader._engine is None
+        assert reader._session_factory is None

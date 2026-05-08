@@ -1,21 +1,17 @@
-"""SQLAlchemy ORM storage primitives for security events."""
+"""SQLAlchemy SQLite storage primitives for security event indexes."""
 
 import re
 import sqlite3
+import sys
+import threading
+from collections.abc import Iterable
 from pathlib import Path
 
-from sqlalchemy import (
-    Float,
-    Index,
-    Integer,
-    Text,
-    create_engine,
-    event,
-    inspect,
-    text,
-)
-from sqlalchemy.engine import URL, Engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from agent_sec_cli.security_events.orm_base import Base
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import URL, Connection, Engine
+from sqlalchemy.exc import DatabaseError, SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 _SCHEMA_VERSION = 1
@@ -24,49 +20,16 @@ _SQLITE_CORRUPTION_CODES = {
     sqlite3.SQLITE_CORRUPT,
     sqlite3.SQLITE_NOTADB,
 }
-_SQLITE_RETRYABLE_CODES = {
-    sqlite3.SQLITE_BUSY,
-    sqlite3.SQLITE_LOCKED,
-    sqlite3.SQLITE_SCHEMA,
-}
-
-# Declarative column registry for convergent migration.
-# To add a column: insert an entry and bump _SCHEMA_VERSION.
-_COLUMNS: dict[str, str] = {
-    # "severity": "TEXT DEFAULT 'info'",  # Future: uncomment and bump version
-}
-
+_SQLITE_SCHEMA_ERROR_MARKERS = (
+    "database schema has changed",
+    "has no column named",
+    "no such column",
+    "no such table",
+)
 _IDENTIFIER_RE = re.compile(r"^[a-z_]+$")
 
-
-class Base(DeclarativeBase):
-    """Base class for security event ORM models."""
-
-
-class SecurityEventRecord(Base):
-    """ORM mapping for the queryable security event index."""
-
-    __tablename__ = "security_events"
-    __table_args__ = (
-        Index("idx_event_type", "event_type"),
-        Index("idx_category_epoch", "category", "timestamp_epoch"),
-        Index("idx_trace_id", "trace_id"),
-        Index("idx_timestamp_epoch", "timestamp_epoch"),
-    )
-
-    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    category: Mapped[str] = mapped_column(Text, nullable=False)
-    result: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="succeeded"
-    )
-    timestamp: Mapped[str] = mapped_column(Text, nullable=False)
-    timestamp_epoch: Mapped[float] = mapped_column(Float, nullable=False)
-    trace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    pid: Mapped[int] = mapped_column(Integer, nullable=False)
-    uid: Mapped[int] = mapped_column(Integer, nullable=False)
-    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    details: Mapped[str] = mapped_column(Text, nullable=False)
+OrmModel = type[Base]
+_DEFAULT_MODELS: tuple[OrmModel, ...] = ()
 
 
 def normalize_sqlite_path(path: str | Path) -> Path:
@@ -75,7 +38,7 @@ def normalize_sqlite_path(path: str | Path) -> Path:
 
 
 def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
-    """Create a pooled SQLAlchemy engine for the security-events SQLite DB."""
+    """Create a pooled SQLAlchemy engine for a SQLite DB."""
     if read_only:
         url = URL.create(
             "sqlite+pysqlite",
@@ -96,10 +59,10 @@ def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA busy_timeout=200")
+            cursor.execute("PRAGMA foreign_keys=ON")
             if read_only:
                 cursor.execute("PRAGMA query_only=ON")
             else:
-                cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.execute("PRAGMA wal_autocheckpoint=100")
         finally:
@@ -108,33 +71,126 @@ def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
     return engine
 
 
-def ensure_schema(engine: Engine) -> None:
-    """Create tables/indexes and apply convergent column migrations."""
+def _require_models(models: tuple[OrmModel, ...]) -> tuple[OrmModel, ...]:
+    if models:
+        return models
+    raise ValueError(
+        "No ORM models registered for SQLite schema initialization; "
+        "import agent_sec_cli.security_events.models or pass models explicitly"
+    )
+
+
+def register_orm_models(models: Iterable[OrmModel]) -> None:
+    """Register default ORM models for schema initialization."""
+    global _DEFAULT_MODELS  # noqa: PLW0603
+    _DEFAULT_MODELS = _require_models(tuple(models))
+
+
+def _coerce_models(models: Iterable[OrmModel] | None) -> tuple[OrmModel, ...]:
+    return _require_models(tuple(models) if models is not None else _DEFAULT_MODELS)
+
+
+def _warn_newer_schema_version(version: int) -> None:
+    print(
+        f"[security_events] sqlite schema version {version} is newer than "
+        f"this binary supports ({_SCHEMA_VERSION}); skipping schema migration",
+        file=sys.stderr,
+    )
+
+
+def _schema_readiness(
+    conn: Connection, models: tuple[OrmModel, ...]
+) -> tuple[int, list[str]]:
+    version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
+    if version > _SCHEMA_VERSION:
+        return version, []
+
+    inspector = inspect(conn)
+    missing_tables = [
+        model.__table__.name
+        for model in models
+        if not inspector.has_table(model.__table__.name)
+    ]
+    return version, missing_tables
+
+
+def _schema_version(conn: Connection) -> int:
+    return int(conn.execute(text("PRAGMA user_version")).scalar_one())
+
+
+def ensure_schema(engine: Engine, models: Iterable[OrmModel] | None = None) -> None:
+    """Create model tables/indexes and apply convergent column migrations."""
+    model_tuple = _coerce_models(models)
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL"))
     with engine.begin() as conn:
+        version = conn.execute(text("PRAGMA user_version")).scalar_one()
+        if version > _SCHEMA_VERSION:
+            _warn_newer_schema_version(int(version))
+            return
+
         conn.execute(text("PRAGMA auto_vacuum = INCREMENTAL"))
-        conn.execute(CreateTable(SecurityEventRecord.__table__, if_not_exists=True))
+        for model in model_tuple:
+            table = model.__table__
+            conn.execute(CreateTable(table, if_not_exists=True))
 
-        existing = {
-            column["name"]
-            for column in inspect(conn).get_columns(SecurityEventRecord.__tablename__)
-        }
-        for col, typedef in _COLUMNS.items():
-            if col not in existing:
-                if not _IDENTIFIER_RE.match(col):
-                    raise ValueError(f"Invalid column name in schema: {col!r}")
-                conn.execute(
-                    text(
-                        f"ALTER TABLE {SecurityEventRecord.__tablename__} "
-                        f"ADD COLUMN {col} {typedef}"
-                    )
-                )
+            extra_columns = getattr(model, "__schema_columns__", {})
+            if extra_columns:
+                existing = {
+                    column["name"] for column in inspect(conn).get_columns(table.name)
+                }
+                for col, typedef in extra_columns.items():
+                    if col not in existing:
+                        if not _IDENTIFIER_RE.match(col):
+                            raise ValueError(f"Invalid column name in schema: {col!r}")
+                        conn.execute(
+                            text(f"ALTER TABLE {table.name} ADD COLUMN {col} {typedef}")
+                        )
 
-        for index in SecurityEventRecord.__table__.indexes:
-            conn.execute(CreateIndex(index, if_not_exists=True))
+            for index in table.indexes:
+                conn.execute(CreateIndex(index, if_not_exists=True))
 
-        # Version-gated escape hatch
-        conn.execute(text("PRAGMA user_version"))  # retained for future migrations
-        conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
+        if version < _SCHEMA_VERSION:
+            conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
+
+
+def ensure_schema_if_needed(
+    engine: Engine,
+    models: Iterable[OrmModel] | None = None,
+    *,
+    force: bool = False,
+) -> None:
+    """Run full schema convergence only when version changes or repair is forced."""
+    model_tuple = _coerce_models(models)
+    with engine.connect() as conn:
+        version = _schema_version(conn)
+        if version > _SCHEMA_VERSION:
+            _warn_newer_schema_version(int(version))
+            return
+
+        if version == _SCHEMA_VERSION and not force:
+            return
+
+    ensure_schema(engine, model_tuple)
+
+
+def warn_readonly_schema_readiness(
+    engine: Engine, models: Iterable[OrmModel] | None = None
+) -> None:
+    """Warn about read-only schema drift without creating or migrating anything."""
+    model_tuple = _coerce_models(models)
+    with engine.connect() as conn:
+        version, missing_tables = _schema_readiness(conn, model_tuple)
+
+    if version > _SCHEMA_VERSION:
+        _warn_newer_schema_version(int(version))
+    elif version < _SCHEMA_VERSION or missing_tables:
+        print(
+            f"[security_events] sqlite schema not ready for read-only access: "
+            f"version={version}, expected={_SCHEMA_VERSION}, "
+            f"missing_tables={missing_tables}",
+            file=sys.stderr,
+        )
 
 
 def sqlite_database_files(path: Path) -> tuple[Path, Path, Path]:
@@ -161,7 +217,221 @@ def is_sqlite_corruption_error(exc: Exception) -> bool:
     return code in _SQLITE_CORRUPTION_CODES
 
 
-def is_sqlite_retryable_error(exc: Exception) -> bool:
-    """Return True for transient SQLite lock/busy/schema races."""
+def is_sqlite_schema_error(exc: Exception) -> bool:
+    """Return True for errors that can be repaired by schema convergence."""
     code = _sqlite_primary_error_code(exc)
-    return code in _SQLITE_RETRYABLE_CODES
+    if code == sqlite3.SQLITE_SCHEMA:
+        return True
+    message = str(getattr(exc, "orig", exc)).lower()
+    return any(marker in message for marker in _SQLITE_SCHEMA_ERROR_MARKERS)
+
+
+class SqliteStore:
+    """Shared SQLite engine/session lifecycle for typed repositories."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        read_only: bool = False,
+        models: Iterable[OrmModel] | None = None,
+    ) -> None:
+        self.path = normalize_sqlite_path(path)
+        self.read_only = read_only
+        self.models = _coerce_models(models)
+        self._engine_lock = threading.Lock()
+        self._engine: Engine | None = None
+        self._session_factory: sessionmaker[Session] | None = None
+        self._db_identity: tuple[int, int] | None = None
+        self._disabled = False
+        self._force_schema_convergence = False
+
+    @property
+    def engine(self) -> Engine | None:
+        """Return the cached engine, if initialized."""
+        return self._engine
+
+    @property
+    def cached_session_factory(self) -> sessionmaker[Session] | None:
+        """Return the cached session factory, if initialized."""
+        return self._session_factory
+
+    @property
+    def disabled(self) -> bool:
+        """Return True when corruption cleanup failed and writes are disabled."""
+        return self._disabled
+
+    def session_factory(self) -> sessionmaker[Session] | None:
+        """Return a lazily initialized session factory."""
+        if self._disabled:
+            return None
+
+        if self.read_only:
+            db_identity = self._current_db_identity()
+            if db_identity is None:
+                with self._engine_lock:
+                    self.dispose()
+                return None
+            if self._has_current_session_factory(db_identity):
+                return self._session_factory
+        else:
+            db_identity = None
+            if self._session_factory is not None:
+                return self._session_factory
+
+        with self._engine_lock:
+            if self.read_only:
+                db_identity = self._current_db_identity()
+                if db_identity is None:
+                    self.dispose()
+                    return None
+                if self._has_current_session_factory(db_identity):
+                    return self._session_factory
+                self.dispose()
+            elif self._session_factory is not None:
+                return self._session_factory
+
+            try:
+                self._open_session_factory(db_identity)
+            except DatabaseError as exc:
+                if self.read_only or not is_sqlite_corruption_error(exc):
+                    print(
+                        f"[security_events] schema init failure: {exc}",
+                        file=sys.stderr,
+                    )
+                    return None
+                self.handle_corruption(exc)
+                if self._disabled:
+                    return None
+                try:
+                    self._open_session_factory(None)
+                except (SQLAlchemyError, OSError) as rebuild_exc:
+                    print(
+                        f"[security_events] corruption rebuild failed: {rebuild_exc}",
+                        file=sys.stderr,
+                    )
+                    return None
+            except (SQLAlchemyError, OSError) as exc:
+                print(
+                    f"[security_events] schema init failure: {exc}",
+                    file=sys.stderr,
+                )
+                return None
+
+        return self._session_factory
+
+    def dispose(self) -> None:
+        """Dispose SQLAlchemy engine state and clear cached session state."""
+        if self._engine is not None:
+            try:
+                self._engine.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        self._engine = None
+        self._session_factory = None
+        self._db_identity = None
+
+    def close(self) -> None:
+        """Dispose cached SQLAlchemy connections."""
+        self.dispose()
+
+    def request_schema_repair(self) -> None:
+        """Force full schema convergence the next time this store opens."""
+        self._force_schema_convergence = True
+        self.dispose()
+
+    def handle_corruption(self, exc: Exception) -> None:
+        """Delete a corrupt expendable SQLite query index and clear state."""
+        print(
+            f"[security_events] corrupt DB detected, recreating: {exc}",
+            file=sys.stderr,
+        )
+        self.dispose()
+        try:
+            for db_file in sqlite_database_files(self.path):
+                db_file.unlink(missing_ok=True)
+        except OSError as delete_exc:
+            self._disabled = True
+            print(
+                f"[security_events] cannot delete corrupt db, "
+                f"writer disabled: {delete_exc}",
+                file=sys.stderr,
+            )
+
+    def _open_session_factory(self, db_identity: tuple[int, int] | None) -> None:
+        force_schema = self._force_schema_convergence
+        if not self.read_only:
+            self._ensure_write_parent()
+
+        engine = create_sqlite_engine(self.path, read_only=self.read_only)
+        try:
+            if self.read_only:
+                warn_readonly_schema_readiness(engine, self.models)
+            else:
+                ensure_schema_if_needed(
+                    engine,
+                    self.models,
+                    force=force_schema,
+                )
+            self._engine = engine
+            self._db_identity = db_identity
+            self._session_factory = sessionmaker(
+                bind=engine,
+                expire_on_commit=False,
+                future=True,
+            )
+            if not self.read_only:
+                try:
+                    self.path.chmod(0o600)
+                except OSError:
+                    pass
+            self._force_schema_convergence = False
+        except Exception:
+            engine.dispose()
+            raise
+
+    def _ensure_write_parent(self) -> None:
+        parent = self.path.parent
+        created_dirs: list[Path] = []
+        current = parent
+        while not current.exists() and current.parent != current:
+            created_dirs.append(current)
+            current = current.parent
+
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for directory in created_dirs:
+            try:
+                directory.chmod(0o700)
+            except OSError:
+                pass
+
+    def _has_current_session_factory(self, db_identity: tuple[int, int]) -> bool:
+        """Return True when cached reader state matches the DB file identity.
+
+        Writers never call this path; they cache only by the presence of a
+        session factory.  ``None`` is therefore reserved for write-mode state
+        and is not treated as a real database identity.
+        """
+        return self._session_factory is not None and self._db_identity == db_identity
+
+    def _current_db_identity(self) -> tuple[int, int] | None:
+        try:
+            stat_result = self.path.stat()
+        except OSError:
+            return None
+        return (stat_result.st_dev, stat_result.st_ino)
+
+
+__all__ = [
+    "Base",
+    "SqliteStore",
+    "create_sqlite_engine",
+    "ensure_schema",
+    "ensure_schema_if_needed",
+    "is_sqlite_corruption_error",
+    "is_sqlite_schema_error",
+    "normalize_sqlite_path",
+    "register_orm_models",
+    "sqlite_database_files",
+    "warn_readonly_schema_readiness",
+]

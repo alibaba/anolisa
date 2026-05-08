@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
+from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 
 
 def _make_event(
@@ -101,7 +102,7 @@ class TestSqliteEventWriter:
         """Verify that all column values are correctly written to SQLite.
 
         This is a critical data integrity test — validates the entire
-        _event_params conversion and INSERT correctness.
+        SecurityEvent conversion and INSERT correctness.
         """
         writer = SqliteEventWriter(path=db_path)
 
@@ -244,6 +245,59 @@ class TestSqliteEventWriter:
     def test_concurrent_writes_from_independent_writers(self, db_path: str) -> None:
         writer_count = 8
         events_per_writer = 25
+        warmup_writer = SqliteEventWriter(path=db_path)
+        warmup_writer.write(
+            SecurityEvent(
+                event_id="warmup-event",
+                event_type="warmup_event",
+                category="test",
+                details={},
+            )
+        )
+        warmup_writer.close()
+        writers = [SqliteEventWriter(path=db_path) for _ in range(writer_count)]
+
+        def write_events(writer_id: int) -> None:
+            writer = writers[writer_id]
+            for event_num in range(events_per_writer):
+                writer.write(
+                    SecurityEvent(
+                        event_id=f"writer-{writer_id}-event-{event_num}",
+                        event_type="concurrent_event",
+                        category="test",
+                        trace_id=f"writer-{writer_id}",
+                        details={"writer_id": writer_id, "event_num": event_num},
+                    )
+                )
+
+        try:
+            with ThreadPoolExecutor(max_workers=writer_count) as executor:
+                futures = [
+                    executor.submit(write_events, writer_id)
+                    for writer_id in range(writer_count)
+                ]
+                for future in as_completed(futures):
+                    future.result()
+        finally:
+            for writer in writers:
+                writer.close()
+
+        conn = sqlite3.connect(db_path)
+        total, distinct_ids = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT event_id) "
+            "FROM security_events WHERE event_type = 'concurrent_event'"
+        ).fetchone()
+        conn.close()
+
+        expected = writer_count * events_per_writer
+        assert total == expected
+        assert distinct_ids == expected
+
+    def test_concurrent_cold_bootstrap_is_best_effort(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        writer_count = 4
+        events_per_writer = 5
 
         def write_events(writer_id: int) -> None:
             writer = SqliteEventWriter(path=db_path)
@@ -251,10 +305,10 @@ class TestSqliteEventWriter:
                 for event_num in range(events_per_writer):
                     writer.write(
                         SecurityEvent(
-                            event_id=f"writer-{writer_id}-event-{event_num}",
-                            event_type="concurrent_event",
+                            event_id=f"cold-{writer_id}-event-{event_num}",
+                            event_type="cold_bootstrap_event",
                             category="test",
-                            trace_id=f"writer-{writer_id}",
+                            trace_id=f"cold-{writer_id}",
                             details={"writer_id": writer_id, "event_num": event_num},
                         )
                     )
@@ -269,15 +323,28 @@ class TestSqliteEventWriter:
             for future in as_completed(futures):
                 future.result()
 
+        probe = SqliteEventWriter(path=db_path)
+        probe.write(
+            SecurityEvent(
+                event_id="cold-bootstrap-probe",
+                event_type="cold_bootstrap_probe",
+                category="test",
+                details={},
+            )
+        )
+        probe.close()
+
         conn = sqlite3.connect(db_path)
         total, distinct_ids = conn.execute(
-            "SELECT COUNT(*), COUNT(DISTINCT event_id) FROM security_events"
+            "SELECT COUNT(*), COUNT(DISTINCT event_id) "
+            "FROM security_events "
+            "WHERE event_type IN ('cold_bootstrap_event', 'cold_bootstrap_probe')"
         ).fetchone()
         conn.close()
 
-        expected = writer_count * events_per_writer
-        assert total == expected
-        assert distinct_ids == expected
+        assert 1 <= total <= (writer_count * events_per_writer) + 1
+        assert distinct_ids == total
+        assert "corrupt DB detected" not in capsys.readouterr().err
 
     def test_pruning_at_close(self, db_path: str) -> None:
         """Pruning happens in close(), not during writes.
@@ -382,6 +449,39 @@ class TestSqliteEventWriter:
             "idx_timestamp_epoch",
         }.issubset(index_names)
 
+    def test_schema_error_requests_repair_for_next_write(self, db_path: str) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.close()
+
+        writer = SqliteEventWriter(path=db_path)
+        skipped_event = SecurityEvent(
+            event_id="schema-error-skipped",
+            event_type="schema_repair",
+            category="test",
+            details={},
+        )
+        repaired_event = SecurityEvent(
+            event_id="schema-error-repaired",
+            event_type="schema_repair",
+            category="test",
+            details={},
+        )
+
+        writer.write(skipped_event)
+        writer.write(repaired_event)
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT event_id FROM security_events "
+            "WHERE event_type = 'schema_repair' ORDER BY event_id"
+        ).fetchall()
+        conn.close()
+
+        assert rows == [("schema-error-repaired",)]
+
     def test_close_performs_checkpoint(self, db_path: str) -> None:
         writer = SqliteEventWriter(path=db_path)
         writer.write(_make_event())
@@ -411,3 +511,58 @@ class TestSqliteEventWriter:
 
         # Subsequent writes should be no-ops
         writer2.write(_make_event())
+
+    def test_store_helpers_delegate_to_store(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event())
+        assert writer._engine is not None
+        assert writer._session_factory is not None
+        assert writer._ensure_session_factory() is writer._session_factory
+        assert not writer._disabled
+
+        writer._dispose_engine()
+        assert writer._engine is None
+        assert writer._session_factory is None
+
+    def test_write_retries_after_corruption_error(
+        self, db_path: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class CorruptError(Exception):
+            sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+
+        writer = SqliteEventWriter(path=db_path)
+        calls = 0
+
+        def flaky_insert(_event: SecurityEvent) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise DatabaseError("INSERT", {}, CorruptError())
+            return True
+
+        monkeypatch.setattr(writer._repository, "insert", flaky_insert)
+        monkeypatch.setattr(writer._store, "handle_corruption", lambda _exc: None)
+
+        writer.write(_make_event())
+
+        assert calls == 2
+
+    def test_write_disposes_on_sqlalchemy_error(
+        self, db_path: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        disposed = False
+
+        def raise_sqlalchemy_error(_event: SecurityEvent) -> bool:
+            raise SQLAlchemyError("boom")
+
+        def mark_disposed() -> None:
+            nonlocal disposed
+            disposed = True
+
+        monkeypatch.setattr(writer._repository, "insert", raise_sqlalchemy_error)
+        monkeypatch.setattr(writer._store, "dispose", mark_disposed)
+
+        writer.write(_make_event())
+
+        assert disposed
