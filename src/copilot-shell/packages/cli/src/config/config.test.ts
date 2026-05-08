@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  AuthType,
   ShellTool,
   EditTool,
   WriteFileTool,
@@ -1427,6 +1428,82 @@ describe('loadCliConfig model selection', () => {
     );
 
     expect(config.getModel()).toBe('qwen3-coder-plus');
+  });
+});
+
+describe('loadCliConfig deprecated/unknown authType handling', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('treats deprecated qwen-oauth selectedType as undefined and warns', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: 'qwen-oauth' } },
+    } as unknown as Settings;
+    const configWarnings: string[] = [];
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      [],
+      configWarnings,
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBeUndefined();
+    expect(configWarnings).toContainEqual(
+      expect.stringContaining('Qwen OAuth service was discontinued'),
+    );
+  });
+
+  it('treats unknown selectedType as undefined and warns', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: 'nonsense-auth' } },
+    } as unknown as Settings;
+    const configWarnings: string[] = [];
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      [],
+      configWarnings,
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBeUndefined();
+    expect(configWarnings).toContainEqual(
+      expect.stringContaining("Unknown auth type 'nonsense-auth'"),
+    );
+  });
+
+  it('passes through valid selectedType without warning', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: 'openai' } },
+    } as unknown as Settings;
+    const configWarnings: string[] = [];
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      [],
+      configWarnings,
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI,
+    );
+    expect(configWarnings).toHaveLength(0);
   });
 });
 

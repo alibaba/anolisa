@@ -56,12 +56,6 @@ describe('modelConfigUtils', () => {
       expect(getAuthTypeFromEnv()).toBeUndefined();
     });
 
-    it('should return QWEN_OAUTH when QWEN_OAUTH is set', () => {
-      process.env['QWEN_OAUTH'] = 'true';
-
-      expect(getAuthTypeFromEnv()).toBe(AuthType.QWEN_OAUTH);
-    });
-
     it('should return USE_GEMINI when Gemini env vars are set', () => {
       process.env['GEMINI_API_KEY'] = 'test-key';
       process.env['GEMINI_MODEL'] = 'gemini-pro';
@@ -104,16 +98,6 @@ describe('modelConfigUtils', () => {
       // Missing ANTHROPIC_BASE_URL
 
       expect(getAuthTypeFromEnv()).toBeUndefined();
-    });
-
-    it('should prioritize QWEN_OAUTH over other auth types when explicitly set', () => {
-      process.env['QWEN_OAUTH'] = 'true';
-      process.env['OPENAI_API_KEY'] = 'test-key';
-      process.env['OPENAI_MODEL'] = 'gpt-4';
-      process.env['OPENAI_BASE_URL'] = 'https://api.openai.com';
-
-      // QWEN_OAUTH is checked first, so it should be returned even when other auth vars are set
-      expect(getAuthTypeFromEnv()).toBe(AuthType.QWEN_OAUTH);
     });
 
     it('should return undefined when no auth env vars are set', () => {

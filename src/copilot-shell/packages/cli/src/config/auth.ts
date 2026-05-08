@@ -170,12 +170,6 @@ export function validateAuthMethod(
     return null;
   }
 
-  if (authMethod === AuthType.QWEN_OAUTH) {
-    // Qwen OAuth doesn't require any environment variables for basic setup
-    // The OAuth flow will handle authentication
-    return null;
-  }
-
   if (authMethod === AuthType.USE_ANTHROPIC) {
     const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
     if (apiKeyError) {

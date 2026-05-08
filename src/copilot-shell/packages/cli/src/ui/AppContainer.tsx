@@ -449,7 +449,6 @@ export const AppContainer = (props: AppContainerProps) => {
     showBashOptionInAuthDialog,
     isAuthenticating,
     pendingAuthType,
-    qwenAuthState,
     handleAuthSelect,
     handleContinueToBash,
     openAuthDialog,
@@ -1472,8 +1471,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthDialogOpen,
       showBashOptionInAuthDialog,
       pendingAuthType,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -1572,8 +1569,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthDialogOpen,
       showBashOptionInAuthDialog,
       pendingAuthType,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,

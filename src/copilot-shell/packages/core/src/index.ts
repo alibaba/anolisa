@@ -18,7 +18,6 @@ export {
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
-  QWEN_OAUTH_MODELS,
   ModelRegistry,
   ModelsConfig,
   type ModelsConfigOptions,
@@ -44,8 +43,6 @@ export * from './core/turn.js';
 export * from './core/geminiRequest.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/nonInteractiveToolExecutor.js';
-
-export * from './qwen/qwenOAuth2.js';
 
 // Aliyun provider
 export * from './aliyun/aliyunCredentials.js';

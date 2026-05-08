@@ -398,6 +398,8 @@ export default {
     'Ripgrep not available: Please install ripgrep globally to enable faster file content search. Falling back to built-in grep.',
   'Ripgrep not available: {{message}}. Falling back to built-in grep.':
     'Ripgrep not available: {{message}}. Falling back to built-in grep.',
+  'Qwen OAuth service was discontinued on April 15, 2026. Please run /auth to select a supported authentication method.':
+    'Qwen OAuth service was discontinued on April 15, 2026. Please run /auth to select a supported authentication method.',
   'set external editor preference': 'set external editor preference',
   'Select Editor': 'Select Editor',
   'Editor Preference': 'Editor Preference',
@@ -971,8 +973,6 @@ export default {
   // ============================================================================
   'Get started': 'Get started',
   'Use Copilot Shell': 'Use Copilot Shell',
-  'Qwen OAuth': 'Qwen OAuth',
-  'Free · Up to 1,000 requests per day': 'Free · Up to 1,000 requests per day',
   'How would you like to authenticate for this project?':
     'How would you like to authenticate for this project?',
 
@@ -1002,25 +1002,11 @@ export default {
     'Failed to login. Message: {{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
-  'Qwen OAuth authentication timed out. Please try again.':
-    'Qwen OAuth authentication timed out. Please try again.',
-  'Qwen OAuth authentication cancelled.':
-    'Qwen OAuth authentication cancelled.',
-  'Qwen OAuth Authentication': 'Qwen OAuth Authentication',
   'Please visit this URL to authorize:': 'Please visit this URL to authorize:',
   'Or scan the QR code below:': 'Or scan the QR code below:',
   'Waiting for authorization': 'Waiting for authorization',
   'Time remaining:': 'Time remaining:',
   '(Press ESC or CTRL+C to cancel)': '(Press ESC or CTRL+C to cancel)',
-  'Qwen OAuth Authentication Timeout': 'Qwen OAuth Authentication Timeout',
-  'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.',
-  'Press any key to return to authentication type selection.':
-    'Press any key to return to authentication type selection.',
-  'Waiting for Qwen OAuth authentication...':
-    'Waiting for Qwen OAuth authentication...',
-  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
-    'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
   'Authentication timed out. Please try again.':
     'Authentication timed out. Please try again.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':

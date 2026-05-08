@@ -57,13 +57,6 @@ export function AuthDialog(): React.JSX.Element {
         ),
         value: AuthType.USE_OPENAI,
       },
-      {
-        key: AuthType.QWEN_OAUTH,
-        label: t('Qwen OAuth'),
-        title: t('Qwen OAuth'),
-        description: t('Free · Up to 1,000 requests per day'),
-        value: AuthType.QWEN_OAUTH,
-      },
     ],
     [],
   );
@@ -135,9 +128,6 @@ export function AuthDialog(): React.JSX.Element {
   const bashDisplayIndex =
     showBashOptionInAuthDialog && activeSection === 'bash' ? 0 : null;
   const isManualAuthDialog = !showBashOptionInAuthDialog;
-  const hasApiKey = Boolean(config.getContentGeneratorConfig()?.apiKey);
-  const currentSelectedAuthType =
-    activeOption === 'bash' ? undefined : activeOption;
 
   useEffect(() => {
     if (!showBashOptionInAuthDialog && activeOption === 'bash') {
@@ -353,23 +343,6 @@ export function AuthDialog(): React.JSX.Element {
             : t('(↑↓ Select · Enter Continue)')}
         </Text>
       </Box>
-      {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
-        <Box marginTop={1}>
-          <Text color={Colors.Gray}>
-            {t(
-              'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
-            )}
-          </Text>
-        </Box>
-      )}
-      {/* <Box marginTop={1}>
-        <Text>{t('Terms of Services and Privacy Notice for Copilot Shell')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={Colors.AccentBlue}>
-          {'https://github.com/QwenLM/Qwen3-Coder/blob/main/README.md'}
-        </Text>
-      </Box> */}
     </Box>
   );
 }

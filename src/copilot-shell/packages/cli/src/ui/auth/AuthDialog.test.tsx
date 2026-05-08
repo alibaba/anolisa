@@ -721,8 +721,6 @@ describe('AuthDialog', () => {
     await wait();
     stdin.write('\u001b[B');
     await wait();
-    stdin.write('\u001b[B');
-    await wait();
 
     expect(lastFrame()).toContain('● Continue to Bash');
 

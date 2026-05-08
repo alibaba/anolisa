@@ -123,8 +123,8 @@ export function shouldOfferVisionSwitch(
   currentModel: string,
   visionModelPreviewEnabled: boolean = true,
 ): boolean {
-  // Only trigger for qwen-oauth
-  if (authType !== AuthType.QWEN_OAUTH) {
+  // Only trigger for supported auth types (requires vision-capable models)
+  if (authType !== AuthType.USE_OPENAI) {
     return false;
   }
 
@@ -220,8 +220,8 @@ export function useVisionAutoSwitch(
 
       const contentGeneratorConfig = config.getContentGeneratorConfig();
 
-      // Only handle qwen-oauth auth type
-      if (contentGeneratorConfig?.authType !== AuthType.QWEN_OAUTH) {
+      // Skip vision handling for auth types without vision support
+      if (!contentGeneratorConfig?.authType) {
         return { shouldProceed: true };
       }
 

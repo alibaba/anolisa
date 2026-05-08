@@ -237,7 +237,7 @@ describe('JSON output', () => {
     process.env['OPENAI_API_KEY'] = 'test-key';
     await rig.setup('json-output-auth-mismatch', {
       settings: {
-        security: { auth: { enforcedType: 'qwen-oauth' } },
+        security: { auth: { enforcedType: 'anthropic' } },
       },
     });
 
@@ -301,7 +301,7 @@ describe('JSON output', () => {
     expect(resultMessage).toHaveProperty('error');
     expect(resultMessage.error).toBeDefined();
     expect(resultMessage.error?.message).toContain(
-      'configured auth type is qwen-oauth',
+      'configured auth type is anthropic',
     );
     expect(resultMessage.error?.message).toContain(
       'current auth type is openai',

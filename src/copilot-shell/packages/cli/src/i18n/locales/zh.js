@@ -381,6 +381,8 @@ export default {
     'Ripgrep 不可用：请全局安装 ripgrep 以启用更快的文件内容搜索。回退到内置 grep。',
   'Ripgrep not available: {{message}}. Falling back to built-in grep.':
     'Ripgrep 不可用：{{message}}。回退到内置 grep。',
+  'Qwen OAuth service was discontinued on April 15, 2026. Please run /auth to select a supported authentication method.':
+    'Qwen OAuth 服务已于 2026 年 4 月 15 日停止服务，请使用 /auth 重新选择认证方式。',
   'set external editor preference': '设置外部编辑器首选项',
   'Select Editor': '选择编辑器',
   'Editor Preference': '编辑器首选项',
@@ -922,8 +924,6 @@ export default {
   // ============================================================================
   'Get started': '开始使用',
   'Use Copilot Shell': '使用 Copilot Shell',
-  'Qwen OAuth': 'Qwen OAuth',
-  'Free · Up to 1,000 requests per day': '免费 · 每天最多 1,000 次请求',
   'How would you like to authenticate for this project?':
     '您希望如何为此项目进行身份验证？',
 
@@ -951,23 +951,11 @@ export default {
   'Failed to login. Message: {{message}}': '登录失败。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     '认证方式被强制设置为 {{enforcedType}}，但您当前使用的是 {{currentType}}',
-  'Qwen OAuth authentication timed out. Please try again.':
-    'Qwen OAuth 认证超时。请重试',
-  'Qwen OAuth authentication cancelled.': 'Qwen OAuth 认证已取消',
-  'Qwen OAuth Authentication': 'Qwen OAuth 认证',
   'Please visit this URL to authorize:': '请访问此 URL 进行授权：',
   'Or scan the QR code below:': '或扫描下方的二维码：',
   'Waiting for authorization': '等待授权中',
   'Time remaining:': '剩余时间：',
   '(Press ESC or CTRL+C to cancel)': '（按 ESC 或 CTRL+C 取消）',
-  'Qwen OAuth Authentication Timeout': 'Qwen OAuth 认证超时',
-  'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已过期（超过 {{seconds}} 秒）。请重新选择认证方法',
-  'Press any key to return to authentication type selection.':
-    '按任意键返回认证类型选择',
-  'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
-  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
-    '注意：使用 Qwen OAuth 时，settings.json 中现有的 API 密钥不会被清除。如果需要，您可以稍后切换回 OpenAI 认证。',
   'Authentication timed out. Please try again.': '认证超时。请重试。',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     '正在等待认证...（按 ESC 或 CTRL+C 取消）',

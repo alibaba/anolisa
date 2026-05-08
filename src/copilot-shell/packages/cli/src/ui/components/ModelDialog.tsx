@@ -195,9 +195,8 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       })
       .filter((x) => x.models.length > 0);
 
-    // Fixed order: qwen-oauth first, then others in a stable order
+    // Fixed order for auth types
     const authTypeOrder: AuthType[] = [
-      AuthType.QWEN_OAUTH,
       AuthType.USE_ALIYUN,
       AuthType.USE_OPENAI,
       AuthType.USE_ANTHROPIC,
@@ -274,21 +273,13 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
       if (config) {
         try {
-          await config.switchModel(
-            selectedAuthType,
-            modelId,
-            selectedAuthType !== authType &&
-              selectedAuthType === AuthType.QWEN_OAUTH
-              ? { requireCachedCredentials: true }
-              : undefined,
-            {
-              reason: 'user_manual',
-              context:
-                selectedAuthType === authType
-                  ? 'Model switched via /model dialog'
-                  : 'AuthType+model switched via /model dialog',
-            },
-          );
+          await config.switchModel(selectedAuthType, modelId, undefined, {
+            reason: 'user_manual',
+            context:
+              selectedAuthType === authType
+                ? 'Model switched via /model dialog'
+                : 'AuthType+model switched via /model dialog',
+          });
         } catch (e) {
           const baseErrorMessage = e instanceof Error ? e.message : String(e);
           setErrorMessage(
@@ -309,9 +300,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
         persistModelSelection(settings, effectiveModelId);
         persistAuthTypeSelection(settings, effectiveAuthType);
 
-        const showBaseUrlAndKey =
-          effectiveAuthType !== AuthType.USE_ALIYUN &&
-          effectiveAuthType !== AuthType.QWEN_OAUTH;
+        const showBaseUrlAndKey = effectiveAuthType !== AuthType.USE_ALIYUN;
         uiState?.historyManager.addItem(
           {
             type: 'info',
@@ -354,21 +343,20 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             badge={formatSourceBadge(sources['model'])}
           />
 
-          {authType !== AuthType.QWEN_OAUTH &&
-            authType !== AuthType.USE_ALIYUN && (
-              <>
-                <ConfigRow
-                  label="Base URL"
-                  value={effectiveConfig?.baseUrl ?? t('(default)')}
-                  badge={formatSourceBadge(sources['baseUrl'])}
-                />
-                <ConfigRow
-                  label="API Key"
-                  value={effectiveConfig?.apiKey ? t('(set)') : t('(not set)')}
-                  badge={formatSourceBadge(sources['apiKey'])}
-                />
-              </>
-            )}
+          {authType !== AuthType.USE_ALIYUN && (
+            <>
+              <ConfigRow
+                label="Base URL"
+                value={effectiveConfig?.baseUrl ?? t('(default)')}
+                badge={formatSourceBadge(sources['baseUrl'])}
+              />
+              <ConfigRow
+                label="API Key"
+                value={effectiveConfig?.apiKey ? t('(set)') : t('(not set)')}
+                badge={formatSourceBadge(sources['apiKey'])}
+              />
+            </>
+          )}
         </Box>
       </Box>
 

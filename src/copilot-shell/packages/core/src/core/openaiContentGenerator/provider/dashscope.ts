@@ -2,7 +2,6 @@ import OpenAI from 'openai';
 import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { AuthType } from '../../contentGenerator.js';
 import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
@@ -33,10 +32,8 @@ export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvid
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const authType = contentGeneratorConfig.authType;
     const baseUrl = contentGeneratorConfig.baseUrl;
     return (
-      authType === AuthType.QWEN_OAUTH ||
       baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1' ||
       baseUrl === 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' ||
       !baseUrl

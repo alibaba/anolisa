@@ -53,14 +53,14 @@ const renderComponent = (
         getModel: vi.fn(() => MAINLINE_CODER),
         setModel: vi.fn().mockResolvedValue(undefined),
         switchModel: vi.fn().mockResolvedValue(undefined),
-        getAuthType: vi.fn(() => 'qwen-oauth'),
+        getAuthType: vi.fn(() => 'openai'),
 
         // --- Functions used by ClearcutLogger ---
         getUsageStatisticsEnabled: vi.fn(() => true),
         getSessionId: vi.fn(() => 'mock-session-id'),
         getDebugMode: vi.fn(() => false),
         getContentGeneratorConfig: vi.fn(() => ({
-          authType: AuthType.QWEN_OAUTH,
+          authType: AuthType.USE_OPENAI,
           model: MAINLINE_CODER,
         })),
         getUseSmartEdit: vi.fn(() => false),
@@ -68,6 +68,16 @@ const renderComponent = (
         getProxy: vi.fn(() => undefined),
 
         // --- Spread test-specific overrides ---
+        getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+          if (t === AuthType.USE_OPENAI) {
+            return AVAILABLE_MODELS_QWEN.map((m) => ({
+              id: m.id,
+              label: m.label,
+              description: m.description,
+            }));
+          }
+          return [];
+        }),
         ...contextValue,
       } as unknown as Config)
     : undefined;
@@ -107,16 +117,16 @@ describe('<ModelDialog />', () => {
   });
 
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
-    renderComponent();
+    renderComponent({}, {});
     expect(mockedSelect).toHaveBeenCalledTimes(1);
 
     const props = mockedSelect.mock.calls[0][0];
     expect(props.items).toHaveLength(AVAILABLE_MODELS_QWEN.length);
     expect(props.items[0].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
+      `${AuthType.USE_OPENAI}::${MAINLINE_CODER}`,
     );
     expect(props.items[1].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
+      `${AuthType.USE_OPENAI}::${MAINLINE_VLM}`,
     );
     expect(props.showNumbers).toBe(true);
   });
@@ -135,7 +145,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('initializes with default coder model if context is not provided', () => {
-    renderComponent({}, undefined);
+    renderComponent({}, {});
 
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -170,10 +180,10 @@ describe('<ModelDialog />', () => {
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.USE_OPENAI}::${MAINLINE_CODER}`);
 
     expect(mockConfig?.switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
       MAINLINE_CODER,
       undefined,
       {
@@ -189,23 +199,23 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
-      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('calls config.switchModel and persists authType+model when selecting a different authType', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
-    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    const getAuthType = vi.fn(() => AuthType.USE_GEMINI);
     const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
-      if (t === AuthType.USE_OPENAI) {
-        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
+      if (t === AuthType.USE_GEMINI) {
+        return [{ id: 'gemini-pro', label: 'Gemini Pro', authType: t }];
       }
-      if (t === AuthType.QWEN_OAUTH) {
+      if (t === AuthType.USE_OPENAI) {
         return AVAILABLE_MODELS_QWEN.map((m) => ({
           id: m.id,
           label: m.label,
-          authType: AuthType.QWEN_OAUTH,
+          authType: AuthType.USE_OPENAI,
         }));
       }
       return [];
@@ -213,9 +223,9 @@ describe('<ModelDialog />', () => {
 
     const mockConfigWithSwitchAuthType = {
       getAuthType,
-      getModel: vi.fn(() => 'gpt-4'),
+      getModel: vi.fn(() => 'gemini-pro'),
       getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.QWEN_OAUTH,
+        authType: AuthType.USE_OPENAI,
         model: MAINLINE_CODER,
       })),
       // Add switchModel to the mock object (not the type)
@@ -230,12 +240,12 @@ describe('<ModelDialog />', () => {
     );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.USE_OPENAI}::${MAINLINE_CODER}`);
 
     expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
       MAINLINE_CODER,
-      { requireCachedCredentials: true },
+      undefined,
       {
         reason: 'user_manual',
         context: 'AuthType+model switched via /model dialog',
@@ -249,13 +259,13 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
-      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('does not pass onHighlight to DescriptiveRadioButtonSelect', () => {
-    renderComponent();
+    renderComponent({}, {});
 
     const childOnHighlight = mockedSelect.mock.calls[0][0].onHighlight;
     expect(childOnHighlight).toBeUndefined();
@@ -294,7 +304,18 @@ describe('<ModelDialog />', () => {
 
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => MAINLINE_CODER);
-    const mockGetAuthType = vi.fn(() => 'qwen-oauth');
+    const mockGetAuthType = vi.fn(() => 'openai');
+    const mockGetAvailableModelsForAuthType = vi.fn((t: AuthType) => {
+      if (t === AuthType.USE_OPENAI) {
+        return AVAILABLE_MODELS_QWEN.map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description,
+          authType: AuthType.USE_OPENAI,
+        }));
+      }
+      return [];
+    });
     const mockSettings = {
       isTrusted: true,
       user: { settings: {} },
@@ -308,6 +329,7 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getAvailableModelsForAuthType: mockGetAvailableModelsForAuthType,
             } as unknown as Config
           }
         >
@@ -322,6 +344,7 @@ describe('<ModelDialog />', () => {
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getAvailableModelsForAuthType: mockGetAvailableModelsForAuthType,
     } as unknown as Config;
 
     rerender(

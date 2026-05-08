@@ -39,8 +39,6 @@ function formatAuthType(authType?: AuthType): string {
   }
 
   switch (authType) {
-    case AuthType.QWEN_OAUTH:
-      return 'Qwen OAuth';
     case AuthType.USE_OPENAI:
       return 'OpenAI';
     case AuthType.USE_GEMINI:

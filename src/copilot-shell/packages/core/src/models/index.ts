@@ -28,8 +28,6 @@ export {
   DEFAULT_MODELS,
   MODEL_GENERATION_CONFIG_FIELDS,
   PROVIDER_SOURCED_FIELDS,
-  QWEN_OAUTH_ALLOWED_MODELS,
-  QWEN_OAUTH_MODELS,
 } from './constants.js';
 
 // Model configuration resolver

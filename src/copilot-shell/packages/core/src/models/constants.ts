@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-
-import type { ModelConfig } from './types.js';
-
 type AuthType = import('../core/contentGenerator.js').AuthType;
 type ContentGeneratorConfig =
   import('../core/contentGenerator.js').ContentGeneratorConfig;
@@ -80,11 +76,6 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: ['GOOGLE_MODEL'],
   },
-  'qwen-oauth': {
-    apiKey: [],
-    baseUrl: [],
-    model: [],
-  },
   aliyun: {
     apiKey: [],
     baseUrl: [],
@@ -94,29 +85,4 @@ export const AUTH_ENV_MAPPINGS = {
 
 export const DEFAULT_MODELS = {
   openai: 'qwen3-coder-plus',
-  'qwen-oauth': DEFAULT_QWEN_MODEL,
 } as Partial<Record<AuthType, string>>;
-
-export const QWEN_OAUTH_ALLOWED_MODELS = [
-  DEFAULT_QWEN_MODEL,
-  'vision-model',
-] as const;
-
-/**
- * Hard-coded Qwen OAuth models that are always available.
- * These cannot be overridden by user configuration.
- */
-export const QWEN_OAUTH_MODELS: ModelConfig[] = [
-  {
-    id: 'coder-model',
-    name: 'coder-model',
-    description: 'The latest Qwen Coder model from Alibaba Cloud ModelStudio',
-    capabilities: { vision: false },
-  },
-  {
-    id: 'vision-model',
-    name: 'vision-model',
-    description: 'The latest Qwen Vision model from Alibaba Cloud ModelStudio',
-    capabilities: { vision: true },
-  },
-];

@@ -92,7 +92,6 @@ function EcsAuthStaticDisplay({
 
 /**
  * 动态状态行：轮询状态展示（无动画，避免 state 变化导致镇屏闪烁）
- * 样式对齐 QwenOAuthProgress 的 StatusDisplay
  */
 function EcsPollingStatus({ step }: { step: string }): React.JSX.Element {
   return (

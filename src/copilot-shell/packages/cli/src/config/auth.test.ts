@@ -111,10 +111,6 @@ describe('validateAuthMethod', () => {
     expect(result).toContain('GEMINI_API_KEY_ALTERED');
   });
 
-  it('should return null for QWEN_OAUTH', () => {
-    expect(validateAuthMethod(AuthType.QWEN_OAUTH)).toBeNull();
-  });
-
   it('should return an error message for an invalid auth method', () => {
     expect(validateAuthMethod('invalid-method')).toBe(
       'Invalid auth method selected.',

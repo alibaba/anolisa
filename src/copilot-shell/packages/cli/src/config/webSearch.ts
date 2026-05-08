@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@copilot-shell/core';
 import type { WebSearchProviderConfig } from '@copilot-shell/core';
 import type { Settings } from './settings.js';
 
@@ -34,16 +33,14 @@ export interface WebSearchConfig {
  *
  * @param argv - Command line arguments
  * @param settings - User settings from settings.json
- * @param authType - Authentication type (e.g., 'qwen-oauth')
+ * @param authType - Authentication type
  * @returns WebSearch configuration or undefined if no providers available
  */
 export function buildWebSearchConfig(
   argv: WebSearchCliArgs,
   settings: Settings,
-  authType?: string,
+  _authType?: string,
 ): WebSearchConfig | undefined {
-  const isQwenOAuth = authType === AuthType.QWEN_OAUTH;
-
   // Step 1: Collect providers from settings or command line/env
   let providers: WebSearchProviderConfig[] = [];
   let userDefault: string | undefined;
@@ -77,20 +74,12 @@ export function buildWebSearchConfig(
     }
   }
 
-  // Step 2: Ensure dashscope is available for qwen-oauth users
-  if (isQwenOAuth) {
-    const hasDashscope = providers.some((p) => p.type === 'dashscope');
-    if (!hasDashscope) {
-      providers.push({ type: 'dashscope' } as WebSearchProviderConfig);
-    }
-  }
-
-  // Step 3: If no providers available, return undefined
+  // Step 2: If no providers available, return undefined
   if (providers.length === 0) {
     return undefined;
   }
 
-  // Step 4: Determine default provider
+  // Step 3: Determine default provider
   // Priority: user explicit config > CLI arg > first available provider (tavily > google > dashscope)
   const providerPriority: Array<'tavily' | 'google' | 'dashscope'> = [
     'tavily',

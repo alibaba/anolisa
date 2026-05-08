@@ -16,6 +16,7 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  AuthType,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
@@ -26,7 +27,6 @@ import type { AnyToolInvocation } from '../tools/tools.js';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
 import {
-  AuthType,
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
@@ -861,10 +861,6 @@ export class Config {
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
-    // Check and consume cached credentials flag
-    const requireCached =
-      this.modelsConfig.consumeRequireCachedCredentialsFlag();
-
     const { config, sources } = resolveContentGeneratorConfigWithSources(
       this,
       authMethod,
@@ -878,7 +874,7 @@ export class Config {
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
-      requireCached ? true : isInitialAuth,
+      isInitialAuth,
     );
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
@@ -1003,14 +999,11 @@ export class Config {
       return;
     }
 
-    // Hot update path: only supported for qwen-oauth.
-    // For other auth types we always refresh to recreate the ContentGenerator.
-    //
-    // Rationale:
-    // - Non-qwen providers may need to re-validate credentials / baseUrl / envKey.
-    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources.
-    // - Refresh keeps runtime behavior consistent and centralized.
-    if (authType === AuthType.QWEN_OAUTH && !requiresRefresh) {
+    // Full refresh path for all auth types
+    // Non-qwen providers may need to re-validate credentials / baseUrl / envKey.
+    // ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources.
+    // Refresh keeps runtime behavior consistent and centralized.
+    if (!requiresRefresh) {
       const { config, sources } = resolveContentGeneratorConfigWithSources(
         this,
         authType,
@@ -1022,7 +1015,7 @@ export class Config {
         },
       );
 
-      // Hot-update fields (qwen-oauth models share the same auth + client).
+      // Hot-update fields.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.disableCacheControl =
@@ -1070,7 +1063,6 @@ export class Config {
   /**
    * Switch authType+model via registry-backed selection.
    * This triggers a refresh of the ContentGenerator when required (always on authType changes).
-   * For qwen-oauth model switches that are hot-update safe, this may update in place.
    *
    * @param authType - Target authentication type
    * @param modelId - Target model ID
@@ -1823,8 +1815,6 @@ export class Config {
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
       registerCoreTool(WebSearchTool, this);
     }

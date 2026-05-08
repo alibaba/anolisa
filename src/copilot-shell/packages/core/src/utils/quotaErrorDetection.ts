@@ -98,29 +98,3 @@ export function isGenericQuotaExceededError(error: unknown): boolean {
 
   return false;
 }
-
-export function isQwenQuotaExceededError(error: unknown): boolean {
-  // Check for Qwen insufficient quota errors (should not retry)
-  const checkMessage = (message: string): boolean => {
-    const lowerMessage = message.toLowerCase();
-    return (
-      lowerMessage.includes('insufficient_quota') ||
-      lowerMessage.includes('free allocated quota exceeded') ||
-      (lowerMessage.includes('quota') && lowerMessage.includes('exceeded'))
-    );
-  };
-
-  if (typeof error === 'string') {
-    return checkMessage(error);
-  }
-
-  if (isStructuredError(error)) {
-    return checkMessage(error.message);
-  }
-
-  if (isApiError(error)) {
-    return checkMessage(error.error.message);
-  }
-
-  return false;
-}

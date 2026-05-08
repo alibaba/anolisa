@@ -410,11 +410,13 @@ export async function main() {
   initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
 
   {
+    const configWarnings: string[] = [];
     const config = await loadCliConfig(
       settings.merged,
       argv,
       process.cwd(),
       argv.extensions,
+      configWarnings,
     );
     registerCleanup(() => config.shutdown());
 
@@ -480,6 +482,7 @@ export async function main() {
     delete process.env['COSH_MIGRATION_WARNING'];
     const startupWarnings = [
       ...new Set([
+        ...configWarnings.map((w) => t(w)),
         ...(effectiveMigrationWarning ? [effectiveMigrationWarning] : []),
         ...(await getStartupWarnings()),
         ...(await getUserStartupWarnings({
@@ -537,6 +540,13 @@ export async function main() {
     // For non-stream-json mode, initialize config here
     if (inputFormat !== InputFormat.STREAM_JSON) {
       await config.initialize();
+    }
+
+    // Print config warnings to stderr for non-interactive mode (no TUI available)
+    if (configWarnings.length > 0) {
+      for (const w of configWarnings) {
+        process.stderr.write(`\x1b[33m${t(w)}\x1b[0m\n`);
+      }
     }
 
     // Only read stdin if NOT in stream-json mode

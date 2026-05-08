@@ -45,10 +45,6 @@ export interface ResolvedCliGenerationConfig {
 }
 
 export function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['QWEN_OAUTH']) {
-    return AuthType.QWEN_OAUTH;
-  }
-
   if (
     process.env['OPENAI_API_KEY'] &&
     process.env['OPENAI_MODEL'] &&

@@ -5,8 +5,6 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
-import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 
 export interface HttpError extends Error {
   status?: number;
@@ -73,7 +71,6 @@ export async function retryWithBackoff<T>(
     maxAttempts,
     initialDelayMs,
     maxDelayMs,
-    authType,
     shouldRetryOnError,
     shouldRetryOnContent,
   } = {
@@ -103,13 +100,6 @@ export async function retryWithBackoff<T>(
       return result;
     } catch (error) {
       const errorStatus = getErrorStatus(error);
-
-      // Check for Qwen OAuth quota exceeded error - throw immediately without retry
-      if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
-        throw new Error(
-          `Qwen API quota exceeded: Your Qwen API quota has been exhausted. Please wait for your quota to reset.`,
-        );
-      }
 
       // Check if we've exhausted retries or shouldn't retry
       if (attempt >= maxAttempts || !shouldRetryOnError(error as Error)) {

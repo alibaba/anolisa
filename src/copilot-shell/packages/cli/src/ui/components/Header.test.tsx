@@ -15,7 +15,7 @@ const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
 const defaultProps = {
   version: '1.0.0',
-  authType: AuthType.QWEN_OAUTH,
+  authType: AuthType.USE_OPENAI,
   model: 'qwen-coder-plus',
   workingDirectory: '/home/user/projects/test',
 };
@@ -58,7 +58,7 @@ describe('<Header />', () => {
 
   it('displays auth type and model', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).toContain('Qwen OAuth');
+    expect(lastFrame()).toContain('OpenAI');
     expect(lastFrame()).toContain('qwen-coder-plus');
   });
 

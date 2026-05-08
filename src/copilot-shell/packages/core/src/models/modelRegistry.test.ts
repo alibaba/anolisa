@@ -5,26 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ModelRegistry, QWEN_OAUTH_MODELS } from './modelRegistry.js';
+import { ModelRegistry } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
 
 describe('ModelRegistry', () => {
   describe('initialization', () => {
-    it('should always include hard-coded qwen-oauth models', () => {
-      const registry = new ModelRegistry();
-
-      const qwenModels = registry.getModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(qwenModels.length).toBe(QWEN_OAUTH_MODELS.length);
-      expect(qwenModels[0].id).toBe('coder-model');
-      expect(qwenModels[1].id).toBe('vision-model');
-    });
-
     it('should initialize with empty config', () => {
       const registry = new ModelRegistry();
-      expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
-        QWEN_OAUTH_MODELS.length,
-      );
       expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(0);
     });
 
@@ -46,22 +34,14 @@ describe('ModelRegistry', () => {
       expect(openaiModels[0].id).toBe('gpt-4-turbo');
     });
 
-    it('should ignore qwen-oauth models in config (hard-coded)', () => {
+    it('should register models from config', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        'qwen-oauth': [
-          {
-            id: 'custom-qwen',
-            name: 'Custom Qwen',
-          },
-        ],
+        openai: [{ id: 'gpt-4-turbo', name: 'GPT-4 Turbo' }],
       };
-
       const registry = new ModelRegistry(modelProvidersConfig);
-
-      // Should still use hard-coded qwen-oauth models
-      const qwenModels = registry.getModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(qwenModels.length).toBe(QWEN_OAUTH_MODELS.length);
-      expect(qwenModels.find((m) => m.id === 'custom-qwen')).toBeUndefined();
+      const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(openaiModels.length).toBe(1);
+      expect(openaiModels[0].id).toBe('gpt-4-turbo');
     });
   });
 
@@ -188,15 +168,7 @@ describe('ModelRegistry', () => {
   });
 
   describe('getDefaultModelForAuthType', () => {
-    it('should return coder-model for qwen-oauth', () => {
-      const registry = new ModelRegistry();
-      const defaultModel = registry.getDefaultModelForAuthType(
-        AuthType.QWEN_OAUTH,
-      );
-      expect(defaultModel?.id).toBe('coder-model');
-    });
-
-    it('should return first model for other authTypes', () => {
+    it('should return first model for authTypes', () => {
       const registry = new ModelRegistry({
         openai: [
           { id: 'gpt-4', name: 'GPT-4' },
@@ -223,12 +195,6 @@ describe('ModelRegistry', () => {
   });
 
   describe('default base URLs', () => {
-    it('should apply default dashscope URL for qwen-oauth', () => {
-      const registry = new ModelRegistry();
-      const model = registry.getModel(AuthType.QWEN_OAUTH, 'coder-model');
-      expect(model?.baseUrl).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
-    });
-
     it('should apply default openai URL when not specified', () => {
       const registry = new ModelRegistry({
         openai: [{ id: 'gpt-4', name: 'GPT-4' }],
@@ -348,7 +314,7 @@ describe('ModelRegistry', () => {
         expect.stringContaining('openai'),
       );
       expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('qwen-oauth'),
+        expect.stringContaining('anthropic'),
       );
       expect(consoleWarnSpy).toHaveBeenCalledWith(
         expect.stringContaining('gemini'),

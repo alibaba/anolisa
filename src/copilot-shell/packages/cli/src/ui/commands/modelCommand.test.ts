@@ -77,21 +77,6 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return dialog action for QWEN_OAUTH auth type', async () => {
-    const mockConfig = createMockConfig({
-      model: 'test-model',
-      authType: AuthType.QWEN_OAUTH,
-    });
-    mockContext.services.config = mockConfig as Config;
-
-    const result = await modelCommand.action!(mockContext, '');
-
-    expect(result).toEqual({
-      type: 'dialog',
-      dialog: 'model',
-    });
-  });
-
   it('should return dialog action for USE_OPENAI auth type', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',

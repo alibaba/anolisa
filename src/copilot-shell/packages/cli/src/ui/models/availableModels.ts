@@ -6,7 +6,6 @@
 
 import {
   AuthType,
-  DEFAULT_QWEN_MODEL,
   type Config,
   type AvailableModel as CoreAvailableModel,
 } from '@copilot-shell/core';
@@ -20,7 +19,7 @@ export type AvailableModel = {
 };
 
 export const MAINLINE_VLM = 'vision-model';
-export const MAINLINE_CODER = DEFAULT_QWEN_MODEL;
+export const MAINLINE_CODER = 'coder-model';
 
 export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
   {
@@ -104,18 +103,12 @@ function convertCoreModelToCliModel(
  * Get available models for the given authType.
  *
  * If a Config object is provided, uses config.getAvailableModelsForAuthType().
- * For qwen-oauth, always returns the hard-coded models.
  * Falls back to environment variables only when no config is provided.
  */
 export function getAvailableModelsForAuthType(
   authType: AuthType,
   config?: Config,
 ): AvailableModel[] {
-  // For qwen-oauth, always use hard-coded models, this aligns with the API gateway.
-  if (authType === AuthType.QWEN_OAUTH) {
-    return AVAILABLE_MODELS_QWEN;
-  }
-
   // Use config's model registry when available
   if (config) {
     try {

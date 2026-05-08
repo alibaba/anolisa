@@ -58,7 +58,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       timeout: 60000,
       maxRetries: 2,
       model: 'qwen-max',
-      authType: AuthType.QWEN_OAUTH,
+      authType: AuthType.USE_OPENAI,
     } as ContentGeneratorConfig;
 
     // Mock Config
@@ -84,17 +84,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   });
 
   describe('isDashScopeProvider', () => {
-    it('should return true for QWEN_OAUTH auth type', () => {
-      const config = {
-        authType: AuthType.QWEN_OAUTH,
-        baseUrl: 'https://api.openai.com/v1',
-      } as ContentGeneratorConfig;
-
-      const result =
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
-      expect(result).toBe(true);
-    });
-
     it('should return true for DashScope domestic URL', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -150,7 +139,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
         'X-DashScope-CacheControl': 'enable',
         'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-        'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
+        'X-DashScope-AuthType': AuthType.USE_OPENAI,
       });
     });
 
@@ -170,7 +159,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       expect(headers['User-Agent']).toContain('QwenCode/1.0.0');
       expect(headers['X-DashScope-UserAgent']).toContain('QwenCode/1.0.0');
-      expect(headers['X-DashScope-AuthType']).toBe(AuthType.QWEN_OAUTH);
+      expect(headers['X-DashScope-AuthType']).toBe(AuthType.USE_OPENAI);
       expect(headers['X-Custom']).toBe('1');
       expect(headers['X-DashScope-CacheControl']).toBe('disable');
     });
@@ -207,7 +196,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-CacheControl': 'enable',
             'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-            'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
+            'X-DashScope-AuthType': AuthType.USE_OPENAI,
           },
         }),
       );

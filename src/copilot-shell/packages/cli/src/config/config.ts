@@ -491,7 +491,6 @@ export async function parseArguments(): Promise<CliArgs> {
             choices: [
               AuthType.USE_OPENAI,
               AuthType.USE_ANTHROPIC,
-              AuthType.QWEN_OAUTH,
               AuthType.USE_GEMINI,
               AuthType.USE_VERTEX_AI,
             ],
@@ -677,6 +676,7 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  configWarnings?: string[],
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -875,11 +875,39 @@ export async function loadCliConfig(
       : undefined;
   }
 
-  const selectedAuthType =
-    (argv.authType as AuthType | undefined) ||
-    settings.security?.auth?.selectedType ||
+  // Guard against deprecated/unknown auth types lingering in user settings.
+  // Known values pass through unchanged; deprecated values warn and reset to
+  // undefined so the interactive shell falls back to AuthDialog and the
+  // non-interactive path exits with a clear "no auth type" error.
+  const KNOWN_AUTH_TYPES: ReadonlySet<string> = new Set(
+    Object.values(AuthType),
+  );
+  const DEPRECATED_AUTH_TYPES: ReadonlySet<string> = new Set(['qwen-oauth']);
+
+  const rawSelectedAuthType: string | undefined =
+    (argv.authType as string | undefined) ||
+    (settings.security?.auth?.selectedType as string | undefined) ||
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
+
+  let selectedAuthType: AuthType | undefined;
+  if (!rawSelectedAuthType) {
+    selectedAuthType = undefined;
+  } else if (KNOWN_AUTH_TYPES.has(rawSelectedAuthType)) {
+    selectedAuthType = rawSelectedAuthType as AuthType;
+  } else if (DEPRECATED_AUTH_TYPES.has(rawSelectedAuthType)) {
+    // i18n key — translated later in gemini.tsx after i18n initialization
+    configWarnings?.push(
+      'Qwen OAuth service was discontinued on April 15, 2026. Please run /auth to select a supported authentication method.',
+    );
+    selectedAuthType = undefined;
+  } else {
+    // Dynamic value prevents exact i18n key match; t() will fallback to raw string
+    configWarnings?.push(
+      `Unknown auth type '${rawSelectedAuthType}' in settings; ignored. Run /auth to reconfigure.`,
+    );
+    selectedAuthType = undefined;
+  }
 
   // Unified resolution of generation config with source attribution
   const resolvedCliConfig = resolveCliGenerationConfig({

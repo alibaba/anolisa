@@ -22,13 +22,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
-import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
-
-export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
 export const useAuthCommand = (
   settings: LoadedSettings,
@@ -51,11 +48,6 @@ export const useAuthCommand = (
   );
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,
-  );
-
-  const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
-    pendingAuthType,
-    isAuthenticating,
   );
 
   const onAuthError = useCallback(
@@ -186,9 +178,7 @@ export const useAuthCommand = (
           );
         }
 
-        // Only update credentials if not switching to QWEN_OAUTH,
-        // so that OpenAI credentials are preserved when switching to QWEN_OAUTH.
-        if (authType !== AuthType.QWEN_OAUTH && credentials) {
+        if (credentials) {
           if (credentials?.apiKey != null) {
             settings.setValue(
               authTypeScope,
@@ -438,10 +428,6 @@ export const useAuthCommand = (
   }, []);
 
   const cancelAuthentication = useCallback(() => {
-    if (isAuthenticating && pendingAuthType === AuthType.QWEN_OAUTH) {
-      cancelQwenAuth();
-    }
-
     // Log authentication cancellation
     if (isAuthenticating && pendingAuthType) {
       const authEvent = new AuthEvent(pendingAuthType, 'manual', 'cancelled');
@@ -453,13 +439,7 @@ export const useAuthCommand = (
     setShowBashOptionInAuthDialog(showBashOptionOnStartup);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [
-    isAuthenticating,
-    pendingAuthType,
-    cancelQwenAuth,
-    config,
-    showBashOptionOnStartup,
-  ]);
+  }, [isAuthenticating, pendingAuthType, config, showBashOptionOnStartup]);
 
   /**
    /**
@@ -476,7 +456,6 @@ export const useAuthCommand = (
     if (
       defaultAuthType &&
       ![
-        AuthType.QWEN_OAUTH,
         AuthType.USE_OPENAI,
         AuthType.USE_ANTHROPIC,
         AuthType.USE_GEMINI,
@@ -489,7 +468,6 @@ export const useAuthCommand = (
           {
             value: defaultAuthType,
             validValues: [
-              AuthType.QWEN_OAUTH,
               AuthType.USE_OPENAI,
               AuthType.USE_ANTHROPIC,
               AuthType.USE_GEMINI,
@@ -510,7 +488,6 @@ export const useAuthCommand = (
     showBashOptionInAuthDialog,
     isAuthenticating,
     pendingAuthType,
-    qwenAuthState,
     handleAuthSelect,
     handleContinueToBash,
     openAuthDialog,

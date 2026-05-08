@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  isQwenQuotaExceededError,
   isProQuotaExceededError,
   isGenericQuotaExceededError,
   isApiError,
@@ -15,55 +14,6 @@ import {
 } from './quotaErrorDetection.js';
 
 describe('quotaErrorDetection', () => {
-  describe('isQwenQuotaExceededError', () => {
-    it('should detect insufficient_quota error message', () => {
-      const error = new Error('insufficient_quota');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect free allocated quota exceeded error message', () => {
-      const error = new Error('Free allocated quota exceeded.');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded error message', () => {
-      const error = new Error('quota exceeded');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in string error', () => {
-      const error = 'insufficient_quota';
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in structured error', () => {
-      const error = { message: 'Free allocated quota exceeded.', status: 429 };
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in API error', () => {
-      const error: ApiError = {
-        error: {
-          code: 429,
-          message: 'insufficient_quota',
-          status: 'RESOURCE_EXHAUSTED',
-          details: [],
-        },
-      };
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should not detect throttling errors as quota exceeded', () => {
-      const error = new Error('requests throttling triggered');
-      expect(isQwenQuotaExceededError(error)).toBe(false);
-    });
-
-    it('should not detect unrelated errors', () => {
-      const error = new Error('Network error');
-      expect(isQwenQuotaExceededError(error)).toBe(false);
-    });
-  });
-
   describe('isProQuotaExceededError', () => {
     it('should detect Gemini Pro quota exceeded error', () => {
       const error = new Error(

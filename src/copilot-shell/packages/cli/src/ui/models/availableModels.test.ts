@@ -89,25 +89,11 @@ describe('availableModels', () => {
       process.env = originalEnv;
     });
 
-    it('should return hard-coded qwen models for qwen-oauth', () => {
-      const models = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
-    });
-
-    it('should return hard-coded qwen models even when config is provided', () => {
-      const mockConfig = {
-        getAvailableModels: vi
-          .fn()
-          .mockReturnValue([
-            { id: 'custom', label: 'Custom', authType: AuthType.QWEN_OAUTH },
-          ]),
-      } as unknown as Config;
-
+    it('should return empty array for unknown auth types without config', () => {
       const models = getAvailableModelsForAuthType(
-        AuthType.QWEN_OAUTH,
-        mockConfig,
+        'unknown-auth-type' as AuthType,
       );
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
+      expect(models).toEqual([]);
     });
 
     it('should use config.getAvailableModels for openai authType when available', () => {

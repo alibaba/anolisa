@@ -88,25 +88,26 @@ describe('createContentGeneratorConfig', () => {
     getProxy: () => undefined,
   } as unknown as Config;
 
-  it('should preserve provided fields and set authType for QWEN_OAUTH', () => {
-    const cfg = createContentGeneratorConfig(mockConfig, AuthType.QWEN_OAUTH, {
-      model: 'vision-model',
-      apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+  it('should preserve provided fields and set authType', () => {
+    const cfg = createContentGeneratorConfig(mockConfig, AuthType.USE_OPENAI, {
+      model: 'gpt-4',
+      apiKey: 'test-key',
     });
-    expect(cfg.authType).toBe(AuthType.QWEN_OAUTH);
-    expect(cfg.model).toBe('vision-model');
-    expect(cfg.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
+    expect(cfg.authType).toBe(AuthType.USE_OPENAI);
+    expect(cfg.model).toBe('gpt-4');
+    expect(cfg.apiKey).toBe('test-key');
   });
 
-  it('should not warn or fallback for QWEN_OAUTH (resolution handled by ModelConfigResolver)', () => {
+  it('should not warn or fallback for valid configuration', () => {
     const warnSpy = vi
       .spyOn(console, 'warn')
       .mockImplementation(() => undefined);
-    const cfg = createContentGeneratorConfig(mockConfig, AuthType.QWEN_OAUTH, {
+    const cfg = createContentGeneratorConfig(mockConfig, AuthType.USE_OPENAI, {
       model: 'some-random-model',
+      apiKey: 'test-api-key',
     });
     expect(cfg.model).toBe('some-random-model');
-    expect(cfg.apiKey).toBeUndefined();
+    expect(cfg.apiKey).toBe('test-api-key');
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
   });

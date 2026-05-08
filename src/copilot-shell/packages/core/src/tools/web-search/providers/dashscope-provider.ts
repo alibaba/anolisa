@@ -5,15 +5,22 @@
  */
 
 import { promises as fs } from 'node:fs';
-import * as path from 'path';
 import { BaseWebSearchProvider } from '../base-provider.js';
 import type {
   WebSearchResult,
   WebSearchResultItem,
   DashScopeProviderConfig,
 } from '../types.js';
-import type { QwenCredentials } from '../../../qwen/qwenOAuth2.js';
-import { Storage } from '../../../config/storage.js';
+
+/**
+ * @deprecated Qwen OAuth credentials type, kept for backward compatibility.
+ */
+interface QwenCredentials {
+  access_token?: string;
+  refresh_token?: string;
+  expiry_date?: number;
+  resource_url?: string;
+}
 
 interface DashScopeSearchItem {
   _id: string;
@@ -59,13 +66,13 @@ interface DashScopeSearchResponse {
 }
 
 // File System Configuration
-const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
 
 /**
  * Get the path to the cached OAuth credentials file.
+ * @deprecated Qwen OAuth is no longer supported.
  */
 function getQwenCachedCredentialPath(): string {
-  return path.join(Storage.getGlobalQwenDir(), QWEN_CREDENTIAL_FILENAME);
+  return '';
 }
 
 /**
@@ -92,9 +99,8 @@ export class DashScopeProvider extends BaseWebSearchProvider {
   }
 
   isAvailable(): boolean {
-    // DashScope provider is only available when auth type is QWEN_OAUTH
-    // This ensures it's only used when OAuth credentials are available
-    return this.config.authType === 'qwen-oauth';
+    // DashScope provider is no longer available.
+    return false;
   }
 
   /**

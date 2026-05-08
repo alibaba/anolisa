@@ -10,15 +10,11 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
-  clearCachedCredentialFile,
-  QwenOAuth2Event,
-  qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
   tokenLimit,
   type Config,
   type ConversationRecord,
-  type DeviceAuthorizationData,
 } from '@copilot-shell/core';
 import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
@@ -76,12 +72,6 @@ class GeminiAgent {
         description:
           'Requires setting the `OPENAI_API_KEY` environment variable',
       },
-      {
-        id: AuthType.QWEN_OAUTH,
-        name: 'Qwen OAuth',
-        description:
-          'OAuth authentication for Qwen models with 2000 daily requests',
-      },
     ];
 
     // Get current approval mode from config
@@ -122,31 +112,12 @@ class GeminiAgent {
   async authenticate({ methodId }: acp.AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
 
-    let authUri: string | undefined;
-    const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
-      authUri = deviceAuth.verification_uri_complete;
-      // Send the auth URL to ACP client as soon as it's available (refreshAuth is blocking).
-      void this.client.authenticateUpdate({ _meta: { authUri } });
-    };
-
-    if (method === AuthType.QWEN_OAUTH) {
-      qwenOAuth2Events.once(QwenOAuth2Event.AuthUri, authUriHandler);
-    }
-
-    await clearCachedCredentialFile();
-    try {
-      await this.config.refreshAuth(method);
-      this.settings.setValue(
-        SettingScope.User,
-        'security.auth.selectedType',
-        method,
-      );
-    } finally {
-      // Ensure we don't leak listeners if auth fails early.
-      if (method === AuthType.QWEN_OAUTH) {
-        qwenOAuth2Events.off(QwenOAuth2Event.AuthUri, authUriHandler);
-      }
-    }
+    await this.config.refreshAuth(method);
+    this.settings.setValue(
+      SettingScope.User,
+      'security.auth.selectedType',
+      method,
+    );
 
     return;
   }

@@ -15,7 +15,6 @@ import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
-import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { CustomAgentKeyImportPrompt } from './CustomAgentKeyImportPrompt.js';
@@ -490,25 +489,6 @@ export const DialogManager = ({
           defaultBaseUrl={defaults.baseUrl}
           defaultModel={defaults.model}
           authError={uiState.authError}
-        />
-      );
-    }
-
-    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
-      return (
-        <QwenOAuthProgress
-          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
-          authStatus={uiState.qwenAuthState.authStatus}
-          authMessage={uiState.qwenAuthState.authMessage}
-          onTimeout={() => {
-            uiActions.onAuthError('Qwen OAuth authentication timed out.');
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
-          }}
-          onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
-          }}
         />
       );
     }
