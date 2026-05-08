@@ -208,7 +208,10 @@ export const DialogManager = ({
   }
   if (uiState.shellConfirmationRequest) {
     return (
-      <ShellConfirmationDialog request={uiState.shellConfirmationRequest} />
+      <ShellConfirmationDialog
+        request={uiState.shellConfirmationRequest}
+        contentWidth={mainAreaWidth}
+      />
     );
   }
   if (uiState.loopDetectionConfirmationRequest) {

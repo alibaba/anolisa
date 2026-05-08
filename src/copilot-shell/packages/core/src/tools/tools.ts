@@ -595,6 +595,13 @@ export interface ToolInfoConfirmationDetails {
    */
   fileName?: string;
   fileDiff?: string;
+  /**
+   * Optional command preview — populated when the hook wraps a native 'exec'
+   * confirmation, allowing the info dialog to show the full shell command
+   * alongside the hook message so the user can make an informed decision.
+   */
+  command?: string;
+  rootCommand?: string;
 }
 
 export type ToolCallConfirmationDetails =

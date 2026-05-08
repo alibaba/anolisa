@@ -998,12 +998,19 @@ export class CoreToolScheduler {
             // t()). Keep both locales/en.js and locales/zh.js entries in sync
             // when editing this text.
             const askPrompt = 'A hook requires your confirmation to proceed.';
-            // Always synthesize an 'info' dialog so the hook message is shown
-            // prominently in the prompt body rather than buried in the title.
-            // If the tool has a native confirmation, forward its onConfirm so
-            // side-effects (e.g. allowlisting via ProceedAlways) are preserved.
             // For 'edit'-type confirmations, also copy fileName/fileDiff so the
             // UI can render a diff preview below the hook message.
+            // For 'exec'-type confirmations, copy command/rootCommand so the UI
+            // can render the full shell command below the hook message.
+            // If the tool needs NO native confirmation (e.g. echo, safe commands)
+            // but the hook still wants to ask, extract the command directly from
+            // reqInfo.args so the user can still see what they're approving.
+            const shellCommandFromArgs =
+              !confirmationDetails &&
+              reqInfo.name === ToolNames.SHELL &&
+              typeof reqInfo.args['command'] === 'string'
+                ? (reqInfo.args['command'] as string)
+                : undefined;
             effectiveConfirmationDetails = {
               type: 'info',
               title: 'Hook Requires Confirmation',
@@ -1014,6 +1021,14 @@ export class CoreToolScheduler {
                     fileDiff: confirmationDetails.fileDiff,
                   }
                 : {}),
+              ...(confirmationDetails && confirmationDetails.type === 'exec'
+                ? {
+                    command: confirmationDetails.command,
+                    rootCommand: confirmationDetails.rootCommand,
+                  }
+                : shellCommandFromArgs
+                  ? { command: shellCommandFromArgs }
+                  : {}),
               onConfirm: confirmationDetails
                 ? (
                     outcome: ToolConfirmationOutcome,

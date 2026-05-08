@@ -11,6 +11,92 @@ import type { ToolCallConfirmationDetails, Config } from '@copilot-shell/core';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
+describe('ToolConfirmationMessage exec confirmation', () => {
+  const mockConfig = {
+    isTrustedFolder: () => false,
+    getIdeMode: () => false,
+  } as unknown as Config;
+
+  it('shows the fixed question text instead of embedding the command', () => {
+    const details: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'grep -r "some pattern" /very/long/path/to/somewhere',
+      rootCommand: 'grep',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={details}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Do you want to execute this command?');
+    expect(lastFrame()).not.toContain('Allow execution of:');
+  });
+
+  it('renders full command in body at 40-column width (snapshot)', () => {
+    // A very long command that would be truncated under the old "question"
+    // approach at narrow terminal widths. We verify the tail of the command
+    // is visible in the rendered output, proving the body wraps correctly.
+    const longCommand =
+      'bash -c "export PATH=/scanner/bin:$PATH; grep -rn --include=*.ts ' +
+      '"dangerous_pattern" /workspace/src 2>&1 | head -50"';
+    const details: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: longCommand,
+      rootCommand: 'bash',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={details}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={40}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // The tail of the command must appear somewhere in the rendered output,
+    // proving it was not silently truncated.
+    expect(frame).toContain('head -50');
+    expect(frame).toMatchSnapshot();
+  });
+
+  it('renders full command in body at 60-column width (snapshot)', () => {
+    const longCommand =
+      'bash -c "export PATH=/scanner/bin:$PATH; grep -rn --include=*.ts ' +
+      '"dangerous_pattern" /workspace/src 2>&1 | head -50"';
+    const details: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: longCommand,
+      rootCommand: 'bash',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={details}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={60}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('head -50');
+    expect(frame).toMatchSnapshot();
+  });
+});
+
 describe('ToolConfirmationMessage', () => {
   const mockConfig = {
     isTrustedFolder: () => true,

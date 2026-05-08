@@ -8,6 +8,7 @@ import type React from 'react';
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { DiffRenderer } from './DiffRenderer.js';
+import { ExecCommandPreview } from './ExecCommandPreview.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import type {
@@ -20,7 +21,6 @@ import type {
 import { IdeClient, ToolConfirmationOutcome } from '@copilot-shell/core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -233,9 +233,7 @@ export const ToolConfirmationMessage: React.FC<
     const executionProps =
       confirmationDetails as ToolExecuteConfirmationDetails;
 
-    question = t("Allow execution of: '{{command}}'?", {
-      command: executionProps.rootCommand,
-    });
+    question = t('Do you want to execute this command?');
     options.push({
       label: t('Yes, allow once'),
       value: ToolConfirmationOutcome.ProceedOnce,
@@ -254,23 +252,13 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
-    let bodyContentHeight = availableBodyContentHeight();
-    if (bodyContentHeight !== undefined) {
-      bodyContentHeight -= 2; // Account for padding;
-    }
     bodyContent = (
-      <Box flexDirection="column">
-        <Box paddingX={1} marginLeft={1}>
-          <MaxSizedBox
-            maxHeight={bodyContentHeight}
-            maxWidth={Math.max(contentWidth, 1)}
-          >
-            <Box>
-              <Text color={theme.text.link}>{executionProps.command}</Text>
-            </Box>
-          </MaxSizedBox>
-        </Box>
-      </Box>
+      <ExecCommandPreview
+        command={executionProps.command}
+        rootCommand={executionProps.rootCommand}
+        contentWidth={contentWidth}
+        maxHeight={availableBodyContentHeight()}
+      />
     );
   } else if (confirmationDetails.type === 'plan') {
     const planProps = confirmationDetails;
@@ -351,6 +339,18 @@ export const ToolConfirmationMessage: React.FC<
               availableTerminalHeight={availableBodyContentHeight()}
               contentWidth={contentWidth}
               settings={settings}
+            />
+          </Box>
+        )}
+        {infoProps.command && (
+          <Box marginTop={1}>
+            <ExecCommandPreview
+              command={infoProps.command}
+              // rootCommand intentionally omitted: in hook-ask info dialogs the
+              // full command is already visible inside the preview box, so the
+              // root-command breadcrumb above the box is redundant noise.
+              contentWidth={contentWidth}
+              maxHeight={availableBodyContentHeight()}
             />
           </Box>
         )}

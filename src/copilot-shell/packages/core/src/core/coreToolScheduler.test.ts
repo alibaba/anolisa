@@ -2611,6 +2611,278 @@ describe('CoreToolScheduler Sequential Execution', () => {
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('success');
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // hook-ask command forwarding: safe shell command (echo)
+  //   When shouldConfirmExecute() returns false (safe command like `echo`)
+  //   but a hook forces ask, the scheduler must extract the shell command
+  //   from reqInfo.args and surface it in the synthesized info dialog so
+  //   the user can see what they are approving.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('hookForceAsk with safe shell command should forward command from reqInfo.args into info dialog', async () => {
+    // A shell-named tool whose shouldConfirmExecute returns false (safe cmd).
+    const safeCmdTool = new MockTool({
+      name: 'run_shell_command',
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    const hookAskOutputSafe = {
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => true,
+      systemMessage: 'Hook verification required',
+      getModifiedToolInput: () => null,
+      getEffectiveReason: () => '',
+    };
+    const mockHookSafeCmd = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(hookAskOutputSafe),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const toolRegistrySafeCmd = {
+      getTool: () => safeCmdTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => safeCmdTool,
+      getToolByDisplayName: () => safeCmdTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsCompleteSafeCmd = vi.fn();
+    let capturedSafeCmdCall: WaitingToolCall | undefined;
+
+    const mockConfigSafeCmd = {
+      getSessionId: () => 'test-session-safe-cmd',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistrySafeCmd,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSafeCmd,
+    } as unknown as Config;
+
+    const schedulerSafeCmd = new CoreToolScheduler({
+      config: mockConfigSafeCmd,
+      onAllToolCallsComplete: onAllToolCallsCompleteSafeCmd,
+      onToolCallsUpdate: (toolCalls) => {
+        if (!capturedSafeCmdCall) {
+          capturedSafeCmdCall = toolCalls.find(
+            (c) => c.status === 'awaiting_approval',
+          ) as WaitingToolCall | undefined;
+        }
+      },
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const acSafeCmd = new AbortController();
+    await schedulerSafeCmd.schedule(
+      [
+        {
+          callId: 'safe-cmd-1',
+          name: 'run_shell_command',
+          args: { command: 'echo hi' },
+          isClientInitiated: false,
+          prompt_id: 'p-safe-cmd',
+        },
+      ],
+      acSafeCmd.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(capturedSafeCmdCall).toBeDefined();
+    });
+
+    // 1. Dialog type must be 'info'.
+    expect(capturedSafeCmdCall!.confirmationDetails.type).toBe('info');
+
+    // 2. command must be extracted from reqInfo.args['command'].
+    expect(
+      (capturedSafeCmdCall!.confirmationDetails as { command?: string })
+        .command,
+    ).toBe('echo hi');
+
+    // 3. rootCommand must NOT be set — only the raw command is available
+    //    from args; there is no exec confirmation to copy rootCommand from.
+    expect(
+      (
+        capturedSafeCmdCall!.confirmationDetails as {
+          rootCommand?: string;
+        }
+      ).rootCommand,
+    ).toBeUndefined();
+
+    // Clean up: confirm so the scheduler can finish.
+    await capturedSafeCmdCall!.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsCompleteSafeCmd).toHaveBeenCalled();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // hook-ask command forwarding: exec-type confirmation (dangerous command)
+  //   When shouldConfirmExecute() returns an exec-type confirmation and a
+  //   hook forces ask, the synthesized info dialog must carry both `command`
+  //   and `rootCommand` forwarded from the native exec confirmation details.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('hookForceAsk with exec confirmation should forward command and rootCommand into info dialog', async () => {
+    const execCommand = 'rm -rf /tmp/test-dir';
+    const execRootCommand = 'rm';
+
+    const execCmdTool = new MockTool({
+      name: 'run_shell_command',
+      shouldConfirmExecute: vi.fn().mockResolvedValue({
+        type: 'exec' as const,
+        title: 'Confirm Shell Command',
+        command: execCommand,
+        rootCommand: execRootCommand,
+        onConfirm: async () => {},
+      }),
+    });
+
+    const hookAskOutputExec = {
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => true,
+      systemMessage: 'Security hook inspection required',
+      getModifiedToolInput: () => null,
+      getEffectiveReason: () => '',
+    };
+    const mockHookExecCmd = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(hookAskOutputExec),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const toolRegistryExecCmd = {
+      getTool: () => execCmdTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => execCmdTool,
+      getToolByDisplayName: () => execCmdTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsCompleteExecCmd = vi.fn();
+    let capturedExecCmdCall: WaitingToolCall | undefined;
+
+    const mockConfigExecCmd = {
+      getSessionId: () => 'test-session-exec-cmd',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistryExecCmd,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookExecCmd,
+    } as unknown as Config;
+
+    const schedulerExecCmd = new CoreToolScheduler({
+      config: mockConfigExecCmd,
+      onAllToolCallsComplete: onAllToolCallsCompleteExecCmd,
+      onToolCallsUpdate: (toolCalls) => {
+        if (!capturedExecCmdCall) {
+          capturedExecCmdCall = toolCalls.find(
+            (c) => c.status === 'awaiting_approval',
+          ) as WaitingToolCall | undefined;
+        }
+      },
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const acExecCmd = new AbortController();
+    await schedulerExecCmd.schedule(
+      [
+        {
+          callId: 'exec-cmd-1',
+          name: 'run_shell_command',
+          args: { command: execCommand },
+          isClientInitiated: false,
+          prompt_id: 'p-exec-cmd',
+        },
+      ],
+      acExecCmd.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(capturedExecCmdCall).toBeDefined();
+    });
+
+    // 1. Dialog type must be 'info'.
+    expect(capturedExecCmdCall!.confirmationDetails.type).toBe('info');
+
+    // 2. command must be forwarded from the native exec confirmation.
+    expect(
+      (capturedExecCmdCall!.confirmationDetails as { command?: string })
+        .command,
+    ).toBe(execCommand);
+
+    // 3. rootCommand must be forwarded from the native exec confirmation.
+    expect(
+      (
+        capturedExecCmdCall!.confirmationDetails as {
+          rootCommand?: string;
+        }
+      ).rootCommand,
+    ).toBe(execRootCommand);
+
+    // Clean up: confirm so the scheduler can finish.
+    await capturedExecCmdCall!.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsCompleteExecCmd).toHaveBeenCalled();
+    });
+  });
 });
 
 describe('truncateAndSaveToFile', () => {

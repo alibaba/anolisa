@@ -918,7 +918,8 @@ export default {
   'Yes, allow always': 'Yes, allow always',
   'Modify with external editor': 'Modify with external editor',
   'No, suggest changes (esc)': 'No, suggest changes (esc)',
-  "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
+  'Do you want to execute this command?':
+    'Do you want to execute this command?',
   'Yes, allow always ...': 'Yes, allow always ...',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',

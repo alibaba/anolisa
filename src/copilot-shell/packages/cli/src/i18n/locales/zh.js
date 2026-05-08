@@ -872,7 +872,7 @@ export default {
   'Yes, allow always': '是，总是允许',
   'Modify with external editor': '使用外部编辑器修改',
   'No, suggest changes (esc)': '否，建议更改 (esc)',
-  "Allow execution of: '{{command}}'?": "允许执行：'{{command}}'？",
+  'Do you want to execute this command?': '是否执行此命令？',
   'Yes, allow always ...': '是，总是允许 ...',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
