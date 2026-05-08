@@ -118,20 +118,22 @@ openclaw-uninstall:
 	rm -rf $(OPENCLAW_DIR)
 	@echo "==> OpenClaw plugin removed"
 
-# copilot-shell extension management
+# copilot-shell extension management (developer convenience — copies to auto-discovery path)
 cosh-install:
-	@echo "==> Installing copilot-shell extension..."
+	@echo "==> Installing copilot-shell extension to auto-discovery path..."
 	@rm -rf $(COSH_EXTENSION_DIR) 2>/dev/null || true
 	@mkdir -p $(COSH_EXTENSION_DIR)
 	cp -r cosh-extension/hooks $(COSH_EXTENSION_DIR)/
 	cp -r cosh-extension/commands $(COSH_EXTENSION_DIR)/
 	cp cosh-extension/cosh-extension.json $(COSH_EXTENSION_DIR)/
+	cp cosh-extension/COPILOT.md $(COSH_EXTENSION_DIR)/
 	cp cosh-extension/README.md $(COSH_EXTENSION_DIR)/
 	chmod +x $(COSH_EXTENSION_DIR)/hooks/*.py
 	@echo "==> copilot-shell extension installed to $(COSH_EXTENSION_DIR)"
+	@echo "    copilot-shell auto-discovers extensions from this path"
 
 cosh-uninstall:
-	@echo "==> Uninstalling copilot-shell extension..."
+	@echo "==> Removing copilot-shell extension from auto-discovery path..."
 	rm -rf $(COSH_EXTENSION_DIR)
 	@echo "==> copilot-shell extension removed"
 

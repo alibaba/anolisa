@@ -11,10 +11,12 @@ set -euo pipefail
 #   ./install.sh --uninstall        # RPM pre-uninstall cleanup (full removal)
 #   ./install.sh --upgrade          # RPM pre-uninstall cleanup (upgrade — no-op)
 #   ./install.sh --openclaw         # Manually install OpenClaw plugin
-#   ./install.sh --cosh              # Manually install copilot-shell extension
 #   ./install.sh --uninstall-openclaw # Uninstall OpenClaw plugin only
-#   ./install.sh --uninstall-cosh    # Uninstall copilot-shell extension only
 #   ./install.sh --help             # Show help
+#
+# Note: copilot-shell extension is auto-discovered from:
+#   - System: /usr/share/anolisa/extensions/tokenless/ (RPM installs here)
+#   - User:   ~/.copilot-shell/extensions/tokenless/ (use /extensions install or make cosh-install)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -80,12 +82,7 @@ detect_install_root() {
 detect_install_root
 
 # Derived paths (overridable via environment variables)
-# BIN_DIR and LIBEXEC_DIR are already set by detect_install_root;
-# only OPENCLAW_DIR needs fallback derivation.
-# COSH_EXTENSION_SRC is the system-installed source of the extension;
-# for local installs we copy from the project's cosh-extension/ directory.
 OPENCLAW_DIR="${OPENCLAW_DIR:-${SHARE_DIR}/adapters/openclaw}"
-COSH_EXTENSION_SRC="${COSH_EXTENSION_SRC:-/usr/share/anolisa/extensions/tokenless}"
 
 # Colors
 RED='\033[0;31m'
@@ -222,77 +219,13 @@ cleanup_openclaw() {
 }
 
 # ============================================================================
-# Copilot-Shell Extension Setup
+# Copilot-Shell Legacy Hook Cleanup (migration helper)
 # ============================================================================
+# The cosh extension is auto-discovered by copilot-shell — no install/uninstall
+# needed. This function cleans up legacy bash hook entries from settings.json
+# that were used before the extension format was adopted.
 
-# Detect copilot-shell extensions directory
-_detect_cosh_extensions_dir() {
-    # copilot-shell and qwen-code store extensions in different locations.
-    # Return the first existing one, or the default copilot-shell path.
-    for dir in "$HOME/.copilot-shell/extensions" "$HOME/.qwen-code/extensions"; do
-        if [ -d "$dir" ]; then
-            echo "$dir"
-            return
-        fi
-    done
-    # Default: use copilot-shell path (will be created if needed)
-    echo "$HOME/.copilot-shell/extensions"
-}
-
-# Install cosh extension (idempotent)
-install_cosh_extension() {
-    local extension_src="${1:-$COSH_EXTENSION_SRC}"
-
-    if [ ! -d "$extension_src" ]; then
-        warn "Extension source directory not found: $extension_src"
-        return 1
-    fi
-
-    local extensions_dir
-    extensions_dir="$(_detect_cosh_extensions_dir)"
-    local target_dir="${extensions_dir}/tokenless"
-
-    info "Installing copilot-shell extension..."
-    info "  Source: $extension_src"
-    info "  Target: $target_dir"
-
-    # Copy entire extension directory
-    rm -rf "$target_dir" 2>/dev/null || true
-    mkdir -p "$extensions_dir"
-    cp -r "$extension_src" "$target_dir"
-    chmod +x "$target_dir/hooks/"*.py 2>/dev/null || true
-    info "  Extension installed to $target_dir"
-
-    # Also clean up legacy bash hooks from settings.json (migration)
-    _cleanup_legacy_cosh_hooks
-}
-
-# Uninstall cosh extension
-uninstall_cosh_extension() {
-    local is_upgrade="${1:-0}"
-
-    if [ "$is_upgrade" -eq 1 ]; then
-        info "Upgrade operation detected, preserving extension"
-        return 0
-    fi
-
-    info "Uninstalling copilot-shell extension..."
-
-    # Remove extension directories from all known locations
-    for extensions_dir in "$HOME/.copilot-shell/extensions" "$HOME/.qwen-code/extensions"; do
-        local target_dir="${extensions_dir}/tokenless"
-        if [ -d "$target_dir" ]; then
-            rm -rf "$target_dir"
-            info "  Removed $target_dir"
-        fi
-    done
-
-    # Also clean up legacy bash hooks from settings.json
-    _cleanup_legacy_cosh_hooks
-}
-
-# Clean up legacy bash hook entries from settings.json (migration helper)
-_cleanup_legacy_cosh_hooks() {
+cleanup_legacy_cosh_hooks() {
     for settings_file in "$HOME/.copilot-shell/settings.json" "$HOME/.qwen-code/settings.json"; do
         if [ ! -f "$settings_file" ]; then
             continue
@@ -386,11 +319,12 @@ install_from_source() {
     # Setup OpenClaw (guarded internally)
     setup_openclaw "local" || true
 
-    # Setup copilot-shell extension (guarded internally)
-    info "Installing copilot-shell extension..."
-    if [ -d "$PROJECT_DIR/cosh-extension" ]; then
-        install_cosh_extension "$PROJECT_DIR/cosh-extension" || true
-    fi
+    # Migrate legacy cosh hooks if present
+    cleanup_legacy_cosh_hooks || true
+
+    info "For copilot-shell extension, use one of:"
+    info "  make cosh-install"
+    info "  /extensions install ${PROJECT_DIR}/cosh-extension  (inside copilot-shell)"
 }
 
 # ============================================================================
@@ -398,7 +332,8 @@ install_from_source() {
 # ============================================================================
 
 rpm_postinstall() {
-    :
+    # Migrate legacy bash hooks from settings.json to extension format
+    cleanup_legacy_cosh_hooks || true
 }
 
 # ============================================================================
@@ -413,8 +348,8 @@ rpm_preuninstall() {
     # Clean up OpenClaw plugin
     cleanup_openclaw 0
 
-    # Clean up copilot-shell extension
-    uninstall_cosh_extension 0
+    # Clean up legacy cosh hooks from settings.json
+    cleanup_legacy_cosh_hooks || true
 
     # Clean up stats data
     if [ -d "$HOME/.tokenless" ]; then
@@ -491,11 +426,12 @@ verify_installation() {
     echo "  OpenClaw Plugin:"
     echo "    ${OPENCLAW_DIR}/"
     echo ""
-    local extensions_dir
-    extensions_dir="$(_detect_cosh_extensions_dir)"
-
-    echo "  Copilot-Shell Extension:"
-    echo "    ${extensions_dir}/tokenless/"
+    echo "  Copilot-Shell Extension (auto-discovered):"
+    if [ "$SOURCE_TYPE" = "system" ]; then
+        echo "    /usr/share/anolisa/extensions/tokenless/"
+    else
+        echo "    Run 'make cosh-install' to install locally"
+    fi
     echo ""
     if [ "$verify_ok" = true ]; then
         echo "  Status: All checks passed"
@@ -523,9 +459,7 @@ OPTIONS:
     --uninstall         RPM pre-uninstallation cleanup (full removal)
     --upgrade           RPM pre-uninstallation cleanup (upgrade scenario)
     --openclaw          Manually setup OpenClaw plugin only
-    --cosh              Manually install copilot-shell extension
     --uninstall-openclaw  Uninstall OpenClaw plugin only
-    --uninstall-cosh    Uninstall copilot-shell extension only
     --help, -h          Show this help message
 
 EXAMPLES:
@@ -542,11 +476,15 @@ EXAMPLES:
     ./install.sh --uninstall
     ./install.sh --upgrade
 
+NOTE:
+    The copilot-shell extension is auto-discovered by copilot-shell:
+    - System: /usr/share/anolisa/extensions/tokenless/ (RPM installs here)
+    - User:   ~/.copilot-shell/extensions/tokenless/ (use 'make cosh-install')
+
 ENVIRONMENT VARIABLES:
     BIN_DIR              tokenless binary dir (auto-detected: /usr/bin for RPM, ~/.local/bin for local)
     LIBEXEC_DIR          helper binary dir (auto-detected: /usr/libexec/tokenless for RPM, ~/.local/bin for local)
     OPENCLAW_DIR         OpenClaw plugin dir (auto-detected from installation root)
-    COSH_EXTENSION_SRC   copilot-shell extension source dir (auto-detected from installation root)
 
 EOF
 }
@@ -578,17 +516,11 @@ main() {
         --uninstall-openclaw)
             cleanup_openclaw 0
             ;;
-        --uninstall-cosh)
-            uninstall_cosh_extension 0
-            ;;
         --upgrade)
             info "Upgrade scenario — preserving existing configuration and stats."
             ;;
         --openclaw)
             setup_openclaw "$SOURCE_TYPE"
-            ;;
-        --cosh)
-            install_cosh_extension "${COSH_EXTENSION_SRC}"
             ;;
         --help|-h)
             show_help
@@ -603,7 +535,7 @@ main() {
                     else
                         info "OpenClaw not installed, skipping plugin configuration"
                     fi
-                    install_cosh_extension "${COSH_EXTENSION_SRC}" || true
+                    cleanup_legacy_cosh_hooks || true
                     verify_installation
                     ;;
                 local)
