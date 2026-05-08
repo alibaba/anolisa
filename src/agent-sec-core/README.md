@@ -23,8 +23,8 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 │              Agent Application              │
 ├──────────────────┬──────────────────────────┤
 │ Security Check   │  Sandbox Policy          │
-│ Workflow         │  (agent-sec-sandbox,      │
-│ (SKILL.md)       │   managed independently)  │
+│ Workflow         │  (managed independently  │
+│ (agent-sec-cli)  │   by agent-sec-cli)      │
 ├──────────────────┴──────────────────────────┤
 │  4. Security Decision (Risk Classification) │
 ├─────────────────────────────────────────────┤
@@ -38,17 +38,17 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 └─────────────────────────────────────────────┘
 ```
 
-The security check workflow (Phase 1-3 + Security Decision) is defined in `skill/SKILL.md`. Sandbox policy is managed independently by `skill/references/agent-sec-sandbox.md`.
+The security check workflow (Phase 1-3 + Security Decision) is provided by `agent-sec-cli`; each phase is invoked through dedicated CLI subcommands.
 
 ## Security Check Workflow
 
-Each Agent execution must complete the following security checks **in strict order** (Phase 1-3). Only after all phases pass can the security decision process proceed. See `skill/SKILL.md` for the full executable protocol.
+Before each Agent execution, complete the following security checks **in strict order** (Phase 1-3). Only after all phases pass can the security decision process proceed.
 
 | Phase | Description | Entry | PASS Condition |
 |-------|-------------|-------|----------------|
-| **Phase 1** | System Hardening — `loongshield seharden --scan --config agentos_baseline` | `skill/references/agent-sec-seharden.md` | Output contains `结果：合规` |
-| **Phase 2** | Asset Protection — GPG signature + SHA-256 hash verification of all skills | `skill/references/agent-sec-skill-verify.md` | Output contains `VERIFICATION PASSED` |
-| **Phase 3** | Final Confirmation — Re-run Phase 1 scan + Phase 2 verify as recheck | `skill/SKILL.md` | Both rechecks pass |
+| **Phase 1** | System Hardening — `loongshield seharden --scan --config agentos_baseline` | `agent-sec-cli harden --scan` | Output contains `结果：合规` |
+| **Phase 2** | Asset Protection — GPG signature + SHA-256 hash verification of all skills | `agent-sec-cli verify` | Output contains `VERIFICATION PASSED` |
+| **Phase 3** | Final Confirmation — Re-run Phase 1 scan + Phase 2 verify as recheck | Re-invoke the commands above | Both rechecks pass |
 
 If any phase is not PASS, all subsequent phases are cancelled and the agent execution is blocked.
 
@@ -123,12 +123,7 @@ agent-sec-core/
 │   │   └── security_middleware/ # Middleware layer + backends
 │   ├── dev-tools/             # Developer guides for extending backends
 │   └── pyproject.toml         # Build configuration
-├── skill/
-│   ├── SKILL.md               # Executable security protocol (check workflow + decision)
-│   └── references/
-│       ├── agent-sec-seharden.md       # Phase 1 sub-skill (loongshield hardening)
-│       ├── agent-sec-sandbox.md        # Sandbox policy configuration guide
-│       └── agent-sec-skill-verify.md   # Phase 2 sub-skill (asset verification)
+├── skills/                    # Security-related skills (skill-ledger, code-scanner, prompt-scanner, ...)
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
 ├── tests/                     # Unit, integration, and e2e tests
 ├── LICENSE

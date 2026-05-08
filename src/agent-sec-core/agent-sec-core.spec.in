@@ -124,7 +124,7 @@ Requires:       agent-sec-cli = %{version}-%{release}
 
 %description -n agent-sec-skills
 Skill reference files and documentation for copilot-shell integration.
-Includes agent-sec-core and code-scanner skill definitions.
+Includes skill-ledger, code-scanner, prompt-scanner and related skill definitions.
 
 %files -n agent-sec-skills
 %defattr(0644,root,root,0755)

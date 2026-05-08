@@ -23,7 +23,7 @@
 │              Agent Application              │
 ├──────────────────┬──────────────────────────┤
 │ 安全检查工作流     │  沙箱策略                 │
-│ (SKILL.md)       │  (agent-sec-sandbox,      │
+│ (agent-sec-cli)  │  (由 agent-sec-cli        │
 │                  │   独立管理)               │
 ├──────────────────┴──────────────────────────┤
 │  4. 安全决策流程（风险分级与处置）          │
@@ -38,17 +38,17 @@
 └─────────────────────────────────────────────┘
 ```
 
-安全检查工作流（Phase 1-3 + 安全决策）定义在 `skill/SKILL.md` 中。沙箱策略由 `skill/references/agent-sec-sandbox.md` 独立管理。
+安全检查工作流（Phase 1-3 + 安全决策）由 `agent-sec-cli` 提供，各阶段通过独立 CLI 子命令调用。
 
 ## 安全检查工作流
 
-每次 Agent 执行时，必须先按顺序完成以下安全检查（Phase 1-3），**全部通过后才允许进入安全决策流程**。完整可执行协议详见 `skill/SKILL.md`。
+每次 Agent 执行前，按顺序完成以下安全检查（Phase 1-3），**全部通过后才允许进入安全决策流程**。
 
 | 阶段 | 说明 | 入口 | 通过条件 |
 |------|------|------|----------|
-| **Phase 1** | 系统安全加固 — `loongshield seharden --scan --config agentos_baseline` | `skill/references/agent-sec-seharden.md` | 输出包含 `结果：合规` |
-| **Phase 2** | 关键资产保护 — GPG 签名 + SHA-256 哈希校验所有 skill | `skill/references/agent-sec-skill-verify.md` | 输出包含 `VERIFICATION PASSED` |
-| **Phase 3** | 最终安全确认 — 重新执行 Phase 1 scan + Phase 2 verify 作为复检 | `skill/SKILL.md` | 复检全部通过 |
+| **Phase 1** | 系统安全加固 — `loongshield seharden --scan --config agentos_baseline` | `agent-sec-cli harden --scan` | 输出包含 `结果：合规` |
+| **Phase 2** | 关键资产保护 — GPG 签名 + SHA-256 哈希校验所有 skill | `agent-sec-cli verify` | 输出包含 `VERIFICATION PASSED` |
+| **Phase 3** | 最终安全确认 — 重新执行 Phase 1 scan + Phase 2 verify 作为复检 | 重新调用上述命令 | 复检全部通过 |
 
 任一 Phase 未通过，后续 Phase 全部取消，Agent 执行被阻断。
 
@@ -123,12 +123,7 @@ agent-sec-core/
 │   │   └── security_middleware/ # 中间层 + 后端实现
 │   ├── dev-tools/             # 后端扩展开发指南
 │   └── pyproject.toml         # 构建配置
-├── skill/
-│   ├── SKILL.md               # 可执行安全协议（检查工作流 + 安全决策）
-│   └── references/
-│       ├── agent-sec-seharden.md       # Phase 1 子 skill（loongshield 安全加固）
-│       ├── agent-sec-sandbox.md        # 沙箱策略配置指南
-│       └── agent-sec-skill-verify.md   # Phase 2 子 skill（资产校验）
+├── skills/                    # 安全相关 skill 集合（skill-ledger、code-scanner、prompt-scanner 等）
 ├── tools/                     # sign-skill.sh — PGP 技能签名工具
 ├── tests/                     # 单元测试、集成测试、端到端测试
 ├── LICENSE
