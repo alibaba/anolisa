@@ -1283,5 +1283,60 @@ describe('useSlashCommandProcessor', () => {
       });
       expect(logSlashCommand).not.toHaveBeenCalled();
     });
+
+    it('should not log SUCCESS when command is cancelled via ESC', async () => {
+      const setIsProcessing = vi.fn();
+      let keypressCallback: ((key: { name: string }) => void) | undefined;
+
+      // Mock useKeypress to capture the callback
+      mockUseKeypress.mockImplementation(
+        (callback: (key: { name: string }) => void) => {
+          keypressCallback = callback;
+        },
+      );
+
+      // Create a slow command that can be cancelled
+      const commandAction = vi.fn().mockImplementation(async () => {
+        // Never resolve - will be cancelled by ESC
+        await new Promise(() => {});
+        return { type: 'handled' };
+      });
+
+      const testCommand = createTestCommand({
+        name: 'canceltest',
+        action: commandAction,
+      });
+
+      vi.mocked(logSlashCommand).mockClear();
+
+      const result = setupProcessorHook([testCommand], [], [], setIsProcessing);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      // Start the command
+      act(() => {
+        result.current.handleSlashCommand('/canceltest');
+      });
+
+      // Wait for processing to start
+      await waitFor(() => {
+        expect(setIsProcessing).toHaveBeenCalledWith(true);
+      });
+
+      // Press ESC to cancel
+      expect(keypressCallback).toBeDefined();
+      act(() => {
+        keypressCallback!({ name: 'escape' });
+      });
+
+      // Should NOT log SUCCESS when cancelled
+      expect(logSlashCommand).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          status: SlashCommandStatus.SUCCESS,
+        }),
+      );
+    });
   });
 });

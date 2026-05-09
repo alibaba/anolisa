@@ -164,7 +164,7 @@ export const useSlashCommandProcessor = (
     );
     setPendingItem(null);
     setIsProcessing(false);
-  }, [addItem, setIsProcessing]);
+  }, [addItem, setPendingItem, setIsProcessing]);
 
   useKeypress(
     (key) => {
@@ -688,7 +688,12 @@ export const useSlashCommandProcessor = (
             }
           }
         }
-        if (config && resolvedCommandPath[0] && !hasError) {
+        if (
+          config &&
+          resolvedCommandPath[0] &&
+          !hasError &&
+          !abortController.signal.aborted
+        ) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
             subcommand,
