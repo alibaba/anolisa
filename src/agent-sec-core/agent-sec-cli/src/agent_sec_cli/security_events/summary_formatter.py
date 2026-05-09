@@ -145,10 +145,12 @@ def _get_mode(event: SecurityEvent) -> str:
 
 
 def _format_timestamp(ts: str) -> str:
-    """Truncate ISO-8601 timestamp to seconds for inline display."""
+    """Render an ISO-8601 timestamp in local time for inline display."""
     try:
         dt = datetime.fromisoformat(ts)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return ts
 

@@ -305,14 +305,16 @@ def _resolve_time_range(
 
 
 def _format_timestamp(ts: str) -> str:
-    """Truncate ISO-8601 timestamp to seconds for table display.
+    """Render an ISO-8601 timestamp in local time for table display.
 
     Reduces column width from ~32 to 19 characters while preserving
     all meaningful precision for security event browsing.
     """
     try:
         dt = datetime.fromisoformat(ts)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return ts  # Fallback to original if parsing fails
 
