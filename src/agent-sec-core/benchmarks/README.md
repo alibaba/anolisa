@@ -11,7 +11,7 @@ benchmarks/
 │   ├── datasets/           # 评测数据集（JSONL 格式）
 │   ├── scripts/            # 评测脚本
 │   ├── results/            # 扫描结果输出
-│   └── reports/            # 评测报告（Markdown）
+│   └── reports/            # 评测报告（HTML）
 ├── code-scan/              # (规划中) 代码安全扫描 benchmark
 └── ...
 ```

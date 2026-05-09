@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prompt 扫描基准测试报告</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+:root {
+  /* ── Palette ─────────────────────────────────── */
+  --cream:       #faf8f4;
+  --paper:       #ffffff;
+  --paper-warm:  #fffdf8;
+  --rule:        #e8e3d9;
+  --rule-lt:     #f0ece4;
+  --ink:         #1a1714;
+  --ink-2:       #3d3730;
+  --ink-3:       #514b44;
+  --ink-4:       #6b6258;
+
+  --cobalt:      #1d4ed8;
+  --cobalt-mid:  #3b82f6;
+  --cobalt-lt:   #eff6ff;
+  --cobalt-bd:   #bfdbfe;
+
+  --emerald:     #047857;
+  --emerald-mid: #10b981;
+  --emerald-lt:  #ecfdf5;
+  --emerald-bd:  #a7f3d0;
+
+  --amber:       #b45309;
+  --amber-mid:   #f59e0b;
+  --amber-lt:    #fffbeb;
+  --amber-bd:    #fde68a;
+
+  --crimson:     #be123c;
+  --crimson-mid: #f43f5e;
+  --crimson-lt:  #fff1f2;
+  --crimson-bd:  #fecdd3;
+
+  --teal:        #0e7490;
+  --teal-mid:    #06b6d4;
+  --teal-lt:     #ecfeff;
+  --teal-bd:     #a5f3fc;
+
+  /* ── Typography ──────────────────────────────── */
+  --font-serif:  'DM Serif Display', 'Noto Sans SC', Georgia, serif;
+  --font-body:   'Noto Sans SC', Georgia, sans-serif;
+  --font-mono:   'DM Mono', 'Courier New', monospace;
+
+  /* ── Shadows ─────────────────────────────────── */
+  --shadow-xs:   0 1px 2px rgba(26,23,20,.04);
+  --shadow-sm:   0 2px 8px rgba(26,23,20,.06), 0 1px 2px rgba(26,23,20,.04);
+  --shadow-md:   0 4px 16px rgba(26,23,20,.08), 0 1px 4px rgba(26,23,20,.06);
+  --shadow-lg:   0 8px 32px rgba(26,23,20,.1), 0 2px 8px rgba(26,23,20,.06);
+}
+
+/* ── Reset ───────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--cream);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: 15px;
+  line-height: 1.7;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Textured background ─────────────────────────── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23d4cfc7' fill-opacity='.35'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Layout ──────────────────────────────────────── */
+.page-wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 32px 80px;
+}
+
+/* ── Page Header ─────────────────────────────────── */
+.site-header {
+  padding: 52px 0 40px;
+  border-bottom: 1.5px solid var(--rule);
+  margin-bottom: 60px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 24px;
+}
+
+.header-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--cobalt);
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-meta::before {
+  content: '';
+  display: block;
+  width: 20px;
+  height: 1.5px;
+  background: var(--cobalt);
+}
+
+h1.report-title {
+  font-family: var(--font-serif);
+  font-size: clamp(30px, 5vw, 52px);
+  font-weight: 400;
+  color: var(--ink);
+  line-height: 1.1;
+  letter-spacing: -.5px;
+}
+
+h1.report-title em {
+  font-style: italic;
+  color: var(--cobalt);
+}
+
+.header-right {
+  text-align: right;
+  padding-bottom: 6px;
+}
+
+.version-pill {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  background: var(--cobalt-lt);
+  color: var(--cobalt);
+  border: 1px solid var(--cobalt-bd);
+  padding: 5px 14px;
+  border-radius: 2px;
+  margin-bottom: 6px;
+}
+
+.header-date {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  letter-spacing: .5px;
+  display: block;
+}
+
+/* ── Section ─────────────────────────────────────── */
+.report-section { margin-bottom: 72px; }
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 28px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.section-num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
+
+.section-title {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: -.2px;
+}
+
+/* ── Metric Cards ────────────────────────────────── */
+.metrics-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 36px;
+  background: var(--paper);
+}
+
+.metric-card {
+  padding: 24px 20px 20px;
+  position: relative;
+  border-right: 1px solid var(--rule);
+  transition: background .18s;
+}
+
+.metric-card:last-child { border-right: none; }
+.metric-card:hover { background: var(--paper-warm); }
+
+.metric-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+
+.mc-blue::before   { background: linear-gradient(90deg, var(--cobalt), var(--cobalt-mid)); }
+.mc-green::before  { background: linear-gradient(90deg, var(--emerald), var(--emerald-mid)); }
+.mc-amber::before  { background: linear-gradient(90deg, var(--amber), var(--amber-mid)); }
+.mc-red::before    { background: linear-gradient(90deg, var(--crimson), var(--crimson-mid)); }
+.mc-gray::before   { background: linear-gradient(90deg, var(--ink-3), var(--ink-4)); }
+
+.metric-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 10px;
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1;
+  margin-bottom: 6px;
+  letter-spacing: -1px;
+}
+
+.mc-blue  .metric-value { color: var(--cobalt); }
+.mc-green .metric-value { color: var(--emerald); }
+.mc-amber .metric-value { color: var(--amber); }
+.mc-red   .metric-value { color: var(--crimson); }
+.mc-gray  .metric-value { color: var(--ink-2); }
+
+.metric-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+/* ── Two-col ─────────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+/* ── Confusion Matrix ────────────────────────────── */
+.cm-block { display: block; }
+
+.cm-subtitle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 16px;
+}
+
+.cm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cm-cell {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 20px 16px;
+  text-align: center;
+  box-shadow: var(--shadow-xs);
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow .2s, transform .15s;
+}
+
+.cm-cell:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+
+.cm-cell::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 10%; right: 10%;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+}
+
+.cm-cell.tp::after { background: var(--emerald-mid); }
+.cm-cell.fn::after { background: var(--crimson-mid); }
+.cm-cell.fp::after { background: var(--amber-mid); }
+.cm-cell.tn::after { background: var(--teal-mid); }
+
+.cm-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.cm-cell.tp .cm-tag { background: var(--emerald-lt); color: var(--emerald); }
+.cm-cell.fn .cm-tag { background: var(--crimson-lt); color: var(--crimson); }
+.cm-cell.fp .cm-tag { background: var(--amber-lt);   color: var(--amber); }
+.cm-cell.tn .cm-tag { background: var(--teal-lt);    color: var(--teal); }
+
+.cm-num {
+  font-family: var(--font-mono);
+  font-size: 42px;
+  font-weight: 500;
+  line-height: 1;
+  margin-bottom: 4px;
+  letter-spacing: -2px;
+}
+
+.cm-cell.tp .cm-num { color: var(--emerald); }
+.cm-cell.fn .cm-num { color: var(--crimson); }
+.cm-cell.fp .cm-num { color: var(--amber); }
+.cm-cell.tn .cm-num { color: var(--teal); }
+
+.cm-desc {
+  font-size: 11px;
+  color: var(--ink-4);
+  font-family: var(--font-mono);
+}
+
+/* ── Donut card ──────────────────────────────────── */
+.donut-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 28px;
+  box-shadow: var(--shadow-sm);
+}
+
+.donut-card-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 20px;
+}
+
+.donut-inner {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+
+.donut-canvas-wrap {
+  position: relative;
+  width: 160px; height: 160px;
+  flex-shrink: 0;
+}
+
+.donut-center {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.donut-center .dc-num {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 400;
+  color: var(--ink);
+  line-height: 1;
+  letter-spacing: -1px;
+}
+
+.donut-center .dc-label {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--ink-4);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  flex: 1;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  transition: background .15s;
+}
+
+.legend-row:hover { background: var(--rule-lt); }
+
+.legend-swatch {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.legend-name { font-size: 12px; color: var(--ink-2); flex: 1; }
+.legend-count { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+
+/* ── Chart Cards ─────────────────────────────────── */
+.chart-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 28px 32px;
+  box-shadow: var(--shadow-sm);
+}
+
+.chart-card-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 6px;
+}
+
+.chart-legend-row {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.cleg-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.cleg-dot {
+  width: 8px; height: 8px;
+  border-radius: 1px;
+}
+
+/* ── Source stacked bars ─────────────────────────── */
+.source-rows { display: flex; flex-direction: column; gap: 14px; }
+
+.source-row {
+  display: grid;
+  grid-template-columns: 230px 1fr 68px;
+  align-items: center;
+  gap: 16px;
+}
+
+.src-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -.3px;
+}
+
+.src-track {
+  height: 24px;
+  background: var(--rule-lt);
+  border-radius: 3px;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+}
+
+.src-detected {
+  background: linear-gradient(90deg, var(--cobalt) 0%, var(--cobalt-mid) 100%);
+  height: 100%;
+  transition: width 1.4s cubic-bezier(.16, 1, .3, 1);
+}
+
+.src-missed {
+  background: linear-gradient(90deg, var(--crimson) 0%, var(--crimson-mid) 100%);
+  opacity: .3;
+  height: 100%;
+  transition: width 1.4s cubic-bezier(.16, 1, .3, 1);
+}
+
+.src-pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: right;
+}
+
+.src-pct.high { color: var(--emerald); }
+.src-pct.mid  { color: var(--amber); }
+.src-pct.low  { color: var(--crimson); }
+
+/* ── Subtype bars ────────────────────────────────── */
+.subtype-scroll { overflow-x: auto; padding-bottom: 4px; }
+.subtype-rows   { min-width: 640px; display: flex; flex-direction: column; gap: 8px; }
+
+.sub-row {
+  display: grid;
+  grid-template-columns: 260px 1fr 62px;
+  align-items: center;
+  gap: 14px;
+}
+
+.sub-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sub-track {
+  height: 14px;
+  background: var(--rule-lt);
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+}
+
+.sub-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 1.1s cubic-bezier(.16, 1, .3, 1);
+}
+
+.sub-fill.high { background: linear-gradient(90deg, var(--emerald), var(--emerald-mid)); }
+.sub-fill.mid  { background: linear-gradient(90deg, var(--amber), var(--amber-mid)); }
+.sub-fill.low  { background: linear-gradient(90deg, var(--crimson), var(--crimson-mid)); opacity: .65; }
+
+.sub-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+}
+
+.sub-pct.high { color: var(--emerald); font-weight: 500; }
+.sub-pct.mid  { color: var(--amber); }
+.sub-pct.low  { color: var(--crimson); }
+
+/* x-axis ticks */
+.x-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-left: 274px;
+  padding-right: 76px;
+}
+
+.x-axis span {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-4);
+  letter-spacing: .5px;
+}
+
+/* vertical guide lines on track */
+.sub-track { position: relative; }
+.sub-track::before,
+.sub-track::after,
+.src-track::before,
+.src-track::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--rule);
+  pointer-events: none;
+}
+.sub-track::before, .src-track::before { left: 25%; }
+.sub-track::after,  .src-track::after  { left: 50%; }
+
+/* ── FN Grid ─────────────────────────────────────── */
+.fn-intro {
+  font-size: 13px;
+  color: var(--ink-3);
+  margin-bottom: 20px;
+  font-style: italic;
+}
+
+.fn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.fn-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--crimson-mid);
+  border-radius: 0 6px 6px 0;
+  padding: 14px 16px;
+  box-shadow: var(--shadow-xs);
+  transition: box-shadow .18s, transform .15s;
+}
+
+.fn-card:hover { box-shadow: var(--shadow-md); transform: translateX(2px); }
+
+.fn-card-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+  margin-bottom: 3px;
+  letter-spacing: -.2px;
+}
+
+.fn-card-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--crimson);
+  margin-bottom: 7px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fn-card-count::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 1px;
+  background: var(--crimson-mid);
+  opacity: .5;
+}
+
+.fn-card-ids {
+  font-size: 10px;
+  color: var(--ink-4);
+  line-height: 1.65;
+  word-break: break-all;
+  font-family: var(--font-mono);
+  letter-spacing: -.3px;
+}
+
+/* ── FP Grid ─────────────────────────────────────── */
+.fp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.fp-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--amber-mid);
+  border-radius: 0 6px 6px 0;
+  padding: 14px 16px;
+  box-shadow: var(--shadow-xs);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: box-shadow .18s;
+}
+
+.fp-card:hover { box-shadow: var(--shadow-md); }
+
+.fp-badge {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--amber);
+  flex-shrink: 0;
+  min-width: 68px;
+}
+
+.fp-divider {
+  width: 1px;
+  height: 32px;
+  background: var(--rule);
+  flex-shrink: 0;
+}
+
+.fp-type {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  letter-spacing: -.2px;
+}
+
+/* ── Page Footer ─────────────────────────────────── */
+.site-footer {
+  margin-top: 80px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.footer-left {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.footer-right {
+  display: flex;
+  gap: 4px;
+}
+
+.footer-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--rule);
+}
+
+.footer-dot:nth-child(2) { background: var(--cobalt-bd); }
+.footer-dot:nth-child(3) { background: var(--cobalt-mid); opacity: .5; }
+
+/* ── Responsive ──────────────────────────────────── */
+@media (max-width: 900px) {
+  .metrics-row { grid-template-columns: repeat(3, 1fr); }
+  .metrics-row .metric-card:nth-child(4),
+  .metrics-row .metric-card:nth-child(5) { border-top: 1px solid var(--rule); }
+}
+
+@media (max-width: 700px) {
+  .site-header { grid-template-columns: 1fr; }
+  .header-right { text-align: left; }
+  .two-col { grid-template-columns: 1fr; }
+  .metrics-row { grid-template-columns: 1fr 1fr; border-radius: 8px; }
+  .source-row { grid-template-columns: 130px 1fr 52px; }
+  .sub-row { grid-template-columns: 140px 1fr 52px; }
+  .x-axis { padding-left: 154px; padding-right: 66px; }
+}
+
+/* ── Dataset Source Cards ────────────────────────── */
+.dataset-context {
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.75;
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: var(--cobalt-lt);
+  border: 1px solid var(--cobalt-bd);
+  border-left: 3px solid var(--cobalt);
+  border-radius: 0 6px 6px 0;
+}
+
+.dataset-context strong { color: var(--cobalt); font-weight: 600; }
+
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.ds-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow-xs);
+  transition: box-shadow .18s, transform .15s;
+  position: relative;
+  overflow: hidden;
+}
+
+.ds-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+
+.ds-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--cobalt), var(--cobalt-mid));
+}
+
+.ds-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 12px;
+}
+
+.ds-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -.2px;
+  flex: 1;
+}
+
+.ds-name a {
+  color: var(--cobalt);
+  text-decoration: none;
+  transition: color .15s;
+}
+
+.ds-name a:hover { color: var(--cobalt-mid); text-decoration: underline; }
+
+.ds-name a::after {
+  content: ' ↗';
+  font-size: 9px;
+  opacity: .5;
+  vertical-align: super;
+}
+
+.ds-stars {
+  font-size: 11px;
+  color: var(--amber);
+  flex-shrink: 0;
+  letter-spacing: 1px;
+}
+
+.ds-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.ds-badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 2px;
+  letter-spacing: .5px;
+}
+
+.ds-badge.cnt  { background: var(--cobalt-lt);  color: var(--cobalt);  border: 1px solid var(--cobalt-bd); }
+.ds-badge.lic  { background: var(--emerald-lt); color: var(--emerald); border: 1px solid var(--emerald-bd); }
+.ds-badge.self { background: var(--rule-lt);     color: var(--ink-3);   border: 1px solid var(--rule); }
+
+.ds-desc {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.65;
+}
+
+/* ── Metric Glossary ─────────────────────────────── */
+.metric-glossary {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.mg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: var(--shadow-xs);
+}
+
+.mg-importance {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-top: 2px;
+  letter-spacing: 0;
+}
+
+.mg-importance.critical { color: var(--cobalt); }
+.mg-importance.high     { color: var(--emerald); }
+.mg-importance.low      { color: var(--ink-4); }
+
+.mg-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 3px;
+}
+
+.mg-desc {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* ── Entry animation ─────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.report-section { animation: fadeUp .5s ease both; }
+.report-section:nth-child(1) { animation-delay: .05s; }
+.report-section:nth-child(2) { animation-delay: .12s; }
+.report-section:nth-child(3) { animation-delay: .19s; }
+.report-section:nth-child(4) { animation-delay: .26s; }
+.report-section:nth-child(5) { animation-delay: .33s; }
+</style>
+</head>
+<body>
+<div class="page-wrap">
+
+  <!-- ── Page Header ─────────────────────────────── -->
+  <header class="site-header">
+    <div>
+      <div class="header-meta">Security Analysis · Benchmark Report</div>
+      <h1 class="report-title">AgentSecCore · Prompt 扫描<em>基准测试</em>报告</h1>
+    </div>
+    <div class="header-right">
+      <span class="version-pill">Dataset v{{VERSION}}</span>
+      <span class="header-date">Prompt Injection · ZH</span>
+    </div>
+  </header>
+
+  <!-- ── 00 数据集说明 ────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">00</span>
+      <h2 class="section-title">评测数据集</h2>
+    </div>
+
+    <div class="dataset-context">
+      <strong>背景：</strong>中文 prompt injection / 越狱攻击领域的公开数据集较为匙乏。大多数“中文 LLM 安全数据集”（如 JADE、FLAMES、SafetyBench 等）实际上是<strong>内容安全类</strong>——测试模型是否输出有害内容，而非<strong>提示词攻击类</strong>——测试攻击者能否操控系统行为。本基准整合了当前公开可用的、真正针对 prompt injection / 越狱攻击手法的中文数据集，并自建良性样本用于误报率测试。数据集总计 <strong>480 条</strong>（攻击 343 条 + 良性 137 条），攻击：良性 ≈ 2.5:1，达到业界评测基准的推荐水平。
+    </div>
+
+    <div class="ds-grid">
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name"><a href="https://github.com/Alibaba-AAIG/Strata-Sword" target="_blank" rel="noopener">Alibaba-AAIG / Strata-Sword</a></div>
+          <div class="ds-stars">★★★</div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">200 条</span>
+          <span class="ds-badge lic">Apache-2.0</span>
+        </div>
+        <div class="ds-desc">阿里巴巴安全团队出品，目前<strong>唯一</strong>系统性覆盖中文特有攻击手法的公开数据集。分层越狱评测集 Level 2+3，含拆字、藏头诗、灯谜等其他数据集均无覆盖的中文特有攻击向量。</div>
+      </div>
+
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name"><a href="https://github.com/liuchengyuan123/CPAD" target="_blank" rel="noopener">CPAD</a></div>
+          <div class="ds-stars">★★</div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">70 条</span>
+          <span class="ds-badge lic">Apache-2.0</span>
+        </div>
+        <div class="ds-desc">学术论文配套数据集（AAAI 2024），公开可用的<strong>唯一</strong>针对中文攻击模板的数据集。覆盖赋予角色、加壳、对话补全等攻击模板。</div>
+      </div>
+
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name"><a href="https://github.com/thu-coai/safety-prompts" target="_blank" rel="noopener">THU-COAI / Safety-Prompts</a></div>
+          <div class="ds-stars">★★★</div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">25 条</span>
+          <span class="ds-badge lic">MIT</span>
+        </div>
+        <div class="ds-desc">清华大学 CoAI 实验室出品，发表于 ACL 2023，学术引用广泛。Goal_Hijacking + Role_Play 攻击，当前基准中召回率最高（72%）。</div>
+      </div>
+
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name"><a href="https://huggingface.co/meta-llama/Prompt-Guard-86M" target="_blank" rel="noopener">Meta-PromptGuard-Multilingual</a></div>
+          <div class="ds-stars">★★★★</div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">28 条</span>
+          <span class="ds-badge lic">CC-BY-4.0</span>
+        </div>
+        <div class="ds-desc">Meta 官方评测集，是 Llama-Prompt-Guard-2 模型的<strong>官方配套基准</strong>，行业参考标准。覆盖直接注入与间接注入的多语言中文部分。</div>
+      </div>
+
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name"><a href="https://github.com/microsoft/BIPIA" target="_blank" rel="noopener">BIPIA-adapted-zh</a></div>
+          <div class="ds-stars">★★★</div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">20 条</span>
+          <span class="ds-badge lic">MIT</span>
+        </div>
+        <div class="ds-desc">基于 Microsoft Research 的 BIPIA 基准改编，BIPIA 是间接注入领域的<strong>标准学术基准</strong>。中文适配版本，覆盖信息注入、诈骗注入、编码混淡、代码注入等。</div>
+      </div>
+
+      <div class="ds-card">
+        <div class="ds-card-head">
+          <div class="ds-name">Self-Constructed（自建）</div>
+          <div class="ds-stars"></div>
+        </div>
+        <div class="ds-meta">
+          <span class="ds-badge cnt">137 条良性</span>
+          <span class="ds-badge self">internal</span>
+        </div>
+        <div class="ds-desc">内部构建的良性样本，用于误报率测试。包含日常问答（BN-001~BN-112）、边界良性（ADV-7）、含注入载荷片段的正当请求（MIX-3）、角色扮演良性（EXT-RP-015）。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 01 整体指标 ─────────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">01</span>
+      <h2 class="section-title">整体指标</h2>
+    </div>
+
+    <!-- Metric strip -->
+    <div class="metrics-row">
+      <div class="metric-card mc-blue">
+        <div class="metric-label">召回率 · Recall</div>
+        <div class="metric-value">{{RECALL}}</div>
+        <div class="metric-sub">{{TP}} / {{TP_FN}}</div>
+      </div>
+      <div class="metric-card mc-green">
+        <div class="metric-label">精确率 · Precision</div>
+        <div class="metric-value">{{PRECISION}}</div>
+        <div class="metric-sub">{{TP}} / {{TP_FP}}</div>
+      </div>
+      <div class="metric-card mc-amber">
+        <div class="metric-label">F1 Score</div>
+        <div class="metric-value">{{F1}}</div>
+        <div class="metric-sub">&nbsp;</div>
+      </div>
+      <div class="metric-card mc-red">
+        <div class="metric-label">Balanced Accuracy</div>
+        <div class="metric-value">{{BALANCED_ACC}}</div>
+        <div class="metric-sub">(Recall + TNR) / 2</div>
+      </div>
+      <div class="metric-card mc-gray">
+        <div class="metric-label">准确率 · Accuracy</div>
+        <div class="metric-value">{{ACCURACY}}</div>
+        <div class="metric-sub">{{TP_TN}} / {{TOTAL}}</div>
+      </div>
+    </div>
+
+    <!-- Metric Glossary -->
+    <div class="metric-glossary">
+      <div class="mg-row">
+        <div class="mg-importance critical">⭐⭐⭐</div>
+        <div>
+          <div class="mg-name">Recall (TPR) &middot; 首要指标</div>
+          <div class="mg-desc">攻击样本中被检出的比例（TP / (TP+FN)）。漏检攻击的代价最高，是安全场景下最重要的单一指标。</div>
+        </div>
+      </div>
+      <div class="mg-row">
+        <div class="mg-importance critical">⭐⭐⭐</div>
+        <div>
+          <div class="mg-name">F1 Score &middot; 核心指标</div>
+          <div class="mg-desc">Precision 和 Recall 的调和均值。综合衡量检测精度，平衡精确率与召回率。</div>
+        </div>
+      </div>
+      <div class="mg-row">
+        <div class="mg-importance high">⭐⭐</div>
+        <div>
+          <div class="mg-name">Precision &middot; 精确率</div>
+          <div class="mg-desc">检出结果中真正攻击的占比（TP / (TP+FP)）。FP 过高会降低用户体验，但误报代价低于漏检。</div>
+        </div>
+      </div>
+      <div class="mg-row">
+        <div class="mg-importance high">⭐⭐</div>
+        <div>
+          <div class="mg-name">Balanced Accuracy</div>
+          <div class="mg-desc">(TPR + TNR) / 2。对不平衡数据集更公平，补充 Accuracy 在 2.5:1 不平衡场景下的缺陷。</div>
+        </div>
+      </div>
+      <div class="mg-row">
+        <div class="mg-importance low">⭐</div>
+        <div>
+          <div class="mg-name">Accuracy &middot; 准确率</div>
+          <div class="mg-desc">整体准确率（(TP+TN) / total）。参考意义有限：在 2.5:1 不平衡下，全预测攻击可达 72% Accuracy。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confusion + Donut -->
+    <div class="two-col">
+      <div class="cm-block">
+        <div class="cm-subtitle">混淆矩阵</div>
+        <div class="cm-grid">
+          <div class="cm-cell tp">
+            <div class="cm-tag">TP</div>
+            <div class="cm-num">{{TP}}</div>
+            <div class="cm-desc">正确检出攻击</div>
+          </div>
+          <div class="cm-cell fn">
+            <div class="cm-tag">FN</div>
+            <div class="cm-num">{{FN}}</div>
+            <div class="cm-desc">漏检攻击</div>
+          </div>
+          <div class="cm-cell fp">
+            <div class="cm-tag">FP</div>
+            <div class="cm-num">{{FP}}</div>
+            <div class="cm-desc">良性误报</div>
+          </div>
+          <div class="cm-cell tn">
+            <div class="cm-tag">TN</div>
+            <div class="cm-num">{{TN}}</div>
+            <div class="cm-desc">正确通过良性</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="donut-card">
+        <div class="donut-card-title">样本分布</div>
+        <div class="donut-inner">
+          <div class="donut-canvas-wrap">
+            <canvas id="donutChart" width="160" height="160"></canvas>
+            <div class="donut-center">
+              <div class="dc-num">{{TOTAL}}</div>
+              <div class="dc-label">samples</div>
+            </div>
+          </div>
+          <div class="legend">
+            <div class="legend-row">
+              <div class="legend-swatch" style="background:#047857"></div>
+              <span class="legend-name">TP · 正确检出</span>
+              <span class="legend-count">{{TP}}</span>
+            </div>
+            <div class="legend-row">
+              <div class="legend-swatch" style="background:#be123c"></div>
+              <span class="legend-name">FN · 漏检攻击</span>
+              <span class="legend-count">{{FN}}</span>
+            </div>
+            <div class="legend-row">
+              <div class="legend-swatch" style="background:#b45309"></div>
+              <span class="legend-name">FP · 良性误报</span>
+              <span class="legend-count">{{FP}}</span>
+            </div>
+            <div class="legend-row">
+              <div class="legend-swatch" style="background:#0e7490"></div>
+              <span class="legend-name">TN · 正确通过</span>
+              <span class="legend-count">{{TN}}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 02 数据来源 ─────────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">02</span>
+      <h2 class="section-title">按数据来源统计召回率</h2>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">召回率对比</div>
+      <div class="chart-legend-row">
+        <div class="cleg-item">
+          <div class="cleg-dot" style="background:#1d4ed8"></div>
+          检出（TP）
+        </div>
+        <div class="cleg-item">
+          <div class="cleg-dot" style="background:#be123c;opacity:.4"></div>
+          漏检（FN）
+        </div>
+      </div>
+      <div class="source-rows" id="sourceChart"></div>
+      <div class="x-axis" style="padding-left:246px;padding-right:84px">
+        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 03 攻击子类型 ───────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">03</span>
+      <h2 class="section-title">按攻击子类型统计召回率</h2>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">各攻击类型检出率</div>
+      <div class="subtype-scroll">
+        <div class="subtype-rows" id="subtypeChart"></div>
+        <div class="x-axis" style="min-width:640px">
+          <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 04 漏检分析 ─────────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">04</span>
+      <h2 class="section-title">漏检分析（False Negatives）</h2>
+    </div>
+    <p class="fn-intro">以下攻击样本未被扫描器检出，判定为通过。</p>
+    <div class="fn-grid" id="fnGrid"></div>
+  </section>
+
+  <!-- ── 05 误报分析 ─────────────────────────────── -->
+  <section class="report-section">
+    <div class="section-header">
+      <span class="section-num">05</span>
+      <h2 class="section-title">误报分析（False Positives）</h2>
+    </div>
+    <p class="fn-intro">以下良性样本被错误标记为攻击。</p>
+    <div class="fp-grid">{{FP_ITEMS_HTML}}</div>
+  </section>
+
+  <!-- ── Footer ──────────────────────────────────── -->
+  <footer class="site-footer">
+    <span class="footer-left">Prompt-Scan Benchmark · Dataset v{{VERSION}}</span>
+    <div class="footer-right">
+      <div class="footer-dot"></div>
+      <div class="footer-dot"></div>
+      <div class="footer-dot"></div>
+    </div>
+  </footer>
+
+</div><!-- .page-wrap -->
+
+<script type="application/json" id="tpl-source">{{SOURCE_DATA_JS}}</script>
+<script type="application/json" id="tpl-subtype">{{SUBTYPE_DATA_JS}}</script>
+<script type="application/json" id="tpl-fn">{{FN_DATA_JS}}</script>
+<script type="application/json" id="tpl-cm">[{{TP_JS}},{{FN_JS}},{{FP_JS}},{{TN_JS}}]</script>
+
+<script>
+const sourceData  = JSON.parse(document.getElementById('tpl-source').textContent);
+const subtypeData = JSON.parse(document.getElementById('tpl-subtype').textContent);
+const fnData      = JSON.parse(document.getElementById('tpl-fn').textContent);
+const [TP, FN_V, FP_V, TN] = JSON.parse(document.getElementById('tpl-cm').textContent);
+
+function pctClass(v) { return v >= 70 ? 'high' : v >= 30 ? 'mid' : 'low'; }
+
+/* ── Donut ──────────────────────────────────────── */
+function drawDonut() {
+  const canvas = document.getElementById('donutChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const cx = 80, cy = 80, r = 62, stroke = 18;
+  const slices = [
+    { value: TP,   color: '#047857' },
+    { value: FN_V, color: '#be123c' },
+    { value: FP_V, color: '#b45309' },
+    { value: TN,   color: '#0e7490' },
+  ];
+  const total = slices.reduce((s, d) => s + d.value, 0);
+  let angle = -Math.PI / 2;
+
+  ctx.clearRect(0, 0, 160, 160);
+
+  // background ring
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = '#e8e3d9';
+  ctx.lineWidth = stroke;
+  ctx.stroke();
+
+  slices.forEach(s => {
+    if (s.value === 0) return;
+    const sweep = (s.value / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, angle, angle + sweep - 0.012);
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = stroke;
+    ctx.lineCap = 'butt';
+    ctx.stroke();
+    angle += sweep;
+  });
+}
+
+/* ── Source chart ───────────────────────────────── */
+function buildSourceChart() {
+  const el = document.getElementById('sourceChart');
+  sourceData.forEach(d => {
+    const row = document.createElement('div');
+    row.className = 'source-row';
+    const detPct = (d.detected / d.total * 100).toFixed(1);
+    const misPct = (d.missed  / d.total * 100).toFixed(1);
+    const cls = pctClass(d.recall);
+    row.innerHTML = `
+      <div class="src-label">${d.name}</div>
+      <div class="src-track">
+        <div class="src-detected" style="width:0%" data-target="${detPct}%"></div>
+        <div class="src-missed"   style="width:0%" data-target="${misPct}%"></div>
+      </div>
+      <div class="src-pct ${cls}">${d.recall}%</div>`;
+    el.appendChild(row);
+  });
+}
+
+/* ── Subtype chart ──────────────────────────────── */
+function buildSubtypeChart() {
+  const el = document.getElementById('subtypeChart');
+  subtypeData.forEach(d => {
+    const cls = pctClass(d.recall);
+    const row = document.createElement('div');
+    row.className = 'sub-row';
+    row.innerHTML = `
+      <div class="sub-label">${d.name}</div>
+      <div class="sub-track">
+        <div class="sub-fill ${cls}" style="width:0%" data-target="${d.recall}%"></div>
+      </div>
+      <div class="sub-pct ${cls}">${d.recall}%</div>`;
+    el.appendChild(row);
+  });
+}
+
+/* ── FN grid ────────────────────────────────────── */
+function buildFnGrid() {
+  const el = document.getElementById('fnGrid');
+  fnData.forEach(d => {
+    const card = document.createElement('div');
+    card.className = 'fn-card';
+    card.innerHTML = `
+      <div class="fn-card-name">${d.name}</div>
+      <div class="fn-card-count">漏检 ${d.count} 条</div>
+      <div class="fn-card-ids">${d.ids}</div>`;
+    el.appendChild(card);
+  });
+}
+
+/* ── Animate bars on scroll ─────────────────────── */
+function animateBars() {
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const fills = entry.target.querySelectorAll('[data-target]');
+        fills.forEach((f, i) => {
+          setTimeout(() => { f.style.width = f.dataset.target; }, i * 40);
+        });
+        obs.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.08 });
+  document.querySelectorAll('#sourceChart, #subtypeChart').forEach(el => obs.observe(el));
+}
+
+drawDonut();
+buildSourceChart();
+buildSubtypeChart();
+buildFnGrid();
+requestAnimationFrame(() => setTimeout(animateBars, 60));
+</script>
+</body>
+</html>

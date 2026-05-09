@@ -232,7 +232,7 @@ def run_benchmark(dataset_file: str, results_file: str, mode_str: str = DEFAULT_
 
 
 def generate_report(results_file: str, report_file: str):
-    """Generate a Markdown analysis report from benchmark results."""
+    """Generate an HTML analysis report from benchmark results."""
     # Load results
     records = []
     dataset_version = None
@@ -282,93 +282,101 @@ def generate_report(results_file: str, report_file: str):
     # FP details (false alarms)
     fp_records = [r for r in benign if r["ok"] is False]
 
-    # Build report (Chinese)
-    lines = []
-    lines.append("# Prompt 扫描基准测试报告")
-    lines.append("")
-    if dataset_version:
-        lines.append(f"> 数据集版本：`{dataset_version}`")
-        lines.append("")
-
-    # Overall metrics
-    lines.append("## 整体指标")
-    lines.append("")
-    lines.append("| 指标 | 值 | 说明 |")
-    lines.append("|------|-----|------|")
-    lines.append(f"| 召回率 (Recall) | {recall:.1%} | {tp}/{tp+fn} |")
-    lines.append(f"| F1 | {f1:.3f} | |")
-    lines.append(f"| 精确率 (Precision) | {precision:.1%} | {tp}/{tp+fp} |")
-    lines.append(
-        f"| Balanced Accuracy | {balanced_accuracy:.1%} | (Recall + TNR) / 2，对不平衡数据集更公平 |"
-    )
-    lines.append(
-        f"| 准确率 (Accuracy) | {accuracy:.1%} | {(tp+tn)}/{tp+fn+fp+tn}，受样本比例影响 |"
-    )
-    lines.append(f"| TP（正确检出攻击） | {tp} | |")
-    lines.append(f"| FN（漏检攻击） | {fn} | |")
-    lines.append(f"| FP（良性误报） | {fp} | |")
-    lines.append(f"| TN（正确通过良性） | {tn} | |")
-    if errors:
-        lines.append(f"| 扫描错误 | {len(errors)} | |")
-    lines.append("")
-
-    # Per-source recall
-    lines.append("## 按数据来源统计召回率")
-    lines.append("")
-    lines.append("| 数据来源 | 总数 | 检出 | 漏检 | 召回率 |")
-    lines.append("|----------|------|------|------|--------|")
+    # ── Build per-source rows ────────────────────────────────────────────────
+    source_rows = []
     for src in sorted(by_source.keys()):
         items = by_source[src]
         s_tp = sum(1 for r in items if r["ok"] is False)
         s_fn = sum(1 for r in items if r["ok"] is True)
         s_recall = s_tp / (s_tp + s_fn) if (s_tp + s_fn) > 0 else 0
-        lines.append(f"| {src} | {len(items)} | {s_tp} | {s_fn} | {s_recall:.1%} |")
-    lines.append("")
+        source_rows.append(
+            {
+                "name": src,
+                "total": len(items),
+                "detected": s_tp,
+                "missed": s_fn,
+                "recall": round(s_recall * 100, 1),
+            }
+        )
+    source_data_js = json.dumps(source_rows, ensure_ascii=False)
 
-    # Per sub_type recall
-    lines.append("## 按攻击子类型统计召回率")
-    lines.append("")
-    lines.append("| 攻击子类型 | 总数 | 检出 | 漏检 | 召回率 |")
-    lines.append("|------------|------|------|------|--------|")
+    # ── Build per-subtype rows (sorted by total desc) ────────────────────────
+    subtype_rows = []
     for sub in sorted(by_sub.keys(), key=lambda x: -len(by_sub[x])):
         items = by_sub[sub]
         s_tp = sum(1 for r in items if r["ok"] is False)
         s_fn = sum(1 for r in items if r["ok"] is True)
         s_recall = s_tp / (s_tp + s_fn) if (s_tp + s_fn) > 0 else 0
-        lines.append(f"| {sub} | {len(items)} | {s_tp} | {s_fn} | {s_recall:.1%} |")
-    lines.append("")
+        subtype_rows.append(
+            {
+                "name": sub,
+                "total": len(items),
+                "detected": s_tp,
+                "missed": s_fn,
+                "recall": round(s_recall * 100, 1),
+            }
+        )
+    subtype_data_js = json.dumps(subtype_rows, ensure_ascii=False)
 
-    # FN analysis
-    if fn_records:
-        lines.append("## 漏检分析（False Negatives）")
-        lines.append("")
-        lines.append("以下攻击样本未被扫描器检出（判定为通过）：")
-        lines.append("")
-        for sub in sorted(fn_by_sub.keys()):
-            ids = fn_by_sub[sub]
-            lines.append(
-                f"- **{sub}**（{len(ids)} 条）：{', '.join(ids[:10])}{'...' if len(ids) > 10 else ''}"
-            )
-        lines.append("")
+    # ── Build FN items ────────────────────────────────────────────────────────
+    fn_items = []
+    for sub in sorted(fn_by_sub.keys()):
+        ids = fn_by_sub[sub]
+        preview = ", ".join(ids[:10]) + ("..." if len(ids) > 10 else "")
+        fn_items.append({"name": sub, "count": len(ids), "ids": preview})
+    fn_data_js = json.dumps(fn_items, ensure_ascii=False)
 
-    # FP analysis
-    if fp_records:
-        lines.append("## 误报分析（False Positives）")
-        lines.append("")
-        lines.append("以下良性样本被错误标记为攻击：")
-        lines.append("")
-        for r in fp_records:
-            lines.append(f"- **{r['id']}**（子类型：{r.get('sub_type', 'N/A')}）")
-        lines.append("")
+    # ── Build FP items ────────────────────────────────────────────────────────
+    fp_items_html = ""
+    for r in fp_records:
+        fp_items_html += (
+            f'<div class="fp-card">'
+            f'<div class="fp-badge">{r["id"]}</div>'
+            f'<div class="fp-divider"></div>'
+            f'<div class="fp-type">{r.get("sub_type", "N/A")}</div>'
+            f"</div>\n"
+        )
+
+    version_str = dataset_version or "N/A"
+    total_samples = tp + fn + fp + tn
+
+    # ── Load HTML template ────────────────────────────────────────────────────
+    template_file = Path(__file__).resolve().parent / "benchmark_report_template.html"
+    template = template_file.read_text(encoding="utf-8")
+
+    # ── Fill in placeholders ──────────────────────────────────────────────────
+    html = (
+        template.replace("{{VERSION}}", version_str)
+        .replace("{{RECALL}}", f"{recall:.1%}")
+        .replace("{{PRECISION}}", f"{precision:.1%}")
+        .replace("{{F1}}", f"{f1:.3f}")
+        .replace("{{BALANCED_ACC}}", f"{balanced_accuracy:.1%}")
+        .replace("{{ACCURACY}}", f"{accuracy:.1%}")
+        .replace("{{TP}}", str(tp))
+        .replace("{{FN}}", str(fn))
+        .replace("{{FP}}", str(fp))
+        .replace("{{TN}}", str(tn))
+        .replace("{{TP_FN}}", str(tp + fn))
+        .replace("{{TP_FP}}", str(tp + fp))
+        .replace("{{TP_TN}}", str(tp + tn))
+        .replace("{{TOTAL}}", str(total_samples))
+        .replace("{{TP_JS}}", str(tp))
+        .replace("{{FN_JS}}", str(fn))
+        .replace("{{FP_JS}}", str(fp))
+        .replace("{{TN_JS}}", str(tn))
+        .replace("{{SOURCE_DATA_JS}}", source_data_js)
+        .replace("{{SUBTYPE_DATA_JS}}", subtype_data_js)
+        .replace("{{FN_DATA_JS}}", fn_data_js)
+        .replace("{{FP_ITEMS_HTML}}", fp_items_html)
+    )
 
     # Write report
-    report_text = "\n".join(lines)
     Path(report_file).parent.mkdir(parents=True, exist_ok=True)
     with open(report_file, "w", encoding="utf-8") as f:
-        f.write(report_text)
+        f.write(html)
 
     print(f"Report saved to: {report_file}")
-    return report_text
+    return html
 
 
 def main():
@@ -389,7 +397,7 @@ def main():
 
     zh_dataset = DATASETS_DIR / "prompt_injection_zh.jsonl"
     zh_results = RESULTS_DIR / "prompt_injection_zh.jsonl"
-    zh_report = REPORTS_DIR / "benchmark_zh.md"
+    zh_report = REPORTS_DIR / "benchmark_zh.html"
 
     print("=" * 42)
     print(" Prompt Scan Benchmark - Chinese Dataset")
@@ -409,7 +417,7 @@ def main():
     print("=" * 42)
     print(" Done!")
     print(f"  Results: {zh_results.name}")
-    print(f"  Report:  {zh_report.name}")
+    print(f"  Report:  {zh_report.name}  (open in browser)")
     print("=" * 42)
 
 
