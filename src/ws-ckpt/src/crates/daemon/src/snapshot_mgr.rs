@@ -163,7 +163,7 @@ pub async fn list_snapshots(state: &Arc<DaemonState>, workspace: &str) -> anyhow
         .collect();
 
     // Sort by created_at ascending
-    snapshots.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
+    snapshots.sort_by_key(|a| a.1.created_at);
 
     let snapshot_entries: Vec<SnapshotEntry> = snapshots
         .into_iter()
@@ -197,7 +197,7 @@ pub async fn list_all_snapshots(state: &Arc<DaemonState>) -> anyhow::Result<Resp
     }
 
     // Sort by created_at ascending
-    all_entries.sort_by(|a, b| a.meta.created_at.cmp(&b.meta.created_at));
+    all_entries.sort_by_key(|a| a.meta.created_at);
 
     Ok(Response::ListOk {
         snapshots: all_entries,
@@ -596,7 +596,7 @@ mod tests {
             .iter()
             .map(|(id, meta)| (id.clone(), meta.clone()))
             .collect();
-        snapshots.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
+        snapshots.sort_by_key(|a| a.1.created_at);
 
         assert_eq!(snapshots[0].0, "snap-a");
         assert_eq!(snapshots[1].0, "snap-b");

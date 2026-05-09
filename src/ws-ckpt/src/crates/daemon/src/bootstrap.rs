@@ -263,10 +263,10 @@ fn compute_target_size(img_size_gb: u64, img_max_percent: f64, total_bytes: u64)
 ///
 /// * `current == target`  -> no-op.
 /// * `current <  target`  -> grow in place, guarded by host avail; if the
-///     delta exceeds avail bytes, keep current size and warn.
+///   delta exceeds avail bytes, keep current size and warn.
 /// * `current >  target`  -> shrink with unmount/remount cycle; if the
-///     mountpoint is still in use by any process, skip shrink and keep
-///     the current (larger) image.
+///   mountpoint is still in use by any process, skip shrink and keep
+///   the current (larger) image.
 ///
 /// The shrink path is strictly serialized because `truncate` on a mounted
 /// loop-backed fs would corrupt the superblock.
