@@ -10,12 +10,19 @@
 use structopt::StructOpt;
 
 mod cli;
-use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand, interruption::InterruptionCommand};
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
+use cli::{
+    audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
+    metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, token::TokenCommand,
+    trace::TraceCommand,
+};
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "agentsight", about = "AI Agent observability tool - trace processes, SSL traffic, and LLM API calls via eBPF")]
+#[structopt(
+    name = "agentsight",
+    about = "AI Agent observability tool - trace processes, SSL traffic, and LLM API calls via eBPF"
+)]
 pub enum Command {
     /// Query token consumption data
     Token(TokenCommand),
@@ -29,6 +36,9 @@ pub enum Command {
     Metrics(MetricsCommand),
     /// Query and manage session interruption events detected during agent conversations
     Interruption(InterruptionCommand),
+    /// Compute and display skill usage metrics
+    #[structopt(name = "skill-metrics")]
+    SkillMetrics(SkillMetricsCommand),
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
@@ -44,6 +54,7 @@ fn main() {
         Command::Discover(discover_cmd) => discover_cmd.execute(),
         Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
         Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
+        Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
     }

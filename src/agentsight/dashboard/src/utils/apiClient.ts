@@ -495,3 +495,88 @@ export async function restartAgentHealth(pid: number): Promise<{ ok: boolean; ne
   }
   return body;
 }
+
+// ─── Skill Metrics types ──────────────────────────────────────────────────────
+
+export interface SkillFirstSeen {
+  first_seen_session_id: string;
+  first_seen_timestamp_ns: number;
+  total_sessions: number;
+}
+
+export interface SkillDownloadMetrics {
+  downloads: Record<string, SkillFirstSeen>;
+}
+
+export interface SkillLoadMetrics {
+  loads: Record<string, number>;
+  total_loads: number;
+}
+
+export interface SkillUsageRatio {
+  ratio: number;
+  with_skill_count: number;
+  without_skill_count: number;
+  total_sessions: number;
+}
+
+export interface SkillCountDistribution {
+  min: number;
+  max: number;
+  mean: number;
+  median: number;
+  p90: number;
+  histogram: [number, number, number, number, number, number];
+}
+
+export interface WeeklyRank {
+  iso_week: string;
+  load_count: number;
+  rank: number;
+}
+
+export interface SkillRankEntry {
+  skill_name: string;
+  total_loads: number;
+  total_rank: number;
+  weekly_ranks: WeeklyRank[];
+  rank_delta: number | null;
+}
+
+export interface SkillHotnessRanking {
+  rankings: SkillRankEntry[];
+}
+
+export interface SkillMetricsReport {
+  downloads: SkillDownloadMetrics | null;
+  loads: SkillLoadMetrics | null;
+  usage_ratio: SkillUsageRatio | null;
+  distribution: SkillCountDistribution | null;
+  hotness: SkillHotnessRanking | null;
+  computed_at: string;
+  time_range_ns: [number, number];
+  event_count: number;
+}
+
+// ─── Skill Metrics API ────────────────────────────────────────────────────────
+
+function buildSkillMetricsParams(startNs?: number, endNs?: number, agentName?: string, granularity?: string): string {
+  const params = new URLSearchParams();
+  if (startNs !== undefined) params.set('start_ns', String(startNs));
+  if (endNs !== undefined) params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
+  if (granularity) params.set('granularity', granularity);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+export async function fetchSkillMetrics(
+  startNs?: number,
+  endNs?: number,
+  agentName?: string,
+  granularity?: string,
+): Promise<SkillMetricsReport> {
+  return apiFetch<SkillMetricsReport>(
+    `${API_BASE}/api/skill-metrics${buildSkillMetricsParams(startNs, endNs, agentName, granularity)}`
+  );
+}

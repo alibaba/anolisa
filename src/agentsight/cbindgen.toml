@@ -53,6 +53,7 @@ int agentsight_read(AgentsightHandle *h,
 
 [parse]
 parse_deps = false
+exclude = ["skill_metrics"]
 
 [export]
 include = [
