@@ -39,7 +39,8 @@ pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
 pub const HF_ENDPOINT: &str = "https://hf-mirror.com";
 
 /// Get the HF_HOME path, expanding `~` to the user's home directory.
-/// 
+///
+///
 /// Uses `$HOME` on Unix and `$USERPROFILE` on Windows as fallback.
 /// Returns `./.agentsight/tokenizers` if home directory cannot be determined.
 pub fn hf_home() -> PathBuf {
@@ -201,8 +202,13 @@ impl Default for AgentsightConfig {
             log_path: None,
 
             // Tokenizer defaults (read from env vars)
-            tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH").ok().map(PathBuf::from),
-            tokenizer_url: Some("https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json".to_owned()),
+            tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH")
+                .ok()
+                .map(PathBuf::from),
+            tokenizer_url: Some(
+                "https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json"
+                    .to_owned(),
+            ),
         }
     }
 }
@@ -438,14 +444,20 @@ mod tests {
     fn test_set_tokenizer_path() {
         let config = AgentsightConfig::new()
             .set_tokenizer_path(Some(PathBuf::from("/path/to/tokenizer.json")));
-        assert_eq!(config.tokenizer_path, Some(PathBuf::from("/path/to/tokenizer.json")));
+        assert_eq!(
+            config.tokenizer_path,
+            Some(PathBuf::from("/path/to/tokenizer.json"))
+        );
     }
 
     #[test]
     fn test_set_tokenizer_url() {
-        let config = AgentsightConfig::new()
-            .set_tokenizer_url(Some("https://example.com/tok.json".into()));
-        assert_eq!(config.tokenizer_url, Some("https://example.com/tok.json".to_string()));
+        let config =
+            AgentsightConfig::new().set_tokenizer_url(Some("https://example.com/tok.json".into()));
+        assert_eq!(
+            config.tokenizer_url,
+            Some("https://example.com/tok.json".to_string())
+        );
     }
 
     #[test]

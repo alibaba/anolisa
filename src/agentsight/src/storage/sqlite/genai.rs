@@ -1054,28 +1054,95 @@ impl GenAISqliteStore {
     }
 
     /// List all conversations under a given session, with aggregated token stats.
+    ///
+    /// If `start_ns`/`end_ns` are provided, only conversations whose
+    /// `start_timestamp_ns` falls within the range are returned.
     pub fn list_traces_by_session(
         &self,
         session_id: &str,
+        start_ns: Option<i64>,
+        end_ns: Option<i64>,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT conversation_id,
-                    COUNT(*)                        AS call_count,
-                    COALESCE(SUM(input_tokens), 0)  AS total_input,
-                    COALESCE(SUM(output_tokens), 0) AS total_output,
-                    MIN(start_timestamp_ns)         AS start_ns,
-                    MAX(end_timestamp_ns)           AS end_ns,
-                    MAX(model)                      AS model,
-                    MIN(user_query)                 AS user_query
-             FROM genai_events
-             WHERE event_type = 'llm_call'
-               AND session_id = ?1
-               AND conversation_id IS NOT NULL
-             GROUP BY conversation_id
-             ORDER BY start_ns ASC",
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| {
+
+        // When both start_ns and end_ns are present, rewrite with BETWEEN
+        let sql = if start_ns.is_some() && end_ns.is_some() {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns BETWEEN ?2 AND ?3
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        } else if start_ns.is_some() {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns >= ?2
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        } else if end_ns.is_some() {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns <= ?2
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        } else {
+            String::from(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        };
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        // Helper to map a row to TraceSummary — avoids closure-type mismatch
+        fn map_row(row: &rusqlite::Row) -> rusqlite::Result<TraceSummary> {
             let cid: String = row.get(0)?;
             Ok(TraceSummary {
                 trace_id: cid.clone(),
@@ -1088,12 +1155,24 @@ impl GenAISqliteStore {
                 model: row.get(6)?,
                 user_query: row.get(7)?,
             })
-        })?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
         }
-        Ok(result)
+
+        let rows: Vec<TraceSummary> = match (start_ns, end_ns) {
+            (Some(s), Some(e)) => stmt
+                .query_map(params![session_id, s, e], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            (Some(s), None) => stmt
+                .query_map(params![session_id, s], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            (None, Some(e)) => stmt
+                .query_map(params![session_id, e], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            (None, None) => stmt
+                .query_map(params![session_id], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        Ok(rows)
     }
 
     /// List all distinct agent_name values observed in the given time window.
@@ -1439,6 +1518,88 @@ impl GenAISqliteStore {
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Fetch all LLM call events within a timestamp range, optionally filtered by agent name.
+    /// Used by skill_metrics module for on-demand metric computation.
+    pub fn get_events_in_time_range(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        agent_name: Option<&str>,
+    ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+
+        let sql = if agent_name.is_some() {
+            "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
+                    model,
+                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    COALESCE(output_tokens, 0) AS output_tokens,
+                    COALESCE(total_tokens, 0)  AS total_tokens,
+                    input_messages, output_messages, system_instructions,
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens, conversation_id, status, interruption_type
+             FROM genai_events
+             WHERE start_timestamp_ns BETWEEN ?1 AND ?2
+               AND event_type = 'llm_call'
+               AND COALESCE(agent_name, process_name) = ?3
+             ORDER BY start_timestamp_ns ASC"
+        } else {
+            "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
+                    model,
+                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    COALESCE(output_tokens, 0) AS output_tokens,
+                    COALESCE(total_tokens, 0)  AS total_tokens,
+                    input_messages, output_messages, system_instructions,
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens, conversation_id, status, interruption_type
+             FROM genai_events
+             WHERE start_timestamp_ns BETWEEN ?1 AND ?2
+               AND event_type = 'llm_call'
+             ORDER BY start_timestamp_ns ASC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<TraceEventDetail> {
+            Ok(TraceEventDetail {
+                id: row.get(0)?,
+                call_id: row.get(1)?,
+                start_timestamp_ns: row.get(2)?,
+                end_timestamp_ns: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                total_tokens: row.get(7)?,
+                input_messages: row.get(8)?,
+                output_messages: row.get(9)?,
+                system_instructions: row.get(10)?,
+                agent_name: row.get(11)?,
+                process_name: row.get(12)?,
+                pid: row.get(13)?,
+                user_query: row.get(14)?,
+                event_json: row.get(15)?,
+                trace_id: row.get(16)?,
+                cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
+                status: row.get(19)?,
+                interruption_type: row.get(20)?,
+            })
+        };
+
+        let mut result = Vec::new();
+        if let Some(agent) = agent_name {
+            let rows = stmt.query_map(params![start_ns, end_ns, agent], map_row)?;
+            for row in rows {
+                result.push(row?);
+            }
+        } else {
+            let rows = stmt.query_map(params![start_ns, end_ns], map_row)?;
+            for row in rows {
+                result.push(row?);
+            }
         }
         Ok(result)
     }

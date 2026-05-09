@@ -6,6 +6,7 @@ import {
 } from 'recharts';
 import { InterruptionBadge } from '../components/InterruptionBadge';
 import { InterruptionPanel, ResolvedEventInfo } from '../components/InterruptionPanel';
+import { DateTimePicker } from '../components/DateTimePicker';
 import {
   fetchSessions,
   fetchTraces,
@@ -92,18 +93,6 @@ function fallbackCopy(text: string, done: () => void) {
   try { document.execCommand('copy'); } catch {}
   document.body.removeChild(el);
   done();
-}
-
-/** datetime-local input value from a timestamp (ms) — uses local timezone */
-function toDatetimeLocal(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** Parse a datetime-local value back to ms timestamp */
-function fromDatetimeLocal(val: string): number {
-  return new Date(val).getTime();
 }
 
 /** Format token number */
@@ -980,24 +969,8 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
         {/* ── Filter bar ── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Time range */}
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-600 whitespace-nowrap">开始时间</label>
-            <input
-              type="datetime-local"
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-              value={toDatetimeLocal(startMs)}
-              onChange={(e) => setStartMs(fromDatetimeLocal(e.target.value))}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-600 whitespace-nowrap">结束时间</label>
-            <input
-              type="datetime-local"
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-              value={toDatetimeLocal(endMs)}
-              onChange={(e) => setEndMs(fromDatetimeLocal(e.target.value))}
-            />
-          </div>
+          <DateTimePicker label="开始时间" value={startMs} onChange={setStartMs} />
+          <DateTimePicker label="结束时间" value={endMs} onChange={setEndMs} />
 
           {/* Quick presets */}
           <div className="flex gap-2 flex-wrap">

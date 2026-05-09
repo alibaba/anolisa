@@ -5,6 +5,7 @@ import { AgentHealthSidebar } from './components/AgentHealthSidebar';
 import { ConversationList } from './pages/ConversationList';
 import { AtifViewerPage } from './pages/AtifViewerPage';
 import { TokenSavingsPage } from './pages/TokenSavingsPage';
+import { SkillMetricsPage } from './pages/SkillMetricsPage';
 
 const App: React.FC = () => {
   return (
@@ -16,6 +17,7 @@ const App: React.FC = () => {
             <Routes>
               <Route path="/" element={<ConversationList />} />
               <Route path="/savings" element={<TokenSavingsPage />} />
+              <Route path="/skills" element={<SkillMetricsPage />} />
               <Route path="/atif" element={<AtifViewerPage />} />
             </Routes>
           </main>
