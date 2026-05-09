@@ -37,11 +37,11 @@ fn main() {
 
     generate_skeleton(&mut out, "sslsniff");
     generate_header(&mut out, "sslsniff");
-
+    
     // Generate proctrace skeleton and bindings
     generate_skeleton(&mut out, "proctrace");
     generate_header(&mut out, "proctrace");
-
+    
     // Generate procmon skeleton and bindings
     generate_skeleton(&mut out, "procmon");
     generate_header(&mut out, "procmon");
@@ -53,7 +53,7 @@ fn main() {
     // Generate filewrite skeleton and bindings
     generate_skeleton(&mut out, "filewrite");
     generate_header(&mut out, "filewrite");
-
+    
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
     // generate_header(&mut out, "stackdeltatypes");
@@ -63,7 +63,8 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
     let frontend_dist = PathBuf::from(&manifest_dir).join("frontend-dist");
     if !frontend_dist.exists() {
-        std::fs::create_dir_all(&frontend_dist).expect("Failed to create frontend-dist directory");
+        std::fs::create_dir_all(&frontend_dist)
+            .expect("Failed to create frontend-dist directory");
     }
     // Watch the directory AND each file inside it so cargo detects content changes
     println!("cargo:rerun-if-changed=frontend-dist");
@@ -75,17 +76,15 @@ fn main() {
 
     // Generate C header from src/ffi.rs via cbindgen
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let header_path = PathBuf::from(&crate_dir)
-        .join("include")
-        .join("agentsight.h");
+    let header_path = PathBuf::from(&crate_dir).join("include").join("agentsight.h");
     std::fs::create_dir_all(header_path.parent().unwrap())
         .expect("Failed to create include/ directory");
-    let cbindgen_config =
-        cbindgen::Config::from_file(PathBuf::from(&crate_dir).join("cbindgen.toml"))
-            .expect("Failed to read cbindgen.toml");
     cbindgen::Builder::new()
         .with_crate(&crate_dir)
-        .with_config(cbindgen_config)
+        .with_config(
+            cbindgen::Config::from_file(PathBuf::from(&crate_dir).join("cbindgen.toml"))
+                .expect("Failed to read cbindgen.toml"),
+        )
         .with_parse_exclude(&["skill_metrics".to_string()])
         .generate()
         .expect("cbindgen failed to generate C header")

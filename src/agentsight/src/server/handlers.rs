@@ -1,12 +1,12 @@
 //! API request handlers
 
-use actix_web::{HttpResponse, Responder, delete, get, post, web};
+use actix_web::{delete, get, post, web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use crate::health::AgentHealthStatus;
-use crate::storage::sqlite::GenAISqliteStore;
-use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
+use crate::storage::sqlite::{GenAISqliteStore};
+use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket};
 use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Prometheus helpers ───────────────────────────────────────────────────────
@@ -15,8 +15,8 @@ use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 /// backslash → \\, double-quote → \", newline → \n
 fn escape_label(s: &str) -> String {
     s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
 }
 
 /// GET /health — health check endpoint
@@ -51,9 +51,7 @@ pub async fn list_sessions(
     let db_path = &data.storage_path;
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
 
     match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => match store.list_sessions(start_ns, end_ns) {
@@ -61,9 +59,8 @@ pub async fn list_sessions(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -89,9 +86,8 @@ pub async fn list_traces_by_session(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -112,9 +108,8 @@ pub async fn get_trace_detail(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -135,9 +130,8 @@ pub async fn get_conversation_events(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -171,9 +165,7 @@ pub async fn list_agent_names(
 ) -> impl Responder {
     let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
     match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => match store.list_agent_names(start_ns, end_ns) {
@@ -181,9 +173,8 @@ pub async fn list_agent_names(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -205,38 +196,26 @@ pub async fn get_timeseries(
 ) -> impl Responder {
     let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
     let buckets = query.buckets.unwrap_or(30);
     let agent_name = query.agent_name.as_deref();
 
     match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => {
-            let token_series =
-                match store.get_token_timeseries(start_ns, end_ns, agent_name, buckets) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return HttpResponse::InternalServerError()
-                            .json(serde_json::json!({"error": e.to_string()}));
-                    }
-                };
-            let model_series =
-                match store.get_model_timeseries(start_ns, end_ns, agent_name, buckets) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return HttpResponse::InternalServerError()
-                            .json(serde_json::json!({"error": e.to_string()}));
-                    }
-                };
-            HttpResponse::Ok().json(TimeseriesResponse {
-                token_series,
-                model_series,
-            })
+            let token_series = match store.get_token_timeseries(start_ns, end_ns, agent_name, buckets) {
+                Ok(v) => v,
+                Err(e) => return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()})),
+            };
+            let model_series = match store.get_model_timeseries(start_ns, end_ns, agent_name, buckets) {
+                Ok(v) => v,
+                Err(e) => return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()})),
+            };
+            HttpResponse::Ok().json(TimeseriesResponse { token_series, model_series })
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -282,29 +261,23 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
     let mut out = String::with_capacity(512 + summaries.len() * 128);
 
     // agentsight_token_input_total
-    out.push_str(
-        "# HELP agentsight_token_input_total Total input tokens consumed by agent (all-time)\n",
-    );
+    out.push_str("# HELP agentsight_token_input_total Total input tokens consumed by agent (all-time)\n");
     out.push_str("# TYPE agentsight_token_input_total counter\n");
     for s in &summaries {
         out.push_str(&format!(
             "agentsight_token_input_total{{agent=\"{}\"}} {}\n",
-            escape_label(&s.agent_name),
-            s.input_tokens
+            escape_label(&s.agent_name), s.input_tokens
         ));
     }
     out.push('\n');
 
     // agentsight_token_output_total
-    out.push_str(
-        "# HELP agentsight_token_output_total Total output tokens consumed by agent (all-time)\n",
-    );
+    out.push_str("# HELP agentsight_token_output_total Total output tokens consumed by agent (all-time)\n");
     out.push_str("# TYPE agentsight_token_output_total counter\n");
     for s in &summaries {
         out.push_str(&format!(
             "agentsight_token_output_total{{agent=\"{}\"}} {}\n",
-            escape_label(&s.agent_name),
-            s.output_tokens
+            escape_label(&s.agent_name), s.output_tokens
         ));
     }
     out.push('\n');
@@ -315,22 +288,18 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
     for s in &summaries {
         out.push_str(&format!(
             "agentsight_token_total_total{{agent=\"{}\"}} {}\n",
-            escape_label(&s.agent_name),
-            s.total_tokens
+            escape_label(&s.agent_name), s.total_tokens
         ));
     }
     out.push('\n');
 
     // agentsight_llm_requests_total
-    out.push_str(
-        "# HELP agentsight_llm_requests_total Total LLM requests made by agent (all-time)\n",
-    );
+    out.push_str("# HELP agentsight_llm_requests_total Total LLM requests made by agent (all-time)\n");
     out.push_str("# TYPE agentsight_llm_requests_total counter\n");
     for s in &summaries {
         out.push_str(&format!(
             "agentsight_llm_requests_total{{agent=\"{}\"}} {}\n",
-            escape_label(&s.agent_name),
-            s.request_count
+            escape_label(&s.agent_name), s.request_count
         ));
     }
     out.push('\n');
@@ -399,8 +368,7 @@ pub async fn restart_agent_health(
     // 从 store 中取出 restart_cmd
     let restart_cmd = {
         let store = data.health_store.read().unwrap();
-        store
-            .all_agents()
+        store.all_agents()
             .into_iter()
             .find(|a| a.pid == pid)
             .and_then(|a| a.restart_cmd)
@@ -408,15 +376,15 @@ pub async fn restart_agent_health(
 
     let cmd = match restart_cmd {
         Some(c) if !c.is_empty() => c,
-        _ => {
-            return HttpResponse::BadRequest()
-                .json(serde_json::json!({"error": "no restart command available for this pid"}));
-        }
+        _ => return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "no restart command available for this pid"})),
     };
 
     // Step 1: kill -9
     use std::process::Command;
-    let kill_result = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    let kill_result = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 
     if let Err(e) = kill_result {
         return HttpResponse::InternalServerError()
@@ -434,9 +402,7 @@ pub async fn restart_agent_health(
             let new_pid = child.id();
             log::info!(
                 "Restarted agent pid={} -> new pid={}, cmd={:?}",
-                pid,
-                new_pid,
-                cmd
+                pid, new_pid, cmd
             );
             // 从 store 中删除旧 PID 条目，下次扫描时新 PID 会自动加入
             data.health_store.write().unwrap().remove_by_pid(pid);
@@ -468,7 +434,7 @@ pub async fn export_atif_trace(
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
@@ -476,19 +442,19 @@ pub async fn export_atif_trace(
         Ok(e) => e,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
     if events.is_empty() {
-        return HttpResponse::NotFound().json(serde_json::json!({"error": "trace not found"}));
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "trace not found"}));
     }
 
     match crate::atif::convert_trace_to_atif(&trace_id, events) {
         Ok(doc) => HttpResponse::Ok().json(doc),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -507,7 +473,7 @@ pub async fn export_atif_session(
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
@@ -515,19 +481,19 @@ pub async fn export_atif_session(
         Ok(e) => e,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
     if events.is_empty() {
-        return HttpResponse::NotFound().json(serde_json::json!({"error": "session not found"}));
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found"}));
     }
 
     match crate::atif::convert_session_to_atif(&session_id, events) {
         Ok(doc) => HttpResponse::Ok().json(doc),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -546,7 +512,7 @@ pub async fn export_atif_conversation(
         Ok(s) => s,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
@@ -554,7 +520,7 @@ pub async fn export_atif_conversation(
         Ok(e) => e,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
+                .json(serde_json::json!({"error": e.to_string()}))
         }
     };
 
@@ -565,9 +531,8 @@ pub async fn export_atif_conversation(
 
     match crate::atif::convert_trace_to_atif(&conversation_id, events) {
         Ok(doc) => HttpResponse::Ok().json(doc),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -599,15 +564,12 @@ pub async fn list_interruptions(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
-    let limit = query.limit.unwrap_or(200);
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let limit    = query.limit.unwrap_or(200);
 
     match istore.list(
-        start_ns,
-        end_ns,
+        start_ns, end_ns,
         query.agent_name.as_deref(),
         query.interruption_type.as_deref(),
         query.severity.as_deref(),
@@ -615,9 +577,8 @@ pub async fn list_interruptions(
         limit,
     ) {
         Ok(rows) => HttpResponse::Ok().json(rows),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -635,10 +596,8 @@ pub async fn interruption_count(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
     match istore.stats(start_ns, end_ns) {
         Ok(stats) => {
@@ -651,9 +610,9 @@ pub async fn interruption_count(
                 total += s.count as u64;
                 match s.severity.as_str() {
                     "critical" => critical += s.count as u64,
-                    "high" => high += s.count as u64,
-                    "medium" => medium += s.count as u64,
-                    _ => low += s.count as u64,
+                    "high"     => high     += s.count as u64,
+                    "medium"   => medium   += s.count as u64,
+                    _          => low      += s.count as u64,
                 }
             }
             HttpResponse::Ok().json(serde_json::json!({
@@ -666,9 +625,8 @@ pub async fn interruption_count(
                 }
             }))
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -685,16 +643,13 @@ pub async fn interruption_stats(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
     match istore.stats(start_ns, end_ns) {
         Ok(stats) => HttpResponse::Ok().json(stats),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e)    => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -713,26 +668,15 @@ pub async fn interruption_session_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
     match istore.count_unresolved_by_session_detailed(start_ns, end_ns) {
         Ok(rows) => {
             // Group by session_id
-            let mut map: std::collections::HashMap<
-                String,
-                (
-                    i64,
-                    std::collections::HashMap<String, i64>,
-                    Vec<serde_json::Value>,
-                ),
-            > = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<String, (i64, std::collections::HashMap<String, i64>, Vec<serde_json::Value>)> = std::collections::HashMap::new();
             for (sid, severity, itype, cnt) in rows {
-                let entry = map
-                    .entry(sid)
-                    .or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
+                let entry = map.entry(sid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
                 entry.0 += cnt;
                 *entry.1.entry(severity.clone()).or_insert(0) += cnt;
                 entry.2.push(serde_json::json!({
@@ -741,27 +685,23 @@ pub async fn interruption_session_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
-                .into_iter()
-                .map(|(sid, (total, by_sev, types))| {
-                    serde_json::json!({
-                        "session_id": sid,
-                        "total": total,
-                        "by_severity": {
-                            "critical": by_sev.get("critical").copied().unwrap_or(0),
-                            "high": by_sev.get("high").copied().unwrap_or(0),
-                            "medium": by_sev.get("medium").copied().unwrap_or(0),
-                            "low": by_sev.get("low").copied().unwrap_or(0),
-                        },
-                        "types": types,
-                    })
+            let json: Vec<_> = map.into_iter().map(|(sid, (total, by_sev, types))| {
+                serde_json::json!({
+                    "session_id": sid,
+                    "total": total,
+                    "by_severity": {
+                        "critical": by_sev.get("critical").copied().unwrap_or(0),
+                        "high": by_sev.get("high").copied().unwrap_or(0),
+                        "medium": by_sev.get("medium").copied().unwrap_or(0),
+                        "low": by_sev.get("low").copied().unwrap_or(0),
+                    },
+                    "types": types,
                 })
-                .collect();
+            }).collect();
             HttpResponse::Ok().json(json)
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -780,25 +720,14 @@ pub async fn interruption_conversation_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let end_ns   = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
     match istore.count_unresolved_by_conversation_detailed(start_ns, end_ns) {
         Ok(rows) => {
-            let mut map: std::collections::HashMap<
-                String,
-                (
-                    i64,
-                    std::collections::HashMap<String, i64>,
-                    Vec<serde_json::Value>,
-                ),
-            > = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<String, (i64, std::collections::HashMap<String, i64>, Vec<serde_json::Value>)> = std::collections::HashMap::new();
             for (cid, severity, itype, cnt) in rows {
-                let entry = map
-                    .entry(cid)
-                    .or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
+                let entry = map.entry(cid).or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
                 entry.0 += cnt;
                 *entry.1.entry(severity.clone()).or_insert(0) += cnt;
                 entry.2.push(serde_json::json!({
@@ -807,27 +736,23 @@ pub async fn interruption_conversation_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
-                .into_iter()
-                .map(|(cid, (total, by_sev, types))| {
-                    serde_json::json!({
-                        "conversation_id": cid,
-                        "total": total,
-                        "by_severity": {
-                            "critical": by_sev.get("critical").copied().unwrap_or(0),
-                            "high": by_sev.get("high").copied().unwrap_or(0),
-                            "medium": by_sev.get("medium").copied().unwrap_or(0),
-                            "low": by_sev.get("low").copied().unwrap_or(0),
-                        },
-                        "types": types,
-                    })
+            let json: Vec<_> = map.into_iter().map(|(cid, (total, by_sev, types))| {
+                serde_json::json!({
+                    "conversation_id": cid,
+                    "total": total,
+                    "by_severity": {
+                        "critical": by_sev.get("critical").copied().unwrap_or(0),
+                        "high": by_sev.get("high").copied().unwrap_or(0),
+                        "medium": by_sev.get("medium").copied().unwrap_or(0),
+                        "low": by_sev.get("low").copied().unwrap_or(0),
+                    },
+                    "types": types,
                 })
-                .collect();
+            }).collect();
             HttpResponse::Ok().json(json)
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -847,9 +772,8 @@ pub async fn list_session_interruptions(
     let session_id = path.into_inner();
     match istore.list_by_session(&session_id) {
         Ok(rows) => HttpResponse::Ok().json(rows),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -869,9 +793,8 @@ pub async fn list_conversation_interruptions(
     let conversation_id = path.into_inner();
     match istore.list_by_conversation(&conversation_id) {
         Ok(rows) => HttpResponse::Ok().json(rows),
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Err(e)   => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -890,13 +813,11 @@ pub async fn resolve_interruption(
 
     let interruption_id = path.into_inner();
     match istore.resolve(&interruption_id) {
-        Ok(true) => HttpResponse::Ok().json(serde_json::json!({"status": "resolved"})),
-        Ok(false) => {
-            HttpResponse::NotFound().json(serde_json::json!({"error": "Interruption not found"}))
-        }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Ok(true)  => HttpResponse::Ok().json(serde_json::json!({"status": "resolved"})),
+        Ok(false) => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Interruption not found"})),
+        Err(e)    => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -916,12 +837,10 @@ pub async fn get_interruption(
     let interruption_id = path.into_inner();
     match istore.get_by_id(&interruption_id) {
         Ok(Some(row)) => HttpResponse::Ok().json(row),
-        Ok(None) => {
-            HttpResponse::NotFound().json(serde_json::json!({"error": "Interruption not found"}))
-        }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
-        }
+        Ok(None)      => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Interruption not found"})),
+        Err(e)        => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -1032,24 +951,18 @@ pub async fn get_token_savings(
 ) -> impl Responder {
     let db_path = &data.storage_path;
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = query.start_ns.unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
     let sessions = match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
             Ok(s) => s,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
+            Err(e) => return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()})),
         },
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
+        Err(e) => return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()})),
     };
 
     // Step 2: Open stats.db (read-only, graceful if absent)
@@ -1071,9 +984,7 @@ pub async fn get_token_savings(
     // column (JSON array) from genai_events, with backward compatibility
     // for stats.db entries that still store call_id.
     let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => store
-            .get_tool_call_turn_indices(&session_ids)
-            .unwrap_or_default(),
+        Ok(store) => store.get_tool_call_turn_indices(&session_ids).unwrap_or_default(),
         Err(_) => std::collections::HashMap::new(),
     };
 
@@ -1109,7 +1020,10 @@ pub async fn get_token_savings(
                 // context of all LLM calls AFTER the one that triggered the
                 // tool use. If the tool was invoked at turn N (1-based) out
                 // of M total turns, the savings persist for (M - N) turns.
-                let turn_index = turn_indices.get(&row.tool_use_id).copied().unwrap_or(1) as i64;
+                let turn_index = turn_indices
+                    .get(&row.tool_use_id)
+                    .copied()
+                    .unwrap_or(1) as i64;
                 let compounding_turns = (request_count - turn_index).max(1);
                 let compounded = saved * compounding_turns;
 
@@ -1134,10 +1048,7 @@ pub async fn get_token_savings(
                     saved_tokens: saved,
                     compounded_saved: compounded,
                     compounding_turns,
-                    before_summary: format!(
-                        "\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens",
-                        row.before_tokens
-                    ),
+                    before_summary: format!("\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens", row.before_tokens),
                     after_summary: format!("\u{4f18}\u{5316}\u{540e} {} tokens", row.after_tokens),
                     before_text: row.before_text.clone(),
                     after_text: row.after_text.clone(),
