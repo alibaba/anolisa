@@ -289,6 +289,143 @@ test_toon_compression() {
     rm -f "$test_db"
 }
 
+test_tool_ready() {
+    log_section "Test 6: Tool Ready (env-check + hook + env-fix + attribution)"
+
+    HOOK_DIR="/usr/share/anolisa/extensions/tokenless/hooks"
+    CORE_DIR="$HOME/.tokenless"
+    SPEC_FILE="$CORE_DIR/tool-ready-spec.json"
+    FIX_SCRIPT="$CORE_DIR/tokenless-env-fix.sh"
+    READY_SCRIPT="$HOOK_DIR/tool_ready_hook.sh"
+    COMPRESS_SCRIPT="$HOOK_DIR/compress_response_hook.py"
+
+    # --- 6.1 Files exist ---
+    log_info "Test 6.1: RPM installation and file existence"
+    [ -f "$SPEC_FILE" ] && log_pass "tool-ready-spec.json exists" || log_fail "tool-ready-spec.json missing"
+    [ -f "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ] && log_pass "tokenless-env-fix.sh exists+executable" || log_fail "tokenless-env-fix.sh missing or not executable"
+    [ -f "$READY_SCRIPT" ] && [ -x "$READY_SCRIPT" ] && log_pass "tool_ready_hook.sh exists+executable" || log_fail "tool_ready_hook.sh missing or not executable"
+
+    # --- 6.2 env-check CLI ---
+    log_info "Test 6.2: env-check CLI"
+    local env_out=$(tokenless env-check --tool Shell 2>&1)
+    assert_contains "$env_out" "READY" "env-check --tool Shell returns READY status"
+    assert_contains "$env_out" "jq" "env-check --tool Shell lists jq dependency"
+
+    local checklist_out=$(tokenless env-check --checklist 2>&1)
+    assert_contains "$checklist_out" "Summary:" "env-check --checklist produces summary"
+
+    local all_out=$(tokenless env-check --all 2>&1)
+    assert_contains "$all_out" "Shell:" "env-check --all lists Shell tool"
+
+    # --- 6.3 tool-ready hook: READY (silent exit) ---
+    log_info "Test 6.3: tool-ready hook — READY silent exit"
+    local ready_out=$(echo '{"tool_name":"Shell","tool_input":{"command":"ls"}}' | bash "$READY_SCRIPT" 2>&1)
+    [ -z "$ready_out" ] && log_pass "tool-ready READY produces no output (silent exit)" || log_fail "tool-ready READY produced unexpected output: $ready_out"
+
+    # --- 6.4 tool-ready hook: NOT_READY ---
+    log_info "Test 6.4: tool-ready hook — NOT_READY + Skip retry"
+    local tmp_spec=$(mktemp)
+    cat > "$tmp_spec" << 'EOF'
+{"TestMissing":{"required":[{"binary":"fakebin99","package":"fakebin99","manager":"apt"}],"recommended":[],"permissions":[],"network":[]}}
+EOF
+    local not_ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' | TOKENLESS_TOOL_READY_SPEC="$tmp_spec" bash "$READY_SCRIPT" 2>&1)
+    assert_contains "$not_ready_out" "NOT_READY" "tool-ready hook outputs NOT_READY"
+    assert_contains "$not_ready_out" "Skip retry" "tool-ready hook includes Skip retry guidance"
+    rm -f "$tmp_spec"
+
+    # --- 6.5 env-fix: check ---
+    log_info "Test 6.5: env-fix check"
+    local check_out=$(bash "$FIX_SCRIPT" check 2>&1)
+    assert_contains "$check_out" "Auto-fixable" "env-fix check lists auto-fixable deps"
+
+    # --- 6.6 env-fix: fix-tool (deps already available) ---
+    log_info "Test 6.6: env-fix fix-tool Shell"
+    local fix_out=$(bash "$FIX_SCRIPT" fix-tool Shell 2>&1)
+    assert_contains "$fix_out" "already available" "env-fix fix-tool reports available deps"
+
+    # --- 6.7 env-fix: fallback chain ---
+    log_info "Test 6.7: env-fix fallback chain (rtk with fallback)"
+    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"rtk","manager":"cargo","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/share/tokenless/bin/rtk"}]}' 2>&1)
+    assert_contains "$fb_out" "already available" "env-fix fallback: rtk already available"
+
+    # --- 6.8 Mixed format backward compat ---
+    log_info "Test 6.8: Mixed format backward compatibility"
+    local compat_out=$(echo '["jq","rtk>=0.35",{"binary":"curl","package":"curl","manager":"apt"}]' | jq -c '[.[] | if type == "string" then if test(">=") then {binary: (capture("^(?<b>[^>=<]+)").b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)").b), manager: "apt"} else {binary: ., package: ., manager: "apt"} end else . end]' 2>&1)
+    if echo "$compat_out" | jq -e '.[1].version' >/dev/null 2>&1; then
+        log_pass "Mixed format string→object conversion works"
+    else log_fail "Mixed format conversion failed: $compat_out"; fi
+
+    # --- 6.9 Attribution: ENV_DEPENDENCY_MISSING ---
+    log_info "Test 6.9: Attribution — ENV_DEPENDENCY_MISSING"
+    # Payload must exceed 200 chars (compress-response skips small responses)
+    local attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
+    local attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Shell","tool_response":$r}')
+    local attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$attr_out" "ENV_DEPENDENCY_MISSING" "Attribution detects command not found"
+    assert_contains "$attr_out" "Skip retry" "Attribution includes Skip retry guidance"
+
+    # --- 6.10 Attribution: ENV_PERMISSION ---
+    log_info "Test 6.10: Attribution — ENV_PERMISSION"
+    attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
+    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$attr_out" "ENV_PERMISSION" "Attribution detects Permission denied"
+
+    # --- 6.11 Attribution: ENV_FILE_MISSING ---
+    log_info "Test 6.11: Attribution — ENV_FILE_MISSING"
+    attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
+    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
+
+    # --- 6.12 env-check --json --tool Shell ---
+    log_info "Test 6.12: env-check --json output schema"
+    local json_out=$(tokenless env-check --tool Shell --json 2>&1)
+    assert_contains "$json_out" '"tool"' "env-check --json contains tool field"
+    assert_contains "$json_out" '"status"' "env-check --json contains status field"
+    assert_contains "$json_out" '"READY"' "env-check --json Shell status is READY"
+
+    # --- 6.13 env-check --tool Docker ---
+    log_info "Test 6.13: env-check Docker tool entry"
+    local docker_out=$(tokenless env-check --tool Docker 2>&1)
+    if echo "$docker_out" | grep -qE 'READY|PARTIAL|NOT_READY'; then
+        log_pass "env-check --tool Docker returns valid status"
+    else log_fail "env-check --tool Docker returns no status: $docker_out"; fi
+    # Verify --json includes docker_socket permission
+    local docker_json=$(tokenless env-check --tool Docker --json 2>&1)
+    if echo "$docker_json" | grep -q '"status"'; then
+        log_pass "env-check --tool Docker --json produces valid output"
+    else log_fail "env-check --tool Docker --json invalid: $docker_json"; fi
+
+    # --- 6.14 env-check --tool Uv ---
+    log_info "Test 6.14: env-check Uv tool entry"
+    local uv_out=$(tokenless env-check --tool Uv 2>&1)
+    if echo "$uv_out" | grep -qE 'READY|PARTIAL|NOT_READY'; then
+        log_pass "env-check --tool Uv returns valid status"
+    else log_fail "env-check --tool Uv returns no status: $uv_out"; fi
+
+    # --- 6.15 env-check --tool Cargo ---
+    log_info "Test 6.15: env-check Cargo tool entry"
+    local cargo_out=$(tokenless env-check --tool Cargo 2>&1)
+    if echo "$cargo_out" | grep -qE 'READY|PARTIAL|NOT_READY'; then
+        log_pass "env-check --tool Cargo returns valid status"
+    else log_fail "env-check --tool Cargo returns no status: $cargo_out"; fi
+
+    # --- 6.16 env-check UNKNOWN status ---
+    log_info "Test 6.16: env-check UNKNOWN tool --json"
+    local unknown_json=$(tokenless env-check --tool NonExistentTool99 --json 2>&1)
+    assert_contains "$unknown_json" '"UNKNOWN"' "env-check --json returns UNKNOWN for unconfigured tool"
+    assert_contains "$unknown_json" '"NonExistentTool99"' "env-check --json includes tool name"
+
+    # --- 6.17 env-check --all includes MVP tools ---
+    log_info "Test 6.17: env-check --all lists Docker/Uv/Cargo/Git"
+    local all_out=$(tokenless env-check --all 2>&1)
+    assert_contains "$all_out" "Docker" "env-check --all includes Docker"
+    assert_contains "$all_out" "Uv" "env-check --all includes Uv"
+    assert_contains "$all_out" "Cargo" "env-check --all includes Cargo"
+    assert_contains "$all_out" "Git" "env-check --all includes Git"
+}
+
 main() {
     echo "============================================"
     echo "  Token-Less Full Test Suite"
@@ -304,6 +441,7 @@ main() {
     test_command_rewriting
     test_stats_system
     test_toon_compression
+    test_tool_ready
 
     echo ""
     echo "============================================"

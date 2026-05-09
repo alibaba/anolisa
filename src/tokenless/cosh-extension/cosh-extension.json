@@ -5,6 +5,18 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-tool-ready",
+            "description": "Pre-checks tool environment readiness, auto-fixes, and provides skip-retry guidance",
+            "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
         "matcher": "run_shell_command",
         "hooks": [
           {

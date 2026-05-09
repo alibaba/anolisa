@@ -1,0 +1,205 @@
+{
+  "_meta": {
+    "version": "2.0",
+    "description": "Tool Ready 可配置依赖字典 — 定义 AI Agent 每个工具所需的系统依赖、检测方法和安装策略。用户可直接编辑此 JSON 文件来增加新的工具支持，无需修改任何代码。",
+    "schema": {
+      "tool_entry": {
+        "required": "必须依赖列表，缺一不可。任意缺失 → NOT_READY，触发自动安装。",
+        "recommended": "推荐依赖列表，缺失不影响基本使用但会降低效率。缺失 → PARTIAL。",
+        "config_files": "必需的配置文件路径（支持 ~ 展开）。缺失 → PARTIAL。",
+        "permissions": "必需的系统权限：file_read, file_write, exec_shell, docker_socket。缺失 → NOT_READY。",
+        "network": "必需的网络能力：https_outbound。缺失 → PARTIAL。"
+      },
+      "dep_entry": {
+        "binary": "(必填) 命令行工具名，用于 command -v 检测",
+        "version": "(可选) 版本约束，如 >=0.35",
+        "package": "(必填) 包管理器中的包名",
+        "manager": "(必填) 包管理器类型，见下方 supported_managers",
+        "pip_name": "(可选) pip 安装时的包名，默认 = package",
+        "uv_name": "(可选) uv 安装时的包名，默认 = package",
+        "npm_name": "(可选) npm 安装时的包名，默认 = package",
+        "use_npx": "(可选) 是否使用 npx 运行",
+        "url": "(可选) curl_pipe_sh 安装时的下载 URL",
+        "args": "(可选) curl_pipe_sh 安装时的额外参数",
+        "fallback": "备选安装策略列表，主策略失败后依次尝试"
+      }
+    },
+    "supported_managers": {
+      "apt": "apt-get / yum / dnf / apk — 系统级包管理器",
+      "rpm": "yum / dnf / rpm — Red Hat 系列",
+      "pip": "pip / pip3 — Python 包",
+      "uv": "uv tool install / uv pip install — 现代 Python 包管理器",
+      "npm": "npm install -g — Node.js 全局包",
+      "npx": "npx -y — Node.js 临时执行（验证可用性）",
+      "cargo": "cargo install --locked — Rust crates.io 安装",
+      "cargo_build": "cargo build --manifest-path — 本地源码编译",
+      "symlink": "ln -sf — 预编译二进制符号链接",
+      "path": "export PATH — 目录注入 PATH",
+      "dir": "mkdir -p — 目录创建",
+      "curl_pipe_sh": "curl/wget | sh — 官方安装脚本（仅作 fallback）"
+    }
+  },
+
+  "Shell": {
+    "required": [
+      { "binary": "jq", "package": "jq", "manager": "apt" },
+      { "binary": "bash", "package": "bash", "manager": "apt" }
+    ],
+    "recommended": [
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/share/tokenless/bin/rtk" },
+          { "method": "cargo_build", "manifest": "/usr/share/tokenless/third_party/rtk/Cargo.toml", "binary": "rtk" }
+        ]
+      },
+      { "binary": "tokenless", "package": "tokenless", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "tokenless", "source": "/usr/share/tokenless/bin/tokenless" },
+          { "method": "cargo_build", "manifest": "/usr/share/tokenless/Cargo.toml", "binary": "tokenless" }
+        ]
+      },
+      { "binary": "toon", "package": "toon", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "toon", "source": "/usr/share/tokenless/bin/toon" },
+          { "method": "cargo_build", "manifest": "/usr/share/tokenless/third_party/toon/Cargo.toml", "binary": "toon", "features": ["cli"] }
+        ]
+      },
+      { "binary": "git", "package": "git", "manager": "apt" },
+      { "binary": "cargo", "package": "cargo", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "cargo", "url": "https://sh.rustup.rs", "args": "-s -- -y" }
+        ]
+      },
+      { "binary": "uv", "package": "uv", "manager": "pip",
+        "pip_name": "uv",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "uv", "url": "https://astral.sh/uv/install.sh" }
+        ]
+      },
+      { "binary": "docker", "package": "docker-ce", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "docker", "url": "https://get.docker.com" }
+        ]
+      }
+    ],
+    "permissions": [],
+    "network": []
+  },
+
+  "WebFetch": {
+    "required": [
+      { "binary": "curl", "package": "curl", "manager": "apt" }
+    ],
+    "recommended": [],
+    "permissions": [],
+    "network": ["https_outbound"]
+  },
+
+  "Read": {
+    "required": [],
+    "recommended": [],
+    "config_files": [],
+    "permissions": ["file_read"],
+    "network": []
+  },
+
+  "Write": {
+    "required": [],
+    "recommended": [],
+    "config_files": [],
+    "permissions": ["file_write"],
+    "network": []
+  },
+
+  "Bash": {
+    "required": [
+      { "binary": "bash", "package": "bash", "manager": "apt" }
+    ],
+    "recommended": [
+      { "binary": "jq", "package": "jq", "manager": "apt" },
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/share/tokenless/bin/rtk" }
+        ]
+      },
+      { "binary": "tokenless", "package": "tokenless", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "tokenless", "source": "/usr/share/tokenless/bin/tokenless" }
+        ]
+      }
+    ],
+    "config_files": [],
+    "permissions": ["exec_shell"],
+    "network": []
+  },
+
+  "Docker": {
+    "_description": "Docker 容器运行时 — docker CLI + daemon 检测",
+    "required": [
+      { "binary": "docker", "package": "docker-ce", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "docker", "url": "https://get.docker.com" }
+        ]
+      }
+    ],
+    "recommended": [
+      { "binary": "docker-compose", "package": "docker-compose-plugin", "manager": "apt" }
+    ],
+    "permissions": ["docker_socket"],
+    "network": ["https_outbound"]
+  },
+
+  "Uv": {
+    "_description": "Uv — 极速 Python 包管理器，Astral 出品",
+    "required": [
+      { "binary": "uv", "package": "uv", "manager": "pip",
+        "pip_name": "uv",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "uv", "url": "https://astral.sh/uv/install.sh" }
+        ]
+      }
+    ],
+    "recommended": [
+      { "binary": "python3", "package": "python3", "manager": "apt" }
+    ],
+    "permissions": [],
+    "network": ["https_outbound"]
+  },
+
+  "Cargo": {
+    "_description": "Cargo — Rust 构建系统和包管理器，随 Rust 工具链一起安装",
+    "required": [
+      { "binary": "cargo", "package": "cargo", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "cargo", "url": "https://sh.rustup.rs", "args": "-s -- -y" }
+        ]
+      },
+      { "binary": "rustc", "package": "rustc", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "rustc", "url": "https://sh.rustup.rs", "args": "-s -- -y" }
+        ]
+      }
+    ],
+    "recommended": [
+      { "binary": "rustup", "package": "rustup", "manager": "apt",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "rustup", "url": "https://sh.rustup.rs", "args": "-s -- -y" }
+        ]
+      }
+    ],
+    "permissions": [],
+    "network": ["https_outbound"]
+  },
+
+  "Git": {
+    "_description": "Git — 分布式版本控制系统",
+    "required": [
+      { "binary": "git", "package": "git", "manager": "apt" }
+    ],
+    "recommended": [
+      { "binary": "ssh", "package": "openssh-client", "manager": "apt" }
+    ],
+    "permissions": [],
+    "network": []
+  }
+}

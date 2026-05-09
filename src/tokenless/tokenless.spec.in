@@ -4,7 +4,7 @@
 Name:           tokenless
 Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
-Summary:        LLM Token Optimization Toolkit - Schema/Response Compression + Command Rewriting
+Summary:        LLM Token Optimization Toolkit - Schema/Response Compression + Command Rewriting + Tool Ready
 
 License:        MIT and Apache-2.0
 URL:            https://github.com/alibaba/anolisa
@@ -18,18 +18,20 @@ BuildRequires:  rust >= 1.86
 
 # Runtime dependencies
 Requires:       python3
+Requires:       jq
 Requires:       bash
 
 %description
 Token-Less is an LLM token optimization toolkit that significantly reduces token
 consumption through Schema/Response Compression, TOON Context Compression,
-Command Rewriting strategies.
+Command Rewriting, and Tool Ready environment pre-check strategies.
 
 Core Features:
 - Schema Compression: Compresses OpenAI Function Calling tool definitions
 - Response Compression: Compresses API/tool responses (removes debug/null/empty)
 - TOON Context Compression: Encodes JSON to TOON format, chained after response compression
 - Command Rewriting: Filters CLI command output via RTK
+- Tool Ready: Pre-execution environment check, auto-fix, and failure attribution
 - Statistics Tracking: SQLite-based metrics for compression effectiveness
 
 The package includes:
@@ -89,6 +91,11 @@ install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenles
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
+# Install core env-check (shared across all agents)
+mkdir -p %{buildroot}%{_datadir}/tokenless/core/env-check
+install -m 0644 core/env-check/tool-ready-spec.json %{buildroot}%{_datadir}/tokenless/core/env-check/
+install -m 0755 core/env-check/tokenless-env-fix.sh %{buildroot}%{_datadir}/tokenless/core/env-check/
+
 # Install OpenClaw adapter and cosh extension (copilot-shell auto-discovery)
 mkdir -p %{buildroot}%{_datadir}/tokenless/adapters/openclaw
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
@@ -104,6 +111,7 @@ install -m 0644 cosh-extension/cosh-extension.json %{buildroot}%{_datadir}/anoli
 install -m 0644 cosh-extension/COPILOT.md %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
 install -m 0644 cosh-extension/README.md %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
 install -m 0755 cosh-extension/hooks/*.py %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
+install -m 0755 cosh-extension/hooks/*.sh %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
 install -m 0644 cosh-extension/commands/*.toml %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands/
 
 install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
@@ -121,6 +129,8 @@ install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 %doc %{_docdir}/tokenless/tokenless-user-manual-en.md
 %doc %{_docdir}/tokenless/tokenless-user-manual-zh.md
 %dir %{_datadir}/tokenless
+%dir %{_datadir}/tokenless/core
+%dir %{_datadir}/tokenless/core/env-check
 %dir %{_datadir}/tokenless/scripts
 %dir %{_datadir}/tokenless/adapters
 %dir %{_datadir}/tokenless/adapters/openclaw
@@ -130,7 +140,10 @@ install -m 0755 scripts/install.sh %{buildroot}%{_datadir}/tokenless/scripts/
 %dir %{_datadir}/anolisa/extensions/tokenless/hooks
 %dir %{_datadir}/anolisa/extensions/tokenless/commands
 %attr(0755,root,root) %{_datadir}/tokenless/scripts/install.sh
+%attr(0644,root,root) %{_datadir}/tokenless/core/env-check/tool-ready-spec.json
+%attr(0755,root,root) %{_datadir}/tokenless/core/env-check/tokenless-env-fix.sh
 %attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.py
+%attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.sh
 %attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/cosh-extension.json
 %attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/COPILOT.md
 %attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/README.md

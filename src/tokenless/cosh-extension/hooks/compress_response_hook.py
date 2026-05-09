@@ -5,10 +5,12 @@ Reads a cosh PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
 format via ``toon -e`` for additional token savings.
 
-Pipeline: Response Compression -> TOON Encoding (if JSON)
-  1. Strip debug fields, nulls, empty values; truncate long strings/arrays
-  2. If the compressed result is still valid JSON, encode to TOON format
-  3. Stats are recorded automatically by tokenless compress-response.
+Pipeline: Env Attribution → Response Compression → TOON Encoding
+  1. If tool_response contains errors, classify as environment vs logic issue
+     and inject "Skip retry" guidance for LLM
+  2. Strip debug fields, nulls, empty values; truncate long strings/arrays
+  3. If the compressed result is still valid JSON, encode to TOON format
+  4. Stats are recorded automatically by tokenless compress-response.
 
 Hook point: **PostToolUse**
 
@@ -19,6 +21,7 @@ tokenless/toon binaries on $PATH.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -92,13 +95,91 @@ def _is_skill_file(text: str) -> bool:
     return False
 
 
+# -- env attribution patterns -------------------------------------------------
+
+_ENV_PATTERNS: list[tuple[list[str], str, str]] = [
+    # (patterns, category, fix_hint_template)
+    (
+        ["command not found", "not installed", "which: no", "No command '"],
+        "ENV_DEPENDENCY_MISSING",
+        "Install missing dependency: {missing}",
+    ),
+    (
+        ["Permission denied", "permission denied", "Access denied"],
+        "ENV_PERMISSION",
+        "Check file/dir permissions or run with appropriate access",
+    ),
+    (
+        ["No such file or directory", "cannot find", "does not exist", "ENOENT"],
+        "ENV_FILE_MISSING",
+        "Create or locate the required file/directory",
+    ),
+    (
+        [
+            "Connection refused", "ECONNREFUSED",
+            "Connection timed out", "ETIMEDOUT",
+            "curl: (7)", "curl: (6)", "network is unreachable",
+        ],
+        "ENV_NETWORK",
+        "Check network connectivity and DNS resolution",
+    ),
+    (
+        ["ModuleNotFoundError", "cannot find module", "ImportError", "npm ERR! 404"],
+        "ENV_PACKAGE_MISSING",
+        "Install the required module/package",
+    ),
+]
+
+
+def _extract_missing_cmd(error_text: str) -> str:
+    """Extract the missing command name from 'command not found' messages."""
+    m = re.search(r"command not found: (\S+)", error_text)
+    if m:
+        return m.group(1)
+    m = re.search(r"which: no (\S+)", error_text)
+    if m:
+        return m.group(1)
+    return "unknown"
+
+
+def _classify_env_error(parsed: dict) -> tuple[str | None, str | None]:
+    """Classify tool execution failures as environment issues vs logic errors.
+
+    Returns (category, fix_hint) if an environment error is detected, or
+    (None, None) otherwise.
+    """
+    if not isinstance(parsed, dict):
+        return None, None
+
+    exit_code = parsed.get("exit_code")
+    stderr_text = str(parsed.get("stderr", ""))
+    error_field = str(parsed.get("error", ""))
+    error_text = stderr_text + error_field
+
+    has_error = bool(error_text) or exit_code in (1, 2)
+    if not has_error:
+        return None, None
+
+    for patterns, category, fix_hint in _ENV_PATTERNS:
+        for pat in patterns:
+            if pat in error_text:
+                if category == "ENV_DEPENDENCY_MISSING":
+                    fix_hint = fix_hint.replace("{missing}", _extract_missing_cmd(error_text))
+                return category, fix_hint
+
+    return None, None
+
+
 def _build_additional_context(
     tool_name: str, savings_pct: int, savings_label: str, content: str,
+    env_attribution: str = "",
 ) -> str:
-    return (
-        f"[tokenless] {tool_name} → {savings_label} ({savings_pct}% savings)\n"
-        f"{content}"
-    )
+    parts = []
+    if env_attribution:
+        parts.append(env_attribution)
+    parts.append(f"[tokenless] {tool_name} → {savings_label} ({savings_pct}% savings)")
+    parts.append(content)
+    return "\n".join(parts)
 
 
 # -- main --------------------------------------------------------------------
@@ -158,6 +239,16 @@ def main() -> None:
     # 9. Extract caller context
     session_id = input_data.get("session_id", "")
     tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
+
+    # 9b. Environment attribution analysis
+    env_attribution = ""
+    attr_category, attr_fix_hint = _classify_env_error(parsed if isinstance(parsed, dict) else {})
+    if attr_category:
+        env_attribution = (
+            f"[tokenless env-attribution] {tool_name} tool failed: "
+            f"{attr_category} ({attr_fix_hint}). "
+            f"Skip retry — this is an environment issue, not a logic error."
+        )
 
     # 10. Step 1: Response compression (only on JSON objects/arrays)
     compressed = tool_response
@@ -227,6 +318,7 @@ def main() -> None:
     # 12. Build response
     context = _build_additional_context(
         tool_name, savings_pct, savings_label, final_output,
+        env_attribution=env_attribution,
     )
 
     output = {

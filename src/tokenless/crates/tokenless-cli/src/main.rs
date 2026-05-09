@@ -1,4 +1,5 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
+mod env_check;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -74,6 +75,24 @@ enum Commands {
     DecompressToon {
         #[arg(short, long)]
         file: Option<String>,
+    },
+    /// Check tool environment readiness
+    EnvCheck {
+        /// Check a specific tool
+        #[arg(long)]
+        tool: Option<String>,
+        /// Check all tools
+        #[arg(long)]
+        all: bool,
+        /// Auto-fix missing dependencies
+        #[arg(long)]
+        fix: bool,
+        /// Output full checklist
+        #[arg(long)]
+        checklist: bool,
+        /// Output machine-readable JSON (for hook/plugin consumption)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -388,6 +407,15 @@ fn run() -> Result<(), (String, i32)> {
             if !output.is_empty() {
                 println!("{}", output);
             }
+        }
+        Commands::EnvCheck {
+            tool,
+            all,
+            fix,
+            checklist,
+            json,
+        } => {
+            env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
     }
 

@@ -2,11 +2,12 @@
   "id": "tokenless-openclaw",
   "name": "Token-Less",
   "version": "5.0.0",
-  "description": "Unified RTK command rewriting + schema/response/TOON compression",
+  "description": "Unified RTK command rewriting + schema/response/TOON compression + Tool Ready environment pre-check",
   "configSchema": {
     "type": "object",
     "properties": {
       "rtk_enabled": { "type": "boolean", "default": true },
+      "tool_ready_enabled": { "type": "boolean", "default": true },
       "schema_compression_enabled": { "type": "boolean", "default": true },
       "response_compression_enabled": { "type": "boolean", "default": true },
       "skip_tools": {
@@ -20,6 +21,7 @@
   },
   "uiHints": {
     "rtk_enabled": { "label": "Enable RTK command rewriting" },
+    "tool_ready_enabled": { "label": "Enable Tool Ready environment pre-check" },
     "schema_compression_enabled": { "label": "Enable schema compression" },
     "response_compression_enabled": { "label": "Enable response compression" },
     "skip_tools": { "label": "Tool names whose responses should not be compressed" },

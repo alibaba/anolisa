@@ -332,6 +332,16 @@ install_from_source() {
 # ============================================================================
 
 rpm_postinstall() {
+    # Copy core env-check config to user directory (user dir is primary, system dir is fallback)
+    local core_src="/usr/share/tokenless/core/env-check"
+    local user_dir="$HOME/.tokenless"
+    if [ -d "$core_src" ]; then
+        mkdir -p "$user_dir"
+        cp "$core_src/tool-ready-spec.json" "$user_dir/" 2>/dev/null || true
+        cp "$core_src/tokenless-env-fix.sh" "$user_dir/" 2>/dev/null || true
+        chmod +x "$user_dir/tokenless-env-fix.sh" 2>/dev/null || true
+        info "  Core env-check config installed to $user_dir"
+    fi
     # Migrate legacy bash hooks from settings.json to extension format
     cleanup_legacy_cosh_hooks || true
 }

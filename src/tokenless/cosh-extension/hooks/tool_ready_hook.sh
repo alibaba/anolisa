@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# tokenless-hook-version: 9
+# Token-Less copilot-shell hook — Tool Ready environment pre-check.
+#
+# Hook event: PreToolUse (matcher: "" — matches all tools)
+# Requires: jq
+#
+# Design: fail-open. If jq is missing or any phase fails, exit 0 silently.
+#
+# Four-Phase Flow:
+#   Phase 1 — LOOKUP:   Find tool in config dictionary. Not found → skip.
+#   Phase 2 — CHECK:    Scan system readiness. All ready → continue silently.
+#   Phase 3 — FIX:      Auto-install missing deps. Success → continue silently.
+#   Phase 4 — FEEDBACK: Fix failed. Inject additionalContext → "Skip retry".
+
+set -euo pipefail
+
+VERBOSE="${TOKENLESS_VERBOSE:-}"
+log_v() { [ -n "$VERBOSE" ] && echo "[tokenless tool-ready] $1" >&2 || true; }
+
+# --- Dependency check (fail-open) ---
+if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
+
+# --- Resolve paths (search shared core location first, then local fallbacks) ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+SPEC_FILE=""
+for candidate in \
+    "${TOKENLESS_TOOL_READY_SPEC:-}" \
+    "$HOME/.tokenless/tool-ready-spec.json" \
+    "/usr/share/tokenless/core/env-check/tool-ready-spec.json" \
+    "${SCRIPT_DIR}/tool-ready-spec.json"; do
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+        SPEC_FILE="$candidate"
+        break
+    fi
+done
+
+FIX_SCRIPT=""
+for candidate in \
+    "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
+    "$HOME/.tokenless/tokenless-env-fix.sh" \
+    "/usr/share/tokenless/core/env-check/tokenless-env-fix.sh" \
+    "${SCRIPT_DIR}/tokenless-env-fix.sh"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        FIX_SCRIPT="$candidate"
+        break
+    fi
+done
+
+# --- Read input (fail-open) ---
+INPUT=$(cat || { exit 0; })
+
+# ============================================================================
+# Phase 1: LOOKUP — Find tool in config dictionary
+# ============================================================================
+# 如果 toolready 字典没有配置，查找不到对应 tool，则正常跳过，继续。
+
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo '')
+log_v "Phase 1 LOOKUP: tool_name=$TOOL_NAME"
+if [ -z "$TOOL_NAME" ]; then exit 0; fi
+
+if [ ! -f "$SPEC_FILE" ]; then log_v "spec file not found, skipping"; exit 0; fi
+
+TOOL_SPEC=$(jq -c --arg name "$TOOL_NAME" '.[$name]' "$SPEC_FILE" 2>/dev/null || echo '')
+if [ -z "$TOOL_SPEC" ] || [ "$TOOL_SPEC" = "null" ]; then
+    log_v "Phase 1: $TOOL_NAME not in spec dict → skip"
+    exit 0
+fi
+log_v "Phase 1: $TOOL_NAME found in spec dict"
+
+# ============================================================================
+# Phase 2: CHECK — Scan system readiness
+# ============================================================================
+# 去 toolready 配置字典里查找工具 ready 的检查方法，检查系统是否已经 ready。
+# 如果已经 ready，则继续（静默退出）。
+
+# --- Normalize deps to object format ---
+# Supports both string ("jq") and object ({binary:"jq",...}) formats.
+# String defaults: manager="apt", package=binary name.
+# Handles version constraints: "rtk>=0.35" → {binary:"rtk", version:">=0.35", ...}
+
+normalize_deps() {
+  local array="$1"
+  echo "$array" | jq -c '[.[] | if type == "string" then
+    (if (test(">=") or test("[^<]<[^=]") or test("=")) then
+      {binary: (capture("^(?<b>[^>=<]+)") | .b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)") | .b), manager: "apt"}
+    else
+      {binary: ., package: ., manager: "apt"}
+    end)
+  else . end]' 2>/dev/null || echo '[]'
+}
+
+REQUIRED=$(normalize_deps "$(echo "$TOOL_SPEC" | jq -c '.required // []')")
+RECOMMENDED=$(normalize_deps "$(echo "$TOOL_SPEC" | jq -c '.recommended // []')")
+PERMISSIONS=$(echo "$TOOL_SPEC" | jq -r '.permissions[] // empty' 2>/dev/null || echo '')
+
+# --- Version comparison helper ---
+version_ge() {
+  local installed="$1" required="$2"
+  local i_major i_minor i_patch r_major r_minor r_patch
+  IFS='.' read -r i_major i_minor i_patch <<< "$installed"
+  IFS='.' read -r r_major r_minor r_patch <<< "$required"
+  i_major=${i_major:-0}; i_minor=${i_minor:-0}; i_patch=${i_patch:-0}
+  r_major=${r_major:-0}; r_minor=${r_minor:-0}; r_patch=${r_patch:-0}
+  [ "$i_major" -gt "$r_major" ] && return 0
+  [ "$i_major" -lt "$r_major" ] && return 1
+  [ "$i_minor" -gt "$r_minor" ] && return 0
+  [ "$i_minor" -lt "$r_minor" ] && return 1
+  [ "$i_patch" -gt "$r_patch" ] && return 0
+  [ "$i_patch" -lt "$r_patch" ] && return 1
+  return 0
+}
+
+# --- Check a single dep (normalized object) ---
+# Output: "available", "missing", "version_low:<installed>:<required>"
+check_dep() {
+  local dep_json="$1"
+  local binary version
+  binary=$(echo "$dep_json" | jq -r '.binary')
+  version=$(echo "$dep_json" | jq -r '.version // empty')
+
+  if ! command -v "$binary" &>/dev/null; then
+    echo "missing"
+    return
+  fi
+
+  if [ -z "$version" ]; then
+    echo "available"
+    return
+  fi
+
+  local constraint_ver installed_version
+  constraint_ver=$(echo "$version" | sed 's/[>=<]//g')
+  installed_version=$("$binary" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")
+  [ -z "$installed_version" ] && installed_version="0.0.0"
+
+  if version_ge "$installed_version" "$constraint_ver"; then
+    echo "available"
+  else
+    echo "version_low:${installed_version}:${constraint_ver}"
+  fi
+}
+
+# --- Check permissions ---
+check_permissions() {
+  local perm_missing=""
+  for perm in $PERMISSIONS; do
+    case "$perm" in
+      file_read)   [ ! -r / ] && perm_missing="${perm_missing} file_read" ;;
+      file_write)  ! touch "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null && { rm -f "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null || true; } && perm_missing="${perm_missing} file_write" ;;
+      exec_shell)  ! command -v bash &>/dev/null && perm_missing="${perm_missing} exec_shell" ;;
+      docker_socket) [ ! -S /var/run/docker.sock ] && [ ! -S /run/docker.sock ] && perm_missing="${perm_missing} docker_socket" ;;
+    esac
+  done
+  echo "$perm_missing"
+}
+
+# --- Scan all deps ---
+MISSING_DEP_JSONS="[]"
+HAS_REQUIRED_MISSING=false
+HAS_VERSION_LOW=false
+PERM_MISSING=$(check_permissions)
+
+# Check required deps
+req_count=$(echo "$REQUIRED" | jq 'length')
+for i in $(seq 0 $((req_count - 1))); do
+  dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
+  status=$(check_dep "$dep_json")
+  case "$status" in
+    missing)
+      HAS_REQUIRED_MISSING=true
+      MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
+      ;;
+    version_low:*)
+      HAS_VERSION_LOW=true
+      ;;
+  esac
+done
+
+# Check recommended deps
+rec_count=$(echo "$RECOMMENDED" | jq 'length')
+for i in $(seq 0 $((rec_count - 1))); do
+  dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
+  status=$(check_dep "$dep_json")
+  case "$status" in
+    missing)
+      MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
+      ;;
+  esac
+done
+
+# --- Determine readiness ---
+IS_READY=true
+$HAS_REQUIRED_MISSING && IS_READY=false
+$HAS_VERSION_LOW && IS_READY=false
+[ -n "$PERM_MISSING" ] && IS_READY=false
+
+if $IS_READY; then
+    log_v "Phase 2 CHECK: $TOOL_NAME → READY, silent pass"
+    exit 0
+fi
+log_v "Phase 2 CHECK: $TOOL_NAME → NOT_READY (missing=$HAS_REQUIRED_MISSING version_low=$HAS_VERSION_LOW perm=$PERM_MISSING)"
+
+# ============================================================================
+# Phase 3: FIX — Auto-install missing dependencies
+# ============================================================================
+# 如果没有 ready，则进一步依据配置字典里的安装配置方法进行工具安装。
+
+missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
+
+log_v "Phase 3 FIX: $missing_count missing deps, fix_script=$FIX_SCRIPT"
+
+if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; then
+    FIX_OUTPUT=$(echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true)
+
+    # Re-scan to check if fix succeeded
+    STILL_MISSING=""
+    for i in $(seq 0 $((missing_count - 1))); do
+        binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
+        if ! command -v "$binary" &>/dev/null; then
+            STILL_MISSING="${STILL_MISSING} ${binary}"
+        fi
+    done
+
+    if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
+        # 如果安装成功，则继续
+        exit 0
+    fi
+fi
+
+# ============================================================================
+# Phase 4: FEEDBACK — Tool not available, inform the Agent
+# ============================================================================
+# 如果安装失败，则向 Agent 反馈工具不可用。
+
+# Collect human-readable missing list
+MISSING_LIST=""
+for i in $(seq 0 $((missing_count - 1))); do
+    binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
+    MISSING_LIST="${MISSING_LIST} ${binary}"
+done
+
+# Build diagnostic message
+DIAG_PARTS=""
+[ -n "$MISSING_LIST" ]  && DIAG_PARTS="${DIAG_PARTS} missing:${MISSING_LIST};"
+$HAS_VERSION_LOW       && DIAG_PARTS="${DIAG_PARTS} version too low;"
+[ -n "$PERM_MISSING" ] && DIAG_PARTS="${DIAG_PARTS} permission missing:${PERM_MISSING};"
+
+DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: NOT_READY (${DIAG_PARTS})"
+DIAG_MSG="${DIAG_MSG} Skip retry — environment issue, not logic error."
+
+log_v "Phase 4 FEEDBACK: $TOOL_NAME → NOT_READY → injecting additionalContext"
+
+# Output hook response via jq
+jq -n --arg context "$DIAG_MSG" '{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "additionalContext": $context
+  }
+}' || exit 0

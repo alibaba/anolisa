@@ -1,12 +1,13 @@
 # Token-Less
 
-**LLM token optimization toolkit** — schema/response compression + command rewriting.
+**LLM token optimization toolkit** — schema/response compression + command rewriting + tool environment readiness.
 
-Token-Less combines two complementary strategies to minimize LLM token consumption:
+Token-Less combines complementary strategies to minimize LLM token consumption:
 
 - **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon` binary, reducing token usage by 15-40% for structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
+- **Tool Ready** — Pre-checks tool execution environments (binaries, configs, permissions, network), auto-fixes missing dependencies, and classifies execution failures as environment issues vs logic errors — reducing wasted retry tokens.
 
 Two integration paths are available:
 
@@ -21,8 +22,9 @@ Two integration paths are available:
 | Response compression | ~26–78% | Compresses API / tool responses (varies by content type) |
 | TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
+| Tool Ready | reduces retry waste | Pre-check env, auto-fix deps, failure attribution |
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ⏳ |
-| copilot-shell hooks | — | Command rewriting ✅, Response compression ✅, TOON compression ✅, Schema compression ⏳ |
+| copilot-shell hooks | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Architecture
@@ -30,9 +32,15 @@ Two integration paths are available:
 ```
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
-├── crates/tokenless-cli/      # CLI binary: `tokenless` command
+├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
 ├── openclaw/                  # Unified OpenClaw plugin (TypeScript delegate)
-├── hooks/copilot-shell/       # copilot-shell hooks (rewrite + compression)
+├── cosh-extension/hooks/      # copilot-shell hooks (tool-ready + rewrite + compression + attribution)
+│   ├── tool_ready_hook.sh       # PreToolUse: env readiness check
+│   ├── rewrite_hook.py          # PreToolUse: command rewriting via RTK
+│   ├── compress_response_hook.py # PostToolUse: compress + attribution + TOON
+│   ├── compress_schema_hook.py  # BeforeModel: schema compression
+│   └── compress_toon_hook.py    # TOON encoding helper
+├── core/env-check/            # Shared env-check assets (spec + fix script)
 ├── third_party/rtk/           # RTK submodule (command rewriting engine)
 ├── third_party/toon/          # TOON submodule (JSON to TOON encoding)
 ├── Makefile                   # Unified build system
@@ -56,7 +64,7 @@ Or use the install script directly:
 ./scripts/install.sh
 ```
 
-Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, deploy the OpenClaw plugin, and install the copilot-shell hook.
+Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, deploy the OpenClaw plugin, and install the copilot-shell hooks.
 
 ## CLI Usage
 
@@ -107,60 +115,59 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 
 ## copilot-shell Hooks
 
-Three copilot-shell hooks provide token optimization at different stages:
+The cosh-extension provides hooks that are auto-discovered by copilot-shell:
 
-| Hook | Event | Status | Savings |
-|------|-------|--------|--------|
-| Command rewriting | PreToolUse | ✅ Available | 60–90% |
-| Response compression | PostToolUse | ✅ Available | ~26% |
-| TOON context compression | PostToolUse | ✅ Available | 15–40% |
-| Schema compression | BeforeModel | ⏳ Placeholder (waiting for anolisa protocol extension) | ~57% |
+| Hook | Event | File | Description |
+|------|-------|------|-------------|
+| Tool environment check | PreToolUse (all tools) | `tool_ready_hook.sh` | Pre-check env, auto-fix, skip-retry guidance |
+| Command rewriting | PreToolUse (Shell) | `rewrite_hook.py` | Rewrite commands via RTK |
+| Response compression + attribution + TOON | PostToolUse | `compress_response_hook.py` | Compress + env error attribution + TOON |
+| Schema compression | BeforeModel | `compress_schema_hook.py` | Compress tool schemas |
 
 ### Install
 
 ```bash
-make copilot-shell-install
+make cosh-install
 ```
 
-Then add the hook configs to your `~/.copilot-shell/settings.json`:
+Hooks are registered via `cosh-extension/cosh-extension.json` and auto-discovered by copilot-shell — no manual `settings.json` configuration needed.
+
+## Tool Ready
+
+Tool Ready prevents wasted LLM tokens from retrying commands that fail due to missing environment dependencies.
+
+**How it works**: Before each tool call, the `tool_ready_hook.sh` hook checks the tool's dependency list (from `tool-ready-spec.json`). If dependencies are missing, it reports `NOT_READY` with "Skip retry" guidance so the LLM doesn't waste tokens retrying a command that can't succeed. After a tool call fails, the compression hook classifies the error (missing binary, permissions, network, etc.) and injects attribution context.
+
+### env-check CLI
+
+```bash
+# Check a specific tool
+tokenless env-check --tool Shell
+
+# Check all tools
+tokenless env-check --all
+
+# Generate checklist
+tokenless env-check --checklist
+
+# Check and auto-fix missing deps
+tokenless env-check --tool Shell --fix
+```
+
+### Configuration
+
+Per-tool dependencies are declared in `~/.tokenless/tool-ready-spec.json` (user directory, same location as stats.db):
 
 ```json
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
-            "name": "tokenless-rewrite",
-            "timeout": 5000
-          }
-        ]
-      }
+  "Shell": {
+    "required": [
+      { "binary": "jq", "package": "jq", "manager": "apt" }
     ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
-            "name": "tokenless-compress-response",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "BeforeModel": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
-            "name": "tokenless-compress-schema",
-            "timeout": 10000
-          }
+    "recommended": [
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/share/tokenless/bin/rtk" }
         ]
       }
     ]
@@ -168,7 +175,7 @@ Then add the hook configs to your `~/.copilot-shell/settings.json`:
 }
 ```
 
-For detailed usage and troubleshooting, see [`hooks/copilot-shell/README.md`](hooks/copilot-shell/README.md).
+String format `"jq"` is also supported (auto-converts to object).
 
 ## OpenClaw Plugin
 
@@ -207,15 +214,19 @@ Options in `openclaw.plugin.json`:
 | `make build-rtk` | Build `rtk` only |
 | `make build-toon` | Build `toon` only |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
-| `make test` | Run all tests |
+| `make test` | Run all tests (Rust + hooks) |
+| `make test-hooks` | Run hook integration tests |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
 | `make openclaw-install` | Install OpenClaw plugin |
 | `make openclaw-uninstall` | Remove OpenClaw plugin |
+| `make core-install` | Install core env-check |
 | `make copilot-shell-install` | Install copilot-shell hooks |
 | `make copilot-shell-uninstall` | Remove copilot-shell hooks |
-| `make setup` | Full setup: build + install + OpenClaw plugin |
+| `make cosh-install` | Install copilot-shell extension |
+| `make cosh-uninstall` | Uninstall copilot-shell extension |
+| `make setup` | Full setup: build + install + core + OpenClaw + hooks |
 
 Override install paths:
 
@@ -228,10 +239,10 @@ make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 
 | Path | Description |
 |---|---|
+| `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
-| `crates/tokenless-cli/` | CLI binary wrapping the schema library (`tokenless` command) |
 | `openclaw/` | OpenClaw plugin — TypeScript delegate calling `tokenless` and `rtk` |
-| `hooks/copilot-shell/` | copilot-shell hooks — command rewriting, response, TOON & schema compression |
+| `cosh-extension/hooks/` | copilot-shell hooks — tool-ready, rewrite, response & schema compression |
 | `third_party/rtk/` | RTK git submodule — command rewriting engine (70+ commands) |
 | `third_party/toon/` | TOON git submodule — JSON to TOON format encoding |
 | `scripts/install.sh` | One-step build + install + plugin deployment script |

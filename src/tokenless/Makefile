@@ -5,12 +5,14 @@ SHARE_DIR ?= $(HOME)/.local/share/tokenless
 BIN_DIR ?= $(HOME)/.local/bin
 OPENCLAW_DIR ?= $(SHARE_DIR)/adapters/openclaw
 COSH_EXTENSION_DIR ?= $(HOME)/.copilot-shell/extensions/tokenless
+CORE_ENV_CHECK_DIR ?= $(HOME)/.tokenless
 RTK_DIR := third_party/rtk
 TOON_DIR := third_party/toon
 
 .PHONY: build build-tokenless build-rtk build-toon install test lint clean \
         openclaw-install openclaw-uninstall \
-        cosh-install cosh-uninstall setup help
+        cosh-install cosh-uninstall core-install setup help \
+        test-hooks
 
 # Default target
 all: build
@@ -40,7 +42,7 @@ install: build
 	@echo "==> Installed tokenless, rtk, and toon to $(BIN_DIR)"
 
 # Run tests
-test: test-tokenless test-rtk test-toon
+test: test-tokenless test-rtk test-toon test-hooks
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -53,6 +55,10 @@ test-rtk:
 test-toon:
 	@echo "==> Testing toon build..."
 	cargo check --manifest-path $(TOON_DIR)/Cargo.toml
+
+test-hooks:
+	@echo "==> Testing copilot-shell hooks..."
+	bash tests/run-all-tests.sh
 
 # Lint
 lint:
@@ -118,6 +124,15 @@ openclaw-uninstall:
 	rm -rf $(OPENCLAW_DIR)
 	@echo "==> OpenClaw plugin removed"
 
+# core env-check installation (shared across all agents)
+core-install:
+	@echo "==> Installing core env-check..."
+	@mkdir -p $(CORE_ENV_CHECK_DIR)
+	cp core/env-check/tool-ready-spec.json $(CORE_ENV_CHECK_DIR)/
+	cp core/env-check/tokenless-env-fix.sh $(CORE_ENV_CHECK_DIR)/
+	chmod +x $(CORE_ENV_CHECK_DIR)/tokenless-env-fix.sh
+	@echo "==> Core env-check installed to $(CORE_ENV_CHECK_DIR)"
+
 # copilot-shell extension management (developer convenience — copies to auto-discovery path)
 cosh-install:
 	@echo "==> Installing copilot-shell extension to auto-discovery path..."
@@ -128,7 +143,7 @@ cosh-install:
 	cp cosh-extension/cosh-extension.json $(COSH_EXTENSION_DIR)/
 	cp cosh-extension/COPILOT.md $(COSH_EXTENSION_DIR)/
 	cp cosh-extension/README.md $(COSH_EXTENSION_DIR)/
-	chmod +x $(COSH_EXTENSION_DIR)/hooks/*.py
+	chmod +x $(COSH_EXTENSION_DIR)/hooks/*.py $(COSH_EXTENSION_DIR)/hooks/*.sh
 	@echo "==> copilot-shell extension installed to $(COSH_EXTENSION_DIR)"
 	@echo "    copilot-shell auto-discovers extensions from this path"
 
@@ -137,8 +152,8 @@ cosh-uninstall:
 	rm -rf $(COSH_EXTENSION_DIR)
 	@echo "==> copilot-shell extension removed"
 
-# One-step setup: build + install + openclaw plugin + cosh extension
-setup: install openclaw-install cosh-install
+# One-step setup: build + install + core + openclaw plugin + hooks
+setup: install core-install openclaw-install cosh-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
@@ -170,13 +185,15 @@ help:
 	@echo "  clean             Clean build artifacts"
 	@echo "  openclaw-install  Install OpenClaw plugin"
 	@echo "  openclaw-uninstall Remove OpenClaw plugin"
+	@echo "  core-install      Install core env-check"
 	@echo "  cosh-install         Install copilot-shell extension"
 	@echo "  cosh-uninstall       Uninstall copilot-shell extension"
-	@echo "  setup                Full setup: build + install + openclaw + cosh extension"
+	@echo "  setup             Full setup: build + install + core + openclaw + cosh extension"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
 	@echo "  SHARE_DIR         Data install root (default: ~/.local/share/tokenless)"
 	@echo "  BIN_DIR           Binary install path (default: ~/.local/bin)"
 	@echo "  OPENCLAW_DIR      OpenClaw plugin path (default: ~/.local/share/tokenless/adapters/openclaw)"
+	@echo "  CORE_ENV_CHECK_DIR  Core env-check path (default: ~/.tokenless)"
 	@echo "  COSH_EXTENSION_DIR  Cosh extension install path (default: ~/.copilot-shell/extensions/tokenless)"
