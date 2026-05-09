@@ -116,6 +116,7 @@ export * from './services/gitService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/sessionService.js';
 export * from './services/fileSystemService.js';
+export * from './services/autoMemory/index.js';
 
 // Export IDE specific logic
 export * from './ide/ide-client.js';

@@ -1237,6 +1237,127 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  autoMemory: {
+    type: 'object',
+    label: 'Auto Memory',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Configuration for automatic memory extraction from past sessions.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Auto Memory',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable background extraction of durable memory and reusable skills from past sessions.',
+        showInDialog: true,
+      },
+      model: {
+        type: 'string',
+        label: 'Auto Memory Model',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Model to use for memory extraction. If not set, uses the currently configured model.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Auto Memory Base URL',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'API base URL override for memory extraction. If not set, uses the current endpoint.',
+        showInDialog: false,
+      },
+      apiKey: {
+        type: 'string',
+        label: 'Auto Memory API Key',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'API key override for memory extraction. If not set, uses the current credentials.',
+        showInDialog: false,
+      },
+      cooldownSeconds: {
+        type: 'number',
+        label: 'Extraction Cooldown',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 1800,
+        description: 'Minimum seconds between two extraction runs.',
+        showInDialog: false,
+      },
+      sessionMinMessages: {
+        type: 'number',
+        label: 'Session Min Messages',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 10,
+        description:
+          'Minimum number of user messages a session must have to be eligible for extraction.',
+        showInDialog: false,
+      },
+      sessionMinIdleSeconds: {
+        type: 'number',
+        label: 'Session Min Idle Time',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 10800,
+        description:
+          'Minimum seconds a session must be idle before it becomes eligible for extraction.',
+        showInDialog: false,
+      },
+      sessionMaxPerRun: {
+        type: 'number',
+        label: 'Sessions Per Run',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 10,
+        description:
+          'Maximum number of new sessions to process per extraction run.',
+        showInDialog: false,
+      },
+      sessionIndexLimit: {
+        type: 'number',
+        label: 'Session Index Limit',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 50,
+        description:
+          'Maximum total sessions (new + old) shown in the index passed to the extraction agent.',
+        showInDialog: false,
+      },
+      agentTimeoutSeconds: {
+        type: 'number',
+        label: 'Agent Timeout',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 1800,
+        description: 'Maximum runtime in seconds for the extraction agent.',
+        showInDialog: false,
+      },
+      agentMaxTurns: {
+        type: 'number',
+        label: 'Agent Max Turns',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 30,
+        description:
+          'Maximum number of conversation turns for the extraction agent.',
+        showInDialog: false,
+      },
+    },
+  },
+
   skillOS: {
     type: 'object',
     label: 'Skill-OS',

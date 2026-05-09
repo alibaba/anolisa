@@ -18,6 +18,11 @@ export interface PostToolUsePayload extends PreToolUsePayload {
   errorMessage?: string;
 }
 
+export interface PostToolUseResult {
+  /** Additional text to append to the tool response (visible to the model) */
+  additionalContent?: string;
+}
+
 export interface SubagentStopPayload {
   subagentId: string;
   name: string; // subagent name
@@ -28,6 +33,8 @@ export interface SubagentStopPayload {
 
 export interface SubagentHooks {
   preToolUse?(payload: PreToolUsePayload): Promise<void> | void;
-  postToolUse?(payload: PostToolUsePayload): Promise<void> | void;
+  postToolUse?(
+    payload: PostToolUsePayload,
+  ): Promise<PostToolUseResult | void> | PostToolUseResult | void;
   onStop?(payload: SubagentStopPayload): Promise<void> | void;
 }

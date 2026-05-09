@@ -9,10 +9,15 @@ import {
   getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
   QWEN_DIR,
+  listInboxPatchFiles,
+  listValidInboxPatchFiles,
+  validateInboxMemoryPatchFile,
+  type InboxMemoryPatchKind,
 } from '@copilot-shell/core';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import * as Diff from 'diff';
 import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
@@ -343,6 +348,252 @@ export const memoryCommand: SlashCommand = {
           );
         }
       },
+    },
+    {
+      name: 'inbox',
+      get description() {
+        return t(
+          'Review pending memory candidates from Auto Memory extraction.',
+        );
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const config = context.services.config;
+        if (!config) {
+          context.ui.addItem(
+            { type: MessageType.ERROR, text: 'Config not available.' },
+            Date.now(),
+          );
+          return;
+        }
+
+        const kinds: InboxMemoryPatchKind[] = ['private', 'global'];
+        const results: string[] = [];
+
+        for (const kind of kinds) {
+          const validFiles = await listValidInboxPatchFiles(config, kind);
+          if (validFiles.length === 0) continue;
+
+          results.push(`## ${kind} (${validFiles.length} patch(es))`);
+          for (const filePath of validFiles) {
+            const relativeName = path.basename(filePath);
+            try {
+              const content = await fs.readFile(filePath, 'utf-8');
+              const parsed = Diff.parsePatch(content);
+              const targets = parsed
+                .map((p) => p.newFileName || p.oldFileName || 'unknown')
+                .join(', ');
+              results.push(
+                `  - ${relativeName}: targets ${targets} (${parsed.length} file(s))`,
+              );
+            } catch {
+              results.push(`  - ${relativeName}: (unreadable)`);
+            }
+          }
+        }
+
+        if (results.length === 0) {
+          context.ui.addItem(
+            {
+              type: MessageType.INFO,
+              text: t(
+                'Memory inbox is empty. No pending extraction candidates.',
+              ),
+            },
+            Date.now(),
+          );
+        } else {
+          context.ui.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Pending memory inbox:\n\n${results.join('\n')}\n\nUse /memory inbox approve or /memory inbox dismiss to manage.`,
+            },
+            Date.now(),
+          );
+        }
+      },
+      subCommands: [
+        {
+          name: 'approve',
+          get description() {
+            return t('Approve and apply all pending memory patches.');
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (context, args) => {
+            const config = context.services.config;
+            if (!config) {
+              context.ui.addItem(
+                { type: MessageType.ERROR, text: 'Config not available.' },
+                Date.now(),
+              );
+              return;
+            }
+
+            const kindArg = args?.trim();
+            const kinds: InboxMemoryPatchKind[] =
+              kindArg === 'private'
+                ? ['private']
+                : kindArg === 'global'
+                  ? ['global']
+                  : ['private', 'global'];
+
+            let approvedFileCount = 0;
+            let retainedFileCount = 0;
+            const failures: string[] = [];
+
+            for (const kind of kinds) {
+              // Walk every inbox patch file, not just the pre-validated ones,
+              // so users can see why malformed files are being retained.
+              const patchFiles = await listInboxPatchFiles(config, kind);
+              for (const filePath of patchFiles) {
+                const validation = await validateInboxMemoryPatchFile(
+                  config,
+                  kind,
+                  filePath,
+                );
+                if (!validation.valid) {
+                  retainedFileCount++;
+                  failures.push(
+                    `${path.basename(filePath)}: ${validation.reason}`,
+                  );
+                  continue;
+                }
+
+                // Apply all hunks; keep the patch file unless every hunk of
+                // this file applies successfully. This preserves an
+                // all-or-nothing semantics per file for easy retry.
+                let allApplied = true;
+                const pendingWrites: Array<{
+                  targetPath: string;
+                  content: string;
+                }> = [];
+
+                for (let i = 0; i < validation.parsed.length; i++) {
+                  const parsedDiff = validation.parsed[i];
+                  const { targetPath, isNewFile } = validation.patches[i];
+
+                  let original = '';
+                  if (!isNewFile) {
+                    try {
+                      original = await fs.readFile(targetPath, 'utf-8');
+                    } catch (error) {
+                      allApplied = false;
+                      failures.push(
+                        `${path.basename(filePath)}: cannot read target ${targetPath}: ${getErrorMessage(error)}`,
+                      );
+                      break;
+                    }
+                  }
+
+                  const applied = Diff.applyPatch(original, parsedDiff);
+                  if (applied === false) {
+                    allApplied = false;
+                    failures.push(
+                      `${path.basename(filePath)}: diff does not apply cleanly to ${targetPath}`,
+                    );
+                    break;
+                  }
+
+                  pendingWrites.push({ targetPath, content: applied });
+                }
+
+                if (!allApplied) {
+                  // Keep the patch file so the user can fix and retry.
+                  retainedFileCount++;
+                  continue;
+                }
+
+                try {
+                  for (const { targetPath, content } of pendingWrites) {
+                    await fs.mkdir(path.dirname(targetPath), {
+                      recursive: true,
+                    });
+                    await fs.writeFile(targetPath, content);
+                  }
+                  await fs.unlink(filePath);
+                  approvedFileCount++;
+                } catch (error) {
+                  retainedFileCount++;
+                  failures.push(
+                    `${path.basename(filePath)}: write failed: ${getErrorMessage(error)}`,
+                  );
+                }
+              }
+            }
+
+            const parts: string[] = [];
+            if (approvedFileCount > 0) {
+              parts.push(`Applied ${approvedFileCount} patch file(s).`);
+            }
+            if (retainedFileCount > 0) {
+              parts.push(
+                `Retained ${retainedFileCount} patch file(s) for retry.`,
+              );
+            }
+            if (approvedFileCount === 0 && retainedFileCount === 0) {
+              parts.push('No pending patches to approve.');
+            }
+            if (failures.length > 0) {
+              parts.push(`Reasons:\n  - ${failures.join('\n  - ')}`);
+            }
+            const message = parts.join('\n');
+
+            context.ui.addItem(
+              { type: MessageType.INFO, text: message },
+              Date.now(),
+            );
+          },
+        },
+        {
+          name: 'dismiss',
+          get description() {
+            return t('Dismiss all pending memory patches without applying.');
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (context, args) => {
+            const config = context.services.config;
+            if (!config) {
+              context.ui.addItem(
+                { type: MessageType.ERROR, text: 'Config not available.' },
+                Date.now(),
+              );
+              return;
+            }
+
+            const kindArg = args?.trim();
+            const kinds: InboxMemoryPatchKind[] =
+              kindArg === 'private'
+                ? ['private']
+                : kindArg === 'global'
+                  ? ['global']
+                  : ['private', 'global'];
+
+            let dismissedCount = 0;
+
+            for (const kind of kinds) {
+              const validFiles = await listValidInboxPatchFiles(config, kind);
+              for (const filePath of validFiles) {
+                try {
+                  await fs.unlink(filePath);
+                  dismissedCount++;
+                } catch {
+                  // Ignore
+                }
+              }
+            }
+
+            const message =
+              dismissedCount > 0
+                ? `Dismissed ${dismissedCount} patch(es).`
+                : 'No pending patches to dismiss.';
+
+            context.ui.addItem(
+              { type: MessageType.INFO, text: message },
+              Date.now(),
+            );
+          },
+        },
+      ],
     },
   ],
 };

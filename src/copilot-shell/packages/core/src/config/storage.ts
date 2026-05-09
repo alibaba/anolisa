@@ -128,6 +128,14 @@ export class Storage {
     return path.join(this.getProjectTempDir(), 'checkpoints');
   }
 
+  getProjectMemoryTempDir(): string {
+    return path.join(this.getProjectTempDir(), 'memory');
+  }
+
+  getProjectSkillsMemoryDir(): string {
+    return path.join(this.getProjectMemoryTempDir(), 'skills');
+  }
+
   getExtensionsDir(): string {
     return path.join(this.getQwenDir(), 'extensions');
   }

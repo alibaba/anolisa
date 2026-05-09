@@ -1024,6 +1024,21 @@ export async function loadCliConfig(
       ? { baseUrl: settings.skillOS.baseUrl }
       : undefined,
     customSkillPaths: settings.skills?.customPaths ?? [],
+    autoMemory: settings.autoMemory?.enabled
+      ? {
+          enabled: true,
+          model: settings.autoMemory.model,
+          baseUrl: settings.autoMemory.baseUrl,
+          apiKey: settings.autoMemory.apiKey,
+          cooldownSeconds: settings.autoMemory.cooldownSeconds,
+          sessionMinMessages: settings.autoMemory.sessionMinMessages,
+          sessionMinIdleSeconds: settings.autoMemory.sessionMinIdleSeconds,
+          sessionMaxPerRun: settings.autoMemory.sessionMaxPerRun,
+          sessionIndexLimit: settings.autoMemory.sessionIndexLimit,
+          agentTimeoutSeconds: settings.autoMemory.agentTimeoutSeconds,
+          agentMaxTurns: settings.autoMemory.agentMaxTurns,
+        }
+      : undefined,
     summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,

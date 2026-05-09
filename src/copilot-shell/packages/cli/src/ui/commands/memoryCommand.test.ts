@@ -11,14 +11,17 @@ import type { SlashCommand, CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import * as Diff from 'diff';
 import {
   getErrorMessage,
   loadServerHierarchicalMemory,
   QWEN_DIR,
   setGeminiMdFilename,
+  listInboxPatchFiles,
+  validateInboxMemoryPatchFile,
   type FileDiscoveryService,
   type LoadServerHierarchicalMemoryResponse,
 } from '@copilot-shell/core';
@@ -32,21 +35,44 @@ vi.mock('@copilot-shell/core', async (importOriginal) => {
       return String(error);
     }),
     loadServerHierarchicalMemory: vi.fn(),
+    listInboxPatchFiles: vi.fn(),
+    validateInboxMemoryPatchFile: vi.fn(),
   };
 });
 
 vi.mock('node:fs/promises', () => {
   const readFile = vi.fn();
+  const writeFile = vi.fn();
+  const unlink = vi.fn();
+  const mkdir = vi.fn();
   return {
     readFile,
+    writeFile,
+    unlink,
+    mkdir,
     default: {
       readFile,
+      writeFile,
+      unlink,
+      mkdir,
     },
   };
 });
 
+vi.mock('diff', () => ({
+  applyPatch: vi.fn(),
+  parsePatch: vi.fn(),
+}));
+
 const mockLoadServerHierarchicalMemory = loadServerHierarchicalMemory as Mock;
 const mockReadFile = readFile as unknown as Mock;
+const mockWriteFile = writeFile as unknown as Mock;
+const mockUnlink = unlink as unknown as Mock;
+const mockMkdir = mkdir as unknown as Mock;
+const mockListInboxPatchFiles = listInboxPatchFiles as unknown as Mock;
+const mockValidateInboxMemoryPatchFile =
+  validateInboxMemoryPatchFile as unknown as Mock;
+const mockApplyPatch = Diff.applyPatch as unknown as Mock;
 
 describe('memoryCommand', () => {
   let mockContext: CommandContext;
@@ -59,6 +85,13 @@ describe('memoryCommand', () => {
       throw new Error(`/memory ${name} command not found.`);
     }
     return subCommand;
+  };
+
+  const getInboxSubCommand = (name: 'approve' | 'dismiss'): SlashCommand => {
+    const inbox = memoryCommand.subCommands?.find((c) => c.name === 'inbox');
+    const sub = inbox?.subCommands?.find((c) => c.name === name);
+    if (!sub) throw new Error(`/memory inbox ${name} command not found.`);
+    return sub;
   };
 
   describe('/memory show', () => {
@@ -405,6 +438,170 @@ describe('memoryCommand', () => {
       );
 
       expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('/memory inbox approve', () => {
+    let approveCommand: SlashCommand;
+
+    beforeEach(() => {
+      approveCommand = getInboxSubCommand('approve');
+      mockListInboxPatchFiles.mockReset();
+      mockValidateInboxMemoryPatchFile.mockReset();
+      mockReadFile.mockReset();
+      mockWriteFile.mockReset();
+      mockUnlink.mockReset();
+      mockMkdir.mockReset();
+      mockApplyPatch.mockReset();
+      mockMkdir.mockResolvedValue(undefined);
+      mockWriteFile.mockResolvedValue(undefined);
+      mockUnlink.mockResolvedValue(undefined);
+      mockContext = createMockCommandContext({
+        services: {
+          config: {} as never,
+        },
+      });
+    });
+
+    it('applies and deletes a patch file when all hunks apply cleanly', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      const patchFile = '/mem/.inbox/private/ok.patch';
+      const target = '/mem/hello.md';
+      const parsedDiff = { hunks: [{}] };
+
+      mockListInboxPatchFiles.mockImplementation(async (_c, kind) =>
+        kind === 'private' ? [patchFile] : [],
+      );
+      mockValidateInboxMemoryPatchFile.mockResolvedValue({
+        valid: true,
+        patches: [{ targetPath: target, isNewFile: true }],
+        parsed: [parsedDiff],
+      });
+      mockApplyPatch.mockReturnValue('hello\n');
+
+      await approveCommand.action(mockContext, '');
+
+      expect(mockWriteFile).toHaveBeenCalledWith(target, 'hello\n');
+      expect(mockUnlink).toHaveBeenCalledWith(patchFile);
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('Applied 1 patch file(s).'),
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('retains patch file and does not unlink when validation fails', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      const patchFile = '/mem/.inbox/private/bad.patch';
+
+      mockListInboxPatchFiles.mockImplementation(async (_c, kind) =>
+        kind === 'private' ? [patchFile] : [],
+      );
+      mockValidateInboxMemoryPatchFile.mockResolvedValue({
+        valid: false,
+        reason: 'no hunks found in patch',
+      });
+
+      await approveCommand.action(mockContext, '');
+
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockUnlink).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('Retained 1 patch file(s) for retry.'),
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('retains patch file when applyPatch returns false (all-or-nothing)', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      const patchFile = '/mem/.inbox/private/fail.patch';
+      const target = '/mem/hello.md';
+
+      mockListInboxPatchFiles.mockImplementation(async (_c, kind) =>
+        kind === 'private' ? [patchFile] : [],
+      );
+      mockValidateInboxMemoryPatchFile.mockResolvedValue({
+        valid: true,
+        patches: [{ targetPath: target, isNewFile: false }],
+        parsed: [{ hunks: [{}] }],
+      });
+      mockReadFile.mockResolvedValue('existing\n');
+      mockApplyPatch.mockReturnValue(false);
+
+      await approveCommand.action(mockContext, '');
+
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockUnlink).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'diff does not apply cleanly to /mem/hello.md',
+          ),
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('retains patch file when write fails after applyPatch success', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      const patchFile = '/mem/.inbox/private/write-fail.patch';
+      const target = '/mem/hello.md';
+
+      mockListInboxPatchFiles.mockImplementation(async (_c, kind) =>
+        kind === 'private' ? [patchFile] : [],
+      );
+      mockValidateInboxMemoryPatchFile.mockResolvedValue({
+        valid: true,
+        patches: [{ targetPath: target, isNewFile: true }],
+        parsed: [{ hunks: [{}] }],
+      });
+      mockApplyPatch.mockReturnValue('new\n');
+      mockWriteFile.mockRejectedValue(new Error('disk full'));
+
+      await approveCommand.action(mockContext, '');
+
+      expect(mockUnlink).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('write failed: disk full'),
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('filters by kind argument', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      mockListInboxPatchFiles.mockResolvedValue([]);
+
+      await approveCommand.action(mockContext, 'global');
+
+      expect(mockListInboxPatchFiles).toHaveBeenCalledTimes(1);
+      expect(mockListInboxPatchFiles).toHaveBeenCalledWith(
+        expect.anything(),
+        'global',
+      );
+    });
+
+    it('shows empty message when no patches are pending', async () => {
+      if (!approveCommand.action) throw new Error('no action');
+      mockListInboxPatchFiles.mockResolvedValue([]);
+
+      await approveCommand.action(mockContext, '');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('No pending patches to approve.'),
+        },
+        expect.any(Number),
+      );
     });
   });
 });

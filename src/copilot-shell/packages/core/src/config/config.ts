@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -274,6 +275,34 @@ export enum AuthProviderType {
   SERVICE_ACCOUNT_IMPERSONATION = 'service_account_impersonation',
 }
 
+/**
+ * Configuration for the Auto Memory extraction feature.
+ * When model/baseUrl/apiKey are undefined, falls back to the current session config.
+ */
+export interface AutoMemoryConfig {
+  enabled: boolean;
+  /** Override model name for extraction agent. */
+  model?: string;
+  /** Override API base URL for extraction agent. */
+  baseUrl?: string;
+  /** Override API key for extraction agent. */
+  apiKey?: string;
+  /** Minimum seconds between two extraction runs. */
+  cooldownSeconds?: number;
+  /** Minimum user messages for a session to be eligible. */
+  sessionMinMessages?: number;
+  /** Minimum idle seconds before a session is eligible. */
+  sessionMinIdleSeconds?: number;
+  /** Maximum new sessions to process per run. */
+  sessionMaxPerRun?: number;
+  /** Maximum total sessions in the index passed to the agent. */
+  sessionIndexLimit?: number;
+  /** Maximum runtime seconds for the extraction agent. */
+  agentTimeoutSeconds?: number;
+  /** Maximum conversation turns for the extraction agent. */
+  agentMaxTurns?: number;
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -385,6 +414,8 @@ export interface ConfigParameters {
   };
   /** User-defined custom skill directory paths (supports ~, $VAR, ${VAR} expansion) */
   customSkillPaths?: string[];
+  /** Auto Memory extraction configuration */
+  autoMemory?: AutoMemoryConfig;
 }
 
 function normalizeConfigOutputFormat(
@@ -516,6 +547,10 @@ export class Config {
   private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
+  private initResolve!: () => void;
+  private readonly initPromise: Promise<void> = new Promise((resolve) => {
+    this.initResolve = resolve;
+  });
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
@@ -528,6 +563,7 @@ export class Config {
     baseUrl?: string;
   };
   private readonly customSkillPaths: string[];
+  private readonly autoMemoryConfig: AutoMemoryConfig;
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -648,6 +684,7 @@ export class Config {
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.skillOSConfig = params.skillOS;
     this.customSkillPaths = params.customSkillPaths ?? [];
+    this.autoMemoryConfig = params.autoMemory ?? { enabled: false };
     this.enableHooks = params.enableHooks ?? false;
     this.hooks = params.hooks;
     this.hooksConfig = params.hooksConfig;
@@ -807,6 +844,15 @@ export class Config {
     await this.geminiClient.initialize();
 
     logStartSession(this, new StartSessionEvent(this));
+    this.initResolve();
+  }
+
+  /**
+   * Returns a promise that resolves once {@link initialize} has completed.
+   * Safe to call multiple times; resolves immediately if already initialized.
+   */
+  waitForInitialization(): Promise<void> {
+    return this.initPromise;
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
@@ -1378,10 +1424,21 @@ export class Config {
     const extensionContextFilePaths = this.getActiveExtensions().flatMap(
       (e) => e.contextFiles,
     );
-    return [
+    const paths = [
       ...extensionContextFilePaths,
       ...(this.outputLanguageFilePath ? [this.outputLanguageFilePath] : []),
     ];
+
+    // Auto-load project-level private memory index if it exists (written by Auto Memory extraction)
+    const privateMemoryIndex = path.join(
+      this.storage.getProjectMemoryTempDir(),
+      'MEMORY.md',
+    );
+    if (existsSync(privateMemoryIndex)) {
+      paths.push(privateMemoryIndex);
+    }
+
+    return paths;
   }
 
   getExperimentalZedIntegration(): boolean {
@@ -1727,6 +1784,28 @@ export class Config {
 
   getSkillManager(): SkillManager | null {
     return this.skillManager;
+  }
+
+  /**
+   * Returns whether Auto Memory extraction is enabled.
+   */
+  isAutoMemoryEnabled(): boolean {
+    return this.autoMemoryConfig.enabled;
+  }
+
+  /**
+   * Returns the full Auto Memory configuration.
+   */
+  getAutoMemoryConfig(): AutoMemoryConfig {
+    return this.autoMemoryConfig;
+  }
+
+  /**
+   * Returns the resolved model name for the extraction agent.
+   * Falls back to the current session model if not overridden.
+   */
+  getAutoMemoryModel(): string {
+    return this.autoMemoryConfig.model || this.getModel();
   }
 
   async createToolRegistry(

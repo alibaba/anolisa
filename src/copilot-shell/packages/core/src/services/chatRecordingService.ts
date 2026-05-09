@@ -161,11 +161,28 @@ export class ChatRecordingService {
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
+  /** Prompt ID prefixes whose telemetry events should be excluded from recording */
+  private readonly excludedPromptIdPrefixes: Set<string> = new Set();
 
   constructor(config: Config) {
     this.config = config;
     this.lastRecordUuid =
       config.getResumedSessionData()?.lastCompletedUuid ?? null;
+  }
+
+  /**
+   * Adds a prompt_id prefix to the exclusion set.
+   * Any UI telemetry event whose prompt_id starts with this prefix will be skipped.
+   */
+  addExcludedPromptIdPrefix(prefix: string): void {
+    this.excludedPromptIdPrefixes.add(prefix);
+  }
+
+  /**
+   * Removes a prompt_id prefix from the exclusion set.
+   */
+  removeExcludedPromptIdPrefix(prefix: string): void {
+    this.excludedPromptIdPrefixes.delete(prefix);
   }
 
   /**
@@ -402,6 +419,16 @@ export class ChatRecordingService {
    */
   recordUiTelemetryEvent(uiEvent: UiEvent): void {
     try {
+      // Skip events from excluded subagents (e.g., auto-memory background extraction)
+      const promptId = (uiEvent as { prompt_id?: string }).prompt_id;
+      if (promptId && this.excludedPromptIdPrefixes.size > 0) {
+        for (const prefix of this.excludedPromptIdPrefixes) {
+          if (promptId.startsWith(prefix)) {
+            return;
+          }
+        }
+      }
+
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',

@@ -15,6 +15,7 @@ import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n, type SupportedLanguage } from '../i18n/index.js';
+import { startAutoMemoryIfEnabled } from './autoMemoryLifecycle.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -64,6 +65,9 @@ export async function initializeApp(
     await ideClient.connect();
     logIdeConnection(config, new IdeConnectionEvent(IdeConnectionType.START));
   }
+
+  // Start Auto Memory extraction in the background (fire-and-forget)
+  startAutoMemoryIfEnabled(config);
 
   return {
     authError,

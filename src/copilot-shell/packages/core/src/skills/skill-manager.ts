@@ -550,6 +550,11 @@ export class SkillManager {
    * @param level - Storage level to scan
    * @returns Array of skill configurations
    */
+  // TODO(auto-memory): Auto Memory extraction writes skills to
+  // config.storage.getProjectSkillsMemoryDir() (~/.copilot-shell/tmp/{hash}/memory/skills/).
+  // This directory is not included in any scan level below.
+  // To close the gap, add a scan of getProjectSkillsMemoryDir() when level === 'project'
+  // (or introduce a new 'auto-memory' level). Also add an FSWatcher for that directory.
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();

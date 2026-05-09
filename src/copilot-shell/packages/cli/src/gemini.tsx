@@ -58,6 +58,7 @@ import {
   getAndMarkUnshownFeatureTips,
   type FeatureTip,
 } from './utils/featureTips.js';
+import { stopAutoMemory } from './core/autoMemoryLifecycle.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -419,6 +420,7 @@ export async function main() {
       configWarnings,
     );
     registerCleanup(() => config.shutdown());
+    registerCleanup(() => stopAutoMemory());
 
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {

@@ -12,9 +12,9 @@ import {
   type ToolCall,
   type WaitingToolCall,
 } from '../core/coreToolScheduler.js';
-import type {
+import {
   ToolConfirmationOutcome,
-  ToolCallConfirmationDetails,
+  type ToolCallConfirmationDetails,
 } from '../tools/tools.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import type {
@@ -666,7 +666,7 @@ export class SubAgentScope {
           );
 
           // post-tool hook
-          await this.hooks?.postToolUse?.({
+          const hookResult = await this.hooks?.postToolUse?.({
             subagentId: this.subagentId,
             name: this.name,
             toolName,
@@ -676,6 +676,9 @@ export class SubAgentScope {
             errorMessage,
             timestamp: Date.now(),
           });
+          if (hookResult?.additionalContent) {
+            toolResponseParts.push({ text: hookResult.additionalContent });
+          }
 
           // Append response parts
           const respParts = call.response.responseParts;
@@ -698,37 +701,46 @@ export class SubAgentScope {
           if (call.status !== 'awaiting_approval') continue;
           const waiting = call as WaitingToolCall;
 
-          // Emit approval request event for UI visibility
-          try {
-            const { confirmationDetails } = waiting;
-            const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
-            this.eventEmitter?.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, {
-              subagentId: this.subagentId,
-              round: currentRound,
-              callId: waiting.request.callId,
-              name: waiting.request.name,
-              description: this.getToolDescription(
-                waiting.request.name,
-                waiting.request.args,
-              ),
-              confirmationDetails: rest,
-              respond: async (
-                outcome: ToolConfirmationOutcome,
-                payload?: Parameters<
-                  ToolCallConfirmationDetails['onConfirm']
-                >[1],
-              ) => {
-                if (responded.has(waiting.request.callId)) return;
-                responded.add(waiting.request.callId);
-                await waiting.confirmationDetails.onConfirm(outcome, payload);
-              },
-              timestamp: Date.now(),
-            });
-          } catch {
-            // ignore UI event emission failures
+          if (this.eventEmitter) {
+            // Emit approval request event for UI visibility
+            try {
+              const { confirmationDetails } = waiting;
+              const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
+              this.eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, {
+                subagentId: this.subagentId,
+                round: currentRound,
+                callId: waiting.request.callId,
+                name: waiting.request.name,
+                description: this.getToolDescription(
+                  waiting.request.name,
+                  waiting.request.args,
+                ),
+                confirmationDetails: rest,
+                respond: async (
+                  outcome: ToolConfirmationOutcome,
+                  payload?: Parameters<
+                    ToolCallConfirmationDetails['onConfirm']
+                  >[1],
+                ) => {
+                  if (responded.has(waiting.request.callId)) return;
+                  responded.add(waiting.request.callId);
+                  await waiting.confirmationDetails.onConfirm(outcome, payload);
+                },
+                timestamp: Date.now(),
+              });
+            } catch {
+              // ignore UI event emission failures
+            }
+          } else {
+            // No event emitter — background subagent with no UI listener.
+            // Auto-approve to prevent hanging indefinitely on confirmation.
+            if (!responded.has(waiting.request.callId)) {
+              responded.add(waiting.request.callId);
+              void waiting.confirmationDetails.onConfirm(
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+            }
           }
-
-          // UI now renders inline confirmation via task tool live output.
         }
       },
       getPreferredEditor: () => undefined,
