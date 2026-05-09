@@ -53,6 +53,10 @@ fn main() {
     // Generate filewrite skeleton and bindings
     generate_skeleton(&mut out, "filewrite");
     generate_header(&mut out, "filewrite");
+
+    // Generate tlssni skeleton and bindings
+    generate_skeleton(&mut out, "tlssni");
+    generate_header(&mut out, "tlssni");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");

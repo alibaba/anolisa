@@ -367,6 +367,13 @@ impl AgentSight {
             return None;
         }
 
+        // Handle TLS SNI events (just log for now)
+        if let Event::TlsSni(ref sni_event) = event {
+            println!("[TLS-SNI] pid={} comm={} sni={}",
+                sni_event.pid, sni_event.comm, sni_event.sni_name);
+            return None;
+        }
+
         // Parse the event
         let result = self.parser.parse_event(event);
 

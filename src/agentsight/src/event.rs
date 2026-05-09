@@ -3,6 +3,7 @@ use crate::probes::sslsniff::SslEvent;
 use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
+use crate::probes::tlssni::TlsSniEvent;
 
 /// Unified event type that can represent any probe event
 ///
@@ -14,6 +15,7 @@ pub enum Event {
     ProcMon(ProcMonEvent),
     FileWatch(FileWatchEvent),
     FileWrite(FileWriteEvent),
+    TlsSni(TlsSniEvent),
 }
 
 impl Event {
@@ -25,6 +27,7 @@ impl Event {
             Event::ProcMon(_) => "ProcMon",
             Event::FileWatch(_) => "FileWatch",
             Event::FileWrite(_) => "FileWrite",
+            Event::TlsSni(_) => "TlsSni",
         }
     }
 }
@@ -91,6 +94,19 @@ impl Event {
     pub fn as_filewrite(&self) -> Option<&FileWriteEvent> {
         match self {
             Event::FileWrite(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a TLS SNI event
+    pub fn is_tlssni(&self) -> bool {
+        matches!(self, Event::TlsSni(_))
+    }
+
+    /// Get TLS SNI event if this is one
+    pub fn as_tlssni(&self) -> Option<&TlsSniEvent> {
+        match self {
+            Event::TlsSni(e) => Some(e),
             _ => None,
         }
     }

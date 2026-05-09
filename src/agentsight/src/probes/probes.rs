@@ -21,6 +21,7 @@ use super::sslsniff::bpf::probe_SSL_data_t as RawSslEvent;
 use super::procmon::{ProcMon, ProcMonEvent};
 use super::filewatch::{FileWatch, RawFileWatchEvent};
 use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
+use super::tlssni::{TlsSni, RawTlsSniEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -30,6 +31,7 @@ const EVENT_SOURCE_SSL: u32 = 2;
 const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
 const EVENT_SOURCE_FILEWRITE: u32 = 5;
+const EVENT_SOURCE_TLSSNI: u32 = 6;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -49,6 +51,8 @@ pub struct Probes {
     filewatch: Option<FileWatch>,
     /// File write probe (reuses traced_processes map and ring buffer, always enabled)
     filewrite: FileWriteProbe,
+    /// TLS SNI probe (reuses ring buffer, captures SNI from ClientHello)
+    tlssni: TlsSni,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -95,6 +99,10 @@ impl Probes {
         let filewrite = FileWriteProbe::new_with_maps(&map_handle, &rb_handle)
             .context("failed to create filewrite")?;
 
+        // Create tlssni - it reuses the ring buffer (captures all TLS SNI globally)
+        let tlssni = TlsSni::new_with_rb(&rb_handle)
+            .context("failed to create tlssni")?;
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
         Ok(Self {
@@ -103,6 +111,7 @@ impl Probes {
             procmon,
             filewatch,
             filewrite,
+            tlssni,
             rb_handle,
             event_tx,
             event_rx,
@@ -123,6 +132,9 @@ impl Probes {
         // Attach filewrite for JSON write monitoring (always enabled)
         self.filewrite.attach()
             .context("failed to attach filewrite")?;
+        // Attach tlssni for TLS SNI capture (always enabled)
+        self.tlssni.attach()
+            .context("failed to attach tlssni")?;
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
@@ -149,6 +161,7 @@ impl Probes {
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
         let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
+        let tlssni_event_size = mem::size_of::<RawTlsSniEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -203,6 +216,14 @@ impl Probes {
                         // File write event (JSON content)
                         if data.len() >= filewrite_event_size {
                             super::filewrite::FileWriteEvent::from_bytes(data).map(Event::FileWrite)
+                        } else {
+                            None
+                        }
+                    }
+                    EVENT_SOURCE_TLSSNI => {
+                        // TLS SNI event (domain name from ClientHello)
+                        if data.len() >= tlssni_event_size {
+                            super::tlssni::TlsSniEvent::from_bytes(data).map(Event::TlsSni)
                         } else {
                             None
                         }
