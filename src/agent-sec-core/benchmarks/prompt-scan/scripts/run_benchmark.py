@@ -127,6 +127,7 @@ def run_benchmark(dataset_file: str, results_file: str, mode_str: str = DEFAULT_
 
     # Load dataset
     samples = []
+    dataset_version = None
     with open(dataset_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -134,12 +135,17 @@ def run_benchmark(dataset_file: str, results_file: str, mode_str: str = DEFAULT_
                 record = json.loads(line)
                 # Skip metadata lines (no "text" field or _type == "dataset_metadata")
                 if record.get("_type") == "dataset_metadata" or "text" not in record:
+                    # Capture dataset version from metadata for provenance tracking
+                    if record.get("_type") == "dataset_metadata":
+                        dataset_version = record.get("version")
                     continue
                 samples.append(record)
 
     total = len(samples)
     print(f"[prompt-scan benchmark]")
     print(f"  Dataset : {dataset_file} ({total} samples)")
+    if dataset_version:
+        print(f"  Version : {dataset_version}")
     print(f"  Mode    : {scan_mode.value}")
     print(f"  Output  : {results_file}")
 
@@ -186,6 +192,10 @@ def run_benchmark(dataset_file: str, results_file: str, mode_str: str = DEFAULT_
                 }
                 errors += 1
 
+            # Embed dataset version for provenance tracking in reports
+            if dataset_version:
+                record["dataset_version"] = dataset_version
+
             results.append(record)
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -225,11 +235,16 @@ def generate_report(results_file: str, report_file: str):
     """Generate a Markdown analysis report from benchmark results."""
     # Load results
     records = []
+    dataset_version = None
     with open(results_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                records.append(json.loads(line))
+                r = json.loads(line)
+                # Pick up dataset version embedded in result records (if any)
+                if dataset_version is None and r.get("dataset_version"):
+                    dataset_version = r["dataset_version"]
+                records.append(r)
 
     # Compute metrics via shared helper
     m = compute_metrics(records)
@@ -271,6 +286,9 @@ def generate_report(results_file: str, report_file: str):
     lines = []
     lines.append("# Prompt 扫描基准测试报告")
     lines.append("")
+    if dataset_version:
+        lines.append(f"> 数据集版本：`{dataset_version}`")
+        lines.append("")
 
     # Overall metrics
     lines.append("## 整体指标")
