@@ -2,6 +2,7 @@
 # Location: /etc/ws-ckpt/config.toml
 
 # ── Scheduling ──
+# auto_cleanup = false                # Switch for periodic auto-cleanup (true = enabled, false = disabled)
 # auto_cleanup_keep = 20              # Unpinned snapshots to keep per workspace
 # auto_cleanup_interval_secs = 600    # Auto-cleanup interval (seconds)
 # health_check_interval_secs = 300    # Health check interval (seconds)

@@ -11,6 +11,13 @@ use crate::state::DaemonState;
 
 /// Start background scheduler tasks: orphan cleanup on boot, periodic auto-cleanup,
 /// and periodic health checks.
+///
+/// Config hot-reload is **push-based**: the dispatcher calls
+/// `state.config_notify.notify_waiters()` after updating `state.config`, and
+/// every periodic loop uses `tokio::select!` to react. This replaces the old
+/// polling design — loops never wake up "just to check", and a disabled task
+/// (`auto_cleanup = false` or `*_interval_secs == 0`) blocks on the notify
+/// at zero CPU cost until a reload re-enables it.
 pub fn start_scheduler(state: Arc<DaemonState>) {
     // Startup orphan cleanup
     let mount_path = state.mount_path.clone();
@@ -20,35 +27,63 @@ pub fn start_scheduler(state: Arc<DaemonState>) {
         }
     });
 
-    // Periodic auto-cleanup (configurable interval)
+    // Periodic auto-cleanup: reacts to `ReloadConfig` via `config_notify`.
     let state_clone = state.clone();
     tokio::spawn(async move {
-        loop {
-            let interval_secs = state_clone
-                .config
-                .read()
-                .unwrap()
-                .auto_cleanup_interval_secs;
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            auto_cleanup(&state_clone).await;
-        }
+        auto_cleanup_loop(state_clone).await;
     });
 
-    // Periodic health check (configurable interval)
+    // Periodic health check: same notify-driven pattern.
     let state_clone2 = state.clone();
     tokio::spawn(async move {
-        loop {
-            let interval_secs = state_clone2
-                .config
-                .read()
-                .unwrap()
-                .health_check_interval_secs;
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            health_check(&state_clone2).await;
-        }
+        health_check_loop(state_clone2).await;
     });
 
     info!("Background scheduler started");
+}
+
+/// Auto-cleanup loop. Re-reads `auto_cleanup` and `auto_cleanup_interval_secs`
+/// at the top of every iteration. Disabled state parks on `config_notify`; an
+/// active interval races `sleep` against `config_notify` so a reload takes
+/// effect immediately instead of on the next tick boundary.
+async fn auto_cleanup_loop(state: Arc<DaemonState>) {
+    loop {
+        let (enabled, interval) = {
+            let cfg = state.config.read().unwrap();
+            (cfg.auto_cleanup, cfg.auto_cleanup_interval_secs)
+        };
+        if !enabled || interval == 0 {
+            // Disabled: block until a reload arrives, then re-check.
+            state.config_notify.notified().await;
+            continue;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
+                auto_cleanup(&state).await;
+            }
+            _ = state.config_notify.notified() => {
+                // Config changed mid-sleep: skip this cleanup pass and re-read.
+            }
+        }
+    }
+}
+
+/// Health-check loop. Same push-based pattern as `auto_cleanup_loop`, keyed
+/// off `health_check_interval_secs`.
+async fn health_check_loop(state: Arc<DaemonState>) {
+    loop {
+        let interval = state.config.read().unwrap().health_check_interval_secs;
+        if interval == 0 {
+            state.config_notify.notified().await;
+            continue;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
+                health_check(&state).await;
+            }
+            _ = state.config_notify.notified() => {}
+        }
+    }
 }
 
 /// Orphan recovery: clean up `.rollback-tmp` residual directories.

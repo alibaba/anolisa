@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{Notify, OnceCell, RwLock};
 use tracing::{info, warn};
 
 use ws_ckpt_common::backend::StorageBackend;
@@ -19,6 +19,13 @@ pub struct DaemonState {
     path_to_wsid: DashMap<PathBuf, String>,
     /// Daemon configuration (std RwLock for runtime-reloadable config)
     pub config: std::sync::RwLock<DaemonConfig>,
+    /// Broadcast signal: dispatcher calls `notify_waiters()` after a successful
+    /// `ReloadConfig`, and background loops use `notified().await` inside a
+    /// `tokio::select!` to (a) break out of a running `sleep` and re-read the
+    /// config, or (b) wake up from a disabled state (`auto_cleanup = false`
+    /// / `interval_secs == 0`). This replaces the old polling-based design
+    /// where loops periodically woke up to check for config changes.
+    pub config_notify: Notify,
     /// Mount path for btrfs filesystem (convenience accessor, immutable)
     pub mount_path: PathBuf,
     /// Socket path (convenience accessor, immutable)
@@ -47,6 +54,7 @@ impl DaemonState {
             workspaces: DashMap::new(),
             path_to_wsid: DashMap::new(),
             config: std::sync::RwLock::new(config),
+            config_notify: Notify::new(),
             mount_path,
             socket_path,
             backend,
@@ -356,6 +364,7 @@ mod tests {
             mount_path: PathBuf::from("/tmp/test-mount"),
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
+            auto_cleanup: false,
             auto_cleanup_keep: 20,
             auto_cleanup_interval_secs: 600,
             health_check_interval_secs: 300,

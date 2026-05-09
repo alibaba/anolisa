@@ -225,6 +225,7 @@ pub struct ConfigReport {
     pub mount_path: String,
     pub socket_path: String,
     pub log_level: String,
+    pub auto_cleanup: bool,
     pub auto_cleanup_keep: u32,
     pub auto_cleanup_interval_secs: u64,
     pub health_check_interval_secs: u64,
@@ -241,6 +242,7 @@ pub struct DaemonConfig {
     pub mount_path: PathBuf,
     pub socket_path: PathBuf,
     pub log_level: String,
+    pub auto_cleanup: bool,
     /// Number of recent unpinned snapshots to keep during auto-cleanup (pinned snapshots are excluded from this count)
     pub auto_cleanup_keep: u32,
     /// Interval in seconds between auto-cleanup runs
@@ -277,6 +279,7 @@ impl DaemonConfig {
     }
 }
 
+pub const DEFAULT_AUTO_CLEANUP: bool = false;
 pub const DEFAULT_AUTO_CLEANUP_KEEP: u32 = 20;
 pub const DEFAULT_AUTO_CLEANUP_INTERVAL_SECS: u64 = 600;
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 300;
@@ -324,6 +327,7 @@ impl Default for BackendConfig {
 /// On-disk config file structure (all fields optional; missing = use defaults).
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct FileConfig {
+    pub auto_cleanup: Option<bool>,
     pub auto_cleanup_keep: Option<u32>,
     pub auto_cleanup_interval_secs: Option<u64>,
     pub health_check_interval_secs: Option<u64>,
@@ -365,6 +369,7 @@ impl Default for DaemonConfig {
             mount_path: PathBuf::from(DEFAULT_MOUNT_PATH),
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             log_level: "info".to_string(),
+            auto_cleanup: DEFAULT_AUTO_CLEANUP,
             auto_cleanup_keep: DEFAULT_AUTO_CLEANUP_KEEP,
             auto_cleanup_interval_secs: DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
@@ -1086,6 +1091,7 @@ mod tests {
                 mount_path: "/mnt/btrfs-workspace".to_string(),
                 socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
                 log_level: "info".to_string(),
+                auto_cleanup: false,
                 auto_cleanup_keep: 20,
                 auto_cleanup_interval_secs: 600,
                 health_check_interval_secs: 300,

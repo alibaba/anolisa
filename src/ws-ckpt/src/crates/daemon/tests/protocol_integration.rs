@@ -89,6 +89,7 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 mount_path: "/mnt/btrfs-workspace".to_string(),
                 socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
                 log_level: "info".to_string(),
+                auto_cleanup: false,
                 auto_cleanup_keep: 20,
                 auto_cleanup_interval_secs: 600,
                 health_check_interval_secs: 300,

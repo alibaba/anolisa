@@ -314,6 +314,7 @@ mod tests {
             mount_path: PathBuf::from("/tmp/test-mount"),
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
+            auto_cleanup: false,
             auto_cleanup_keep: 20,
             auto_cleanup_interval_secs: 600,
             health_check_interval_secs: 300,

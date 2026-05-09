@@ -2,9 +2,9 @@ use crate::state::DaemonState;
 use std::sync::Arc;
 use ws_ckpt_common::{
     load_config_file, ConfigReport, ErrorCode, Request, Response, StatusReport, WorkspaceInfo,
-    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_AUTO_CLEANUP_KEEP,
-    DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT,
-    DEFAULT_IMG_SIZE_GB,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
+    DEFAULT_AUTO_CLEANUP_KEEP, DEFAULT_FS_WARN_THRESHOLD_PERCENT,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
 };
 
 pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
@@ -211,6 +211,7 @@ fn handle_config(state: &Arc<DaemonState>) -> Response {
             mount_path: state.mount_path.to_string_lossy().to_string(),
             socket_path: state.socket_path.to_string_lossy().to_string(),
             log_level: cfg.log_level.clone(),
+            auto_cleanup: cfg.auto_cleanup,
             auto_cleanup_keep: cfg.auto_cleanup_keep,
             auto_cleanup_interval_secs: cfg.auto_cleanup_interval_secs,
             health_check_interval_secs: cfg.health_check_interval_secs,
@@ -232,6 +233,7 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
     match load_config_file(std::path::Path::new(CONFIG_FILE_PATH)) {
         Ok(file_config) => {
             let mut cfg = state.config.write().unwrap();
+            cfg.auto_cleanup = file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP);
             cfg.auto_cleanup_keep = file_config
                 .auto_cleanup_keep
                 .unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP);
@@ -278,13 +280,21 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             }
 
             tracing::info!(
-                "Config reloaded: keep={}, cleanup_interval={}s, health_interval={}s, \
+                "Config reloaded: auto_cleanup={}, keep={}, cleanup_interval={}s, health_interval={}s, \
                  fs_warn={}% (img fields are bootstrap-only; restart required to apply)",
+                cfg.auto_cleanup,
                 cfg.auto_cleanup_keep,
                 cfg.auto_cleanup_interval_secs,
                 cfg.health_check_interval_secs,
                 cfg.fs_warn_threshold_percent,
             );
+            // Drop the write lock before notifying so woken loops can read the
+            // fresh config without contending on the lock.
+            drop(cfg);
+            // Push notification to scheduler loops: break their current sleep
+            // (or wake them from a disabled state) so the new config takes
+            // effect immediately instead of on the next polling boundary.
+            state.config_notify.notify_waiters();
             Response::ReloadConfigOk
         }
         Err(e) => Response::Error {
@@ -314,6 +324,7 @@ mod tests {
             mount_path: PathBuf::from("/tmp/test-mount"),
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
+            auto_cleanup: false,
             auto_cleanup_keep: 20,
             auto_cleanup_interval_secs: 600,
             health_check_interval_secs: 300,

@@ -9,7 +9,7 @@ use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
     decode_payload, encode_frame, load_config_file, save_config_file, ChangeType, DaemonConfig,
-    ErrorCode, Request, Response, BTRFS_IMG_PATH, CONFIG_FILE_PATH,
+    ErrorCode, Request, Response, BTRFS_IMG_PATH, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_AUTO_CLEANUP_KEEP,
     DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT,
     DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
@@ -208,6 +208,7 @@ async fn run(cli: Cli) -> Result<()> {
                 mount_path,
                 socket_path: socket,
                 log_level,
+                auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
                 auto_cleanup_keep: file_config
                     .auto_cleanup_keep
                     .unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP),
@@ -708,6 +709,7 @@ fn handle_config_view() -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
     let fc = load_config_file(path).map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
 
+    let auto_cleanup = fc.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP);
     let keep = fc.auto_cleanup_keep.unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP);
     let interval = fc
         .auto_cleanup_interval_secs
@@ -735,6 +737,15 @@ fn handle_config_view() -> Result<()> {
     println!(
         "  Socket path:             {} (default)",
         DEFAULT_SOCKET_PATH
+    );
+    println!(
+        "  Auto-cleanup:            {}{}",
+        if auto_cleanup { "enabled" } else { "disabled" },
+        if fc.auto_cleanup.is_none() {
+            " (default)"
+        } else {
+            ""
+        }
     );
     println!(
         "  Auto-cleanup keep:       {}{}",
