@@ -21,6 +21,7 @@ import {
   deleteAgentHealth,
   restartAgentHealth,
   INTERRUPTION_TYPE_CN,
+  fetchSkillMetrics,
 } from '../utils/apiClient';
 
 // Mock global fetch
@@ -316,6 +317,53 @@ describe('apiClient', () => {
         text: () => Promise.reject(new Error('stream error')),
       });
       await expect(fetchSessions()).rejects.toThrow('Bad Gateway');
+    });
+  });
+
+  describe('fetchSkillMetrics', () => {
+    const mockReport = {
+      event_count: 50,
+      downloads: { downloads: { 'skill-a': 50 } },
+      loads: { loads: { 'skill-a': 20 }, total_loads: 20 },
+      usage_ratio: { ratio: 0.4 },
+      distribution: { histogram: [0, 5, 10, 15, 10, 10], min: 0, max: 5, mean: 3.0 },
+      hotness: { rankings: [{ skill_name: 'skill-a', total_loads: 20, total_rank: 1, rank_delta: null }] },
+      computed_at: '2026-01-01T00:00:00Z',
+      time_range_ns: [0, 1000000],
+    };
+
+    it('should call /api/skill-metrics without params', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(mockReport));
+      const result = await fetchSkillMetrics();
+      expect(result).toEqual(mockReport);
+      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/skill-metrics'));
+    });
+
+    it('should add start_ns and end_ns query params', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(mockReport));
+      await fetchSkillMetrics(1000, 2000);
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('start_ns=1000');
+      expect(url).toContain('end_ns=2000');
+    });
+
+    it('should add agent_name query param when provided', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(mockReport));
+      await fetchSkillMetrics(undefined, undefined, 'cosh');
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('agent_name=cosh');
+    });
+
+    it('should add granularity query param when provided', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(mockReport));
+      await fetchSkillMetrics(undefined, undefined, undefined, 'week');
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('granularity=week');
+    });
+
+    it('should throw on non-ok response', async () => {
+      mockFetch.mockResolvedValueOnce(mockErrorResponse(500, 'Internal Server Error'));
+      await expect(fetchSkillMetrics()).rejects.toThrow();
     });
   });
 });
