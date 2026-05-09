@@ -7,16 +7,17 @@
 //!
 //! The discovery module consists of:
 //! - `agent`: Core types (`AgentInfo`, `DiscoveredAgent`)
-//! - `matcher`: Matching trait (`AgentMatcher`, `ProcessContext`)
-//! - `registry`: Built-in known agent list
-//! - `scanner`: System scanner using /proc
+//! - `matcher`: Matching logic (`CmdlineGlobMatcher`, `ProcessContext`)
+//! - `registry`: Config-driven agent list
+//! - `scanner`: System scanner using /proc with allow/deny/domain rules
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use agentsight::discovery::{AgentScanner, DiscoveredAgent};
+//! use agentsight::discovery::AgentScanner;
+//! use agentsight::config::default_cmdline_rules;
 //!
-//! let scanner = AgentScanner::new();
+//! let mut scanner = AgentScanner::from_rules(&default_cmdline_rules(), &[]);
 //! let agents = scanner.scan();
 //!
 //! for agent in agents {
@@ -25,12 +26,9 @@
 //! ```
 
 pub mod agent;
-pub mod agents;
 pub mod matcher;
-pub mod registry;
 pub mod scanner;
 
 pub use agent::{AgentInfo, DiscoveredAgent};
-pub use matcher::{AgentMatcher, ProcessContext};
-pub use registry::known_agents;
+pub use matcher::{ProcessContext, CmdlineGlobMatcher, match_cmdline_glob, match_domain_glob};
 pub use scanner::AgentScanner;

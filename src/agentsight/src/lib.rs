@@ -92,7 +92,8 @@ pub use probes::FileWatchEvent;
 pub use response_map::ResponseSessionMapper;
 
 // Re-export discovery types
-pub use discovery::{AgentInfo, AgentMatcher, AgentScanner, DiscoveredAgent, ProcessContext, known_agents};
+pub use discovery::{AgentInfo, AgentScanner, CmdlineGlobMatcher, DiscoveredAgent, ProcessContext};
+pub use config::default_cmdline_rules;
 
 // Re-export genai types
 pub use genai::{

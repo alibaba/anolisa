@@ -77,7 +77,7 @@ impl HealthChecker {
 
     /// Perform a single health check cycle for all discovered agents.
     fn check_once(&self) {
-        let mut scanner = AgentScanner::new();
+        let mut scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
         let agents = scanner.scan();
 
         let active_pids: HashSet<u32> = agents.iter().map(|a| a.pid).collect();

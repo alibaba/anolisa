@@ -1,0 +1,15 @@
+{
+  "cmdline": {
+    "allow": [
+      {"rule": ["hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*python*", "*hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*python*", "-m", "*hermes*"], "agent_name": "Hermes"},
+      {"rule": ["node*", "*/usr/bin/co*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*/usr/bin/cosh*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*/usr/bin/copliot*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*copilot-shell*"], "agent_name": "Cosh"},
+      {"rule": ["*openclaw-gatewa*"], "agent_name": "OpenClaw"},
+      {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"}
+    ]
+  }
+}

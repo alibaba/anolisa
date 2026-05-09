@@ -120,18 +120,44 @@ impl AgentSight {
     /// let config = AgentsightConfig::new();
     /// let mut sight = AgentSight::new(config)?;
     /// ```
-    pub fn new(config: AgentsightConfig) -> Result<Self> {
+    pub fn new(mut config: AgentsightConfig) -> Result<Self> {
         config.apply_verbose();
 
+        // Load rules from config file if not provided via FFI/CLI
+        if config.cmdline_rules.is_empty() {
+            let path = config.resolve_config_path();
+            let load_result = if path.exists() {
+                config.load_from_file(&path)
+            } else {
+                match crate::config::ensure_default_agents_config(&path) {
+                    Ok(()) => config.load_from_file(&path),
+                    Err(e) => Err(e),
+                }
+            };
+            match load_result {
+                Ok(()) => {
+                    log::info!("Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
+                        config.cmdline_rules.len(), config.domain_rules.len(), path);
+                }
+                Err(e) => {
+                    log::warn!("Failed to load config from {:?}: {}, using embedded defaults", path, e);
+                    config.cmdline_rules = crate::config::default_cmdline_rules();
+                }
+            }
+        }
+
+        let all_cmdline_rules = config.cmdline_rules.clone();
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
+        let enable_tlssni = !config.domain_rules.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_tlssni).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
 
-        // Create scanner and scan for existing agent processes
-        let mut scanner = AgentScanner::new();
+        // Create scanner with all rules (allow/deny/domain)
+        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.domain_rules);
         let existing_agents = scanner.scan();
 
         // Attach SSL probes to already-running agents
@@ -320,6 +346,9 @@ impl AgentSight {
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
         log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
+        if let Err(e) = probes.add_traced_pid(pid) {
+            log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
+        }
         if let Err(e) = probes.attach_process(pid as i32) {
             log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
         } else {
@@ -367,10 +396,18 @@ impl AgentSight {
             return None;
         }
 
-        // Handle TLS SNI events (just log for now)
+        // Handle TLS SNI events (domain-based attachment)
         if let Event::TlsSni(ref sni_event) = event {
-            println!("[TLS-SNI] pid={} comm={} sni={}",
+            log::debug!("[TLS-SNI] pid={} comm={} sni={}",
                 sni_event.pid, sni_event.comm, sni_event.sni_name);
+
+            if self.scanner.on_sni_event(sni_event.pid, &sni_event.sni_name) {
+                log::info!("[TLS-SNI] Attaching to pid={} via domain rule (sni={})",
+                    sni_event.pid, sni_event.sni_name);
+                if let Err(e) = self.probes.attach_process(sni_event.pid as i32) {
+                    log::warn!("[TLS-SNI] Failed to attach to pid={}: {}", sni_event.pid, e);
+                }
+            }
             return None;
         }
 
@@ -458,7 +495,16 @@ impl AgentSight {
 
         match event {
             ProcMonEvent::Exec { pid, comm, .. } => {
-                // Check if this is a known agent and start tracking
+                // Read cmdline for deny-check and custom matching
+                let cmdline_args = crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+
+                // Phase 1: check deny rules first (blacklist overrides everything)
+                if self.scanner.is_denied(&cmdline_args) {
+                    log::debug!("ProcMon: pid={} denied by cmdline rule, skipping attach", pid);
+                    return;
+                }
+
+                // Phase 2: check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.insert(*pid, agent_name.clone());

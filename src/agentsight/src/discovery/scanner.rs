@@ -2,47 +2,91 @@
 //!
 //! This module provides functionality to scan the system for running AI agent processes
 //! by examining /proc filesystem entries and handling process lifecycle events.
+//! It also manages deny rules and domain rules for unified rule-based decisions.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use super::agent::{AgentInfo, DiscoveredAgent};
-use super::matcher::{AgentMatcher, ProcessContext};
-use super::registry::known_agents;
+use super::matcher::{CmdlineGlobMatcher, ProcessContext, match_domain_glob};
+use crate::config::{CmdlineRule, DomainRule};
 
 /// Scanner for discovering AI agent processes on the system
 ///
-/// The scanner maintains a list of agent matchers and can scan the /proc filesystem
-/// to find running processes that match these agents. It also handles process
-/// lifecycle events (creation/exit) for dynamic tracking.
+/// The scanner maintains allow matchers, deny matchers, and domain patterns.
+/// It can scan the /proc filesystem to find running processes that match allow rules,
+/// check deny rules, and match TLS-SNI domain events.
 pub struct AgentScanner {
-    matchers: Vec<Box<dyn AgentMatcher>>,
+    /// Allow matchers (agent discovery)
+    matchers: Vec<CmdlineGlobMatcher>,
+    /// Deny matchers (blacklist)
+    deny_matchers: Vec<CmdlineGlobMatcher>,
+    /// Domain/SNI glob patterns
+    domain_patterns: Vec<String>,
     /// Currently tracked agent processes: pid -> DiscoveredAgent
     tracked_agents: HashMap<u32, DiscoveredAgent>,
 }
 
-impl Default for AgentScanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AgentScanner {
-    /// Create a scanner with the built-in list of known agents
-    pub fn new() -> Self {
-        Self {
-            matchers: known_agents(),
-            tracked_agents: HashMap::new(),
-        }
-    }
-
-    /// Create a scanner with a custom list of agent matchers
-    pub fn with_matchers(matchers: Vec<Box<dyn AgentMatcher>>) -> Self {
+    /// Create a scanner from the full set of rules (recommended).
+    ///
+    /// Separates cmdline_rules into allow matchers and deny matchers,
+    /// and stores domain patterns for SNI-based matching.
+    pub fn from_rules(
+        cmdline_rules: &[CmdlineRule],
+        domain_rules: &[DomainRule],
+    ) -> Self {
+        let matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
+            .iter()
+            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .collect();
+        let deny_matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
+            .iter()
+            .filter_map(|r| CmdlineGlobMatcher::from_deny_rule(r))
+            .collect();
+        let domain_patterns: Vec<String> = domain_rules
+            .iter()
+            .map(|r| r.pattern.clone())
+            .collect();
         Self {
             matchers,
+            deny_matchers,
+            domain_patterns,
             tracked_agents: HashMap::new(),
         }
+    }
+
+    /// Check if cmdline matches any deny rule.
+    pub fn is_denied(&self, cmdline_args: &[String]) -> bool {
+        let ctx = ProcessContext {
+            comm: String::new(),
+            cmdline_args: cmdline_args.to_vec(),
+            exe_path: String::new(),
+        };
+        self.deny_matchers.iter().any(|m| m.matches(&ctx))
+    }
+
+    /// Check if a domain matches any domain rule.
+    pub fn matches_domain(&self, domain: &str) -> bool {
+        match_domain_glob(domain, &self.domain_patterns)
+    }
+
+    /// Whether any domain rules are configured (used to enable TLS-SNI probe).
+    pub fn has_domain_rules(&self) -> bool {
+        !self.domain_patterns.is_empty()
+    }
+
+    /// Handle TLS-SNI event: check domain match + deny check.
+    ///
+    /// Returns `true` if the process should be attached (domain matches and
+    /// the process cmdline is not denied).
+    pub fn on_sni_event(&self, pid: u32, sni: &str) -> bool {
+        if !self.matches_domain(sni) {
+            return false;
+        }
+        let cmdline = read_cmdline(&format!("/proc/{}/cmdline", pid));
+        !self.is_denied(&cmdline)
     }
 
     /// Scan the system for running AI agent processes
@@ -90,7 +134,7 @@ impl AgentScanner {
     ///
     /// # Arguments
     /// * `pid` - Process ID
-    /// * `comm` - Process command name (from BPF event, already updated at sys_exit_execve)
+    /// * `bpf_comm` - Process command name (from BPF event, already updated at sys_exit_execve)
     ///
     /// # Returns
     ///
@@ -109,7 +153,7 @@ impl AgentScanner {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| bpf_comm.to_string())
         };
-        
+
         // Read full command line from /proc/[pid]/cmdline
         let cmdline_args = read_cmdline(&format!("/proc/{}/cmdline", pid));
         log::debug!("Process created: pid={}, comm='{}', cmdline={:?}", pid, comm, cmdline_args);
@@ -143,13 +187,6 @@ impl AgentScanner {
     /// Handle process exit event
     ///
     /// Remove the process from tracking if it was a known agent.
-    ///
-    /// # Arguments
-    /// * `pid` - Process ID
-    ///
-    /// # Returns
-    ///
-    /// `Some(DiscoveredAgent)` if the process was being tracked, `None` otherwise.
     pub fn on_process_exit(&mut self, pid: u32) -> Option<DiscoveredAgent> {
         log::debug!("Process exited: pid={}", pid);
         self.tracked_agents.remove(&pid)
@@ -235,7 +272,7 @@ impl AgentScanner {
 ///
 /// The cmdline file contains arguments separated by null bytes.
 /// Returns a vector of command line arguments.
-fn read_cmdline(path: &str) -> Vec<String> {
+pub fn read_cmdline(path: &str) -> Vec<String> {
     match fs::read(path) {
         Ok(data) => {
             // Split by null bytes and collect non-empty strings
@@ -259,95 +296,80 @@ mod tests {
 
     #[test]
     fn test_scanner_creation() {
-        let scanner = AgentScanner::new();
+        let scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
         assert!(scanner.matcher_count() > 0);
     }
 
     #[test]
-    fn test_scanner_with_custom_matchers() {
-        let custom: Vec<Box<dyn AgentMatcher>> = vec![
-            Box::new(AgentInfo::new("Test Agent", vec!["test"], "A test agent", "test")),
-        ];
-        let scanner = AgentScanner::with_matchers(custom);
-        assert_eq!(scanner.matcher_count(), 1);
-    }
-
-    #[test]
-    fn test_matches_case_insensitive() {
-        let agent = AgentInfo::new("Claude Code", vec!["claude"], "desc", "cat");
-        let ctx = ProcessContext { comm: "CLAUDE".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(agent.matches(&ctx));
-
-        let ctx = ProcessContext { comm: "Claude".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(agent.matches(&ctx));
-
-        let ctx = ProcessContext { comm: "claude".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(agent.matches(&ctx));
-    }
-
-    #[test]
-    fn test_matches_version_suffix() {
-        let agent = AgentInfo::new("Node Agent", vec!["node"], "desc", "cat");
-        let ctx = ProcessContext { comm: "node-22".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(agent.matches(&ctx));
-
-        let ctx = ProcessContext { comm: "node.18".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(agent.matches(&ctx));
-
-        // Should NOT match: "nodejs" (alphanumeric continuation)
-        let ctx = ProcessContext { comm: "nodejs".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(!agent.matches(&ctx));
-    }
-
-    #[test]
-    fn test_matches_not_found() {
-        let agent = AgentInfo::new("Claude Code", vec!["claude"], "desc", "cat");
-        let ctx = ProcessContext { comm: "nonexistent".to_string(), cmdline_args: vec![], exe_path: String::new() };
-        assert!(!agent.matches(&ctx));
-    }
-
-    #[test]
     fn test_process_lifecycle() {
-        let mut scanner = AgentScanner::new();
-        
+        let mut scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+
         // Initially no tracked agents
         assert!(scanner.tracked_pids().is_empty());
-        
+
         // Simulate process exit for non-tracked PID
         let result = scanner.on_process_exit(99999);
         assert!(result.is_none());
-        
+
         // Check is_tracked
         assert!(!scanner.is_tracked(99999));
     }
 
     #[test]
-    fn test_custom_matcher() {
-        /// A custom matcher that matches by exe_path
-        struct ExePathMatcher {
-            info: AgentInfo,
-            exe_keyword: String,
-        }
-
-        impl AgentMatcher for ExePathMatcher {
-            fn info(&self) -> &AgentInfo {
-                &self.info
-            }
-
-            fn matches(&self, ctx: &ProcessContext) -> bool {
-                ctx.exe_path.contains(&self.exe_keyword)
-            }
-        }
-
-        let custom: Vec<Box<dyn AgentMatcher>> = vec![
-            Box::new(ExePathMatcher {
-                info: AgentInfo::new("Special Agent", vec![], "custom", "custom"),
-                exe_keyword: "special-agent".to_string(),
-            }),
+    fn test_is_denied() {
+        let rules = vec![
+            CmdlineRule {
+                patterns: vec!["*spam*".to_string()],
+                agent_name: None,
+                allow: false,
+            },
         ];
-        let scanner = AgentScanner::with_matchers(custom);
+        let scanner = AgentScanner::from_rules(&rules, &[]);
 
-        // Verify the custom matcher is registered
+        assert!(scanner.is_denied(&["spam-process".to_string()]));
+        assert!(!scanner.is_denied(&["good-process".to_string()]));
+    }
+
+    #[test]
+    fn test_matches_domain() {
+        let domain_rules = vec![
+            DomainRule { pattern: "*.openai.com".to_string() },
+            DomainRule { pattern: "*.anthropic.com".to_string() },
+        ];
+        let scanner = AgentScanner::from_rules(&[], &domain_rules);
+
+        assert!(scanner.matches_domain("api.openai.com"));
+        assert!(scanner.matches_domain("api.anthropic.com"));
+        assert!(!scanner.matches_domain("example.com"));
+        assert!(scanner.has_domain_rules());
+    }
+
+    #[test]
+    fn test_has_no_domain_rules() {
+        let scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+        assert!(!scanner.has_domain_rules());
+    }
+
+    #[test]
+    fn test_from_rules_separates_allow_and_deny() {
+        let rules = vec![
+            CmdlineRule {
+                patterns: vec!["node".to_string(), "*claude*".to_string()],
+                agent_name: Some("Claude".to_string()),
+                allow: true,
+            },
+            CmdlineRule {
+                patterns: vec!["*deny-me*".to_string()],
+                agent_name: None,
+                allow: false,
+            },
+        ];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+
+        // One allow matcher
         assert_eq!(scanner.matcher_count(), 1);
+        // Deny works
+        assert!(scanner.is_denied(&["deny-me-process".to_string()]));
+        assert!(!scanner.is_denied(&["node".to_string(), "/path/claude-code".to_string()]));
     }
 }

@@ -152,10 +152,7 @@ pub struct AgentsightLLMData {
 
 /// Configuration handle (created → configured → passed to `agentsight_new`).
 /// cbindgen:no-export
-pub struct AgentsightConfigHandle {
-    verbose: i32,
-    log_path: Option<String>,
-}
+pub type AgentsightConfigHandle = AgentsightConfig;
 
 /// Main runtime handle.
 /// cbindgen:no-export
@@ -394,10 +391,7 @@ pub extern "C" fn agentsight_last_error() -> *const c_char {
 /// Create a new configuration with default values.
 #[unsafe(no_mangle)]
 pub extern "C" fn agentsight_config_new() -> *mut AgentsightConfigHandle {
-    Box::into_raw(Box::new(AgentsightConfigHandle {
-        verbose: 0,
-        log_path: None,
-    }))
+    Box::into_raw(Box::new(AgentsightConfig::default()))
 }
 
 /// Set the verbose flag (0 = off, 1 = on).
@@ -407,7 +401,7 @@ pub unsafe extern "C" fn agentsight_config_set_verbose(
     verbose: c_int,
 ) {
     if !cfg.is_null() {
-        unsafe { (*cfg).verbose = verbose };
+        unsafe { (*cfg).verbose = verbose != 0 };
     }
 }
 
@@ -426,6 +420,93 @@ pub unsafe extern "C" fn agentsight_config_set_log_path(
         } else {
             Some(CStr::from_ptr(path).to_string_lossy().to_string())
         };
+    }
+}
+
+/// Add a cmdline rule (allowlist or denylist).
+/// * `rule` — NULL-terminated array of C strings (glob patterns).
+/// * `agent_name` — agent name for allow=1; ignored for allow=0 (may be NULL).
+/// * `allow` — 1 = whitelist (attach), 0 = blacklist (don't attach).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_add_cmdline_rule(
+    cfg: *mut AgentsightConfigHandle,
+    rule: *const *const c_char,
+    agent_name: *const c_char,
+    allow: c_int,
+) {
+    if cfg.is_null() || rule.is_null() {
+        return;
+    }
+    let c = unsafe { &mut *cfg };
+
+    // Collect patterns from NULL-terminated array
+    let mut patterns = Vec::new();
+    let mut i = 0usize;
+    loop {
+        let ptr = unsafe { *rule.add(i) };
+        if ptr.is_null() {
+            break;
+        }
+        let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().to_string() };
+        if !s.is_empty() {
+            patterns.push(s);
+        }
+        i += 1;
+    }
+
+    if patterns.is_empty() {
+        return;
+    }
+
+    let agent_name = if agent_name.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(agent_name).to_string_lossy().to_string() })
+    };
+
+    c.cmdline_rules.push(crate::config::CmdlineRule {
+        patterns,
+        agent_name,
+        allow: allow != 0,
+    });
+}
+
+/// Add a domain rule (whitelist for SNI-based attachment).
+/// * `rule` — domain glob pattern (e.g. "*.openai.com").
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_add_domain_rule(
+    cfg: *mut AgentsightConfigHandle,
+    rule: *const c_char,
+) {
+    if cfg.is_null() || rule.is_null() {
+        return;
+    }
+    let c = unsafe { &mut *cfg };
+    let s = unsafe { CStr::from_ptr(rule).to_string_lossy().to_string() };
+    if !s.is_empty() {
+        c.domain_rules.push(crate::config::DomainRule { pattern: s });
+    }
+}
+
+/// Load configuration from a JSON string. Rules are appended to existing ones.
+/// Returns 0 on success, <0 on parse error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_load_config(
+    cfg: *mut AgentsightConfigHandle,
+    json_str: *const c_char,
+) -> c_int {
+    if cfg.is_null() || json_str.is_null() {
+        return -1;
+    }
+    let c = unsafe { &mut *cfg };
+    let json = unsafe { CStr::from_ptr(json_str).to_string_lossy() };
+
+    match c.load_from_json(&json) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_last_error(&e);
+            -1
+        }
     }
 }
 
@@ -452,15 +533,11 @@ pub unsafe extern "C" fn agentsight_new(
         return ptr::null_mut();
     }
 
-    // Build Rust config from the C handle
-    let mut config = AgentsightConfig::new();
-    if !cfg.is_null() {
-        let c = unsafe { &*cfg };
-        if c.verbose != 0 {
-            config.verbose = true;
-        }
-        config.log_path = c.log_path.clone();
-    }
+    let config = if cfg.is_null() {
+        AgentsightConfig::default()
+    } else {
+        unsafe { (*cfg).clone() }
+    };
 
     let (tx, rx) = mpsc::channel();
     let running = Arc::new(AtomicBool::new(false));
@@ -654,4 +731,163 @@ pub unsafe extern "C" fn agentsight_read(
     count
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn new_cfg() -> AgentsightConfig {
+        let mut cfg = AgentsightConfig::default();
+        cfg.cmdline_rules.clear();
+        cfg.domain_rules.clear();
+        cfg
+    }
+
+    #[test]
+    fn test_load_json_basic() {
+        let mut cfg = new_cfg();
+        let json = r#"{"verbose":1,"log_path":"/tmp/test.log"}"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.verbose, true);
+        assert_eq!(cfg.log_path, Some("/tmp/test.log".to_string()));
+    }
+
+    #[test]
+    fn test_load_json_cmdline_allow_and_deny() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "cmdline": {
+                "allow": [
+                    {"rule": ["node", "*claude*"], "agent_name": "Claude Code"}
+                ],
+                "deny": [
+                    {"rule": ["node", "*webpack*"]}
+                ]
+            }
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 2);
+        assert!(cfg.cmdline_rules[0].allow);
+        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
+        assert!(!cfg.cmdline_rules[1].allow);
+        assert!(cfg.cmdline_rules[1].agent_name.is_none());
+    }
+
+    #[test]
+    fn test_load_json_domain_rules() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "domain": [
+                {"rule": ["*.openai.com", "*.anthropic.com"]}
+            ]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.domain_rules.len(), 2);
+        assert_eq!(cfg.domain_rules[0].pattern, "*.openai.com");
+        assert_eq!(cfg.domain_rules[1].pattern, "*.anthropic.com");
+    }
+
+    #[test]
+    fn test_load_json_invalid() {
+        let mut cfg = new_cfg();
+        let json = r#"{ invalid json }"#;
+        assert!(cfg.load_from_json(json).is_err());
+    }
+
+    #[test]
+    fn test_load_json_appends_to_existing() {
+        let mut cfg = new_cfg();
+        // First load
+        let json1 = r#"{"cmdline":{"allow":[{"rule":["node"],"agent_name":"Agent1"}]}}"#;
+        assert!(cfg.load_from_json(json1).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 1);
+
+        // Second load should append
+        let json2 = r#"{"cmdline":{"allow":[{"rule":["python3"],"agent_name":"Agent2"}]}}"#;
+        assert!(cfg.load_from_json(json2).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 2);
+        assert_eq!(cfg.cmdline_rules[1].agent_name, Some("Agent2".to_string()));
+    }
+
+    #[test]
+    fn test_load_json_empty_rule_skipped() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "cmdline": {
+                "allow": [
+                    {"rule": [], "agent_name": "Skipped"},
+                    {"rule": ["node"], "agent_name": "Kept"}
+                ]
+            }
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 1);
+        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Kept".to_string()));
+    }
+
+    #[test]
+    fn test_safe_cstring_replaces_nul() {
+        let s = "hel\0lo";
+        let c = safe_cstring(s);
+        assert_eq!(c.to_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_copy_process_name_truncate() {
+        let name = "very_long_process_name_that_exceeds_16";
+        let buf = copy_process_name(name);
+        assert_eq!(buf[15], 0); // NUL-terminated
+        // First 15 chars should match
+        for i in 0..15 {
+            assert_eq!(buf[i] as u8, name.as_bytes()[i]);
+        }
+    }
+
+    #[test]
+    fn test_load_json_cmdline_allow() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "cmdline": {
+                "allow": [
+                    {"rule": ["*python*", "*hermes*"], "agent_name": "Hermes"},
+                    {"rule": ["node*", "*copilot-shell*"], "agent_name": "Cosh"}
+                ]
+            }
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 2);
+        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Hermes".to_string()));
+        assert_eq!(cfg.cmdline_rules[0].allow, true);
+        assert_eq!(cfg.cmdline_rules[1].agent_name, Some("Cosh".to_string()));
+    }
+
+    #[test]
+    fn test_load_json_cmdline_with_deny() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "cmdline": {
+                "allow": [{"rule": ["node", "*claude*"], "agent_name": "Claude Code"}],
+                "deny": [{"rule": ["node", "*webpack*"]}]
+            }
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.cmdline_rules.len(), 2);
+        assert!(cfg.cmdline_rules[0].allow);
+        assert!(!cfg.cmdline_rules[1].allow);
+    }
+
+    #[test]
+    fn test_load_json_all_fields() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "verbose": 1,
+            "cmdline": {
+                "allow": [{"rule": ["node", "*claude*"], "agent_name": "Claude Code"}]
+            },
+            "domain": [{"rule": ["*.openai.com"]}]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.verbose, true);
+        assert_eq!(cfg.cmdline_rules.len(), 1);
+        assert_eq!(cfg.domain_rules.len(), 1);
+    }
+}

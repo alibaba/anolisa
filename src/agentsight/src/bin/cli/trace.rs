@@ -21,6 +21,10 @@ pub struct TraceCommand {
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     #[structopt(long)]
     pub enable_filewatch: bool,
+
+    /// Path to JSON configuration file
+    #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
+    pub config: String,
 }
 
 impl TraceCommand {
@@ -62,6 +66,9 @@ impl TraceCommand {
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch);
+
+        // Set config_path for unified loading in AgentSight::new()
+        let config = config.set_config_path(std::path::PathBuf::from(&self.config));
         
         // Create AgentSight (auto-attaches probes and starts polling)
         let mut sight = match AgentSight::new(config) {

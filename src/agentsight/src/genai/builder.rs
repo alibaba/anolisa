@@ -9,8 +9,8 @@ use crate::analyzer::{
 use crate::analyzer::message::types::OpenAIChatMessage;
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::token::TokenParser;
-use crate::discovery::matcher::ProcessContext;
-use crate::discovery::registry::known_agents;
+use crate::discovery::matcher::{ProcessContext, CmdlineGlobMatcher};
+use crate::config::default_cmdline_rules;
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
 use crate::storage::sqlite::{PendingCallInfo, SseEnrichment};
@@ -1220,8 +1220,9 @@ impl GenAIBuilder {
             cmdline_args: vec![],
             exe_path: String::new(),
         };
-        known_agents()
+        default_cmdline_rules()
             .iter()
+            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
     }
@@ -1253,8 +1254,9 @@ impl GenAIBuilder {
             cmdline_args,
             exe_path,
         };
-        known_agents()
+        default_cmdline_rules()
             .iter()
+            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
     }

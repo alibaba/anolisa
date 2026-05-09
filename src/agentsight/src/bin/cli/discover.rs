@@ -3,7 +3,7 @@
 //! This module provides the `discover` subcommand which scans the system
 //! for running AI agent processes.
 
-use agentsight::AgentScanner;
+use agentsight::{AgentScanner, CmdlineGlobMatcher};
 use structopt::StructOpt;
 
 /// Discover subcommand for finding AI agents running on the system
@@ -30,15 +30,16 @@ impl DiscoverCommand {
 
     /// List all known agents that can be detected
     fn list_known_agents(&self) {
-        let scanner = AgentScanner::new();
+        let rules = agentsight::default_cmdline_rules();
+        let scanner = AgentScanner::from_rules(&rules, &[]);
         let count = scanner.matcher_count();
 
         println!("Known AI Agents ({} total):", count);
         println!("{}", "=".repeat(60));
         println!();
 
-        // Use the module-level known_agents() to list agent info
-        for matcher in agentsight::known_agents() {
+        // Use CmdlineGlobMatcher to list agent info
+        for matcher in agentsight::default_cmdline_rules().iter().filter_map(|rule| CmdlineGlobMatcher::from_config(rule)) {
             let agent = matcher.info();
             println!("  {} ({})", agent.name, agent.category);
             println!("    Process names: {}", agent.process_names.join(", "));
@@ -49,7 +50,7 @@ impl DiscoverCommand {
 
     /// Scan the system for running AI agents
     fn scan_agents(&self) {
-        let mut scanner = AgentScanner::new();
+        let mut scanner = AgentScanner::from_rules(&agentsight::default_cmdline_rules(), &[]);
         let agents = scanner.scan();
 
         if agents.is_empty() {

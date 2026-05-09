@@ -1,9 +1,10 @@
-//! Agent matching trait and process context
+//! Agent matching logic and process context
 //!
-//! This module defines the `AgentMatcher` trait for identifying AI agent processes,
+//! This module defines `CmdlineGlobMatcher` for identifying AI agent processes,
 //! along with `ProcessContext` and helper matching functions.
 
 use super::agent::AgentInfo;
+use glob::Pattern;
 
 /// Process context passed to agent matchers for identification
 pub struct ProcessContext {
@@ -15,78 +16,97 @@ pub struct ProcessContext {
     pub exe_path: String,
 }
 
-/// Trait for matching a process to an AI agent
+/// Match cmdline args against glob patterns position-by-position.
 ///
-/// Provides a default matching implementation based on `AgentInfo` fields.
-/// Special agents can implement this trait on custom structs to override
-/// the matching logic while reusing the same scanner infrastructure.
-///
-/// # Example: custom matcher
-///
-/// ```rust,ignore
-/// struct MySpecialAgent {
-///     info: AgentInfo,
-/// }
-///
-/// impl AgentMatcher for MySpecialAgent {
-///     fn info(&self) -> &AgentInfo { &self.info }
-///
-///     fn matches(&self, ctx: &ProcessContext) -> bool {
-///         // custom logic: check env var, socket file, etc.
-///         ctx.exe_path.contains("my-special-agent")
-///     }
-/// }
-/// ```
-pub trait AgentMatcher: Send + Sync {
+/// Rules:
+/// - `patterns[i]` is matched against `cmdline[i]` using glob (case-insensitive)
+/// - If patterns is shorter than cmdline, extra cmdline args are ignored (prefix match)
+/// - If cmdline is shorter than patterns, returns false (not enough args)
+/// - `"*"` matches any value at that position
+pub fn match_cmdline_glob(patterns: &[String], cmdline: &[String]) -> bool {
+    if cmdline.len() < patterns.len() {
+        return false;
+    }
+    for (pat, arg) in patterns.iter().zip(cmdline.iter()) {
+        let pat_lower = pat.to_lowercase();
+        let arg_lower = arg.to_lowercase();
+        // Fast path for literal "*"
+        if pat_lower == "*" {
+            continue;
+        }
+        match Pattern::new(&pat_lower) {
+            Ok(p) => {
+                if !p.matches(&arg_lower) {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Check if a domain matches any of the given glob patterns.
+pub fn match_domain_glob(domain: &str, patterns: &[String]) -> bool {
+    let domain_lower = domain.to_lowercase();
+    for pat in patterns {
+        let pat_lower = pat.to_lowercase();
+        match Pattern::new(&pat_lower) {
+            Ok(p) => {
+                if p.matches(&domain_lower) {
+                    return true;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    false
+}
+
+/// Matcher based on cmdline glob patterns (config-driven).
+pub struct CmdlineGlobMatcher {
+    info: AgentInfo,
+    patterns: Vec<String>,
+}
+
+impl CmdlineGlobMatcher {
+    pub fn new(agent_name: &str, patterns: Vec<String>) -> Self {
+        Self {
+            info: AgentInfo::new(agent_name, vec![], "Config-driven agent", "custom"),
+            patterns,
+        }
+    }
+
+    /// Create from an allow rule (requires `allow=true` and non-empty patterns).
+    pub fn from_config(rule: &crate::config::CmdlineRule) -> Option<Self> {
+        if !rule.allow || rule.patterns.is_empty() {
+            return None;
+        }
+        Some(Self::new(
+            rule.agent_name.as_deref().unwrap_or("Custom Agent"),
+            rule.patterns.clone(),
+        ))
+    }
+
+    /// Create from a deny rule (requires `allow=false` and non-empty patterns).
+    pub fn from_deny_rule(rule: &crate::config::CmdlineRule) -> Option<Self> {
+        if rule.allow || rule.patterns.is_empty() {
+            return None;
+        }
+        Some(Self::new(
+            rule.agent_name.as_deref().unwrap_or("deny-rule"),
+            rule.patterns.clone(),
+        ))
+    }
+
     /// Return the agent metadata
-    fn info(&self) -> &AgentInfo;
-
-    /// Check if a process matches this agent
-    ///
-    /// Default implementation matches `comm` against `process_names`
-    /// (case-insensitive, version-suffix tolerant).
-    /// For complex matching logic (e.g., node + cmdline pattern),
-    /// implement a custom matcher struct.
-    fn matches(&self, ctx: &ProcessContext) -> bool {
-        let info = self.info();
-        let comm_lower = ctx.comm.to_lowercase();
-
-        info.process_names.iter().any(|name| {
-            match_name_with_version_suffix(&comm_lower, &name.to_lowercase())
-        })
+    pub fn info(&self) -> &AgentInfo {
+        &self.info
     }
-}
 
-/// Default `AgentMatcher` implementation for `AgentInfo`
-///
-/// Most agents use this — the default `matches()` logic from the trait.
-impl AgentMatcher for AgentInfo {
-    fn info(&self) -> &AgentInfo {
-        self
-    }
-}
-
-/// Match process name against a known name, allowing version suffixes
-///
-/// This is useful for matching runtime processes like "node-22", "python3.11",
-/// "python3" where the version is part of the process name.
-///
-/// The separator must be a non-alphanumeric char (e.g., '-', '.', '_')
-/// to avoid false positives like "codeium" matching "code".
-///
-/// # Examples
-/// - "node-22" matches "node"
-/// - "python3.11" matches "python3"
-/// - "python3" matches "python3" (exact match)
-/// - "nodejs" does NOT match "node" (alphanumeric continuation)
-pub fn match_name_with_version_suffix(process_name: &str, known_name: &str) -> bool {
-    if process_name == known_name {
-        return true;
-    }
-    if let Some(rest) = process_name.strip_prefix(known_name) {
-        rest.starts_with(|c: char| !c.is_alphanumeric())
-    } else {
-        false
+    /// Check if a process matches this matcher's patterns
+    pub fn matches(&self, ctx: &ProcessContext) -> bool {
+        match_cmdline_glob(&self.patterns, &ctx.cmdline_args)
     }
 }
 
@@ -95,104 +115,153 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exact_match() {
-        assert!(match_name_with_version_suffix("node", "node"));
-        assert!(match_name_with_version_suffix("python3", "python3"));
+    fn test_match_cmdline_glob_exact() {
+        let patterns = vec!["node".to_string(), "*claude*".to_string()];
+        let cmdline = vec!["node".to_string(), "/path/claude-code".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_version_suffix_dash() {
-        assert!(match_name_with_version_suffix("node-22", "node"));
-        assert!(match_name_with_version_suffix("node-18.0", "node"));
+    fn test_match_cmdline_glob_prefix() {
+        // rule shorter than cmdline -> prefix match succeeds
+        let patterns = vec!["node".to_string()];
+        let cmdline = vec!["node".to_string(), "extra".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_version_suffix_dot() {
-        assert!(match_name_with_version_suffix("python3.11", "python3"));
-        assert!(match_name_with_version_suffix("ruby.3.2", "ruby"));
+    fn test_match_cmdline_glob_too_short() {
+        // cmdline shorter than rule -> fails
+        let patterns = vec!["node".to_string(), "*claude*".to_string()];
+        let cmdline = vec!["node".to_string()];
+        assert!(!match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_version_suffix_underscore() {
-        assert!(match_name_with_version_suffix("agent_v2", "agent"));
+    fn test_match_cmdline_glob_wildcard() {
+        let patterns = vec!["*".to_string(), "*aider*".to_string()];
+        let cmdline = vec!["python3".to_string(), "/path/aider".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_reject_alphanumeric_continuation() {
-        // "nodejs" should NOT match "node" because 'j' is alphanumeric
-        assert!(!match_name_with_version_suffix("nodejs", "node"));
-        assert!(!match_name_with_version_suffix("codeium", "code"));
-        assert!(!match_name_with_version_suffix("python3x", "python3"));
+    fn test_match_cmdline_glob_case_insensitive() {
+        let patterns = vec!["NODE".to_string(), "*CLAUDE*".to_string()];
+        let cmdline = vec!["node".to_string(), "claude".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_no_match() {
-        assert!(!match_name_with_version_suffix("ruby", "node"));
-        assert!(!match_name_with_version_suffix("", "node"));
-        assert!(!match_name_with_version_suffix("nod", "node"));
+    fn test_match_domain_glob() {
+        let patterns = vec!["*.openai.com".to_string()];
+        assert!(match_domain_glob("api.openai.com", &patterns));
+        assert!(!match_domain_glob("example.com", &patterns));
     }
 
     #[test]
-    fn test_process_context_matches_default() {
-        let info = AgentInfo {
-            name: "TestAgent".to_string(),
-            process_names: vec!["test-agent".to_string(), "testagent".to_string()],
-            description: "Test".to_string(),
-            category: "test".to_string(),
-        };
+    fn test_cmdline_glob_matcher() {
+        let matcher = CmdlineGlobMatcher::new("Claude Code", vec!["node".to_string(), "*claude*".to_string()]);
         let ctx = ProcessContext {
-            comm: "test-agent".to_string(),
-            cmdline_args: vec![],
-            exe_path: "/usr/bin/test-agent".to_string(),
-        };
-        assert!(info.matches(&ctx));
-    }
-
-    #[test]
-    fn test_process_context_matches_case_insensitive() {
-        let info = AgentInfo {
-            name: "TestAgent".to_string(),
-            process_names: vec!["MyAgent".to_string()],
-            description: "Test".to_string(),
-            category: "test".to_string(),
-        };
-        let ctx = ProcessContext {
-            comm: "myagent".to_string(),
-            cmdline_args: vec![],
+            comm: "node".to_string(),
+            cmdline_args: vec!["node".to_string(), "/path/claude-code".to_string()],
             exe_path: "".to_string(),
         };
-        assert!(info.matches(&ctx));
+        assert!(matcher.matches(&ctx));
+        assert_eq!(matcher.info().name, "Claude Code");
     }
 
     #[test]
-    fn test_process_context_no_match() {
-        let info = AgentInfo {
-            name: "TestAgent".to_string(),
-            process_names: vec!["agent-x".to_string()],
-            description: "Test".to_string(),
-            category: "test".to_string(),
-        };
-        let ctx = ProcessContext {
-            comm: "other-process".to_string(),
-            cmdline_args: vec![],
-            exe_path: "".to_string(),
-        };
-        assert!(!info.matches(&ctx));
+    fn test_match_cmdline_glob_empty_patterns() {
+        // Empty patterns matches any cmdline (no constraints)
+        let patterns: Vec<String> = vec![];
+        let cmdline = vec!["node".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
     }
 
     #[test]
-    fn test_version_suffix_with_case_insensitive() {
-        let info = AgentInfo {
-            name: "NodeAgent".to_string(),
-            process_names: vec!["node".to_string()],
-            description: "Node-based agent".to_string(),
-            category: "test".to_string(),
+    fn test_match_cmdline_glob_empty_cmdline() {
+        let patterns = vec!["node".to_string()];
+        let cmdline: Vec<String> = vec![];
+        assert!(!match_cmdline_glob(&patterns, &cmdline));
+    }
+
+    #[test]
+    fn test_match_cmdline_glob_question_mark() {
+        let patterns = vec!["node".to_string(), "?.js".to_string()];
+        let cmdline = vec!["node".to_string(), "a.js".to_string()];
+        assert!(match_cmdline_glob(&patterns, &cmdline));
+        let cmdline2 = vec!["node".to_string(), "ab.js".to_string()];
+        assert!(!match_cmdline_glob(&patterns, &cmdline2));
+    }
+
+    #[test]
+    fn test_match_domain_glob_multiple_or() {
+        let patterns = vec!["*.openai.com".to_string(), "*.anthropic.com".to_string()];
+        assert!(match_domain_glob("api.openai.com", &patterns));
+        assert!(match_domain_glob("api.anthropic.com", &patterns));
+        assert!(!match_domain_glob("example.com", &patterns));
+    }
+
+    #[test]
+    fn test_cmdline_glob_matcher_from_config_allow() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec!["node".to_string(), "*claude*".to_string()],
+            agent_name: Some("Claude Code".to_string()),
+            allow: true,
         };
+        let matcher = CmdlineGlobMatcher::from_config(&rule).unwrap();
         let ctx = ProcessContext {
-            comm: "Node-22".to_string(),
-            cmdline_args: vec![],
+            comm: "node".to_string(),
+            cmdline_args: vec!["node".to_string(), "/path/claude-code".to_string()],
             exe_path: "".to_string(),
         };
-        assert!(info.matches(&ctx));
+        assert!(matcher.matches(&ctx));
+        assert_eq!(matcher.info().name, "Claude Code");
+    }
+
+    #[test]
+    fn test_cmdline_glob_matcher_from_config_deny_returns_none() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec!["node".to_string()],
+            agent_name: None,
+            allow: false,
+        };
+        assert!(CmdlineGlobMatcher::from_config(&rule).is_none());
+    }
+
+    #[test]
+    fn test_cmdline_glob_matcher_from_config_empty_patterns_returns_none() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec![],
+            agent_name: Some("Test".to_string()),
+            allow: true,
+        };
+        assert!(CmdlineGlobMatcher::from_config(&rule).is_none());
+    }
+
+    #[test]
+    fn test_cmdline_glob_matcher_from_deny_rule() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec!["*spam*".to_string()],
+            agent_name: None,
+            allow: false,
+        };
+        let matcher = CmdlineGlobMatcher::from_deny_rule(&rule).unwrap();
+        let ctx = ProcessContext {
+            comm: "".to_string(),
+            cmdline_args: vec!["spam-process".to_string()],
+            exe_path: "".to_string(),
+        };
+        assert!(matcher.matches(&ctx));
+    }
+
+    #[test]
+    fn test_cmdline_glob_matcher_from_deny_rule_allow_returns_none() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec!["node".to_string()],
+            agent_name: Some("Test".to_string()),
+            allow: true,
+        };
+        assert!(CmdlineGlobMatcher::from_deny_rule(&rule).is_none());
     }
 }

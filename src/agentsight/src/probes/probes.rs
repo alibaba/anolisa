@@ -51,8 +51,8 @@ pub struct Probes {
     filewatch: Option<FileWatch>,
     /// File write probe (reuses traced_processes map and ring buffer, always enabled)
     filewrite: FileWriteProbe,
-    /// TLS SNI probe (reuses ring buffer, captures SNI from ClientHello)
-    tlssni: TlsSni,
+    /// TLS SNI probe (reuses ring buffer, captures SNI from ClientHello, optional)
+    tlssni: Option<TlsSni>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -66,7 +66,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_tlssni: bool) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -99,9 +99,15 @@ impl Probes {
         let filewrite = FileWriteProbe::new_with_maps(&map_handle, &rb_handle)
             .context("failed to create filewrite")?;
 
-        // Create tlssni - it reuses the ring buffer (captures all TLS SNI globally)
-        let tlssni = TlsSni::new_with_rb(&rb_handle)
-            .context("failed to create tlssni")?;
+        // Optionally create tlssni - it reuses the ring buffer (captures all TLS SNI globally)
+        let tlssni = if enable_tlssni {
+            let sni = TlsSni::new_with_rb(&rb_handle)
+                .context("failed to create tlssni")?;
+            Some(sni)
+        } else {
+            log::info!("TLS SNI probe disabled (no domain_rules configured)");
+            None
+        };
 
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
@@ -132,9 +138,11 @@ impl Probes {
         // Attach filewrite for JSON write monitoring (always enabled)
         self.filewrite.attach()
             .context("failed to attach filewrite")?;
-        // Attach tlssni for TLS SNI capture (always enabled)
-        self.tlssni.attach()
-            .context("failed to attach tlssni")?;
+        // Attach tlssni for TLS SNI capture (if enabled)
+        if let Some(ref mut sni) = self.tlssni {
+            sni.attach()
+                .context("failed to attach tlssni")?;
+        }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
