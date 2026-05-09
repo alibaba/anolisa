@@ -1,5 +1,5 @@
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 982c937..5eb93c1 100644
+index 982c937..8d01fc4 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
 @@ -1294,6 +1294,9 @@ impl TimedExecution {
@@ -12,7 +12,7 @@ index 982c937..5eb93c1 100644
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1355,6 +1358,157 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1355,6 +1358,156 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
  
@@ -47,11 +47,10 @@ index 982c937..5eb93c1 100644
 +        let agent = lines.next().unwrap_or("").trim().to_string();
 +        let session = lines.next().unwrap_or("").trim().to_string();
 +        let toolcall = lines.next().unwrap_or("").trim().to_string();
-+        // Clean up the context file after reading
-+        let _ = dirs::home_dir()
-+            .map(|d| d.join(".tokenless/.rewrite-context"))
-+            .as_ref()
-+            .map(std::fs::remove_file);
++        // Do NOT delete the context file — multiple rtk processes may
++        // need to read it within the same tool-call cycle.  The hook
++        // overwrites the file on the next invocation, so stale context
++        // does not leak to unrelated commands.
 +        let agent = if !agent.is_empty() {
 +            agent
 +        } else {

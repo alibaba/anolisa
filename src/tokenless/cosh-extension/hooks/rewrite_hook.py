@@ -25,6 +25,9 @@ _MIN_RTK_VERSION = (0, 35, 0)
 _RTK_FALLBACK = "/usr/libexec/tokenless/rtk"
 _AGENT_ID = "copilot-shell"
 
+_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
+_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
+
 
 # -- helpers -----------------------------------------------------------------
 
@@ -52,6 +55,14 @@ def _skip() -> None:
 
 def _warn(msg: str) -> None:
     print(f"[tokenless] WARNING: {msg}", file=sys.stderr)
+
+
+def _write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
+    os.makedirs(_CONTEXT_DIR, exist_ok=True)
+    with open(_CONTEXT_FILE, "w") as f:
+        f.write(f"{agent_id}\n")
+        f.write(f"{session_id}\n")
+        f.write(f"{tool_use_id}\n")
 
 
 # -- main --------------------------------------------------------------------
@@ -103,6 +114,14 @@ def main() -> None:
         env["TOKENLESS_SESSION_ID"] = session_id
     if tool_use_id:
         env["TOKENLESS_TOOL_USE_ID"] = tool_use_id
+
+    # Write context file so rtk (run as command proxy later) can recover
+    # agent/session/tool IDs even though it won't inherit hook env vars.
+    # rtk's resolve_tokenless_context() reads this as a fallback.
+    # The file persists across multiple rtk processes within one tool-call
+    # cycle, and is overwritten by the next hook invocation so stale
+    # context does not leak to unrelated commands.
+    _write_context(_AGENT_ID, session_id, tool_use_id)
 
     try:
         proc = subprocess.run(

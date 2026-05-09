@@ -153,9 +153,6 @@ fi
 
 %changelog
 * Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-4
-- fix: preserve tool result message structure in TOON encoding
-
-* Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-3
 - build: align install paths with FHS
 
 * Mon Apr 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-2

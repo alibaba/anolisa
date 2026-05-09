@@ -184,7 +184,8 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
 function tryCompressSchema(schema: Record<string, unknown>): Record<string, unknown> | null {
   try {
     const input = JSON.stringify(schema);
-    const result = execFileSync(tokenlessPath, ["compress-schema"], {
+    const args = ["compress-schema", "--agent-id", "openclaw"];
+    const result = execFileSync(tokenlessPath, args, {
       encoding: "utf-8",
       timeout: 3000,
       input,
