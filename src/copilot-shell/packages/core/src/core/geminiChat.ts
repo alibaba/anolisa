@@ -285,7 +285,7 @@ export class GeminiChat {
 
     // Add user content to history ONCE before any attempts.
     this.history.push(userContent);
-    const requestContents = this.getHistory(true);
+    const requestContents = extractCuratedHistory(this.history);
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -554,13 +554,13 @@ export class GeminiChat {
    * @return History contents alternating between user and model for the entire
    * chat session.
    */
-  getHistory(curated: boolean = false): Content[] {
+  getHistory(curated: boolean = false): readonly Content[] {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
-    // Deep copy the history to avoid mutating the history outside of the
-    // chat session.
-    return structuredClone(history);
+    // Shallow copy the history to avoid mutating the array outside of the
+    // chat session. Callers must not mutate individual Content elements.
+    return [...history];
   }
 
   /**

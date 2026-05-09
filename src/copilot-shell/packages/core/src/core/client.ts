@@ -160,7 +160,7 @@ export class GeminiClient {
     return this.chat !== undefined;
   }
 
-  getHistory(): Content[] {
+  getHistory(): readonly Content[] {
     return this.getChat().getHistory();
   }
 
@@ -934,11 +934,10 @@ export class GeminiClient {
       }
     } else if (
       info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT
     ) {
-      // Track failed attempts (only mark as failed if not forced)
+      // Only latch on inflated token count failure. Empty summary is a
+      // transient condition that may succeed on the next attempt.
       if (!force) {
         this.hasFailedCompressionAttempt = true;
       }

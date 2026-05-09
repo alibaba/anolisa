@@ -647,6 +647,61 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('does not permanently latch after an empty summary failure', async () => {
+      // Call 1: Setup to produce EMPTY_SUMMARY (summaryText = '')
+      const { client } = setup({
+        originalTokenCount: 100,
+        summaryText: '',
+        compressionInputTokenCount: 1600,
+        compressionOutputTokenCount: 50,
+      });
+
+      // Mock contextWindowSize to ensure compression is triggered
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 100,
+      });
+
+      const firstResult = await client.tryCompressChat(
+        'prompt-id-empty',
+        false,
+      );
+
+      expect(firstResult.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      );
+
+      // Call 2: Re-setup with a valid summary to verify compression is retried
+      setup({
+        originalTokenCount: 100,
+        summaryText: 'A valid summary this time.',
+        compressionInputTokenCount: 1600,
+        compressionOutputTokenCount: 50,
+      });
+
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 100,
+      });
+
+      const secondResult = await client.tryCompressChat(
+        'prompt-id-retry',
+        false,
+      );
+
+      // Should NOT be NOOP — empty summary failure is transient
+      expect(secondResult.compressionStatus).not.toBe(CompressionStatus.NOOP);
+      expect(secondResult.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // generateContent should have been called twice (once per attempt)
+      expect(mockGenerateContentFn).toHaveBeenCalledTimes(2);
+    });
+
     it('should not trigger summarization if token count is below threshold', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
       vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
