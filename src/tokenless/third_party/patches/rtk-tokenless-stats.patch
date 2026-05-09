@@ -1,5 +1,5 @@
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 982c937..8d01fc4 100644
+index 982c937..5e60a58 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
 @@ -1294,6 +1294,9 @@ impl TimedExecution {
@@ -12,7 +12,7 @@ index 982c937..8d01fc4 100644
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1355,6 +1358,156 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1355,6 +1358,150 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
  
@@ -47,10 +47,6 @@ index 982c937..8d01fc4 100644
 +        let agent = lines.next().unwrap_or("").trim().to_string();
 +        let session = lines.next().unwrap_or("").trim().to_string();
 +        let toolcall = lines.next().unwrap_or("").trim().to_string();
-+        // Do NOT delete the context file — multiple rtk processes may
-+        // need to read it within the same tool-call cycle.  The hook
-+        // overwrites the file on the next invocation, so stale context
-+        // does not leak to unrelated commands.
 +        let agent = if !agent.is_empty() {
 +            agent
 +        } else {
@@ -65,13 +61,10 @@ index 982c937..8d01fc4 100644
 +}
 +
 +/// Check if tokenless stats are enabled.
-+/// Priority: TOKENLESS_STATS_ENABLED env > config.json > default(true)
 +fn is_tokenless_stats_enabled() -> bool {
-+    // Check env var first
 +    if let Ok(val) = std::env::var("TOKENLESS_STATS_ENABLED") {
 +        return val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes");
 +    }
-+    // Fall back to config file
 +    dirs::home_dir()
 +        .map(|d| d.join(".tokenless/config.json"))
 +        .and_then(|p| std::fs::read_to_string(p).ok())
@@ -81,11 +74,6 @@ index 982c937..8d01fc4 100644
 +}
 +
 +/// Record RTK command output compression stats to the tokenless stats database.
-+///
-+/// Called from `TimedExecution::track` whenever RTK filters command output.
-+/// Reads caller context from environment variables (primary) or
-+/// .rewrite-context file (fallback) to obtain agent_id, session_id, and
-+/// tool_use_id so the record can be correlated with a specific tool call.
 +///
 +/// Fails silently so RTK output is never blocked by database errors.
 +fn record_to_tokenless_stats(
@@ -112,8 +100,14 @@ index 982c937..8d01fc4 100644
 +
 +    let before_chars = raw_output.len();
 +    let after_chars = filtered_output.len();
++
 +    let before_tokens = estimate_tokens_from_chars(before_chars);
 +    let after_tokens = estimate_tokens_from_chars(after_chars);
++
++    // Skip recording if there was no actual token savings
++    if after_tokens >= before_tokens {
++        return;
++    }
 +
 +    let _ = (|| -> anyhow::Result<()> {
 +        if let Some(parent) = std::path::Path::new(&db_path).parent() {

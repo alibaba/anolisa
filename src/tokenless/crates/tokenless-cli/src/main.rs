@@ -176,15 +176,24 @@ fn run() -> Result<(), (String, i32)> {
                     .map_err(|e| (format!("Serialization error: {}", e), 2))?
             };
 
-            println!("{}", result_json);
-
-            // Auto-record stats with actual text content
-            // Compact JSON for accurate after_text (pretty-print inflates size)
+            // Compact JSON for accurate size comparison (pretty-print inflates size)
             let after_compact = serde_json::to_string(
                 &serde_json::from_str::<serde_json::Value>(&result_json)
                     .unwrap_or(serde_json::Value::Null),
             )
             .unwrap_or(result_json.clone());
+
+            // If no token savings, output original instead of compressed result
+            let before_tokens = estimate_tokens_from_chars(input.len());
+            let after_tokens = estimate_tokens_from_chars(after_compact.len());
+            let output_text = if after_tokens >= before_tokens {
+                input.clone()
+            } else {
+                result_json.clone()
+            };
+
+            println!("{}", output_text);
+
             record_compression_stats(
                 OperationType::CompressSchema,
                 agent_id,
@@ -208,14 +217,23 @@ fn run() -> Result<(), (String, i32)> {
             let result_json = serde_json::to_string_pretty(&compressor.compress(&value))
                 .map_err(|e| (format!("Serialization error: {}", e), 2))?;
 
-            println!("{}", result_json);
-
-            // Auto-record stats with actual text content
             let after_compact = serde_json::to_string(
                 &serde_json::from_str::<serde_json::Value>(&result_json)
                     .unwrap_or(serde_json::Value::Null),
             )
             .unwrap_or(result_json.clone());
+
+            // If no token savings, output original instead of compressed result
+            let before_tokens = estimate_tokens_from_chars(input.len());
+            let after_tokens = estimate_tokens_from_chars(after_compact.len());
+            let output_text = if after_tokens >= before_tokens {
+                input.clone()
+            } else {
+                result_json.clone()
+            };
+
+            println!("{}", output_text);
+
             record_compression_stats(
                 OperationType::CompressResponse,
                 agent_id,
@@ -343,10 +361,17 @@ fn run() -> Result<(), (String, i32)> {
             }
             let output = String::from_utf8_lossy(&out.stdout);
             let output = output.trim_end();
-            if !output.is_empty() {
-                println!("{}", output);
-            }
-            // Auto-record stats
+
+            // If no token savings, output original instead of TOON result
+            let before_tokens = estimate_tokens_from_chars(input.len());
+            let after_tokens = estimate_tokens_from_chars(output.len());
+            let display = if output.is_empty() || after_tokens >= before_tokens {
+                input.clone()
+            } else {
+                output.to_string()
+            };
+            println!("{}", display);
+
             record_compression_stats(
                 OperationType::CompressToon,
                 agent_id,
@@ -414,13 +439,12 @@ fn record_compression_stats(
     let before_chars = before_text.len();
     let after_chars = after_text.len();
 
-    // Skip recording if there was no actual compression (same content, same length)
-    if before_chars == after_chars && before_text == after_text {
-        return;
-    }
-
+    // Skip recording if there was no actual token savings
     let before_tokens = estimate_tokens_from_chars(before_chars);
     let after_tokens = estimate_tokens_from_chars(after_chars);
+    if after_tokens >= before_tokens {
+        return;
+    }
 
     let pid = std::process::id();
     let agent = agent_id

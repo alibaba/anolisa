@@ -88,6 +88,7 @@ impl SchemaCompressor {
             }
 
             // Optionally remove title
+            #[allow(clippy::collapsible_if)]
             if self.drop_titles {
                 if let Some(obj) = function.as_object_mut() {
                     obj.remove("title");
@@ -107,6 +108,7 @@ impl SchemaCompressor {
             }
 
             // Optionally remove title
+            #[allow(clippy::collapsible_if)]
             if self.drop_titles {
                 if let Some(obj) = result.as_object_mut() {
                     obj.remove("title");
@@ -165,6 +167,7 @@ impl SchemaCompressor {
         }
 
         // Recursively compress properties (for object types)
+        #[allow(clippy::collapsible_if)]
         if let Some(properties) = obj.get_mut("properties") {
             if let Some(props_obj) = properties.as_object_mut() {
                 for (_key, prop_schema) in props_obj.iter_mut() {
@@ -179,6 +182,7 @@ impl SchemaCompressor {
         }
 
         // Handle anyOf
+        #[allow(clippy::collapsible_if)]
         if let Some(any_of) = obj.get_mut("anyOf") {
             if let Some(arr) = any_of.as_array_mut() {
                 for item in arr.iter_mut() {
@@ -188,6 +192,7 @@ impl SchemaCompressor {
         }
 
         // Handle oneOf
+        #[allow(clippy::collapsible_if)]
         if let Some(one_of) = obj.get_mut("oneOf") {
             if let Some(arr) = one_of.as_array_mut() {
                 for item in arr.iter_mut() {
@@ -197,6 +202,7 @@ impl SchemaCompressor {
         }
 
         // Handle allOf
+        #[allow(clippy::collapsible_if)]
         if let Some(all_of) = obj.get_mut("allOf") {
             if let Some(arr) = all_of.as_array_mut() {
                 for item in arr.iter_mut() {
