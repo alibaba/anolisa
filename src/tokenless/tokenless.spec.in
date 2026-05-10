@@ -1,4 +1,4 @@
-%define anolis_release 4
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -165,6 +165,9 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Sat May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.0-1
+- Bump to v0.3.0 with tool-ready env pre-check and multiple fixes
+
 * Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-4
 - build: align install paths with FHS
 
