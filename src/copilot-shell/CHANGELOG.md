@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.0
+
+- **BREAKING** Removed qwen-oauth authentication support. (#455)
+- Added auto memory background extraction system. (#465)
+- Added full shell command display in hook-ask and exec confirm dialogs. (#452)
+- Added esc key to cancel running slash commands. (#290)
+- Fixed JavaScript heap out of memory during long sessions. (#462)
+- Fixed missing allow decision reason in UI when systemMessage is absent. (#435)
+- Improved test coverage with standalone tests for ExecCommandPreview. (#460)
+- Updated hook docs to clarify difference between systemMessage and reason. (#436)
+
 ## 2.2.1
 
 - Fixed initial chat being blocked during skill/subagent first-load discovery. (#418)
