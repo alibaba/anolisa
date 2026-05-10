@@ -44,7 +44,7 @@ install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
 
 install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_bindir}/ws-ckpt
 install -p -m 0644 src/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
-install -p -m 0644 src/config.toml %{buildroot}/etc/ws-ckpt/config.toml
+install -p -m 0644 src/config.toml.sample %{buildroot}/etc/ws-ckpt/config.toml.sample
 install -p -m 0644 src/skills/ws-ckpt/SKILL.md %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt/SKILL.md
 
 %files
@@ -52,7 +52,7 @@ install -p -m 0644 src/skills/ws-ckpt/SKILL.md %{buildroot}%{_datadir}/anolisa/r
 %doc README.md
 %attr(0755,root,root) %{_bindir}/ws-ckpt
 %{_unitdir}/ws-ckpt.service
-%config(noreplace) /etc/ws-ckpt/config.toml
+/etc/ws-ckpt/config.toml.sample
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/runtime
 %dir %{_datadir}/anolisa/runtime/skills

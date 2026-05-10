@@ -1,6 +1,17 @@
-# ws-ckpt configuration file
-# Location: /etc/ws-ckpt/config.toml
-# Apply edits without reload: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# ws-ckpt configuration sample
+#
+# This file is a reference. To customize ws-ckpt, copy it to
+# /etc/ws-ckpt/config.toml and uncomment/edit fields you care about:
+#
+#     cp /etc/ws-ckpt/config.toml.sample /etc/ws-ckpt/config.toml
+#
+# Any field left unset falls back to its built-in default; a missing
+# /etc/ws-ckpt/config.toml is equivalent to all defaults.
+#
+# Apply edits without restart: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Most fields can also be updated via `ws-ckpt config --<flag>`, which writes
+# /etc/ws-ckpt/config.toml without comments — this sample stays as the
+# canonical reference for available options.
 
 # ── Scheduling ──
 # auto_cleanup = false                # Switch for periodic auto-cleanup (true = enabled, false = disabled)
