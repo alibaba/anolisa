@@ -165,6 +165,9 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
+* Sat May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.1-1
+- fix(openclaw): add activation onCapabilities hook for high-version plugin compatibility
+
 * Sat May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.0-1
 - Bump to v0.3.0 with tool-ready env pre-check and multiple fixes
 
