@@ -3,6 +3,9 @@
   "name": "Token-Less",
   "version": "5.0.0",
   "description": "Unified RTK command rewriting + schema/response/TOON compression + Tool Ready environment pre-check",
+  "activation": {
+    "onCapabilities": ["hook"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
