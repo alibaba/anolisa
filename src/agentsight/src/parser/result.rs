@@ -3,10 +3,12 @@
 //! This module defines the `ParsedMessage` and `ParseResult` types
 //! representing the output from parsing events.
 
+use std::rc::Rc;
 use crate::parser::http::{ParsedRequest, ParsedResponse};
 use crate::parser::sse::ParsedSseEvent;
 use crate::parser::proctrace::ParsedProcEvent;
 use crate::parser::http2::ParsedHttp2Frame;
+use crate::probes::sslsniff::SslEvent;
 
 /// Parsed message from events
 #[derive(Debug, Clone)]
@@ -21,6 +23,8 @@ pub enum ParsedMessage {
     Http2Frames(Vec<ParsedHttp2Frame>),
     /// Process Event
     ProcEvent(ParsedProcEvent),
+    /// Raw SSL data (unrecognized write-direction, used for body continuation)
+    RawData(Rc<SslEvent>),
 }
 
 impl ParsedMessage {
@@ -32,6 +36,7 @@ impl ParsedMessage {
             ParsedMessage::SseEvent(_) => "SseEvent",
             ParsedMessage::Http2Frames(_) => "Http2Frames",
             ParsedMessage::ProcEvent(_) => "ProcEvent",
+            ParsedMessage::RawData(_) => "RawData",
         }
     }
 }

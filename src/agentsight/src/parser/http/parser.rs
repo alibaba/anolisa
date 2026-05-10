@@ -90,6 +90,7 @@ impl HttpParser {
             body_offset: header_end,
             body_len,
             source_event: Rc::clone(event),
+            reassembled_body: None,
         })
     }
 

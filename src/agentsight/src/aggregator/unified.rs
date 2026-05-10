@@ -68,6 +68,9 @@ impl Aggregator {
                     .map(AggregatedResult::Http2StreamComplete)
                     .collect()
             }
+            ParsedMessage::RawData(ssl_event) => {
+                self.http.process_raw_body_data(&ssl_event).into_iter().collect()
+            }
         }
     }
 

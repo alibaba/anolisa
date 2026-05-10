@@ -95,7 +95,19 @@ impl Parser {
             }
         }
 
-        // 3. Fallback: SSE data
+        // 3. Write-direction data that failed all protocol detection → RawData
+        // This is likely a body continuation for an in-progress HTTP/1.1 request
+        if ssl_event.rw == 1 {
+            log::debug!(
+                "parse_ssl_event: unrecognized write-direction data (len={}), emitting RawData",
+                ssl_event.buf_size()
+            );
+            return ParseResult {
+                messages: vec![ParsedMessage::RawData(ssl_event)],
+            };
+        }
+
+        // 4. Fallback: SSE data (read-direction only)
         let sse_events = self.sse_parser.parse(ssl_event.clone());
         let messages = sse_events
             .into_iter()

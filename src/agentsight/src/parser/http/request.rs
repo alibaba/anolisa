@@ -17,12 +17,18 @@ pub struct ParsedRequest {
     pub body_offset: usize,          // body 在 source_event.buf 中的起始位置
     pub body_len: usize,             // body 长度
     pub source_event: Rc<SslEvent>,  // 原始 SslEvent (Rc 避免拷贝)
+    /// 重组后的完整 body（跨多事件聚合时使用）
+    pub reassembled_body: Option<Vec<u8>>,
 }
 
 impl ParsedRequest {
-    /// 获取 body 数据（零拷贝）
+    /// 获取 body 数据（零拷贝，或返回重组后的 body）
     pub fn body(&self) -> &[u8] {
-        &self.source_event.buf[self.body_offset..self.body_offset + self.body_len]
+        if let Some(ref buf) = self.reassembled_body {
+            buf
+        } else {
+            &self.source_event.buf[self.body_offset..self.body_offset + self.body_len]
+        }
     }
 
     pub fn body_str(&self) -> &str {
@@ -34,10 +40,10 @@ impl ParsedRequest {
     /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value。
     /// 如果直接解析失败，会尝试剥离 HTTP chunked transfer encoding 后再解析。
     pub fn json_body(&self) -> Option<serde_json::Value> {
-        if self.body_len == 0 {
+        let body = self.body();
+        if body.is_empty() {
             return None;
         }
-        let body = self.body();
         let body_str = String::from_utf8_lossy(body);
 
         // Try direct JSON parse first
@@ -227,6 +233,7 @@ mod tests {
             body_offset: body.len() - 5,
             body_len: 5,
             source_event: event,
+            reassembled_body: None,
         };
         assert_eq!(req.body_str(), "hello");
         assert_eq!(req.body(), b"hello");
@@ -247,6 +254,7 @@ mod tests {
             body_offset,
             body_len: json_str.len(),
             source_event: event,
+            reassembled_body: None,
         };
         let val = req.json_body().unwrap();
         assert_eq!(val["key"], "value");
@@ -263,6 +271,7 @@ mod tests {
             body_offset: 0,
             body_len: 0,
             source_event: event,
+            reassembled_body: None,
         };
         assert!(req.json_body().is_none());
     }
@@ -294,6 +303,7 @@ mod tests {
             body_offset: body.len() - 7,
             body_len: 7,
             source_event: event,
+            reassembled_body: None,
         };
         let args = req.to_trace_args();
         assert_eq!(args["method"], "POST");
@@ -311,6 +321,7 @@ mod tests {
             body_offset: 0,
             body_len: 0,
             source_event: event,
+            reassembled_body: None,
         };
         let events = req.to_chrome_trace_events();
         assert_eq!(events.len(), 1);
@@ -351,6 +362,7 @@ mod tests {
             body_offset: 0,
             body_len: 0,
             source_event: event,
+            reassembled_body: None,
         };
         let debug_str = format!("{:?}", req);
         assert!(debug_str.contains("GET"));

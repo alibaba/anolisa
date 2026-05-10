@@ -39,6 +39,12 @@ pub enum ConnectionState {
     RequestPending {
         request: ParsedRequest,
     },
+    /// Request body pending - body not yet complete, waiting for more data or response
+    RequestBodyPending {
+        request: ParsedRequest,
+        expected_body_len: Option<usize>,
+        body_buffer: Vec<u8>,
+    },
     /// SSE active - response headers received, body streaming
     SseActive {
         request: Option<ParsedRequest>,
@@ -84,6 +90,7 @@ impl HttpConnectionAggregator {
                     match evicted_state {
                         ConnectionState::Idle => "Idle",
                         ConnectionState::RequestPending { .. } => "RequestPending",
+                        ConnectionState::RequestBodyPending { .. } => "RequestBodyPending",
                         ConnectionState::SseActive { .. } => "SseActive",
                     },
                     self.connections.cap(),
@@ -96,19 +103,61 @@ impl HttpConnectionAggregator {
     pub fn process_request(&mut self, request: ParsedRequest) {
         let connection_id = ConnectionId::from_ssl_event(&request.source_event);
 
-        log::trace!(
-            "[HttpAggregator] State transition: -> RequestPending | conn={:?} | method={} | path={}",
-            connection_id,
-            request.method,
-            request.path,
-        );
+        // Check if body is complete by comparing with Content-Length
+        let content_length: Option<usize> = request
+            .headers
+            .get("content-length")
+            .and_then(|v| v.parse().ok());
 
-        self.insert(
-            connection_id,
-            ConnectionState::RequestPending {
-                request,
-            },
-        );
+        let body_complete = match content_length {
+            Some(cl) => request.body_len >= cl,
+            None => {
+                // No Content-Length: check for Transfer-Encoding: chunked
+                let is_chunked = request
+                    .headers
+                    .get("transfer-encoding")
+                    .map(|v| v.contains("chunked"))
+                    .unwrap_or(false);
+                if is_chunked {
+                    // Check if body contains chunked terminator
+                    let body = request.body();
+                    body.windows(5).any(|w| w == b"0\r\n\r\n")
+                } else {
+                    true // No Content-Length and not chunked → body is complete
+                }
+            }
+        };
+
+        if body_complete {
+            log::trace!(
+                "[HttpAggregator] State transition: -> RequestPending | conn={:?} | method={} | path={}",
+                connection_id,
+                request.method,
+                request.path,
+            );
+            self.insert(
+                connection_id,
+                ConnectionState::RequestPending { request },
+            );
+        } else {
+            log::debug!(
+                "[HttpAggregator] State transition: -> RequestBodyPending | conn={:?} | method={} | path={} | body_len={} | content_length={:?}",
+                connection_id,
+                request.method,
+                request.path,
+                request.body_len,
+                content_length,
+            );
+            let initial_body = request.body().to_vec();
+            self.insert(
+                connection_id,
+                ConnectionState::RequestBodyPending {
+                    request,
+                    expected_body_len: content_length,
+                    body_buffer: initial_body,
+                },
+            );
+        }
     }
 
     /// Process HTTP Response (from HTTP Parser)
@@ -122,6 +171,42 @@ impl HttpConnectionAggregator {
         let state = self.connections.pop(&connection_id)?;
         
         match state {
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len,
+                mut body_buffer,
+            } => {
+                // Response arrived → request must be complete (server replies only after full request)
+                log::debug!(
+                    "[HttpAggregator] State transition: RequestBodyPending -> Complete (response-driven) | conn={:?} | buffered={}",
+                    connection_id,
+                    body_buffer.len(),
+                );
+                if let Some(cl) = expected_body_len {
+                    body_buffer.truncate(cl);
+                }
+                let mut completed_request = request;
+                completed_request.reassembled_body = Some(body_buffer);
+
+                if response.is_sse() {
+                    self.insert(
+                        connection_id,
+                        ConnectionState::SseActive {
+                            request: Some(completed_request),
+                            response_headers: response,
+                            sse_events: Vec::new(),
+                        },
+                    );
+                    None
+                } else {
+                    let pair = HttpPair::from_parsed(
+                        connection_id,
+                        completed_request,
+                        response,
+                    );
+                    Some(AggregatedResult::HttpComplete(pair))
+                }
+            }
             ConnectionState::RequestPending { request } => {
                 if response.is_sse() {
                     log::trace!(
@@ -193,6 +278,72 @@ impl HttpConnectionAggregator {
                 // Response on SSE connection - shouldn't happen normally
                 // Restore state and return None
                 self.insert(connection_id, state);
+                None
+            }
+        }
+    }
+
+    /// Process raw body data (continuation bytes for an in-progress request)
+    pub fn process_raw_body_data(&mut self, ssl_event: &SslEvent) -> Option<AggregatedResult> {
+        let connection_id = ConnectionId::from_ssl_event(ssl_event);
+        let state = self.connections.pop(&connection_id)?;
+
+        match state {
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len,
+                mut body_buffer,
+            } => {
+                // Append new data to buffer
+                let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
+                body_buffer.extend_from_slice(data);
+
+                // Check if body is now complete
+                let complete = match expected_body_len {
+                    Some(cl) => body_buffer.len() >= cl,
+                    None => {
+                        // chunked: check for terminator
+                        body_buffer.windows(5).any(|w| w == b"0\r\n\r\n")
+                    }
+                };
+
+                if complete {
+                    log::debug!(
+                        "[HttpAggregator] State transition: RequestBodyPending -> RequestPending (body complete) | conn={:?} | total_body={}",
+                        connection_id,
+                        body_buffer.len(),
+                    );
+                    if let Some(cl) = expected_body_len {
+                        body_buffer.truncate(cl);
+                    }
+                    let mut completed_request = request;
+                    completed_request.reassembled_body = Some(body_buffer);
+                    self.insert(
+                        connection_id,
+                        ConnectionState::RequestPending {
+                            request: completed_request,
+                        },
+                    );
+                } else {
+                    log::trace!(
+                        "[HttpAggregator] RequestBodyPending: buffered more data | conn={:?} | total={}",
+                        connection_id,
+                        body_buffer.len(),
+                    );
+                    self.insert(
+                        connection_id,
+                        ConnectionState::RequestBodyPending {
+                            request,
+                            expected_body_len,
+                            body_buffer,
+                        },
+                    );
+                }
+                None
+            }
+            other => {
+                // Not in RequestBodyPending state, restore and ignore
+                self.insert(connection_id, other);
                 None
             }
         }
@@ -419,6 +570,7 @@ mod tests {
             body_offset: 0,
             body_len: 0,
             source_event: event.clone(),
+            reassembled_body: None,
         };
         aggregator.process_request(request);
         
@@ -461,6 +613,7 @@ mod tests {
             body_offset: 0,
             body_len: 0,
             source_event: event.clone(),
+            reassembled_body: None,
         };
         aggregator.process_request(request);
         
@@ -483,5 +636,272 @@ mod tests {
         // SSE response should not return result immediately, but should activate SSE state
         assert!(result.is_none());
         assert!(aggregator.is_sse_active(&ConnectionId { pid: 1234, ssl_ptr: 0x1000 }));
+    }
+
+    fn create_mock_ssl_event_with_buf(pid: u32, ssl_ptr: u64, buf: Vec<u8>, rw: i32) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw,
+            comm: String::new(),
+            buf,
+            is_handshake: false,
+            ssl_ptr,
+        })
+    }
+
+    #[test]
+    fn test_request_body_aggregation_content_length() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        // Simulate a request with Content-Length: 20 but only 5 bytes in first event
+        let headers_and_partial_body = b"POST /api HTTP/1.1\r\nContent-Length: 20\r\n\r\nhello";
+        let event1 = create_mock_ssl_event_with_buf(1234, 0x2000, headers_and_partial_body.to_vec(), 1);
+
+        // Parse as request (simulating what HttpParser would produce)
+        let header_end = headers_and_partial_body.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap() + 4;
+        let body_len = headers_and_partial_body.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "20".to_string());
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/api".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event1,
+            reassembled_body: None,
+        };
+
+        // Process request - should enter RequestBodyPending since body_len(5) < content_length(20)
+        aggregator.process_request(request);
+        let conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x2000 };
+        assert!(!aggregator.has_pending_request(&conn_id));
+
+        // Send continuation data (10 bytes)
+        let continuation1 = SslEvent {
+            source: 0, timestamp_ns: 2000, delta_ns: 0,
+            pid: 1234, tid: 1, uid: 0, len: 10, rw: 1,
+            comm: String::new(),
+            buf: b" world fir".to_vec(),
+            is_handshake: false, ssl_ptr: 0x2000,
+        };
+        let result = aggregator.process_raw_body_data(&continuation1);
+        assert!(result.is_none()); // Still incomplete (15 < 20)
+
+        // Send final continuation (5 bytes, total = 5 + 10 + 5 = 20)
+        let continuation2 = SslEvent {
+            source: 0, timestamp_ns: 3000, delta_ns: 0,
+            pid: 1234, tid: 1, uid: 0, len: 5, rw: 1,
+            comm: String::new(),
+            buf: b"st!!!".to_vec(),
+            is_handshake: false, ssl_ptr: 0x2000,
+        };
+        let result = aggregator.process_raw_body_data(&continuation2);
+        assert!(result.is_none()); // Transitioned to RequestPending
+
+        // Now the request should be in RequestPending with full body
+        assert!(aggregator.has_pending_request(&conn_id));
+
+        // Sending a response should complete the pair
+        let resp_event = create_mock_ssl_event_with_buf(1234, 0x2000,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec(), 0);
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 2,
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        assert!(result.is_some());
+        if let Some(AggregatedResult::HttpComplete(pair)) = result {
+            assert_eq!(pair.request.method, "POST");
+            // Verify the reassembled body
+            let body = pair.request.body();
+            assert_eq!(body, b"hello world first!!!");
+            assert_eq!(body.len(), 20);
+        } else {
+            panic!("Expected HttpComplete result");
+        }
+    }
+
+    #[test]
+    fn test_request_body_aggregation_response_completion() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        // Request with Content-Length but body will be completed by response arrival
+        let headers_and_partial = b"POST /chat HTTP/1.1\r\nContent-Length: 100\r\n\r\npartial";
+        let event = create_mock_ssl_event_with_buf(5678, 0x3000, headers_and_partial.to_vec(), 1);
+
+        let header_end = headers_and_partial.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap() + 4;
+        let body_len = headers_and_partial.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "100".to_string());
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        aggregator.process_request(request);
+
+        // Send some continuation
+        let cont = SslEvent {
+            source: 0, timestamp_ns: 2000, delta_ns: 0,
+            pid: 5678, tid: 1, uid: 0, len: 10, rw: 1,
+            comm: String::new(),
+            buf: b"_more_data".to_vec(),
+            is_handshake: false, ssl_ptr: 0x3000,
+        };
+        aggregator.process_raw_body_data(&cont);
+
+        // Response arrives before Content-Length is satisfied → force-complete
+        let resp_event = create_mock_ssl_event_with_buf(5678, 0x3000,
+            b"HTTP/1.1 200 OK\r\n\r\n{}".to_vec(), 0);
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 2,
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        assert!(result.is_some());
+        if let Some(AggregatedResult::HttpComplete(pair)) = result {
+            // Body should be truncated to content_length (100) but we only have 17 bytes
+            // Since total buffer (17) < content_length (100), truncate does nothing
+            let body = pair.request.body();
+            assert_eq!(body, b"partial_more_data");
+        } else {
+            panic!("Expected HttpComplete result");
+        }
+    }
+
+    #[test]
+    fn test_request_body_single_event_no_aggregation() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        // Request where body fits in single event (body_len >= content_length)
+        let full_request = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let event = create_mock_ssl_event_with_buf(1234, 0x4000, full_request.to_vec(), 1);
+
+        let header_end = full_request.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap() + 4;
+        let body_len = full_request.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "5".to_string());
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/api".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        // Should go directly to RequestPending (no aggregation needed)
+        aggregator.process_request(request);
+        let conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x4000 };
+        assert!(aggregator.has_pending_request(&conn_id));
+    }
+
+    #[test]
+    fn test_raw_data_ignored_when_no_pending() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        // Send raw data for a connection that has no pending body
+        let raw = SslEvent {
+            source: 0, timestamp_ns: 1000, delta_ns: 0,
+            pid: 9999, tid: 1, uid: 0, len: 5, rw: 1,
+            comm: String::new(),
+            buf: b"hello".to_vec(),
+            is_handshake: false, ssl_ptr: 0x5000,
+        };
+        let result = aggregator.process_raw_body_data(&raw);
+        assert!(result.is_none());
+        assert_eq!(aggregator.active_connections(), 0);
+    }
+
+    #[test]
+    fn test_request_body_pending_with_sse_response() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        // Request with incomplete body
+        let partial = b"POST /stream HTTP/1.1\r\nContent-Length: 50\r\n\r\ndata";
+        let event = create_mock_ssl_event_with_buf(1234, 0x6000, partial.to_vec(), 1);
+
+        let header_end = partial.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap() + 4;
+        let body_len = partial.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "50".to_string());
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/stream".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        aggregator.process_request(request);
+
+        // SSE response arrives → should force-complete body and enter SseActive
+        let resp_event = create_mock_ssl_event_with_buf(1234, 0x6000,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec(), 0);
+        let mut resp_headers = HashMap::new();
+        resp_headers.insert("content-type".to_string(), "text/event-stream".to_string());
+
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: resp_headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        // SSE response should not return immediately, should enter SseActive
+        assert!(result.is_none());
+        let conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x6000 };
+        assert!(aggregator.is_sse_active(&conn_id));
     }
 }
