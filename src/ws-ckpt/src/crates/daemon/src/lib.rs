@@ -98,6 +98,27 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     // 8.2. Register signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
 
+    // 8.3. SIGHUP no-op: default disposition is terminate, so consume it to
+    // prevent `kill -HUP <pid>` from accidentally killing the daemon. Reload
+    // is driven by `Request::ReloadConfig` (`ws-ckpt reload` / `ExecReload`),
+    // not SIGHUP.
+    match signal(SignalKind::hangup()) {
+        Ok(mut sighup) => {
+            tokio::spawn(async move {
+                loop {
+                    sighup.recv().await;
+                    tracing::info!(
+                        "Received SIGHUP; no-op (use `systemctl reload ws-ckpt` or \
+                         `ws-ckpt reload` to reload config)"
+                    );
+                }
+            });
+        }
+        Err(e) => {
+            tracing::warn!("Failed to install SIGHUP handler: {}", e);
+        }
+    }
+
     // 9. Spawn listener
     let listener_cancel = cancel.clone();
     let listener_state = Arc::clone(&state);

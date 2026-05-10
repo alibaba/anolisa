@@ -1,5 +1,6 @@
 # ws-ckpt configuration file
 # Location: /etc/ws-ckpt/config.toml
+# Apply edits without reload: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
 
 # ── Scheduling ──
 # auto_cleanup = false                # Switch for periodic auto-cleanup (true = enabled, false = disabled)

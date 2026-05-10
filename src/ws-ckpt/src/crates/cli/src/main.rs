@@ -162,6 +162,9 @@ enum Commands {
         img_max_percent: Option<f64>,
     },
 
+    /// Trigger daemon to reload /etc/ws-ckpt/config.toml
+    Reload,
+
     /// Recover workspace to a normal directory (undo init)
     Recover {
         /// Workspace path or ID
@@ -349,6 +352,9 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?;
             }
+        }
+        Commands::Reload => {
+            handle_reload().await?;
         }
         Commands::Recover {
             workspace,
@@ -879,6 +885,22 @@ async fn handle_config_update(
         _ => {}
     }
     Ok(())
+}
+
+/// Handle `ws-ckpt reload` (also used by systemd `ExecReload=`): send
+/// `Request::ReloadConfig` IPC. If the daemon is not running,
+/// `send_request_to_daemon` exits 1 with a red message.
+async fn handle_reload() -> Result<()> {
+    match send_request_to_daemon(&Request::ReloadConfig).await? {
+        Response::ReloadConfigOk => {
+            println!("\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m");
+            Ok(())
+        }
+        Response::Error { code, message } => {
+            anyhow::bail!("Daemon reload failed [{:?}]: {}", code, message);
+        }
+        other => anyhow::bail!("Unexpected response from daemon: {:?}", other),
+    }
 }
 
 /// Handle recover command: single workspace or all workspaces.
@@ -1528,6 +1550,18 @@ mod tests {
             }
             _ => panic!("expected Config"),
         }
+    }
+
+    #[test]
+    fn parse_reload() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "reload"]).unwrap();
+        assert!(matches!(cli.command, Commands::Reload));
+    }
+
+    #[test]
+    fn parse_reload_rejects_args() {
+        let result = Cli::try_parse_from(["ws-ckpt", "reload", "--foo"]);
+        assert!(result.is_err(), "reload should accept no arguments");
     }
 
     #[test]
