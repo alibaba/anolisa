@@ -2,7 +2,7 @@ use crate::state::DaemonState;
 use std::sync::Arc;
 use ws_ckpt_common::{
     default_auto_cleanup_keep, load_config_file, ConfigReport, ErrorCode, Request, Response,
-    StatusReport, WorkspaceInfo, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
+    StatusReport, WorkspaceInfo, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
 };
@@ -114,6 +114,7 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
             Err(e) => Err(e),
             Ok(()) => crate::workspace_mgr::recover_workspace(state, &workspace).await,
         },
+        Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
     };
 
     match result {
@@ -297,6 +298,25 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             code: ErrorCode::InternalError,
             message: format!("Failed to reload config: {}", e),
         },
+    }
+}
+
+/// Aggregate advisory metrics. Never triggers bootstrap; backend-query failure
+/// yields zero bytes so the CLI silently skips the fs warning.
+async fn handle_health_advisory(state: &Arc<DaemonState>) -> Response {
+    let over_limit_workspace_count: u32 = state
+        .get_all_workspace_info()
+        .iter()
+        .filter(|w| w.snapshot_count > ADVISORY_SNAPSHOT_LIMIT)
+        .count() as u32;
+    let (fs_total_bytes, fs_used_bytes) = match state.backend.get_usage().await {
+        Ok((total, used)) => (total, used),
+        Err(_) => (0, 0),
+    };
+    Response::HealthAdvisoryOk {
+        over_limit_workspace_count,
+        fs_total_bytes,
+        fs_used_bytes,
     }
 }
 
@@ -620,6 +640,23 @@ mod tests {
         match resp {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::WorkspaceNotFound),
             _ => panic!("expected WorkspaceNotFound error from Recover"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_health_advisory_returns_health_advisory_ok() {
+        // Empty workspace set -> counter must be 0; fs bytes vary by OS.
+        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let req = Request::HealthAdvisory;
+        let resp = dispatch(&state, req).await;
+        match resp {
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count,
+                ..
+            } => {
+                assert_eq!(over_limit_workspace_count, 0);
+            }
+            _ => panic!("expected HealthAdvisoryOk, got {:?}", resp),
         }
     }
 }

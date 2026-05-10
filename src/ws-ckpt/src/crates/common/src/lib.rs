@@ -21,6 +21,9 @@ pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
 
+/// Snapshot advisory threshold; strict-greater filter shared by daemon and CLI.
+pub const ADVISORY_SNAPSHOT_LIMIT: u32 = 1000;
+
 // ── Error type ──
 
 #[derive(Error, Debug)]
@@ -84,23 +87,58 @@ pub enum Request {
     Recover {
         workspace: String,
     },
+    /// Aggregated health metrics for post-command CLI advisories.
+    HealthAdvisory,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Response {
-    InitOk { ws_id: String },
-    CheckpointOk { snapshot_id: String },
-    RollbackOk { from: String, to: String },
-    DeleteOk { target: String },
-    Error { code: ErrorCode, message: String },
-    ListOk { snapshots: Vec<SnapshotEntry> },
-    DiffOk { changes: Vec<DiffEntry> },
-    StatusOk { report: StatusReport },
-    CleanupOk { removed: Vec<String> },
-    ConfigOk { config: ConfigReport },
+    InitOk {
+        ws_id: String,
+    },
+    CheckpointOk {
+        snapshot_id: String,
+    },
+    RollbackOk {
+        from: String,
+        to: String,
+    },
+    DeleteOk {
+        target: String,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+    ListOk {
+        snapshots: Vec<SnapshotEntry>,
+    },
+    DiffOk {
+        changes: Vec<DiffEntry>,
+    },
+    StatusOk {
+        report: StatusReport,
+    },
+    CleanupOk {
+        removed: Vec<String>,
+    },
+    ConfigOk {
+        config: ConfigReport,
+    },
     ReloadConfigOk,
-    CheckpointSkipped { reason: String },
-    RecoverOk { workspace: String },
+    CheckpointSkipped {
+        reason: String,
+    },
+    RecoverOk {
+        workspace: String,
+    },
+    HealthAdvisoryOk {
+        /// Count of workspaces exceeding `ADVISORY_SNAPSHOT_LIMIT`.
+        over_limit_workspace_count: u32,
+        /// Backend usage bytes; `fs_total_bytes == 0` sentinel means unavailable.
+        fs_total_bytes: u64,
+        fs_used_bytes: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -1449,6 +1487,63 @@ mod tests {
         match decoded {
             Response::RecoverOk { workspace } => assert_eq!(workspace, "/home/user/project"),
             _ => panic!("expected RecoverOk variant"),
+        }
+    }
+
+    // ── HealthAdvisory round-trip tests ──
+
+    #[test]
+    fn request_health_advisory_round_trip() {
+        let req = Request::HealthAdvisory;
+        let decoded = round_trip_request(&req);
+        match decoded {
+            Request::HealthAdvisory => {}
+            _ => panic!("expected HealthAdvisory variant"),
+        }
+    }
+
+    #[test]
+    fn response_health_advisory_ok_round_trip() {
+        let resp = Response::HealthAdvisoryOk {
+            over_limit_workspace_count: 3,
+            fs_total_bytes: 100 * 1024 * 1024 * 1024,
+            fs_used_bytes: 94 * 1024 * 1024 * 1024,
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count,
+                fs_total_bytes,
+                fs_used_bytes,
+            } => {
+                assert_eq!(over_limit_workspace_count, 3);
+                assert_eq!(fs_total_bytes, 100 * 1024 * 1024 * 1024);
+                assert_eq!(fs_used_bytes, 94 * 1024 * 1024 * 1024);
+            }
+            _ => panic!("expected HealthAdvisoryOk variant"),
+        }
+    }
+
+    #[test]
+    fn response_health_advisory_ok_zero_round_trip() {
+        // Backend query failed or no workspace over limit: all zeros.
+        let resp = Response::HealthAdvisoryOk {
+            over_limit_workspace_count: 0,
+            fs_total_bytes: 0,
+            fs_used_bytes: 0,
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count,
+                fs_total_bytes,
+                fs_used_bytes,
+            } => {
+                assert_eq!(over_limit_workspace_count, 0);
+                assert_eq!(fs_total_bytes, 0);
+                assert_eq!(fs_used_bytes, 0);
+            }
+            _ => panic!("expected HealthAdvisoryOk variant"),
         }
     }
 }

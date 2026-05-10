@@ -100,6 +100,11 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
         },
         Request::ReloadConfig => Response::ReloadConfigOk,
         Request::Recover { workspace } => Response::RecoverOk { workspace },
+        Request::HealthAdvisory => Response::HealthAdvisoryOk {
+            over_limit_workspace_count: 0,
+            fs_total_bytes: 1_000_000_000,
+            fs_used_bytes: 500_000_000,
+        },
     };
 
     // 5. Encode and send response frame

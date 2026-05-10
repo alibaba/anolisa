@@ -9,11 +9,18 @@ use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
-    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, Request, Response, BTRFS_IMG_PATH,
-    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
-    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
-    DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
+    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, Request, Response,
+    ADVISORY_SNAPSHOT_LIMIT, BTRFS_IMG_PATH, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
+    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
 };
+
+/// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
+const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
+
+/// Upper bound for the best-effort advisory IPC; a stuck daemon must not delay
+/// user-visible commands. Local UDS RTT is sub-millisecond.
+const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10);
 
 // Parse CLI value for `--auto-cleanup-keep`: integer -> Count mode, duration
 // string (e.g. "30d", units s/m/h/d/w) -> Age mode. Mirrors TOML semantics in
@@ -203,9 +210,15 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = run(cli).await {
-        eprintln!("\x1b[31mError: {:#}\x1b[0m", e);
-        process::exit(1);
+    match run(cli).await {
+        Ok(()) => {
+            // Post-command soft advisory: best-effort, silent on failure.
+            print_health_advisory_if_needed().await;
+        }
+        Err(e) => {
+            eprintln!("\x1b[31mError: {:#}\x1b[0m", e);
+            process::exit(1);
+        }
     }
 }
 
@@ -473,6 +486,100 @@ async fn send_request_to_daemon(request: &Request) -> Result<Response> {
 
     let response: Response = decode_payload(&payload)?;
     Ok(response)
+}
+
+/// Silent IPC used by best-effort callers (e.g. post-command health advisory).
+/// Never prints to stderr and never calls `process::exit`; all errors bubble up
+/// so the caller can decide to ignore them.
+async fn try_send_request_to_daemon_silent(request: &Request) -> Result<Response> {
+    let socket_path = get_socket_path();
+
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .context("connect to daemon (silent)")?;
+
+    let frame = encode_frame(request)?;
+    stream
+        .write_all(&frame)
+        .await
+        .context("send request (silent)")?;
+
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("read response length (silent)")?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("read response payload (silent)")?;
+
+    let response: Response = decode_payload(&payload)?;
+    Ok(response)
+}
+
+/// Emit a best-effort advisory to stderr when any threshold is crossed.
+/// Silent on timeout/IPC error; `fs_total_bytes == 0` skips only the fs warning.
+async fn print_health_advisory_if_needed() {
+    let (over_limit_workspace_count, fs_total_bytes, fs_used_bytes) = match tokio::time::timeout(
+        ADVISORY_TIMEOUT,
+        try_send_request_to_daemon_silent(&Request::HealthAdvisory),
+    )
+    .await
+    {
+        Ok(Ok(Response::HealthAdvisoryOk {
+            over_limit_workspace_count,
+            fs_total_bytes,
+            fs_used_bytes,
+        })) => (over_limit_workspace_count, fs_total_bytes, fs_used_bytes),
+        _ => return,
+    };
+
+    let snapshot_warning: Option<String> = if over_limit_workspace_count > 0 {
+        Some(format!(
+            "{} workspace(s) have more than {} snapshots. Run `ws-ckpt status` to see details",
+            over_limit_workspace_count, ADVISORY_SNAPSHOT_LIMIT
+        ))
+    } else {
+        None
+    };
+
+    let fs_warning: Option<String> = if fs_total_bytes > 0 {
+        let pct = (fs_used_bytes as f64 / fs_total_bytes as f64) * 100.0;
+        if pct > ADVISORY_FS_USAGE_PCT {
+            Some(format!(
+                "btrfs backend usage above {}% (current: {:.1}%)",
+                ADVISORY_FS_USAGE_PCT, pct
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if snapshot_warning.is_none() && fs_warning.is_none() {
+        return;
+    }
+
+    eprintln!();
+    if let Some(msg) = &snapshot_warning {
+        eprintln!("\x1b[33m\u{26a0} Warning: {}.\x1b[0m", msg);
+    }
+    if let Some(msg) = &fs_warning {
+        eprintln!("\x1b[33m\u{26a0} Warning: {}.\x1b[0m", msg);
+    }
+    eprintln!();
+    eprintln!("\x1b[33m  Manual cleanup:   ws-ckpt cleanup -w <workspace> --keep <N>\x1b[0m");
+    eprintln!("\x1b[33m  Or enable auto-cleanup for all workspaces:\x1b[0m");
+    eprintln!("\x1b[33m      ws-ckpt config --enable-auto-cleanup \\\x1b[0m");
+    eprintln!("\x1b[33m                     --auto-cleanup-keep <NUM|DURATION> \\\x1b[0m");
+    eprintln!("\x1b[33m                     --auto-cleanup-interval <SECONDS>\x1b[0m");
+    eprintln!("\x1b[33m  Suggested values:\x1b[0m");
+    eprintln!("\x1b[33m      ws-ckpt config --enable-auto-cleanup --auto-cleanup-keep 1000 --auto-cleanup-interval 86400\x1b[0m");
 }
 
 /// Handle the response, printing formatted output.
