@@ -32,6 +32,7 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Parse tag
         id: parse
@@ -84,13 +85,27 @@ jobs:
           retention-days: 28
 
   # =========================================================================
-  # Step 2: Publish (requires manual approval via GitHub Environment)
+  # Step 2: Build RPMs (amd64 + arm64) from the packaged tarballs
+  # =========================================================================
+  rpm:
+    name: RPM ${{ needs.package.outputs.tag }}
+    needs: package
+    uses: ./.github/workflows/rpm.yaml
+    with:
+      component: ${{ needs.package.outputs.component }}
+      version: ${{ needs.package.outputs.version }}
+      artifact-suffix: ''
+      retention-days: '28'
+    secrets: inherit
+
+  # =========================================================================
+  # Step 3: Publish (requires manual approval via GitHub Environment)
   #
   # If reviewer rejects, no Release is created.
   # =========================================================================
   publish:
     name: Publish ${{ needs.package.outputs.tag }}
-    needs: package
+    needs: [package, rpm]
     environment: release
     runs-on: ubuntu-22.04
     steps:
@@ -127,6 +142,13 @@ jobs:
           name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
           path: /tmp/archives
 
+      - name: Download RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-${{ needs.package.outputs.component }}-*
+          path: /tmp/rpms
+          merge-multiple: true
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,6 +183,13 @@ jobs:
             ASSETS+=("$VENDOR_ARCHIVE")
           fi
 
+          # Append all RPMs produced by the rpm job
+          if [ -d /tmp/rpms ]; then
+            while IFS= read -r rpm; do
+              [ -n "$rpm" ] && ASSETS+=("$rpm")
+            done < <(find /tmp/rpms -name '*.rpm' | sort)
+          fi
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "::error::Release '$TAG' already exists."
             echo "::error::If you need to re-publish, delete the existing release first, then re-run this workflow."
@@ -184,5 +213,9 @@ jobs:
           echo "| Release | [View Release](${RELEASE_URL}) |" >> $GITHUB_STEP_SUMMARY
           if [ -f "$VENDOR_ARCHIVE" ]; then
             echo "| Vendor | \`${COMPONENT}-${VERSION}-vendor.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          RPM_COUNT=$(find /tmp/rpms -name '*.rpm' 2>/dev/null | wc -l)
+          if [ "$RPM_COUNT" -gt 0 ]; then
+            echo "| RPMs | ${RPM_COUNT} file(s) |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "| Changelog | [Compare](${COMPARE_URL}) |" >> $GITHUB_STEP_SUMMARY
