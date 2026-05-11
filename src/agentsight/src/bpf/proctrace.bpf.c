@@ -315,6 +315,8 @@ int trace_write_enter(struct syscall_trace_enter *ctx)
     
     // Copy variable-length payload
     u8 *payload_dst = (void *)(stdout_data + 1);
+    // Mask payload_len so BPF verifier can prove it's bounded and non-negative
+    payload_len &= (MAX_STDOUT_PAYLOAD - 1);
     int ret = bpf_probe_read_user(payload_dst, payload_len, buf);
     if (ret != 0) {
         // Read failed, submit with zero payload
