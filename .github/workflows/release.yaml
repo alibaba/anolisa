@@ -16,23 +16,19 @@ permissions:
 
 jobs:
   # =========================================================================
-  # Step 1: Parse tag and package
-  # Triggered by push tag; produces official artifacts retained 28 days.
+  # Step 1: Parse tag only.
+  # Source/vendor/RPM artifacts are all produced by rpm.yaml below to avoid
+  # duplicating package-source uploads, which would collide on artifact names
+  # within the same workflow run (409 Conflict).
   # =========================================================================
-  package:
-    name: Package ${{ github.ref_name }}
+  parse:
+    name: Parse ${{ github.ref_name }}
     runs-on: ubuntu-22.04
     outputs:
       component: ${{ steps.parse.outputs.component }}
       version: ${{ steps.parse.outputs.version }}
       tag: ${{ steps.parse.outputs.tag }}
-      archive-sha256: ${{ steps.package-source.outputs.archive-sha256 }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-
       - name: Parse tag
         id: parse
         run: |
@@ -64,33 +60,30 @@ jobs:
           echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
 
-      - name: Package source archive
-        id: package-source
-        uses: ./.github/actions/package-source
-        with:
-          component: ${{ steps.parse.outputs.component }}
-          version: ${{ steps.parse.outputs.version }}
-          artifact-suffix: ''
-          retention-days: 28
-          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
-          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
-
-      - name: Package vendor archive
-        uses: ./.github/actions/package-vendor
-        with:
-          component: ${{ steps.parse.outputs.component }}
-          version: ${{ steps.parse.outputs.version }}
-          artifact-suffix: ''
-          retention-days: 28
+  # =========================================================================
+  # Step 2: Package source/vendor + build RPMs (amd64 + arm64).
+  # rpm.yaml produces source tarball, vendor tarball, and per-arch RPMs as
+  # artifacts consumed by the publish job below.
+  # =========================================================================
+  rpm:
+    name: RPM ${{ needs.parse.outputs.tag }}
+    needs: parse
+    uses: ./.github/workflows/rpm.yaml
+    with:
+      component: ${{ needs.parse.outputs.component }}
+      version: ${{ needs.parse.outputs.version }}
+      artifact-suffix: ''
+      retention-days: '28'
+    secrets: inherit
 
   # =========================================================================
-  # Step 2: Publish (requires manual approval via GitHub Environment)
+  # Step 3: Publish (requires manual approval via GitHub Environment)
   #
   # If reviewer rejects, no Release is created.
   # =========================================================================
   publish:
-    name: Publish ${{ needs.package.outputs.tag }}
-    needs: package
+    name: Publish ${{ needs.parse.outputs.tag }}
+    needs: [parse, rpm]
     environment: release
     runs-on: ubuntu-22.04
     steps:
@@ -101,39 +94,32 @@ jobs:
       - name: Download official artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}
+          name: ${{ needs.parse.outputs.component }}-${{ needs.parse.outputs.version }}
           path: /tmp/archives
-
-      - name: Verify official artifact checksum
-        run: |
-          COMPONENT="${{ needs.package.outputs.component }}"
-          VERSION="${{ needs.package.outputs.version }}"
-          ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
-          EXPECTED="${{ needs.package.outputs.archive-sha256 }}"
-          ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-          if [ "$EXPECTED" != "$ACTUAL" ]; then
-            echo "::error::Checksum mismatch for ${ARCHIVE}"
-            echo "::error::Expected: $EXPECTED"
-            echo "::error::Actual:   $ACTUAL"
-            exit 1
-          fi
-          echo "Checksum verified: $ACTUAL"
 
       - name: Download vendor artifact (if exists)
         id: download-vendor
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
+          name: ${{ needs.parse.outputs.component }}-${{ needs.parse.outputs.version }}-vendor
           path: /tmp/archives
+
+      - name: Download RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Single-component pattern; rpm.yaml uploads as rpm-<component>-<arch>.
+          pattern: rpm-${{ needs.parse.outputs.component }}-*
+          path: /tmp/rpms
+          merge-multiple: true
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMPONENT="${{ needs.package.outputs.component }}"
-          VERSION="${{ needs.package.outputs.version }}"
-          TAG="${{ needs.package.outputs.tag }}"
+          COMPONENT="${{ needs.parse.outputs.component }}"
+          VERSION="${{ needs.parse.outputs.version }}"
+          TAG="${{ needs.parse.outputs.tag }}"
           ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}.tar.gz"
 
           case "$COMPONENT" in
@@ -161,6 +147,13 @@ jobs:
             ASSETS+=("$VENDOR_ARCHIVE")
           fi
 
+          # Append all RPMs produced by the rpm job
+          if [ -d /tmp/rpms ]; then
+            while IFS= read -r rpm; do
+              [ -n "$rpm" ] && ASSETS+=("$rpm")
+            done < <(find /tmp/rpms -name '*.rpm' | sort)
+          fi
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "::error::Release '$TAG' already exists."
             echo "::error::If you need to re-publish, delete the existing release first, then re-run this workflow."
@@ -184,5 +177,9 @@ jobs:
           echo "| Release | [View Release](${RELEASE_URL}) |" >> $GITHUB_STEP_SUMMARY
           if [ -f "$VENDOR_ARCHIVE" ]; then
             echo "| Vendor | \`${COMPONENT}-${VERSION}-vendor.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          RPM_COUNT=$(find /tmp/rpms -name '*.rpm' 2>/dev/null | wc -l)
+          if [ "$RPM_COUNT" -gt 0 ]; then
+            echo "| RPMs | ${RPM_COUNT} file(s) |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "| Changelog | [Compare](${COMPARE_URL}) |" >> $GITHUB_STEP_SUMMARY
