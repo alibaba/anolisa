@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Add HTTP/1.1 request body reassembly for fragmented SSL writes.
+- Add skill metrics analysis with cosh filesystem-based discovery.
+- Add SLS upload and Logtail file exporter for GenAI events.
+- Add hermes agent matcher for LLM process discovery.
+- Detect uv Python static OpenSSL in SSL sniffer.
+- Remove AK/SK-based SLS direct upload, keep Logtail file export.
+
 ## 0.3.1
 
 - Fix simplify agent_crash detection and fix multi-process dedup. (#411)
