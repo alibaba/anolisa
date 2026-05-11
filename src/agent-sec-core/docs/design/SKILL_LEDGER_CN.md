@@ -1,5 +1,7 @@
 # Skill 安全技术方案（skill-ledger）
 
+> 本文是 `skill-ledger` 组件级详细设计，聚焦 manifest、签名、版本链、Scanner Registry 和 CLI 工作流。Skill 安全体系总览和模块关系见 [SKILL_SECURITY_ARCHITECTURE_CN.md](SKILL_SECURITY_ARCHITECTURE_CN.md)，扫描器设计见 [SKILL_SCANNER_CN.md](SKILL_SCANNER_CN.md)。
+
 ## 背景与目标
 
 ### 问题
@@ -12,12 +14,6 @@ AI Agent 通过加载 Skill（结构化指令 + 辅助脚本）扩展能力。Sk
 2. **安全扫描集成**：提供可扩展的扫描器框架，支持 Agent 驱动（skill-vetter）和 CLI 自动调用两种模式
 3. **实时守卫**：在 Skill 加载时自动执行完整性检查（hook 层），对异常状态输出告警
 4. **零阻断**：所有检查采用 fail-open 策略——仅告警不阻断，确保 Agent 可用性
-
-### 非目标
-
-- 不替代操作系统级沙箱或进程隔离
-- 不实现运行时行为监控（仅静态内容检查 + 签名验证）
-- 当前版本不阻断 Skill 执行（后续可升级为可配置阻断）
 
 ---
 
@@ -202,7 +198,7 @@ class SigningBackend(Protocol):
       "parser": "findings-array",
       "description": "LLM-driven 4-phase skill audit"
     }
-    // 后续扩展示例（本版本不实现）：
+    // 扩展示例（本版本不实现）：
     // { "name": "pattern-scanner", "type": "builtin", "enabled": true, "parser": "findings-array" }
     // { "name": "license-checker", "type": "cli", "command": "...", "parser": "license-checker" }
     // { "name": "cloud-scanner", "type": "api", "endpoint": "...", "parser": "cloud-scanner" }
@@ -213,7 +209,7 @@ class SigningBackend(Protocol):
     "findings-array": {            // 恒等解析器，输入已是标准格式（本版本唯一实现）
       "type": "findings-array"
     }
-    // 后续扩展示例（本版本不实现）：
+    // 扩展示例（本版本不实现）：
     // "license-checker": { "type": "field-mapping", "rootPath": "$.results", "mappings": {...}, "levelMap": {...} }
     // "sarif-parser": { "type": "sarif" }
     // "custom-parser": { "type": "custom", "entrypoint": "my_module:parse" }
@@ -499,42 +495,11 @@ skill-ledger/
 
 ### Phase 1：安全扫描（vetter）
 
-Agent 调用此 Skill 后，按 SKILL.md 指令使用 read/grep/shell tool 逐文件审查目标 Skill，参照 [skill-vetter 协议](https://github.com/openclaw/skills/blob/main/skills/spclaudehome/skill-vetter/SKILL.md)的四阶段框架：
+Agent 调用此 Skill 后，按 SKILL.md 指令使用 read/grep/shell tool 审查目标 Skill，并输出 `NormalizedFinding[]` JSON 文件。`skill-vetter` 在 Scanner Registry 中注册为 `type: "skill"` 扫描器，CLI 不直接调用它，而是在 Phase 2 接收其 findings 文件。
 
-1. **来源验证**：检查 Skill 来源（本地/远程/extension）、是否有 README/LICENSE
-2. **强制代码审查**：逐文件扫描危险模式（下文规则表）
-3. **权限边界评估**：Skill 声明的 `allowedTools` 与实际内容是否对齐
-4. **风险分级**：汇总 findings，输出结构化 JSON
+`skill-vetter` 的扫描阶段、规则范围、输出格式和与 Scanner Registry 的关系见 [SKILL_SCANNER_CN.md](SKILL_SCANNER_CN.md)。
 
-> **与 Scanner Registry 的关系**：skill-vetter 在 `config.json` 中注册为 `type: "skill"` 扫描器（见 §3 扫描能力架构），是本版本唯一实现的扫描器。Phase 1 即为 Agent 层编排 `skill` 类型扫描器的标准流程。其输出通过 `findings-array` parser 归一化为 `NormalizedFinding[]`，确保与 `certify` 的聚合逻辑对齐。后续将实现内置 `pattern-scanner` 覆盖同一规则表的静态检测子集，作为无 LLM 环境下的降级替代，届时 `certify` 的自动调用模式可直接触发。
-
-**代码文件规则**（.js/.ts/.sh/.py 等）：
-
-| 规则 ID | 级别 | 检测目标 |
-|---------|------|---------|
-| `dangerous-exec` | deny | child_process exec/spawn、subprocess |
-| `dynamic-code-eval` | deny | eval()、new Function() |
-| `env-harvesting` | deny | process.env 批量读取 + 网络发送 |
-| `credential-access` | deny | 凭据与敏感文件访问（`~/.ssh/`、`.env`） |
-| `system-modification` | deny | 系统文件篡改（`/etc/`、crontab） |
-| `crypto-mining` | deny | stratum/coinhive/xmrig 特征 |
-| `obfuscated-code` | warn | hex/base64 编码 + decode |
-| `suspicious-network` | warn | 非标准端口、直连 IP |
-| `exfiltration-pattern` | warn | 文件读取 + 网络发送组合 |
-| `agent-data-access` | warn | Agent 身份数据访问（`MEMORY.md` 等） |
-| `unauthorized-install` | warn | 未声明的包安装 |
-
-**Prompt 文档规则**（.md 文件）：
-
-| 规则 ID | 级别 | 检测目标 |
-|---------|------|---------|
-| `prompt-override` | deny | "ignore previous instructions" 等覆盖指令 |
-| `hidden-instruction` | deny | 零宽字符、注释伪装隐藏指令 |
-| `unrestricted-tool-use` | warn | 引导无约束 shell 执行 |
-| `external-fetch-exec` | warn | 引导下载并执行外部内容 |
-| `privilege-escalation` | warn | 引导 sudo、修改系统文件 |
-
-Phase 1 输出：Agent 将 findings 写入临时文件（如 `/tmp/skill-vetter-findings-<skill_name>.json`）。
+Phase 1 输出路径示例：`/tmp/skill-vetter-findings-<skill_name>.json`。
 
 ### Phase 2：建版签名（ledger）
 
@@ -548,30 +513,74 @@ Phase 2 不能独立执行——SKILL.md 中明确约束"必须先完成 Phase 1
 
 ---
 
-## 5. Hook 告警策略
+## 5. 用户交互设计
 
 ### 设计原则
 
-为简化实现、减少对用户的干扰，当 hook 层（`skill-ledger check`）检测到非 `pass` 状态时，**仅输出告警信息，不阻断 Skill 执行**。告警信息通过宿主系统的日志/消息通道呈现给用户，用户可事后选择手动调用 skill-ledger Skill 进行扫描建版。
+`skill-ledger` 的交互目标是把扫描结果接入用户关键路径，让用户在调用、安装和周期复查 Skill 时看到可理解、可追溯、可操作的安全状态。交互层只消费 `check`、`certify`、`status` 的结构化结果，不直接解析 `.skill-meta/` 文件。
 
-### 各状态的行为
+当前交互默认提示风险但不阻断执行。是否升级为确认或阻断，由宿主系统策略解释 `scanStatus` 和 `policy` 决定，不改变 SignedManifest 数据结构。
 
-| 状态 | 行为 | 告警内容 |
+### 交互入口
+
+| 场景 | 触发时机 | 调用方式 | 用户可见结果 |
+|---|---|---|---|
+| Skill 调用前检查 | pre hook 调用 Skill 时 | `skill-ledger check <skill_dir>` | 非 `pass` 状态展示简短 warning |
+| prompt 安装/启用 Skill | 用户通过 prompt 请求安装、启用或首次使用 Skill 时 | `check` → 扫描 → `certify` | 展示扫描结论和关键 findings |
+| 周期性复查 | OpenClaw 定时任务场景 | `skill-ledger status --verbose` | 展示整体状态和需关注 Skill |
+
+### 5.1 Pre Hook 调用提示
+
+用户调用 Skill 时，宿主在加载前执行：
+
+```bash
+agent-sec-cli skill-ledger check <skill_dir>
+```
+
+| 状态 | 行为 | 提示内容 |
 |------|------|---------|
 | `pass` | 静默放行 | 无 |
-| `warn` | 放行 + 告警 | `⚠️ Skill '<name>' 存在低风险项，建议关注` |
-| `drifted` | 放行 + 告警 | `⚠️ Skill '<name>' 内容已变更，尚未重新扫描` |
-| `none` | 放行 + 告警 | `⚠️ Skill '<name>' 尚未经过安全扫描` |
-| `deny` | 放行 + 告警 | `🚨 Skill '<name>' 上次扫描存在高危项，请尽快处理` |
-| `tampered` | 放行 + 告警 | `🚨 Skill '<name>' 元数据签名校验失败，建议重新扫描建版` |
+| `warn` | 放行 + warning | Skill 存在低风险发现，建议审查 |
+| `drifted` | 放行 + warning | Skill 文件已变更，建议重新扫描认证 |
+| `none` | 放行 + warning | Skill 尚未经过安全扫描 |
+| `deny` | 放行 + warning | Skill 上次扫描存在高风险发现 |
+| `tampered` | 放行 + warning | Skill 元数据签名校验失败，建议重新认证 |
 
-所有非 `pass` 状态均**仅告警、不阻断**。`tampered` 触发条件较窄（内容未变但 manifest 被伪造），属于元数据可信度问题而非紧急安全事件，告警提示用户重新执行扫描建版即可恢复正常。
+pre hook 提示只包含 Skill 名称、状态、核心原因和下一步建议；详细 findings 不在热路径展开。
 
-所有告警均通过宿主系统日志/消息通道输出，保证可追溯。
+### 5.2 Prompt 安装/启用扫描报告
 
-### 后续升级路径
+用户通过 prompt 请求安装、启用或首次使用 Skill 时，可触发扫描与认证流程：
 
-当前的告警模式为最小可用版本。后续可按需升级：对 `deny` 状态改为阻断 + 用户选择，对 `drifted`/`none` 状态可配置为自动触发扫描建版。升级时仅需修改 hook handler 的返回值，不影响 CLI 和 Skill 侧逻辑。
+```text
+resolve skill_dir
+  -> skill-ledger check <skill_dir>
+  -> 如需扫描：执行 Skill Scanner / skill-vetter
+  -> skill-ledger certify <skill_dir> ...
+  -> 展示扫描报告
+```
+
+报告展示必要信息即可：
+
+| 区块 | 内容 |
+|---|---|
+| 基本信息 | Skill 名称、路径、版本号、文件数、状态指纹 |
+| 扫描结论 | `pass` / `warn` / `deny` / `none` |
+| 发现摘要 | deny/warn 数量、规则 ID、文件位置 |
+| 文件变更 | 对 `drifted` 状态展示新增、删除、修改文件 |
+| 建议操作 | 继续使用、重新扫描、修复后再认证、禁用或移除 |
+
+报告可以比 pre hook 更详细，但 evidence 应摘要化，避免输出凭据、token、私钥等敏感内容。
+
+### 5.3 OpenClaw 周期性扫描报告
+
+OpenClaw 可通过定时任务周期调用：
+
+```bash
+agent-sec-cli skill-ledger status --verbose
+```
+
+周期报告展示总数、各状态计数、`drifted` / `warn` / `deny` / `tampered` Skill 列表和建议操作。周期报告提供整体态势视图，pre hook 仍负责单次调用路径提示。
 
 ### 向后兼容
 
