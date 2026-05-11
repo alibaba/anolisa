@@ -20,7 +20,8 @@ class TestRunVerificationSingleSkill(unittest.TestCase):
     """Single-skill path: run_verification(skill=<path>)."""
 
     @patch(f"{_MOD}.verify_skill", return_value=(True, "my-skill"))
-    def test_success_returns_passed_list(self, _mock_vs, _mock_keys):
+    @patch(f"{_MOD}.load_config", return_value={"skills_dirs": ["/opt/skills"]})
+    def test_success_returns_passed_list(self, _mock_cfg, _mock_vs, _mock_keys):
         result = run_verification(skill="/opt/skills/my-skill")
 
         self.assertIsInstance(result["passed"], list)
@@ -29,7 +30,8 @@ class TestRunVerificationSingleSkill(unittest.TestCase):
         self.assertEqual(result["failed"], [])
 
     @patch(f"{_MOD}.verify_skill", side_effect=ErrSigInvalid("bad-skill", "bad sig"))
-    def test_failure_returns_failed_list(self, _mock_vs, _mock_keys):
+    @patch(f"{_MOD}.load_config", return_value={"skills_dirs": ["/opt/skills"]})
+    def test_failure_returns_failed_list(self, _mock_cfg, _mock_vs, _mock_keys):
         result = run_verification(skill="/opt/skills/bad-skill")
 
         self.assertIsInstance(result["passed"], list)
@@ -40,7 +42,10 @@ class TestRunVerificationSingleSkill(unittest.TestCase):
         self.assertIn("bad sig", result["failed"][0]["error"])
 
     @patch(f"{_MOD}.verify_skill", side_effect=ErrManifestMissing("no-manifest"))
-    def test_missing_manifest_returns_failed_list(self, _mock_vs, _mock_keys):
+    @patch(f"{_MOD}.load_config", return_value={"skills_dirs": ["/opt/skills"]})
+    def test_missing_manifest_returns_failed_list(
+        self, _mock_cfg, _mock_vs, _mock_keys
+    ):
         result = run_verification(skill="/opt/skills/no-manifest")
 
         self.assertEqual(result["passed"], [])

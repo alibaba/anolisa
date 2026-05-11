@@ -70,8 +70,8 @@ def cmd_init_keys(
     using any other skill-ledger command.
 
     Key storage:
-      ~/.local/share/agent-sec/skill-ledger/key.enc  (encrypted private key, 0600)
-      ~/.local/share/agent-sec/skill-ledger/key.pub  (public key, 0644)
+      /etc/agent-sec/skill-security/ledger/keys/key.enc  (system install)
+      /etc/agent-sec/skill-security/ledger/keys/key.pub  (system install)
 
     By default, no passphrase is required — safe for non-interactive use.
     """
@@ -133,8 +133,8 @@ def cmd_check(
 
     Use --all to check every registered skill and receive a JSON array of
     enriched results. Skills are registered in
-    ~/.config/agent-sec/skill-ledger/config.json skillDirs (paths and globs expanded
-    automatically by the CLI).
+    /etc/agent-sec/skill-security/ledger/config.json skillDirs (paths and globs
+    expanded automatically by the CLI).
     """
     if all_skills and skill_dir is not None:
         typer.echo(
@@ -205,8 +205,8 @@ def cmd_certify(
       4. Re-sign and write to .skill-meta/latest.json
 
     Use --all to certify every registered skill at once. Skills are
-    registered in ~/.config/agent-sec/skill-ledger/config.json skillDirs (paths and
-    globs expanded automatically by the CLI).
+    registered in /etc/agent-sec/skill-security/ledger/config.json skillDirs (paths
+    and globs expanded automatically by the CLI).
     """
     scanner_names = [s.strip() for s in scanners.split(",")] if scanners else None
 
@@ -322,8 +322,8 @@ def cmd_list_scanners() -> None:
     """List registered scanners and their configuration.
 
     Shows all scanners defined in the built-in defaults and
-    ~/.config/agent-sec/skill-ledger/config.json, including their invocation type,
-    result parser, and enabled status.
+    /etc/agent-sec/skill-security/ledger/config.json, including their invocation
+    type, result parser, and enabled status.
 
     Use this to discover valid values for the --scanner flag in certify.
     """

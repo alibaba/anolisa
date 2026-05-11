@@ -50,8 +50,7 @@ def _keys_info() -> dict[str, Any]:
     if initialized:
         raw_pub = key_pub_path().read_bytes()
         info["fingerprint"] = compute_fingerprint(raw_pub)
-        enc_data = key_enc_path().read_bytes()
-        info["encrypted"] = len(enc_data) != _RAW_SEED_LEN
+        info["encrypted"] = key_enc_path().stat().st_size != _RAW_SEED_LEN
 
     kdir = keyring_dir()
     if kdir.is_dir():

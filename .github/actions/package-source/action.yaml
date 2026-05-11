@@ -125,8 +125,8 @@ runs:
           done
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
-          # Replace example keys in trusted-keys with the real GPG public key
-          # so the packaged archive ships the production key.
+          # Replace example keys with the real GPG public key. RPM install copies
+          # this package fallback into /etc/agent-sec/skill-security/trusted-keys.
           if [ -n "$GPG_PUBLIC_KEY" ]; then
             TRUSTED_KEYS_DIR="/tmp/build/${ARCHIVE_NAME}/agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys"
             rm -f "${TRUSTED_KEYS_DIR}"/*.asc

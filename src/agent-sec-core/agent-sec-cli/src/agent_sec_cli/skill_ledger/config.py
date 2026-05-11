@@ -1,12 +1,13 @@
-"""Configuration loading for skill-ledger (``~/.config/agent-sec/skill-ledger/config.json``)."""
+"""Configuration loading for skill-ledger."""
 
+import copy
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.skill_ledger.errors import ConfigError
-from agent_sec_cli.skill_ledger.paths import get_config_dir
+from agent_sec_cli.skill_ledger.paths import config_search_paths
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def config_path() -> Path:
-    """Return the path to ``config.json``."""
-    return get_config_dir() / "config.json"
+    """Return the active writable config file path."""
+    return config_search_paths()[-1]
 
 
 def _deep_merge_config(
@@ -87,20 +88,26 @@ def _deep_merge_config(
 
 
 def load_config() -> dict[str, Any]:
-    """Load and return the config file.  Returns defaults if the file does not exist."""
-    path = config_path()
-    if not path.is_file():
-        return dict(_DEFAULT_CONFIG)
-    try:
-        raw = path.read_text(encoding="utf-8")
-        cfg = json.loads(raw)
-        if not isinstance(cfg, dict):
-            raise ConfigError(
-                f"config.json must be a JSON object, got {type(cfg).__name__}"
-            )
-        return _deep_merge_config(_DEFAULT_CONFIG, cfg)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
+    """Load and merge config files.
+
+    The system skill-security config is loaded when present, preserving default
+    policy while allowing configured skill directory additions.
+    """
+    config = copy.deepcopy(_DEFAULT_CONFIG)
+    for path in config_search_paths():
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            cfg = json.loads(raw)
+            if not isinstance(cfg, dict):
+                raise ConfigError(
+                    f"config.json must be a JSON object, got {type(cfg).__name__}"
+                )
+            config = _deep_merge_config(config, cfg)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
+    return config
 
 
 def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:

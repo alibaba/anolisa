@@ -28,7 +28,7 @@ Three commands cover the entire workflow. Step 1 is a one-time setup; step 2 sho
 # 1. One-time setup — generate GPG key + export public key to trusted-keys
 tools/sign-skill.sh --init
 
-# 2. Batch-sign all deployed skills (default: ~/.copilot-shell/skills/)
+# 2. Batch-sign all deployed skills (default: /usr/share/anolisa/skills)
 tools/sign-skill.sh --batch --force
 
 # 3. Verify
@@ -36,8 +36,10 @@ agent-sec-cli verify
 ```
 
 `--init` automatically generates a dedicated signing key (`ANOLISA Local Deploy Key`) and
-exports the public key to `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`.
-You can override the export path with `--trusted-keys-dir <DIR>`.
+exports the public key to the `trusted-keys/` directory used by `agent-sec-cli verify`.
+On RPM installs this resolves to `/etc/agent-sec/skill-security/trusted-keys/`.
+Use `AGENT_SEC_SKILL_SECURITY_DIR` for an alternate skill-security root, or
+override only the export path with `--trusted-keys-dir <DIR>`.
 
 ## Step-by-Step (Manual Key Management)
 
@@ -65,7 +67,8 @@ gpg --list-secret-keys me@example.com
 
 ### 2. Export the Public Key
 
-The verifier loads trusted public keys from `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`.
+The verifier loads trusted public keys from `/etc/agent-sec/skill-security/trusted-keys/`
+on installed systems.
 `--init` exports there automatically. To re-export manually:
 
 ```bash
@@ -82,7 +85,7 @@ Or fully manually:
 
 ```bash
 gpg --armor --export me@example.com \
-    > ~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/me-example-com.asc
+    > /etc/agent-sec/skill-security/trusted-keys/me-example-com.asc
 ```
 
 ### 3. Sign Skills
@@ -96,7 +99,7 @@ tools/sign-skill.sh /usr/share/anolisa/skills/my-skill --force
 Batch-sign all skills under a directory:
 
 ```bash
-# Uses the default directory (~/.copilot-shell/skills/)
+# Uses the default directory (/usr/share/anolisa/skills)
 tools/sign-skill.sh --batch --force
 
 # Or specify a custom directory
@@ -112,7 +115,12 @@ Each signed skill directory will contain:
 
 ### 4. Configure the Verifier
 
-When using `--batch`, the script automatically registers the skills directory in `config.conf`. For manual setups, make sure the skills directory is listed in the deployed `config.conf` (e.g. `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf`):
+When using `--batch` for the deployed skills directory
+(`/usr/share/anolisa/skills`), the script automatically registers the directory
+in `/etc/agent-sec/skill-security/config.conf`. Temporary build directories and
+custom directories are not auto-registered unless `AGENT_SEC_ASSET_VERIFY_CONFIG`
+is set explicitly. For manual setups, make sure the skills directory is listed
+there:
 
 ```ini
 skills_dir = [
@@ -206,8 +214,8 @@ agent-sec-cli verify
 | **Init** | `--init [--trusted-keys-dir DIR]` | Generate GPG key + export public key |
 | **Check** | `--check` | Verify prerequisites (gpg, jq, sha256sum) |
 | **Single** | `<skill_dir> [--force]` | Sign one skill directory |
-| **Batch** | `--batch [parent_dir] [--force]` | Sign all subdirectories under parent (default: `~/.copilot-shell/skills/`). Auto-registers the directory in `config.conf`. |
-| **Export** | `--export-key [DIR]` | Export public key (default: `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`) |
+| **Batch** | `--batch [parent_dir] [--force]` | Sign all subdirectories under parent (default: `/usr/share/anolisa/skills`). Auto-registers only the deployed directory, or a custom directory when `AGENT_SEC_ASSET_VERIFY_CONFIG` is set. |
+| **Export** | `--export-key [DIR]` | Export public key (default: `/etc/agent-sec/skill-security/trusted-keys/`) |
 
 Common options:
 
@@ -216,3 +224,4 @@ Common options:
 | `--force` | Overwrite existing `.skill-meta/Manifest.json` and `.skill-meta/.skill.sig` |
 | `--skill-name NAME` | Override the skill name in the manifest (default: directory name) |
 | `--trusted-keys-dir DIR` | Override the public key export directory (used with `--init`) |
+| `AGENT_SEC_SKILL_SECURITY_DIR` | Override the shared skill-security root used by signing and verification |

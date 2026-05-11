@@ -200,7 +200,7 @@ uv run maturin build --release
 
 ### Asset Verification
 
-Edit `asset_verify/config.conf`:
+Edit `/etc/agent-sec/skill-security/config.conf`:
 
 ```ini
 skills_dir = [
@@ -250,7 +250,7 @@ python -m agent_sec_cli.asset_verify.verifier --skill /path/to/skill
 ### Common Issues
 
 **Issue:** `Verification failed: No trusted keys found`
-- **Solution:** Add trusted GPG keys to `asset_verify/trusted-keys/`
+- **Solution:** Add trusted GPG keys to `/etc/agent-sec/skill-security/trusted-keys/`
 
 **Issue:** `Permission denied` errors during hardening
 - **Solution:** Run with sudo: `sudo agent-sec-cli harden --reinforce --config agentos_baseline`

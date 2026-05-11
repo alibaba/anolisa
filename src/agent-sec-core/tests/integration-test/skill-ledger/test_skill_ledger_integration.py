@@ -11,15 +11,14 @@ This file requires the source tree — it is *not* for RPM-installed
 environments.  See ``tests/e2e/skill-ledger/e2e_test.py`` for the RPM
 binary end-to-end test suite.
 
-All key material and config files are isolated via ``XDG_DATA_HOME`` and
-``XDG_CONFIG_HOME`` environment variables so the host keyring is never touched.
+All key material and config files are isolated via explicit ``AGENT_SEC_*``
+environment variables so the host keyring is never touched.
 
 Prerequisites: Python 3.11, source tree
 """
 
 import hashlib
 import json
-import os
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -96,24 +95,24 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
 
 
 class Workspace:
-    """Shared test workspace: isolated XDG dirs, skills dir."""
+    """Shared test workspace: isolated config/key dirs and skills dir."""
 
     def __init__(self):
         self.root = Path(tempfile.mkdtemp(prefix="e2e_skill_ledger_"))
-        self.xdg_data = self.root / "xdg_data"
-        self.xdg_config = self.root / "xdg_config"
-        self.xdg_data.mkdir()
-        self.xdg_config.mkdir()
+        self.ledger_keys = self.root / "ledger_keys"
+        self.ledger_config = self.root / "ledger_config"
+        self.ledger_keys.mkdir()
+        self.ledger_config.mkdir()
         self.skills_dir = self.root / "skills"
         self.skills_dir.mkdir()
         self.fixtures = self.root / "fixtures"
         self.fixtures.mkdir()
 
     def env(self, extra: dict | None = None) -> dict:
-        """Return env dict with XDG isolation (for subprocess)."""
+        """Return env dict with isolated skill-ledger config/key dirs."""
         e = {
-            "XDG_DATA_HOME": str(self.xdg_data),
-            "XDG_CONFIG_HOME": str(self.xdg_config),
+            "AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(self.ledger_keys),
+            "AGENT_SEC_SKILL_LEDGER_CONFIG_DIR": str(self.ledger_config),
         }
         if extra:
             e.update(extra)
@@ -138,9 +137,9 @@ def ws():
 
 def test_init_keys_no_passphrase(ws):
     """init-keys without passphrase → exit 0, encrypted: false."""
-    alt_data = ws.root / "nopass_data"
-    alt_data.mkdir()
-    env = ws.env({"XDG_DATA_HOME": str(alt_data)})
+    alt_keys = ws.root / "nopass_data"
+    alt_keys.mkdir()
+    env = ws.env({"AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys)})
     r = run_skill_ledger(["init-keys"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
@@ -150,9 +149,9 @@ def test_init_keys_no_passphrase(ws):
 
 def test_init_keys_json_structure(ws):
     """JSON output must contain all 4 expected fields."""
-    alt_data = ws.root / "json_struct_data"
-    alt_data.mkdir()
-    env = ws.env({"XDG_DATA_HOME": str(alt_data)})
+    alt_keys = ws.root / "json_struct_data"
+    alt_keys.mkdir()
+    env = ws.env({"AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys)})
     r = run_skill_ledger(["init-keys"], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
@@ -165,10 +164,10 @@ def test_init_keys_json_structure(ws):
 
 def test_init_keys_reject_duplicate(ws):
     """Second init-keys without --force → exit 1."""
-    # Generate fresh keys in a separate XDG
-    alt_data = ws.root / "alt_data"
-    alt_data.mkdir()
-    env = ws.env({"XDG_DATA_HOME": str(alt_data)})
+    # Generate fresh keys in a separate data directory.
+    alt_keys = ws.root / "alt_keys"
+    alt_keys.mkdir()
+    env = ws.env({"AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys)})
     r1 = run_skill_ledger(["init-keys"], env_extra=env)
     assert r1.returncode == 0, f"first init failed: {r1.stderr}"
 
@@ -181,9 +180,9 @@ def test_init_keys_reject_duplicate(ws):
 
 def test_init_keys_force_overwrite(ws):
     """--force overwrites existing keys and produces a new fingerprint."""
-    alt_data = ws.root / "force_data"
-    alt_data.mkdir()
-    env = ws.env({"XDG_DATA_HOME": str(alt_data)})
+    alt_keys = ws.root / "force_data"
+    alt_keys.mkdir()
+    env = ws.env({"AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys)})
     r1 = run_skill_ledger(["init-keys"], env_extra=env)
     assert r1.returncode == 0
     fp1 = parse_json_output(r1.stdout)["fingerprint"]
@@ -198,11 +197,11 @@ def test_init_keys_force_overwrite(ws):
 
 def test_init_keys_with_passphrase_env(ws):
     """SKILL_LEDGER_PASSPHRASE env var → encrypted: true."""
-    alt_data = ws.root / "pass_data"
-    alt_data.mkdir()
+    alt_keys = ws.root / "pass_data"
+    alt_keys.mkdir()
     env = ws.env(
         {
-            "XDG_DATA_HOME": str(alt_data),
+            "AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys),
             "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
         }
     )
@@ -621,7 +620,7 @@ def test_certify_all_multiple_skills(ws):
         make_skill(batch_root, name, {"main.py": f"# {name}\n"})
 
     # Write config.json with skillDirs glob
-    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
+    config_dir = ws.ledger_config
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -642,7 +641,7 @@ def test_certify_all_no_skill_dirs(ws):
     env = ws.env()
 
     # Write config.json with empty skillDirs
-    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
+    config_dir = ws.ledger_config
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -771,7 +770,7 @@ def test_status_human_readable_output(ws):
     for name in ("sa-skill-1", "sa-skill-2"):
         make_skill(batch_root, name, {"run.sh": f"echo {name}\n"})
 
-    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
+    config_dir = ws.ledger_config
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -811,7 +810,7 @@ def test_status_drifted_shows_details(ws):
         {"orig.txt": "original"},
     )
 
-    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
+    config_dir = ws.ledger_config
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"skillDirs": [str(batch_root / "*")]}
     (config_dir / "config.json").write_text(json.dumps(config))
@@ -900,11 +899,11 @@ def test_contract_init_keys_empty_passphrase_env(ws):
 
     This is the exact invocation SKILL.md uses for first-time auto-init.
     """
-    alt_data = ws.root / "contract_keys"
-    alt_data.mkdir()
+    alt_keys = ws.root / "contract_keys"
+    alt_keys.mkdir()
     env = ws.env(
         {
-            "XDG_DATA_HOME": str(alt_data),
+            "AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(alt_keys),
             "SKILL_LEDGER_PASSPHRASE": "",  # empty string, NOT absent
         }
     )
@@ -915,8 +914,8 @@ def test_contract_init_keys_empty_passphrase_env(ws):
         out.get("encrypted") is False
     ), f"Empty passphrase should produce unencrypted keys, got {out}"
 
-    # Step 0.2 also checks: ls ~/.local/share/agent-sec/skill-ledger/key.pub
-    key_pub = Path(alt_data) / "agent-sec" / "skill-ledger" / "key.pub"
+    # Step 0.2 also checks: ls /etc/agent-sec/skill-security/ledger/keys/key.pub
+    key_pub = alt_keys / "key.pub"
     assert key_pub.exists(), f"key.pub not at expected path: {key_pub}"
 
 
@@ -1164,7 +1163,7 @@ def test_key_rotation_old_sigs_verifiable(ws):
     assert r.returncode == 0, f"certify failed: {r.stderr}"
 
     # Capture the old key fingerprint from the public key file
-    pub_path = Path(env["XDG_DATA_HOME"]) / "agent-sec" / "skill-ledger" / "key.pub"
+    pub_path = Path(env["AGENT_SEC_SKILL_LEDGER_KEY_DIR"]) / "key.pub"
     old_fp = "sha256:" + hashlib.sha256(pub_path.read_bytes()).hexdigest()
 
     # check passes with original key
@@ -1176,10 +1175,9 @@ def test_key_rotation_old_sigs_verifiable(ws):
     r = run_skill_ledger(["init-keys", "--force"], env_extra=env)
     assert r.returncode == 0, f"init-keys --force failed: {r.stderr}"
     new_fp = parse_json_output(r.stdout)["fingerprint"]
-    assert new_fp != old_fp, (
-        f"Key rotation must produce a different fingerprint: "
-        f"old={old_fp}, new={new_fp}"
-    )
+    assert (
+        new_fp != old_fp
+    ), f"Key rotation must produce a different fingerprint: old={old_fp}, new={new_fp}"
     assert new_fp.startswith("sha256:"), f"Fingerprint format unexpected: {new_fp}"
 
     # --- Old manifest must still verify via keyring fallback ---
@@ -1193,7 +1191,6 @@ def test_key_rotation_old_sigs_verifiable(ws):
         f"but got status={out['status']}. Keyring archival may be broken."
     )
     # Specifically expect 'pass' since files are unchanged:
-    assert out["status"] == "pass", (
-        f"Expected 'pass' for unchanged skill after key rotation, "
-        f"got '{out['status']}'"
-    )
+    assert (
+        out["status"] == "pass"
+    ), f"Expected 'pass' for unchanged skill after key rotation, got '{out['status']}'"

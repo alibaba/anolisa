@@ -28,7 +28,7 @@ tools/sign-skill.sh --check
 # 1. 一次性初始化 — 生成 GPG 密钥并导出公钥到 trusted-keys 目录
 tools/sign-skill.sh --init
 
-# 2. 批量签名所有已部署的 skill（默认：~/.copilot-shell/skills/）
+# 2. 批量签名所有已部署的 skill（默认：/usr/share/anolisa/skills）
 tools/sign-skill.sh --batch --force
 
 # 3. 验证
@@ -36,8 +36,10 @@ agent-sec-cli verify
 ```
 
 `--init` 会自动生成专用签名密钥（`ANOLISA Local Deploy Key`），并将公钥导出到
-`~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`。
-可通过 `--trusted-keys-dir <DIR>` 覆盖导出路径。
+`agent-sec-cli verify` 使用的 `trusted-keys/` 目录。
+RPM 安装态路径为 `/etc/agent-sec/skill-security/trusted-keys/`。
+可通过 `AGENT_SEC_SKILL_SECURITY_DIR` 覆盖统一 skill-security 根目录，或通过
+`--trusted-keys-dir <DIR>` 仅覆盖导出路径。
 
 ## 手动逐步操作
 
@@ -65,7 +67,7 @@ gpg --list-secret-keys me@example.com
 
 ### 2. 导出公钥
 
-校验器从 `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/` 加载受信公钥，
+校验器在安装态从 `/etc/agent-sec/skill-security/trusted-keys/` 加载受信公钥，
 `--init` 会自动导出到此目录。手动重新导出：
 
 ```bash
@@ -82,7 +84,7 @@ tools/sign-skill.sh --export-key /custom/path/to/trusted-keys/
 
 ```bash
 gpg --armor --export me@example.com \
-    > ~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/me-example-com.asc
+    > /etc/agent-sec/skill-security/trusted-keys/me-example-com.asc
 ```
 
 ### 3. 签名 Skill
@@ -96,7 +98,7 @@ tools/sign-skill.sh /usr/share/anolisa/skills/my-skill --force
 批量签名目录下所有 skill：
 
 ```bash
-# 使用默认目录（~/.copilot-shell/skills/）
+# 使用默认目录（/usr/share/anolisa/skills）
 tools/sign-skill.sh --batch --force
 
 # 或指定自定义目录
@@ -112,7 +114,10 @@ tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 
 ### 4. 配置校验器
 
-使用 `--batch` 时，脚本会自动将 skill 目录注册到 `config.conf` 中。如果手动配置，请确保 skill 目录已配置在已部署的 `config.conf` 中（如 `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf`）：
+对已部署 skill 目录（`/usr/share/anolisa/skills`）使用 `--batch` 时，脚本会自动将
+该目录注册到 `/etc/agent-sec/skill-security/config.conf` 中。临时构建目录和自定义目录
+不会自动注册，除非显式设置 `AGENT_SEC_ASSET_VERIFY_CONFIG`。如果手动配置，请确保
+skill 目录已配置在那里：
 
 ```ini
 skills_dir = [
@@ -206,8 +211,8 @@ agent-sec-cli verify
 | **初始化** | `--init [--trusted-keys-dir DIR]` | 生成 GPG 密钥 + 导出公钥 |
 | **检查** | `--check` | 检查前置依赖（gpg、jq、sha256sum） |
 | **单个签名** | `<skill_dir> [--force]` | 签名单个 skill 目录 |
-| **批量签名** | `--batch [parent_dir] [--force]` | 签名目录下所有子目录（默认：`~/.copilot-shell/skills/`）。自动将目录注册到 `config.conf`。 |
-| **导出公钥** | `--export-key [DIR]` | 导出公钥（默认：`~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`） |
+| **批量签名** | `--batch [parent_dir] [--force]` | 签名目录下所有子目录（默认：`/usr/share/anolisa/skills`）。仅自动注册已部署目录；显式设置 `AGENT_SEC_ASSET_VERIFY_CONFIG` 时可注册自定义目录。 |
+| **导出公钥** | `--export-key [DIR]` | 导出公钥（默认：`/etc/agent-sec/skill-security/trusted-keys/`） |
 
 常用选项：
 
@@ -216,3 +221,4 @@ agent-sec-cli verify
 | `--force` | 覆盖已有的 `.skill-meta/Manifest.json` 和 `.skill-meta/.skill.sig` |
 | `--skill-name NAME` | 覆盖 Manifest 中的 skill 名称（默认：目录名） |
 | `--trusted-keys-dir DIR` | 覆盖公钥导出目录（配合 `--init` 使用） |
+| `AGENT_SEC_SKILL_SECURITY_DIR` | 覆盖签名与验签共用的 skill-security 根目录 |

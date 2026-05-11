@@ -70,6 +70,7 @@ python-source = "src"
 include = [
     "src/agent_sec_cli/asset_verify/config.conf",
     "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
+    "src/agent_sec_cli/skill_ledger/default_config.json",
     "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
     "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
 ]
@@ -159,4 +160,3 @@ explicit = true
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
-

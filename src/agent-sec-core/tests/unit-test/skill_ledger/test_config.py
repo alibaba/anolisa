@@ -18,10 +18,14 @@ from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
     _compact_skill_dirs,
     _deep_merge_config,
+    config_path,
     is_covered,
+    load_config,
     remember_skill_dir,
     resolve_skill_dirs,
+    save_config,
 )
+from agent_sec_cli.skill_ledger.paths import get_config_dir, get_key_dir
 
 
 class TestDefaultConfig(unittest.TestCase):
@@ -70,6 +74,133 @@ class TestAdditiveMerge(unittest.TestCase):
         user = {"otherList": [3]}
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["otherList"], [3])
+
+
+class TestLoadConfig(unittest.TestCase):
+    """Config loading should support the unified skill-security root."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir)
+
+    def test_skill_security_env_config_is_loaded(self):
+        root = Path(self.tmpdir) / "skill-security"
+        ledger_dir = root / "ledger"
+        ledger_dir.mkdir(parents=True)
+        (ledger_dir / "config.json").write_text(
+            json.dumps({"skillDirs": ["/opt/company-skills/*"]}),
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ, {"AGENT_SEC_SKILL_SECURITY_DIR": str(root)}, clear=True
+        ):
+            config = load_config()
+
+        self.assertIn("/usr/share/anolisa/skills/*", config["skillDirs"])
+        self.assertIn("/opt/company-skills/*", config["skillDirs"])
+
+    def test_skill_security_env_controls_config_and_default_key_dir(self):
+        root = Path(self.tmpdir) / "skill-security"
+
+        with patch.dict(
+            os.environ, {"AGENT_SEC_SKILL_SECURITY_DIR": str(root)}, clear=True
+        ):
+            self.assertEqual(get_config_dir(), root / "ledger")
+            self.assertEqual(get_key_dir(), root / "ledger" / "keys")
+
+    def test_skill_ledger_key_env_controls_key_dir(self):
+        root = Path(self.tmpdir) / "skill-security"
+        key_dir = Path(self.tmpdir) / "ledger-keys"
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_SEC_SKILL_SECURITY_DIR": str(root),
+                "AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(key_dir),
+            },
+            clear=True,
+        ):
+            self.assertEqual(get_config_dir(), root / "ledger")
+            self.assertEqual(get_key_dir(), key_dir)
+
+    def test_explicit_config_file_is_used_for_read_and_write(self):
+        custom_config = Path(self.tmpdir) / "custom-ledger.json"
+
+        with patch.dict(
+            os.environ,
+            {"AGENT_SEC_SKILL_LEDGER_CONFIG": str(custom_config)},
+            clear=True,
+        ):
+            self.assertEqual(config_path(), custom_config)
+            save_config({"skillDirs": ["/custom/skills/*"]})
+            config = load_config()
+
+        self.assertTrue(custom_config.is_file())
+        self.assertFalse((custom_config.parent / "config.json").exists())
+        self.assertIn("/custom/skills/*", config["skillDirs"])
+
+    def test_legacy_skill_ledger_paths_are_ignored(self):
+        legacy_root = Path(self.tmpdir) / "legacy"
+        legacy_config_dir = legacy_root / "agent-sec" / "skill-ledger"
+        legacy_key_dir = legacy_root / "data" / "agent-sec" / "skill-ledger"
+        legacy_config_dir.mkdir(parents=True)
+        legacy_key_dir.mkdir(parents=True)
+        (legacy_config_dir / "config.json").write_text(
+            json.dumps({"skillDirs": ["/legacy/skills/*"]}),
+            encoding="utf-8",
+        )
+
+        missing_system_config = Path(self.tmpdir) / "missing-system-config"
+        missing_system_key = Path(self.tmpdir) / "missing-system-key"
+
+        with (
+            patch.dict(
+                os.environ,
+                {},
+                clear=True,
+            ),
+            patch(
+                "agent_sec_cli.skill_ledger.paths.system_config_dir",
+                return_value=missing_system_config,
+            ),
+            patch(
+                "agent_sec_cli.skill_ledger.paths.system_key_dir",
+                return_value=missing_system_key,
+            ),
+        ):
+            self.assertEqual(get_config_dir(), missing_system_config)
+            self.assertEqual(get_key_dir(), missing_system_key)
+            config = load_config()
+
+        self.assertNotIn("/legacy/skills/*", config["skillDirs"])
+
+    def test_legacy_state_env_is_ignored(self):
+        legacy_state = Path(self.tmpdir) / "legacy-state"
+
+        with (
+            patch.dict(
+                os.environ,
+                {"AGENT_SEC_SKILL_SECURITY_STATE_DIR": str(legacy_state)},
+                clear=True,
+            ),
+            patch(
+                "agent_sec_cli.skill_ledger.paths.system_config_dir",
+                return_value=Path(self.tmpdir) / "missing-system-config",
+            ),
+            patch(
+                "agent_sec_cli.skill_ledger.paths.system_key_dir",
+                return_value=Path(self.tmpdir) / "missing-system-key",
+            ),
+        ):
+            self.assertEqual(
+                get_key_dir(),
+                Path(self.tmpdir) / "missing-system-key",
+            )
 
 
 class TestResolveSkillDirs(unittest.TestCase):
@@ -178,7 +309,9 @@ class TestRememberSkillDir(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.config_dir = Path(self.tmpdir) / "config" / "agent-sec" / "skill-ledger"
+        self.config_dir = (
+            Path(self.tmpdir) / "config" / "agent-sec" / "skill-security" / "ledger"
+        )
         self.config_dir.mkdir(parents=True)
         self.config_file = self.config_dir / "config.json"
 

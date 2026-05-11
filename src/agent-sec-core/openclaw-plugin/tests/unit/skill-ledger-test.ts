@@ -4,6 +4,9 @@
 // Run:  npx tsx tests/unit/skill-ledger-test.ts
 //       npm test
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 
 // ── Minimal test framework ──────────────────────────────────────────────────
@@ -48,7 +51,40 @@ function createMockApi() {
   return { api: api as any, hooks, logs };
 }
 
+async function exerciseKeyResolutionEnv(
+  overrides: Record<string, string | undefined>,
+): Promise<void> {
+  const originalLedgerDir = process.env.AGENT_SEC_SKILL_LEDGER_KEY_DIR;
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  const { api } = createMockApi();
+  skillLedger.register(api as any);
+  await new Promise((r) => setTimeout(r, 300));
+
+  if (originalLedgerDir === undefined) {
+    delete process.env.AGENT_SEC_SKILL_LEDGER_KEY_DIR;
+  } else {
+    process.env.AGENT_SEC_SKILL_LEDGER_KEY_DIR = originalLedgerDir;
+  }
+}
+
 // ── Setup: register capability, extract handler ─────────────────────────────
+
+const testKeyDir = join(tmpdir(), `agent-sec-openclaw-${process.pid}`);
+mkdirSync(testKeyDir, { recursive: true });
+writeFileSync(join(testKeyDir, "key.pub"), "test-public-key");
+writeFileSync(join(testKeyDir, "key.enc"), "test-private-key");
+await exerciseKeyResolutionEnv({
+  AGENT_SEC_SKILL_LEDGER_KEY_DIR: testKeyDir,
+});
+process.env.AGENT_SEC_SKILL_LEDGER_KEY_DIR = testKeyDir;
 
 const { api, hooks, logs } = createMockApi();
 skillLedger.register(api);

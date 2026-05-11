@@ -29,19 +29,23 @@ REPO_ROOT = Path(__file__).resolve().parents[3]  # agent-sec-core/
 SIGN_SKILL_SH = REPO_ROOT / "tools" / "sign-skill.sh"
 VERIFIER_DIR = REPO_ROOT / "agent-sec-cli" / "src" / "agent_sec_cli" / "asset_verify"
 VERIFIER_PY = VERIFIER_DIR / "verifier.py"
+AGENT_SEC_CLI_SRC = REPO_ROOT / "agent-sec-cli" / "src"
 
 SIGNING_DIR = ".skill-meta"
 
-# Make verifier importable
-sys.path.insert(0, str(VERIFIER_DIR))
+# Make agent_sec_cli importable from source.
+sys.path.insert(0, str(AGENT_SEC_CLI_SRC))
 
-from errors import (  # noqa: E402
+from agent_sec_cli.asset_verify.errors import (  # noqa: E402
     ErrHashMismatch,
     ErrSigInvalid,
     ErrSigMissing,
     ErrUnexpectedFile,
 )
-from verifier import load_trusted_keys, verify_skill  # noqa: E402
+from agent_sec_cli.asset_verify.verifier import (  # noqa: E402
+    load_trusted_keys,
+    verify_skill,
+)
 
 # ── Colours ────────────────────────────────────────────────────────────────
 

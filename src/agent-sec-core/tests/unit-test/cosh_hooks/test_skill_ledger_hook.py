@@ -236,16 +236,16 @@ def mock_cli_env(tmp_path):
     _create_skill_dir(str(project), "test-skill")
 
     # Create fake key files so _ensure_keys() is a no-op
-    data_dir = tmp_path / "xdg-data" / "agent-sec" / "skill-ledger"
-    data_dir.mkdir(parents=True)
-    (data_dir / "key.pub").write_text("fake-pub")
-    (data_dir / "key.enc").write_text("fake-enc")
+    key_dir = tmp_path / "skill-ledger-keys"
+    key_dir.mkdir(parents=True)
+    (key_dir / "key.pub").write_text("fake-pub")
+    (key_dir / "key.enc").write_text("fake-enc")
 
     def _make_env(check_output, *, rc=0):
         """Build env override dict for a given canned CLI response."""
         return {
             "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-            "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+            "AGENT_SEC_SKILL_LEDGER_KEY_DIR": str(key_dir),
             "_MOCK_CHECK_OUTPUT": check_output,
             "_MOCK_CHECK_RC": str(rc),
         }

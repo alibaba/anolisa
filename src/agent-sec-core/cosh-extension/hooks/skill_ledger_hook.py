@@ -54,6 +54,7 @@ from pathlib import Path
 _TOOL_NAME = "skill"
 _CHECK_TIMEOUT = 5  # seconds for the CLI check call
 _INIT_TIMEOUT = 3  # seconds for key initialization
+_SYSTEM_KEY_DIR = Path("/etc/agent-sec/skill-security/ledger/keys")
 
 # Warning messages per status (design doc §4)
 _WARNING_MESSAGES = {
@@ -115,13 +116,19 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
     return None, traversal_detected
 
 
+def _key_dir() -> Path:
+    """Return the skill-ledger key directory used for key discovery."""
+    ledger_dir = os.environ.get("AGENT_SEC_SKILL_LEDGER_KEY_DIR", "")
+    if ledger_dir:
+        return Path(ledger_dir).expanduser()
+
+    return _SYSTEM_KEY_DIR
+
+
 def _keys_exist() -> bool:
     """Return True if both key.pub and key.enc exist."""
-    xdg_data = os.environ.get("XDG_DATA_HOME", "")
-    if not xdg_data:
-        xdg_data = str(Path.home() / ".local" / "share")
-    data_dir = Path(xdg_data) / "agent-sec" / "skill-ledger"
-    return (data_dir / "key.pub").is_file() and (data_dir / "key.enc").is_file()
+    key_dir = _key_dir()
+    return (key_dir / "key.pub").is_file() and (key_dir / "key.enc").is_file()
 
 
 def _ensure_keys() -> None:

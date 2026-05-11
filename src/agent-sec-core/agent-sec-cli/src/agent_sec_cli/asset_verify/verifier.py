@@ -25,16 +25,59 @@ from agent_sec_cli.asset_verify.errors import (
     ErrSigMissing,
     ErrUnexpectedFile,
 )
+from agent_sec_cli.skill_security.paths import config_root
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-DEFAULT_CONFIG = SCRIPT_DIR / "config.conf"
-DEFAULT_TRUSTED_KEYS_DIR = SCRIPT_DIR / "trusted-keys"
+ENV_ASSET_VERIFY_CONFIG = "AGENT_SEC_ASSET_VERIFY_CONFIG"
+ENV_TRUSTED_KEYS_DIR = "AGENT_SEC_ASSET_VERIFY_TRUSTED_KEYS_DIR"
 
 # Check if system gpg is available (prefer 'gpg', fall back to 'gpg2' on RHEL/Alinux)
 GPG_BIN = shutil.which("gpg") or shutil.which("gpg2")
 
 # Hidden directory inside each skill that holds signing artifacts
 SIGNING_DIR = ".skill-meta"
+
+
+def _expand_path(path: str) -> Path:
+    return Path(path).expanduser()
+
+
+def _skill_security_config_path() -> Path:
+    return config_root() / "config.conf"
+
+
+def _skill_security_trusted_keys_dir() -> Path:
+    return config_root() / "trusted-keys"
+
+
+def resolve_config_path() -> Path:
+    """Resolve the verifier config path.
+
+    Precedence:
+    1. ``AGENT_SEC_ASSET_VERIFY_CONFIG`` explicit file override
+    2. ``/etc/agent-sec/skill-security/config.conf``
+    """
+    explicit_config = os.environ.get(ENV_ASSET_VERIFY_CONFIG)
+    if explicit_config:
+        return _expand_path(explicit_config)
+
+    return _skill_security_config_path()
+
+
+def resolve_trusted_keys_dir(
+    config: dict[str, list[str] | str] | None = None,
+    config_path: Path | None = None,
+) -> Path:
+    """Resolve the directory containing trusted public keys."""
+    explicit_keys = os.environ.get(ENV_TRUSTED_KEYS_DIR)
+    if explicit_keys:
+        return _expand_path(explicit_keys)
+
+    if config:
+        trusted_keys_dir = config.get("trusted_keys_dir")
+        if isinstance(trusted_keys_dir, str) and trusted_keys_dir:
+            return _expand_path(trusted_keys_dir)
+
+    return _skill_security_trusted_keys_dir()
 
 
 def load_config(config_path: Path) -> dict[str, list[str] | str]:
@@ -55,7 +98,7 @@ def load_config(config_path: Path) -> dict[str, list[str] | str]:
                 if line == "]":
                     in_list = False
                 else:
-                    config["skills_dirs"].append(line.rstrip(","))
+                    config["skills_dirs"].append(line.rstrip(",").strip("\"'"))
             elif "=" in line:
                 key, val = line.split("=", 1)
                 key, val = key.strip(), val.strip()
@@ -63,9 +106,9 @@ def load_config(config_path: Path) -> dict[str, list[str] | str]:
                     if val == "[":
                         in_list = True
                     else:
-                        config["skills_dirs"].append(val)
+                        config["skills_dirs"].append(val.strip("\"'"))
                 elif key == "trusted_keys_dir":
-                    config["trusted_keys_dir"] = val
+                    config["trusted_keys_dir"] = val.strip("\"'")
     return config
 
 
@@ -302,7 +345,10 @@ def run_verification(skill: str | None = None) -> dict[str, list]:
     Returns:
         dict with ``passed`` (list[str]) and ``failed`` (list[dict]) keys.
     """
-    trusted_keys = load_trusted_keys(DEFAULT_TRUSTED_KEYS_DIR)
+    config_path = resolve_config_path()
+    config = load_config(config_path)
+    trusted_keys_dir = resolve_trusted_keys_dir(config, config_path)
+    trusted_keys = load_trusted_keys(trusted_keys_dir)
 
     if skill is not None:
         try:
@@ -314,7 +360,6 @@ def run_verification(skill: str | None = None) -> dict[str, list]:
                 "failed": [{"name": os.path.basename(skill), "error": str(e)}],
             }
 
-    config = load_config(DEFAULT_CONFIG)
     all_passed: list[str] = []
     all_failed: list[dict] = []
 

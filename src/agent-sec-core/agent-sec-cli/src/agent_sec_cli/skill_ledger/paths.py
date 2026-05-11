@@ -1,40 +1,80 @@
-"""XDG Base Directory resolution for skill-ledger.
+"""Path resolution for skill-ledger configuration and key material.
 
-Provides ``get_data_dir()`` and ``get_config_dir()`` so that every module can
+Provides ``get_key_dir()`` and ``get_config_dir()`` so that every module can
 resolve paths without pulling in unrelated dependencies.
 
-All skill-ledger paths live under the ``agent-sec`` vendor namespace so that
-every agent-sec-core sub-module shares a common top-level directory
-(e.g. ``~/.local/share/agent-sec/skill-ledger/``).
+The skill-ledger uses the shared skill-security namespace:
+``/etc/agent-sec/skill-security/ledger/`` for configuration and
+``/etc/agent-sec/skill-security/ledger/keys/`` for signing keys and key history.
 
-Testing strategy: set ``XDG_DATA_HOME`` / ``XDG_CONFIG_HOME`` env vars to a
-``tempfile.mkdtemp()`` directory — all key and config I/O is automatically
-redirected.
+Tests and development runs may redirect those paths with explicit
+``AGENT_SEC_*`` environment overrides.
 """
 
 import os
 from pathlib import Path
 
-_APP_NAME = Path("agent-sec") / "skill-ledger"
+from agent_sec_cli.skill_security.paths import config_root
+
+_CONFIG_FILENAME = "config.json"
+
+ENV_LEDGER_CONFIG = "AGENT_SEC_SKILL_LEDGER_CONFIG"
+ENV_LEDGER_CONFIG_DIR = "AGENT_SEC_SKILL_LEDGER_CONFIG_DIR"
+ENV_LEDGER_KEY_DIR = "AGENT_SEC_SKILL_LEDGER_KEY_DIR"
 
 
-def get_data_dir() -> Path:
-    """Return the skill-ledger data directory (XDG_DATA_HOME).
+def _expand(path: str) -> Path:
+    return Path(path).expanduser()
 
-    Default: ``~/.local/share/agent-sec/skill-ledger/``
+
+def system_config_dir() -> Path:
+    """Return the system skill-ledger config directory."""
+    return config_root() / "ledger"
+
+
+def system_key_dir() -> Path:
+    """Return the system skill-ledger key directory."""
+    return system_config_dir() / "keys"
+
+
+def get_key_dir() -> Path:
+    """Return the skill-ledger key directory.
+
+    System installs use ``/etc/agent-sec/skill-security/ledger/keys/`` unless
+    an explicit skill-ledger key directory override is provided.
     """
-    base = os.environ.get("XDG_DATA_HOME", "")
-    if not base:
-        base = str(Path.home() / ".local" / "share")
-    return Path(base) / _APP_NAME
+    explicit = os.environ.get(ENV_LEDGER_KEY_DIR)
+    if explicit:
+        return _expand(explicit)
+
+    return system_key_dir()
 
 
 def get_config_dir() -> Path:
-    """Return the skill-ledger config directory (XDG_CONFIG_HOME).
+    """Return the preferred skill-ledger config directory.
 
-    Default: ``~/.config/agent-sec/skill-ledger/``
+    System installs use ``/etc/agent-sec/skill-security/ledger/`` unless an
+    explicit skill-ledger or skill-security config override is provided.
     """
-    base = os.environ.get("XDG_CONFIG_HOME", "")
-    if not base:
-        base = str(Path.home() / ".config")
-    return Path(base) / _APP_NAME
+    explicit_file = os.environ.get(ENV_LEDGER_CONFIG)
+    if explicit_file:
+        return _expand(explicit_file).parent
+
+    explicit_dir = os.environ.get(ENV_LEDGER_CONFIG_DIR)
+    if explicit_dir:
+        return _expand(explicit_dir)
+
+    return system_config_dir()
+
+
+def config_search_paths() -> list[Path]:
+    """Return config files in merge order."""
+    explicit_file = os.environ.get(ENV_LEDGER_CONFIG)
+    if explicit_file:
+        return [_expand(explicit_file)]
+
+    explicit_dir = os.environ.get(ENV_LEDGER_CONFIG_DIR)
+    if explicit_dir:
+        return [_expand(explicit_dir) / _CONFIG_FILENAME]
+
+    return [system_config_dir() / _CONFIG_FILENAME]

@@ -26,6 +26,13 @@
 #                      automatically before signing. Typically provided in CI/CD
 #                      environments where the keyring is not pre-configured.
 #   GPG_PASSPHRASE   - Passphrase for the GPG key (optional).
+#   AGENT_SEC_SKILL_SECURITY_DIR
+#                    - Skill-security config root.
+#                      Default: /etc/agent-sec/skill-security
+#   AGENT_SEC_ASSET_VERIFY_CONFIG
+#                    - Explicit asset-verify config.conf path.
+#   AGENT_SEC_ASSET_VERIFY_TRUSTED_KEYS_DIR
+#                    - Explicit trusted public keys directory.
 #
 # Full guide: tools/SIGNING_GUIDE.md | tools/SIGNING_GUIDE_CN.md
 #
@@ -52,16 +59,19 @@ SIGN_KEY_NAME="ANOLISA Local Deploy Key"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Default path for deployed skills
-DEFAULT_SKILLS_DIR="$HOME/.copilot-shell/skills"
+# Default path for deployed agent-sec-core skills
+DEFAULT_SKILLS_DIR="/usr/share/anolisa/skills"
 
-# Default path for trusted public keys (verifier reads from here)
-DEFAULT_TRUSTED_KEYS_DIR="$HOME/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys"
+# Shared skill-security config root for asset-verify and skill-ledger.
+SKILL_SECURITY_DIR="${AGENT_SEC_SKILL_SECURITY_DIR:-/etc/agent-sec/skill-security}"
 
-# Path to the deployed verifier config (inside agent-sec-core skill).
-# Batch mode auto-registers the signed directory here so that the verifier
-# picks it up without manual config.conf editing.
-DEPLOY_CONFIG_CONF="$HOME/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf"
+# Default path for trusted public keys (verifier reads from here).
+DEFAULT_TRUSTED_KEYS_DIR="${AGENT_SEC_ASSET_VERIFY_TRUSTED_KEYS_DIR:-$SKILL_SECURITY_DIR/trusted-keys}"
+
+# Path to the deployed verifier config.
+# Batch mode auto-registers deployed skills here so that the verifier picks
+# them up without manual config.conf editing.
+DEPLOY_CONFIG_CONF="${AGENT_SEC_ASSET_VERIFY_CONFIG:-$SKILL_SECURITY_DIR/config.conf}"
 
 # Resolve gpg binary: prefer 'gpg', fall back to 'gpg2' (RHEL/Alinux minimal)
 if command -v gpg &>/dev/null; then
@@ -175,16 +185,32 @@ sign_manifest() {
     return 0
 }
 
-# Ensure a skills directory is registered in the deployed config.conf.
-# This must be called BEFORE signing agent-sec-core, because config.conf
-# is part of that skill and will be included in its manifest hash.
+# Ensure a skills directory is registered in the deployed verifier config.conf.
+# This must be called before batch signing so a later verification run uses
+# the same skill root that was just signed.
 ensure_config_dir_entry() {
     local dir_to_add="$1"
     local config_file="$DEPLOY_CONFIG_CONF"
 
     if [[ ! -f "$config_file" ]]; then
-        echo -e "${YELLOW}NOTE: config.conf not found at $config_file — skipping auto-register${NC}"
-        return 0
+        local config_dir
+        config_dir=$(dirname "$config_file")
+        if mkdir -p "$config_dir" 2>/dev/null; then
+            cat > "$config_file" <<EOF
+# Skill Security Config
+# Trusted keys default to the sibling trusted-keys/ directory.
+# trusted_keys_dir = $SKILL_SECURITY_DIR/trusted-keys
+
+# Skills directories to verify (one per line)
+skills_dir = [
+]
+EOF
+            chmod 0644 "$config_file" 2>/dev/null || true
+            echo -e "${GREEN}Created verifier config: $config_file${NC}"
+        else
+            echo -e "${YELLOW}NOTE: config.conf not found at $config_file — skipping auto-register${NC}"
+            return 0
+        fi
     fi
 
     # Already registered?  Use awk to check only inside the skills_dir
@@ -230,6 +256,20 @@ ensure_config_dir_entry() {
     fi
 }
 
+should_auto_register_batch_dir() {
+    local batch_dir="$1"
+
+    # An explicitly selected verifier config means the caller wants this
+    # signing run reflected in that config, even for a custom skills root.
+    if [[ -n "${AGENT_SEC_ASSET_VERIFY_CONFIG:-}" ]]; then
+        return 0
+    fi
+
+    local default_dir
+    default_dir=$(cd "$DEFAULT_SKILLS_DIR" 2>/dev/null && pwd) || default_dir="$DEFAULT_SKILLS_DIR"
+    [[ "$batch_dir" == "$default_dir" ]]
+}
+
 # Function to show usage
 show_usage() {
     echo -e "${BOLD}Skill Manifest and Signature Generator${NC}"
@@ -260,11 +300,15 @@ show_usage() {
     echo "Quick Start (self-deployment):"
     echo "  $0 --init"
     echo "  $0 --batch --force"
-    echo "  python3 /path/to/verifier.py"
+    echo "  agent-sec-cli verify"
     echo ""
     echo "Environment Variables:"
-    echo "  GPG_PRIVATE_KEY   ASCII-armored GPG private key (for CI/CD auto-import)"
-    echo "  GPG_PASSPHRASE    Passphrase for the GPG key (optional)"
+    echo "  GPG_PRIVATE_KEY                         ASCII-armored GPG private key"
+    echo "  GPG_PASSPHRASE                          Passphrase for the GPG key (optional)"
+    echo "  AGENT_SEC_SKILL_SECURITY_DIR            Skill-security config root"
+    echo "                                          (default: /etc/agent-sec/skill-security)"
+    echo "  AGENT_SEC_ASSET_VERIFY_CONFIG           Explicit verifier config.conf path"
+    echo "  AGENT_SEC_ASSET_VERIFY_TRUSTED_KEYS_DIR Explicit trusted keys directory"
     echo ""
     echo "Full guide: ${SCRIPT_DIR}/SIGNING_GUIDE.md"
 }
@@ -625,10 +669,14 @@ main() {
             exit 1
         fi
 
-        # Register the skills directory in config.conf BEFORE signing.
-        # config.conf is part of the agent-sec-core skill, so it must be
-        # updated first to ensure its manifest hash is correct.
-        ensure_config_dir_entry "$batch_dir"
+        # Register the deployed skills directory in the verifier config BEFORE
+        # signing. Temporary package/build trees are intentionally not written
+        # into config.conf; the installed package ships the deployed path.
+        if should_auto_register_batch_dir "$batch_dir"; then
+            ensure_config_dir_entry "$batch_dir"
+        else
+            echo "Skipping config.conf auto-register for non-deployed batch directory: $batch_dir"
+        fi
 
         echo "Batch signing skills under: $batch_dir"
         echo ""

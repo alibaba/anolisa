@@ -73,6 +73,14 @@ Built with maturin as a Rust native Python extension.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 /opt/agent-sec/lib/python3.11/site-packages/*
+%dir /etc/agent-sec
+%dir /etc/agent-sec/skill-security
+%dir /etc/agent-sec/skill-security/trusted-keys
+%dir /etc/agent-sec/skill-security/ledger
+%dir /etc/agent-sec/skill-security/ledger/keys
+%config(noreplace) /etc/agent-sec/skill-security/config.conf
+%config(noreplace) /etc/agent-sec/skill-security/trusted-keys/*.asc
+%config(noreplace) /etc/agent-sec/skill-security/ledger/config.json
 %license LICENSE
 
 # =============================================================================

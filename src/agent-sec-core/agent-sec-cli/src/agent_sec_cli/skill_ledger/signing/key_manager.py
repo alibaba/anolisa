@@ -1,4 +1,4 @@
-"""Key file I/O, XDG path resolution, and passphrase management."""
+"""Key file I/O, path resolution, and passphrase management."""
 
 import getpass
 import hashlib
@@ -9,26 +9,26 @@ from agent_sec_cli.skill_ledger.errors import (
     KeyAlreadyExistsError,
     KeyNotFoundError,
 )
-from agent_sec_cli.skill_ledger.paths import get_data_dir
+from agent_sec_cli.skill_ledger.paths import get_key_dir
 
 # ---------------------------------------------------------------------------
-# Key file paths (data dir resolved via paths.get_data_dir)
+# Key file paths (key dir resolved via paths.get_key_dir)
 # ---------------------------------------------------------------------------
 
 
 def key_enc_path() -> Path:
     """Path to the encrypted private key file."""
-    return get_data_dir() / "key.enc"
+    return get_key_dir() / "key.enc"
 
 
 def key_pub_path() -> Path:
     """Path to the public key file."""
-    return get_data_dir() / "key.pub"
+    return get_key_dir() / "key.pub"
 
 
 def keyring_dir() -> Path:
     """Path to the trusted public key ring directory."""
-    return get_data_dir() / "keyring"
+    return get_key_dir() / "keyring"
 
 
 # ---------------------------------------------------------------------------

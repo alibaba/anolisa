@@ -165,6 +165,7 @@ OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
 WHEEL_DIR          ?= /opt/agent-sec/wheels
 CLI_STAGED_SITE    ?= _staged/site-packages
 CLI_PRIVATE_SITE   ?= /opt/agent-sec/lib/python3.11/site-packages
+SKILL_SECURITY_DIR ?= /etc/agent-sec/skill-security
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -195,6 +196,19 @@ install-cli-site: ## Copy staged agent-sec-cli + deps to private site-packages +
 	install -d -m 0755 $(DESTDIR)/usr/bin
 	install -p -m 0755 scripts/agent-sec-cli-wrapper.sh $(DESTDIR)/usr/bin/agent-sec-cli
 
+.PHONY: install-skill-security-config
+install-skill-security-config: ## Install shared skill-security config and trusted keys
+	install -d -m 0755 $(DESTDIR)$(SKILL_SECURITY_DIR)
+	install -d -m 0755 $(DESTDIR)$(SKILL_SECURITY_DIR)/trusted-keys
+	install -d -m 0755 $(DESTDIR)$(SKILL_SECURITY_DIR)/ledger
+	install -d -m 0755 $(DESTDIR)$(SKILL_SECURITY_DIR)/ledger/keys
+	install -p -m 0644 agent-sec-cli/src/agent_sec_cli/asset_verify/config.conf $(DESTDIR)$(SKILL_SECURITY_DIR)/config.conf
+	install -p -m 0644 agent-sec-cli/src/agent_sec_cli/skill_ledger/default_config.json $(DESTDIR)$(SKILL_SECURITY_DIR)/ledger/config.json
+	if [ -d agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys ]; then \
+		find agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys -maxdepth 1 -type f -name '*.asc' \
+			-exec install -p -m 0644 {} $(DESTDIR)$(SKILL_SECURITY_DIR)/trusted-keys/ \; ; \
+	fi
+
 .PHONY: install-skills
 install-skills: ## Install skill files to SKILL_DIR
 	install -d -m 0755 $(DESTDIR)$(SKILL_DIR)
@@ -221,10 +235,10 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + code_scanner_hook)
 	cp -rp cosh-extension $(DESTDIR)/usr/share/anolisa/extensions/agent-sec-core
 
 .PHONY: install-all
-install-all: install-cli install-cosh-hook install-openclaw-plugin install-skills ## Install all components (local dev)
+install-all: install-cli install-skill-security-config install-cosh-hook install-openclaw-plugin install-skills ## Install all components (local dev)
 
 .PHONY: install-all-for-rpmbuild
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-skills ## Install all components (used by rpmbuild)
+install-all-for-rpmbuild: install-cli-site install-skill-security-config install-cosh-hook install-openclaw-plugin install-skills ## Install all components (used by rpmbuild)
 
 .PHONY: help
 help: ## Show this help message

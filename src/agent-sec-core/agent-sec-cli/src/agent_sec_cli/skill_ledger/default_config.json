@@ -1,0 +1,21 @@
+{
+  "signingBackend": "ed25519",
+  "skillDirs": [
+    "~/.openclaw/skills/*",
+    "~/.copilot-shell/skills/*",
+    "/usr/share/anolisa/skills/*"
+  ],
+  "scanners": [
+    {
+      "name": "skill-vetter",
+      "type": "skill",
+      "parser": "findings-array",
+      "description": "LLM-driven 4-phase skill audit"
+    }
+  ],
+  "parsers": {
+    "findings-array": {
+      "type": "findings-array"
+    }
+  }
+}

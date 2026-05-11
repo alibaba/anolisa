@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 # Add agent-sec-cli/src to path so the full package is importable
 sys.path.insert(
@@ -31,6 +33,9 @@ from agent_sec_cli.asset_verify.verifier import (
     compute_file_hash,
     load_config,
     load_trusted_keys,
+    resolve_config_path,
+    resolve_trusted_keys_dir,
+    run_verification,
     verify_manifest_hashes,
     verify_skill,
     verify_skills_dir,
@@ -190,14 +195,10 @@ class TestLoadConfig(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_missing_config(self):
-        from pathlib import Path
-
         with self.assertRaises(ErrConfigMissing):
             load_config(Path("/nonexistent/config.conf"))
 
     def test_single_skills_dir(self):
-        from pathlib import Path
-
         config_path = os.path.join(self.tmpdir, "config.conf")
         with open(config_path, "w") as f:
             f.write("skills_dir = /opt/skills\n")
@@ -206,8 +207,6 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config["skills_dirs"], ["/opt/skills"])
 
     def test_list_skills_dir(self):
-        from pathlib import Path
-
         config_path = os.path.join(self.tmpdir, "config.conf")
         with open(config_path, "w") as f:
             f.write("skills_dir = [\n")
@@ -217,6 +216,107 @@ class TestLoadConfig(unittest.TestCase):
 
         config = load_config(Path(config_path))
         self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
+
+    def test_trusted_keys_dir_config(self):
+        config_path = os.path.join(self.tmpdir, "config.conf")
+        with open(config_path, "w") as f:
+            f.write("trusted_keys_dir = /etc/agent-sec/skill-security/trusted-keys\n")
+            f.write("skills_dir = /opt/skills\n")
+
+        config = load_config(Path(config_path))
+        self.assertEqual(
+            config["trusted_keys_dir"],
+            "/etc/agent-sec/skill-security/trusted-keys",
+        )
+
+
+class TestPathResolution(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_skill_security_env_resolves_config_and_keys(self):
+        root = Path(self.tmpdir) / "skill-security"
+        root.mkdir()
+        (root / "config.conf").write_text("skills_dir = /opt/skills\n")
+
+        with patch.dict(
+            os.environ, {"AGENT_SEC_SKILL_SECURITY_DIR": str(root)}, clear=True
+        ):
+            config_path = resolve_config_path()
+            config = load_config(config_path)
+
+            self.assertEqual(config_path, root / "config.conf")
+            self.assertEqual(
+                resolve_trusted_keys_dir(config, config_path),
+                root / "trusted-keys",
+            )
+
+    def test_default_config_path_is_system_skill_security(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                resolve_config_path(),
+                Path("/etc/agent-sec/skill-security/config.conf"),
+            )
+
+    def test_legacy_asset_verify_dir_env_is_ignored(self):
+        legacy_dir = Path(self.tmpdir) / "legacy-asset-verify"
+
+        with patch.dict(
+            os.environ,
+            {"AGENT_SEC_ASSET_VERIFY_DIR": str(legacy_dir)},
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_config_path(),
+                Path("/etc/agent-sec/skill-security/config.conf"),
+            )
+            self.assertEqual(
+                resolve_trusted_keys_dir({}, None),
+                Path("/etc/agent-sec/skill-security/trusted-keys"),
+            )
+
+    def test_explicit_asset_verify_env_overrides(self):
+        config_file = Path(self.tmpdir) / "config.conf"
+        key_dir = Path(self.tmpdir) / "trusted-keys"
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_SEC_ASSET_VERIFY_CONFIG": str(config_file),
+                "AGENT_SEC_ASSET_VERIFY_TRUSTED_KEYS_DIR": str(key_dir),
+            },
+            clear=True,
+        ):
+            self.assertEqual(resolve_config_path(), config_file)
+            self.assertEqual(resolve_trusted_keys_dir({}, config_file), key_dir)
+
+    def test_config_trusted_keys_dir_overrides_sibling_default(self):
+        root = Path(self.tmpdir) / "skill-security"
+        root.mkdir()
+        key_dir = Path(self.tmpdir) / "custom-keys"
+        config = {"skills_dirs": ["/opt/skills"], "trusted_keys_dir": str(key_dir)}
+
+        with patch.dict(
+            os.environ, {"AGENT_SEC_SKILL_SECURITY_DIR": str(root)}, clear=True
+        ):
+            self.assertEqual(
+                resolve_trusted_keys_dir(config, root / "config.conf"),
+                key_dir,
+            )
+
+    def test_single_skill_verify_requires_config_file(self):
+        missing_config = Path(self.tmpdir) / "missing.conf"
+
+        with patch.dict(
+            os.environ,
+            {"AGENT_SEC_ASSET_VERIFY_CONFIG": str(missing_config)},
+            clear=True,
+        ):
+            with self.assertRaises(ErrConfigMissing):
+                run_verification(skill="/opt/skills/one")
 
 
 class TestLoadTrustedKeys(unittest.TestCase):

@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
-import { homedir } from "node:os";
 import type { SecurityCapability } from "../types.js";
 import { callAgentSecCli } from "../utils.js";
 
@@ -26,6 +25,7 @@ type CheckResult = {
 const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
+const SYSTEM_KEY_DIR = "/etc/agent-sec/skill-security/ledger/keys";
 
 // ---------------------------------------------------------------------------
 // Warning messages — per-status, design doc §4
@@ -40,17 +40,22 @@ const WARNING_MESSAGES: Record<string, (name: string) => string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Key path resolution (mirrors Python's XDG_DATA_HOME / agent-sec/skill-ledger)
+// Key path resolution (mirrors Python's skill-ledger key directory)
 // ---------------------------------------------------------------------------
 
+function getKeyDir(): string {
+  const ledgerDir = process.env.AGENT_SEC_SKILL_LEDGER_KEY_DIR;
+  if (ledgerDir) return resolve(ledgerDir);
+
+  return SYSTEM_KEY_DIR;
+}
+
 function getKeyPubPath(): string {
-  const xdgData = process.env.XDG_DATA_HOME || resolve(homedir(), ".local", "share");
-  return resolve(xdgData, "agent-sec", "skill-ledger", "key.pub");
+  return resolve(getKeyDir(), "key.pub");
 }
 
 function getKeyEncPath(): string {
-  const xdgData = process.env.XDG_DATA_HOME || resolve(homedir(), ".local", "share");
-  return resolve(xdgData, "agent-sec", "skill-ledger", "key.enc");
+  return resolve(getKeyDir(), "key.enc");
 }
 
 /** Return true only if both key.pub and key.enc exist (mirrors Python key_manager.keys_exist). */

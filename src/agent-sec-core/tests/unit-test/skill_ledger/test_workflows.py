@@ -117,8 +117,10 @@ class SkillDirTestCase(unittest.TestCase):
         """Point config to a temp config dir so tests don't touch real user config."""
         config_dir = os.path.join(self.tmpdir, "config")
         os.makedirs(config_dir, exist_ok=True)
-        os.environ["XDG_CONFIG_HOME"] = self.tmpdir
-        self.addCleanup(lambda: os.environ.pop("XDG_CONFIG_HOME", None))
+        os.environ["AGENT_SEC_SKILL_LEDGER_CONFIG_DIR"] = config_dir
+        self.addCleanup(
+            lambda: os.environ.pop("AGENT_SEC_SKILL_LEDGER_CONFIG_DIR", None)
+        )
 
 
 # ---------------------------------------------------------------------------

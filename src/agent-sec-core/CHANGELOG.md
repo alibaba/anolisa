@@ -14,7 +14,7 @@
 **Skill Ledger**
 
 - Fixed sign-skill auto-register config (exact awk match) and parse openclaw stdout unconditionally. (#445)
-- Unified XDG paths under `agent-sec/skill-ledger` vendor namespace. (#445)
+- Unified skill-security config, trusted keys, and ledger signing keys under `/etc/agent-sec/skill-security`. (#486)
 - Unified single-skill verify into structured result for consistent output. (#445)
 - Converted integration tests from subprocess to Typer CliRunner. (#445)
 
