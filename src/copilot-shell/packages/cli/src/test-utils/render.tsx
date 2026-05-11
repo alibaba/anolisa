@@ -28,17 +28,22 @@ export const renderWithProviders = (
     shellFocus = true,
     settings = mockSettings,
     config = undefined,
+    pasteWorkaround = false,
   }: {
     shellFocus?: boolean;
     settings?: LoadedSettings;
     config?: Config;
+    pasteWorkaround?: boolean;
   } = {},
 ): ReturnType<typeof render> =>
   render(
     <SettingsContext.Provider value={settings}>
       <ConfigContext.Provider value={config}>
         <ShellFocusContext.Provider value={shellFocus}>
-          <KeypressProvider kittyProtocolEnabled={true}>
+          <KeypressProvider
+            kittyProtocolEnabled={true}
+            pasteWorkaround={pasteWorkaround}
+          >
             {component}
           </KeypressProvider>
         </ShellFocusContext.Provider>
