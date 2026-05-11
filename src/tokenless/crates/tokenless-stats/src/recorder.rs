@@ -141,30 +141,31 @@ impl StatsRecorder {
             ))
         })?;
 
-        let sql = match limit {
-            Some(n) => format!(
-                "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
+        const SELECT_COLS: &str =
+            "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                         before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text, before_output, after_output
-                 FROM stats ORDER BY timestamp DESC LIMIT {}",
-                n
-            ),
-            None => String::from(
-                "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
-                        before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text, before_output, after_output
-                 FROM stats ORDER BY timestamp DESC",
-            ),
+                        before_text, after_text, before_output, after_output";
+
+        let records = match limit {
+            Some(n) => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
+                    SELECT_COLS
+                ))?;
+                let rows = stmt.query_map([n as i64], Self::row_to_record)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            None => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {} FROM stats ORDER BY timestamp DESC",
+                    SELECT_COLS
+                ))?;
+                let rows = stmt.query_map([], Self::row_to_record)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
         };
 
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], Self::row_to_record)?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok(result)
+        Ok(records)
     }
 
     /// Get a single record by database ID

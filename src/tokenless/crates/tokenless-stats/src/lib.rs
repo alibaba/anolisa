@@ -16,7 +16,7 @@ pub use recorder::{StatsError, StatsRecorder, StatsResult, StatsSummary};
 
 pub use query::{format_list, format_show, format_summary};
 
-pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_chars};
+pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 
 pub use config::TokenlessConfig;
 

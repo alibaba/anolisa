@@ -63,11 +63,11 @@ pub struct StatsRecord {
     pub session_id: Option<String>,
     /// Tool use ID for correlation with specific tool calls
     pub tool_use_id: Option<String>,
-    /// Characters before compression
+    /// Byte length before compression (equals char count for ASCII)
     pub before_chars: usize,
     /// Tokens before compression (estimated)
     pub before_tokens: usize,
-    /// Characters after compression
+    /// Byte length after compression (equals char count for ASCII)
     pub after_chars: usize,
     /// Tokens after compression (estimated)
     pub after_tokens: usize,

@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::process;
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
-use tokenless_stats::estimate_tokens_from_chars;
+use tokenless_stats::estimate_tokens_from_bytes;
 use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, TokenlessConfig};
 use tokenless_stats::{format_list, format_show, format_summary};
 
@@ -141,13 +141,15 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
     }
 }
 
+pub fn get_home_dir() -> String {
+    dirs::home_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+}
+
 fn get_db_path() -> String {
-    std::env::var("TOKENLESS_STATS_DB").unwrap_or_else(|_| {
-        format!(
-            "{}/.tokenless/stats.db",
-            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        )
-    })
+    std::env::var("TOKENLESS_STATS_DB")
+        .unwrap_or_else(|_| format!("{}/.tokenless/stats.db", get_home_dir()))
 }
 
 fn ensure_db_dir() -> Result<(), (String, i32)> {
@@ -203,8 +205,8 @@ fn run() -> Result<(), (String, i32)> {
             .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
-            let before_tokens = estimate_tokens_from_chars(input.len());
-            let after_tokens = estimate_tokens_from_chars(after_compact.len());
+            let before_tokens = estimate_tokens_from_bytes(input.len());
+            let after_tokens = estimate_tokens_from_bytes(after_compact.len());
             let output_text = if after_tokens >= before_tokens {
                 input.clone()
             } else {
@@ -243,8 +245,8 @@ fn run() -> Result<(), (String, i32)> {
             .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
-            let before_tokens = estimate_tokens_from_chars(input.len());
-            let after_tokens = estimate_tokens_from_chars(after_compact.len());
+            let before_tokens = estimate_tokens_from_bytes(input.len());
+            let after_tokens = estimate_tokens_from_bytes(after_compact.len());
             let output_text = if after_tokens >= before_tokens {
                 input.clone()
             } else {
@@ -382,8 +384,8 @@ fn run() -> Result<(), (String, i32)> {
             let output = output.trim_end();
 
             // If no token savings, output original instead of TOON result
-            let before_tokens = estimate_tokens_from_chars(input.len());
-            let after_tokens = estimate_tokens_from_chars(output.len());
+            let before_tokens = estimate_tokens_from_bytes(input.len());
+            let after_tokens = estimate_tokens_from_bytes(output.len());
             let display = if output.is_empty() || after_tokens >= before_tokens {
                 input.clone()
             } else {
@@ -397,7 +399,7 @@ fn run() -> Result<(), (String, i32)> {
                 session_id,
                 tool_use_id,
                 input,
-                output.to_string(),
+                display,
             );
         }
         Commands::DecompressToon { file } => {
@@ -464,12 +466,12 @@ fn record_compression_stats(
         return;
     }
 
-    let before_chars = before_text.len();
-    let after_chars = after_text.len();
+    let before_bytes = before_text.len();
+    let after_bytes = after_text.len();
 
     // Skip recording if there was no actual token savings
-    let before_tokens = estimate_tokens_from_chars(before_chars);
-    let after_tokens = estimate_tokens_from_chars(after_chars);
+    let before_tokens = estimate_tokens_from_bytes(before_bytes);
+    let after_tokens = estimate_tokens_from_bytes(after_bytes);
     if after_tokens >= before_tokens {
         return;
     }
@@ -482,9 +484,9 @@ fn record_compression_stats(
     let mut record = StatsRecord::new(
         op,
         agent,
-        before_chars,
+        before_bytes,
         before_tokens,
-        after_chars,
+        after_bytes,
         after_tokens,
     )
     .with_before_text(before_text)

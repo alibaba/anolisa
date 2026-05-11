@@ -373,7 +373,7 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
 /// Expand ~ in paths to HOME directory.
 fn expand_path(path: &str) -> String {
     if path.starts_with("~") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = super::get_home_dir();
         path.replacen("~", &home, 1)
     } else {
         path.to_string()
@@ -389,7 +389,7 @@ fn check_config_file(path: &str) -> bool {
 /// Check a permission type.
 fn check_permission(perm: &str) -> bool {
     match perm {
-        "file_read" => fs::metadata("/").is_ok(),
+        "file_read" => fs::read_to_string("/etc/hostname").is_ok(),
         "file_write" => {
             let test_path = std::env::temp_dir().join(".tokenless-ready-test");
             let can_write = fs::write(&test_path, "").is_ok();
@@ -668,7 +668,7 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
 
 /// Auto-fix missing dependencies via tokenless-env-fix.sh.
 fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = super::get_home_dir();
     let fix_script = std::env::var("TOKENLESS_ENV_FIX_SCRIPT")
         .unwrap_or_else(|_| format!("{}/.tokenless/tokenless-env-fix.sh", home));
 
@@ -765,7 +765,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
 
 /// Find the spec file path.
 fn find_spec_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = super::get_home_dir();
     let candidates = [
         std::env::var("TOKENLESS_TOOL_READY_SPEC")
             .ok()

@@ -9,13 +9,16 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
-/// Estimate token count from a character count when text is unavailable.
-/// Same heuristic: ~4 characters per token.
-pub fn estimate_tokens_from_chars(chars: usize) -> usize {
-    if chars == 0 {
+/// Estimate token count from byte length when text is unavailable.
+/// Uses ~4 bytes per token for ASCII/English text. For UTF-8 multi-byte
+/// characters this overestimates (fewer bytes per token); for CJK text
+/// (~3 bytes/char, ~1-2 chars/token) it underestimates. Use
+/// `estimate_tokens(&str)` when text is available for more accurate results.
+pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
+    if bytes == 0 {
         return 0;
     }
-    chars.div_ceil(4)
+    bytes.div_ceil(4)
 }
 
 /// Count Unicode characters in text.

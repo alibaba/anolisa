@@ -549,6 +549,7 @@ version = "0.3.2"
 dependencies = [
  "chrono",
  "clap",
+ "dirs",
  "rusqlite",
  "serde_json",
  "tokenless-schema",
