@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrNoTrustedKeys,
     ErrSigInvalid,
     ErrSigMissing,
+    ErrUnexpectedFile,
 )
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -99,6 +101,43 @@ def compute_file_hash(file_path: str) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             sha256.update(chunk)
     return sha256.hexdigest()
+
+
+def _is_hidden_manifest_path(rel_path: str) -> bool:
+    """Return True if a manifest-relative path contains a hidden component."""
+    return any(part.startswith(".") for part in Path(rel_path).parts)
+
+
+def collect_signed_file_paths(skill_dir: str) -> set[str]:
+    """Collect files that should be covered by a skill manifest.
+
+    This mirrors ``sign-skill.sh``: regular files are included recursively, while
+    hidden files and files in hidden directories such as ``.skill-meta`` are
+    ignored.
+    """
+    signed_paths: set[str] = set()
+    root = Path(skill_dir)
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+
+            file_path = Path(dirpath) / filename
+            try:
+                if not stat.S_ISREG(os.lstat(file_path).st_mode):
+                    continue
+            except OSError:
+                continue
+
+            rel_path = file_path.relative_to(root).as_posix()
+            if _is_hidden_manifest_path(rel_path):
+                continue
+            signed_paths.add(rel_path)
+
+    return signed_paths
 
 
 def verify_signature_gpg(
@@ -185,10 +224,13 @@ def verify_signature(
 
 
 def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> None:
-    """Verify all file hashes in manifest"""
+    """Verify manifest hashes and reject unsigned files."""
+    manifest_paths: set[str] = set()
+
     for file_entry in manifest.get("files", []):
         rel_path = file_entry["path"]
         expected_hash = file_entry["hash"]
+        manifest_paths.add(rel_path)
 
         full_path = os.path.join(skill_dir, rel_path)
         if not os.path.exists(full_path):
@@ -197,6 +239,9 @@ def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> N
         actual_hash = compute_file_hash(full_path)
         if actual_hash != expected_hash:
             raise ErrHashMismatch(skill_name, rel_path, expected_hash, actual_hash)
+
+    for rel_path in sorted(collect_signed_file_paths(skill_dir) - manifest_paths):
+        raise ErrUnexpectedFile(skill_name, rel_path)
 
 
 def verify_skill(skill_dir: str, trusted_keys: list) -> tuple[bool, str]:
@@ -298,10 +343,10 @@ def main() -> int:
             print(f"[ERROR] {item['name']}")
             print(f"  {item['error']}")
 
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(f"PASSED: {len(results['passed'])}")
         print(f"FAILED: {len(results['failed'])}")
-        print(f"{'='*50}")
+        print(f"{'=' * 50}")
 
         if results["failed"]:
             print("VERIFICATION FAILED")

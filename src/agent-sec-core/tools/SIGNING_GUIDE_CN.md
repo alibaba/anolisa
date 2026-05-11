@@ -197,6 +197,7 @@ agent-sec-cli verify
 | 11 | 缺失 `.skill-meta/Manifest.json` | skill 从未签名 |
 | 12 | 签名无效 | 签名密钥不在 `trusted-keys/` 中 |
 | 13 | 哈希不匹配 | 签名后 skill 文件被修改 |
+| 14 | 存在未签名文件 | 签名后新增了未写入 manifest 的文件 |
 
 ## sign-skill.sh 命令参考
 

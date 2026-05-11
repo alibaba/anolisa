@@ -7,6 +7,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrNoTrustedKeys,
     ErrSigInvalid,
     ErrSigMissing,
+    ErrUnexpectedFile,
 )
 from agent_sec_cli.asset_verify.verifier import (
     compute_file_hash,
@@ -25,6 +26,7 @@ __all__ = [
     "ErrNoTrustedKeys",
     "ErrSigInvalid",
     "ErrSigMissing",
+    "ErrUnexpectedFile",
     "compute_file_hash",
     "load_config",
     "load_trusted_keys",

@@ -197,6 +197,7 @@ agent-sec-cli verify
 | 11 | Missing `.skill-meta/Manifest.json` | Skill was never signed |
 | 12 | Invalid signature | Signed with a key not in `trusted-keys/` |
 | 13 | Hash mismatch | Skill files changed after signing |
+| 14 | Unexpected file | Unsigned file added after signing |
 
 ## sign-skill.sh Command Reference
 

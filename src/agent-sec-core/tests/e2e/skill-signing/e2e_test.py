@@ -35,7 +35,12 @@ SIGNING_DIR = ".skill-meta"
 # Make verifier importable
 sys.path.insert(0, str(VERIFIER_DIR))
 
-from errors import ErrHashMismatch, ErrSigInvalid, ErrSigMissing  # noqa: E402
+from errors import (  # noqa: E402
+    ErrHashMismatch,
+    ErrSigInvalid,
+    ErrSigMissing,
+    ErrUnexpectedFile,
+)
 from verifier import load_trusted_keys, verify_skill  # noqa: E402
 
 # ── Colours ────────────────────────────────────────────────────────────────
@@ -320,6 +325,30 @@ def test_tampered_file_detected(ws: Workspace):
         pass  # expected
 
 
+def test_unsigned_reference_file_detected(ws: Workspace):
+    """Verifier detects new files added under references after signing."""
+    skill = make_skill(
+        ws.skills_dir,
+        "skill-extra-file",
+        {
+            "SKILL.md": "# Skill\n",
+            "references/original.md": "signed\n",
+        },
+    )
+    r = run_sign_skill([str(skill), "--force"])
+    assert r.returncode == 0
+
+    # Empty files are still unsigned payloads when they are absent from Manifest.json.
+    (skill / "references" / "a.md").write_text("")
+
+    keys = load_trusted_keys(ws.trusted_keys)
+    try:
+        verify_skill(str(skill), keys)
+        assert False, "Expected ErrUnexpectedFile"
+    except ErrUnexpectedFile as exc:
+        assert "references/a.md" in str(exc)
+
+
 def test_missing_sig_detected(ws: Workspace):
     """Verifier raises ErrSigMissing when .skill.sig is deleted."""
     skill = make_skill(ws.skills_dir, "skill-nosig", {"f.txt": "f"})
@@ -522,6 +551,10 @@ def main():
 
         # Negative / security tests
         test("Tampered file detected", lambda: test_tampered_file_detected(ws))
+        test(
+            "Unsigned reference file detected",
+            lambda: test_unsigned_reference_file_detected(ws),
+        )
         test("Missing .skill.sig detected", lambda: test_missing_sig_detected(ws))
         test("Wrong key rejected", lambda: test_wrong_key_rejected(ws))
 

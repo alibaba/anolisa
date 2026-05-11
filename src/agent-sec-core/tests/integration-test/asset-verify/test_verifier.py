@@ -25,6 +25,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
+    ErrUnexpectedFile,
 )
 from agent_sec_cli.asset_verify.verifier import (
     compute_file_hash,
@@ -81,6 +82,39 @@ class TestVerifyManifestHashes(unittest.TestCase):
         with self.assertRaises(ErrHashMismatch) as ctx:
             verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
         self.assertIn("FILE_MISSING", str(ctx.exception))
+
+    def test_unexpected_file(self):
+        extra_file = os.path.join(self.tmpdir, "references", "a.md")
+        os.makedirs(os.path.dirname(extra_file), exist_ok=True)
+        with open(extra_file, "w") as f:
+            f.write("")
+
+        manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
+        with self.assertRaises(ErrUnexpectedFile) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("references/a.md", str(ctx.exception))
+
+    def test_unexpected_root_file(self):
+        extra_file = os.path.join(self.tmpdir, "a.md")
+        with open(extra_file, "w") as f:
+            f.write("")
+
+        manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
+        with self.assertRaises(ErrUnexpectedFile) as ctx:
+            verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+        self.assertIn("a.md", str(ctx.exception))
+
+    def test_hidden_files_are_ignored(self):
+        hidden_file = os.path.join(self.tmpdir, ".hidden.md")
+        hidden_dir_file = os.path.join(self.tmpdir, ".skill-meta", "Manifest.json")
+        os.makedirs(os.path.dirname(hidden_dir_file), exist_ok=True)
+        with open(hidden_file, "w") as f:
+            f.write("ignored")
+        with open(hidden_dir_file, "w") as f:
+            f.write("ignored")
+
+        manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
+        verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
 
 
 class TestVerifySkill(unittest.TestCase):

@@ -47,6 +47,15 @@ class ErrHashMismatch(SkillVerifyError):
         )
 
 
+class ErrUnexpectedFile(SkillVerifyError):
+    code = 14
+
+    def __init__(self, skill_name: str, file_path: str) -> None:
+        super().__init__(
+            f"ERR_UNEXPECTED_FILE: Unsigned file '{file_path}' present in '{skill_name}'"
+        )
+
+
 class ErrConfigMissing(SkillVerifyError):
     code = 20
 
