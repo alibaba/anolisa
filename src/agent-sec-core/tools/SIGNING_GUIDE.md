@@ -25,18 +25,18 @@ tools/sign-skill.sh --check
 Three commands cover the entire workflow. Step 1 is a one-time setup; step 2 should be re-run whenever skill files change.
 
 ```bash
-# 1. One-time setup — generate GPG key + export public key to trusted-keys
+# 1. One-time setup — generate GPG key + export public key to verifier package data
 tools/sign-skill.sh --init
 
-# 2. Batch-sign all deployed skills (default: ~/.copilot-shell/skills/)
-tools/sign-skill.sh --batch --force
+# 2. Batch-sign all skills in this source checkout
+tools/sign-skill.sh --batch skills --force
 
 # 3. Verify
 agent-sec-cli verify
 ```
 
 `--init` automatically generates a dedicated signing key (`ANOLISA Local Deploy Key`) and
-exports the public key to `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`.
+exports the public key to `agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/`.
 You can override the export path with `--trusted-keys-dir <DIR>`.
 
 ## Step-by-Step (Manual Key Management)
@@ -65,8 +65,10 @@ gpg --list-secret-keys me@example.com
 
 ### 2. Export the Public Key
 
-The verifier loads trusted public keys from `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`.
-`--init` exports there automatically. To re-export manually:
+The verifier loads trusted public keys from the packaged `agent_sec_cli/asset_verify/trusted-keys/`
+directory. When running from this source checkout, `--init` exports to
+`agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/` automatically.
+To re-export manually:
 
 ```bash
 tools/sign-skill.sh --export-key
@@ -82,7 +84,7 @@ Or fully manually:
 
 ```bash
 gpg --armor --export me@example.com \
-    > ~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/me-example-com.asc
+    > agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/me-example-com.asc
 ```
 
 ### 3. Sign Skills
@@ -96,10 +98,10 @@ tools/sign-skill.sh /usr/share/anolisa/skills/my-skill --force
 Batch-sign all skills under a directory:
 
 ```bash
-# Uses the default directory (~/.copilot-shell/skills/)
-tools/sign-skill.sh --batch --force
+# Source checkout example
+tools/sign-skill.sh --batch skills --force
 
-# Or specify a custom directory
+# Custom or installed directory
 tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 ```
 
@@ -112,7 +114,10 @@ Each signed skill directory will contain:
 
 ### 4. Configure the Verifier
 
-When using `--batch`, the script automatically registers the skills directory in `config.conf`. For manual setups, make sure the skills directory is listed in the deployed `config.conf` (e.g. `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf`):
+`--batch` signs skill directories but does not edit verifier configuration. For
+batch verification, make sure the skills root is listed in the verifier config
+packaged with the CLI (`agent-sec-cli/src/agent_sec_cli/asset_verify/config.conf`
+in this source tree):
 
 ```ini
 skills_dir = [
@@ -179,7 +184,7 @@ tools/sign-skill.sh --batch /path/to/skills --force
 Whenever skill files are modified, the existing `.skill-meta/Manifest.json` hashes become stale. Re-sign with `--force`:
 
 ```bash
-tools/sign-skill.sh --batch --force
+tools/sign-skill.sh --batch skills --force
 ```
 
 Then verify:
@@ -206,8 +211,8 @@ agent-sec-cli verify
 | **Init** | `--init [--trusted-keys-dir DIR]` | Generate GPG key + export public key |
 | **Check** | `--check` | Verify prerequisites (gpg, jq, sha256sum) |
 | **Single** | `<skill_dir> [--force]` | Sign one skill directory |
-| **Batch** | `--batch [parent_dir] [--force]` | Sign all subdirectories under parent (default: `~/.copilot-shell/skills/`). Auto-registers the directory in `config.conf`. |
-| **Export** | `--export-key [DIR]` | Export public key (default: `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`) |
+| **Batch** | `--batch <parent_dir> [--force]` | Sign all subdirectories under parent. |
+| **Export** | `--export-key [DIR]` | Export public key (default: `agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/`) |
 
 Common options:
 

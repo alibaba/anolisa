@@ -208,7 +208,7 @@ python3 agent-sec-cli/src/agent_sec_cli/sandbox/sandbox_policy.py --cwd "$PWD" "
 
 ### 校验流程
 
-1. 加载受信公钥（`agent-sec-cli/asset-verify/trusted-keys/*.asc`）
+1. 加载受信公钥（`agent_sec_cli/asset_verify/trusted-keys/*.asc`）
 2. 验证 Skill 目录中 `.skill-meta/Manifest.json` 的 GPG 签名（`.skill-meta/.skill.sig`）
 3. 校验 Manifest 中所有文件的 SHA-256 哈希
 

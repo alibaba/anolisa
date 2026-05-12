@@ -9,7 +9,7 @@
 #
 # Usage:
 #   Single mode: ./sign-skill.sh <skill_dir> [--skill-name NAME] [--force]
-#   Batch  mode: ./sign-skill.sh --batch [parent_dir] [--force]
+#   Batch  mode: ./sign-skill.sh --batch <parent_dir> [--force]
 #   Init   mode: ./sign-skill.sh --init [--trusted-keys-dir DIR]
 #   Export key:  ./sign-skill.sh --export-key [DIR]
 #   Check deps:  ./sign-skill.sh --check
@@ -51,17 +51,10 @@ SIGN_KEY_EMAIL="anolisa-deploy@$(hostname -s 2>/dev/null || echo localhost)"
 SIGN_KEY_NAME="ANOLISA Local Deploy Key"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_SEC_CORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Default path for deployed skills
-DEFAULT_SKILLS_DIR="$HOME/.copilot-shell/skills"
-
-# Default path for trusted public keys (verifier reads from here)
-DEFAULT_TRUSTED_KEYS_DIR="$HOME/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys"
-
-# Path to the deployed verifier config (inside agent-sec-core skill).
-# Batch mode auto-registers the signed directory here so that the verifier
-# picks it up without manual config.conf editing.
-DEPLOY_CONFIG_CONF="$HOME/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf"
+# Default path for trusted public keys in the verifier package data.
+DEFAULT_TRUSTED_KEYS_DIR="$AGENT_SEC_CORE_DIR/agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys"
 
 # Resolve gpg binary: prefer 'gpg', fall back to 'gpg2' (RHEL/Alinux minimal)
 if command -v gpg &>/dev/null; then
@@ -175,76 +168,20 @@ sign_manifest() {
     return 0
 }
 
-# Ensure a skills directory is registered in the deployed config.conf.
-# This must be called BEFORE signing agent-sec-core, because config.conf
-# is part of that skill and will be included in its manifest hash.
-ensure_config_dir_entry() {
-    local dir_to_add="$1"
-    local config_file="$DEPLOY_CONFIG_CONF"
-
-    if [[ ! -f "$config_file" ]]; then
-        echo -e "${YELLOW}NOTE: config.conf not found at $config_file — skipping auto-register${NC}"
-        return 0
-    fi
-
-    # Already registered?  Use awk to check only inside the skills_dir
-    # array for an exact (whitespace-trimmed) match, avoiding substring
-    # false positives from grep -F.
-    if awk -v target="$dir_to_add" '
-        /skills_dir[[:space:]]*=/ { in_list=1; next }
-        in_list && /^[[:space:]]*\]/ { exit 1 }
-        in_list {
-            line=$0; gsub(/^[[:space:]]+|[[:space:],]+$/, "", line)
-            if (line == target) { found=1; exit 0 }
-        }
-        END { exit (found ? 0 : 1) }
-    ' "$config_file" 2>/dev/null; then
-        echo "Skills directory already in config.conf: $dir_to_add"
-        return 0
-    fi
-
-    # Preserve original file permissions across the temp-file swap.
-    local orig_mode
-    orig_mode=$(stat -c '%a' "$config_file" 2>/dev/null) \
-        || orig_mode=$(stat -f '%Lp' "$config_file" 2>/dev/null) \
-        || orig_mode=""
-
-    # Insert entry before the first ']' (end of skills_dir array).
-    # The pattern tolerates an optionally-indented closing bracket.
-    local tmp_file
-    tmp_file=$(mktemp)
-    awk -v entry="    $dir_to_add" '
-        /^[[:space:]]*\]/ && !done { print entry; done=1 }
-        { print }
-    ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
-
-    # Restore original permissions if we captured them.
-    if [[ -n "$orig_mode" ]]; then
-        chmod "$orig_mode" "$config_file" 2>/dev/null
-    fi
-
-    if grep -qF "$dir_to_add" "$config_file" 2>/dev/null; then
-        echo -e "${GREEN}Added skills directory to config.conf: $dir_to_add${NC}"
-    else
-        echo -e "${YELLOW}WARNING: Could not update config.conf — please add '$dir_to_add' manually${NC}"
-    fi
-}
-
 # Function to show usage
 show_usage() {
     echo -e "${BOLD}Skill Manifest and Signature Generator${NC}"
     echo ""
     echo "Usage:"
     echo "  $0 <skill_dir> [--skill-name NAME] [--force]"
-    echo "  $0 --batch [parent_dir] [--force]"
+    echo "  $0 --batch <parent_dir> [--force]"
     echo "  $0 --init [--trusted-keys-dir DIR]"
     echo "  $0 --export-key [DIR]"
     echo "  $0 --check"
     echo ""
     echo "Modes:"
     echo "  (default)           Sign a single skill directory"
-    echo "  --batch [DIR]       Sign every subdirectory under DIR"
-    echo "                      (default: $DEFAULT_SKILLS_DIR)"
+    echo "  --batch DIR         Sign every subdirectory under DIR"
     echo "  --init              One-time setup: generate GPG key + export public key"
     echo "  --export-key [DIR]  Export signing public key to DIR"
     echo "                      (default: $DEFAULT_TRUSTED_KEYS_DIR)"
@@ -259,8 +196,8 @@ show_usage() {
     echo ""
     echo "Quick Start (self-deployment):"
     echo "  $0 --init"
-    echo "  $0 --batch --force"
-    echo "  python3 /path/to/verifier.py"
+    echo "  $0 --batch /path/to/skills --force"
+    echo "  agent-sec-cli verify"
     echo ""
     echo "Environment Variables:"
     echo "  GPG_PRIVATE_KEY   ASCII-armored GPG private key (for CI/CD auto-import)"
@@ -555,13 +492,13 @@ main() {
                 ;;
             --batch)
                 batch=true
-                # Directory is optional; default to DEFAULT_SKILLS_DIR
                 if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
                     batch_dir="$2"
                     shift 2
                 else
-                    batch_dir=""
-                    shift
+                    echo -e "${RED}ERROR: --batch requires a parent directory${NC}" >&2
+                    show_usage
+                    exit 1
                 fi
                 ;;
             --skill-name)
@@ -614,21 +551,11 @@ main() {
     # ── Batch mode ──
 
     if [[ "$batch" == true ]]; then
-        # Default to the standard deployed skills directory
-        if [[ -z "$batch_dir" ]]; then
-            batch_dir="$DEFAULT_SKILLS_DIR"
-        fi
-
         batch_dir=$(cd "$batch_dir" 2>/dev/null && pwd) || true
         if [[ ! -d "$batch_dir" ]]; then
             echo -e "${RED}ERROR: Batch directory does not exist: $batch_dir${NC}" >&2
             exit 1
         fi
-
-        # Register the skills directory in config.conf BEFORE signing.
-        # config.conf is part of the agent-sec-core skill, so it must be
-        # updated first to ensure its manifest hash is correct.
-        ensure_config_dir_entry "$batch_dir"
 
         echo "Batch signing skills under: $batch_dir"
         echo ""

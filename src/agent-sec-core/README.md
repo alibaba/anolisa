@@ -208,7 +208,7 @@ Output example:
 
 ### Verification Flow
 
-1. Load trusted public keys from `agent-sec-cli/asset-verify/trusted-keys/*.asc`
+1. Load trusted public keys from `agent_sec_cli/asset_verify/trusted-keys/*.asc`
 2. Verify the GPG signature (`.skill-meta/.skill.sig`) of `.skill-meta/Manifest.json` in each skill directory
 3. Validate SHA-256 hashes of all files listed in the Manifest
 

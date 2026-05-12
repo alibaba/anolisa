@@ -25,18 +25,18 @@ tools/sign-skill.sh --check
 三条命令即可完成全部流程。步骤 1 每台机器只需执行一次；步骤 2 在 skill 文件变更后需重新执行。
 
 ```bash
-# 1. 一次性初始化 — 生成 GPG 密钥并导出公钥到 trusted-keys 目录
+# 1. 一次性初始化 — 生成 GPG 密钥并导出公钥到校验器包内数据目录
 tools/sign-skill.sh --init
 
-# 2. 批量签名所有已部署的 skill（默认：~/.copilot-shell/skills/）
-tools/sign-skill.sh --batch --force
+# 2. 批量签名当前源码树中的所有 skill
+tools/sign-skill.sh --batch skills --force
 
 # 3. 验证
 agent-sec-cli verify
 ```
 
 `--init` 会自动生成专用签名密钥（`ANOLISA Local Deploy Key`），并将公钥导出到
-`~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`。
+`agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/`。
 可通过 `--trusted-keys-dir <DIR>` 覆盖导出路径。
 
 ## 手动逐步操作
@@ -65,8 +65,9 @@ gpg --list-secret-keys me@example.com
 
 ### 2. 导出公钥
 
-校验器从 `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/` 加载受信公钥，
-`--init` 会自动导出到此目录。手动重新导出：
+校验器从打包后的 `agent_sec_cli/asset_verify/trusted-keys/` 目录加载受信公钥。
+在当前源码树中运行时，`--init` 会自动导出到
+`agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/`。手动重新导出：
 
 ```bash
 tools/sign-skill.sh --export-key
@@ -82,7 +83,7 @@ tools/sign-skill.sh --export-key /custom/path/to/trusted-keys/
 
 ```bash
 gpg --armor --export me@example.com \
-    > ~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/me-example-com.asc
+    > agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/me-example-com.asc
 ```
 
 ### 3. 签名 Skill
@@ -96,10 +97,10 @@ tools/sign-skill.sh /usr/share/anolisa/skills/my-skill --force
 批量签名目录下所有 skill：
 
 ```bash
-# 使用默认目录（~/.copilot-shell/skills/）
-tools/sign-skill.sh --batch --force
+# 当前源码树示例
+tools/sign-skill.sh --batch skills --force
 
-# 或指定自定义目录
+# 自定义目录 / 已安装目录
 tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 ```
 
@@ -112,7 +113,9 @@ tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 
 ### 4. 配置校验器
 
-使用 `--batch` 时，脚本会自动将 skill 目录注册到 `config.conf` 中。如果手动配置，请确保 skill 目录已配置在已部署的 `config.conf` 中（如 `~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/config.conf`）：
+`--batch` 只负责签名 skill 目录，不会修改校验器配置。若要进行批量校验，请确保
+skill 根目录已配置在随 CLI 打包的校验器配置中（当前源码树中的路径为
+`agent-sec-cli/src/agent_sec_cli/asset_verify/config.conf`）：
 
 ```ini
 skills_dir = [
@@ -179,7 +182,7 @@ tools/sign-skill.sh --batch /path/to/skills --force
 每当 skill 文件被修改，已有的 `.skill-meta/Manifest.json` 哈希值将失效。使用 `--force` 重新签名：
 
 ```bash
-tools/sign-skill.sh --batch --force
+tools/sign-skill.sh --batch skills --force
 ```
 
 然后验证：
@@ -206,8 +209,8 @@ agent-sec-cli verify
 | **初始化** | `--init [--trusted-keys-dir DIR]` | 生成 GPG 密钥 + 导出公钥 |
 | **检查** | `--check` | 检查前置依赖（gpg、jq、sha256sum） |
 | **单个签名** | `<skill_dir> [--force]` | 签名单个 skill 目录 |
-| **批量签名** | `--batch [parent_dir] [--force]` | 签名目录下所有子目录（默认：`~/.copilot-shell/skills/`）。自动将目录注册到 `config.conf`。 |
-| **导出公钥** | `--export-key [DIR]` | 导出公钥（默认：`~/.copilot-shell/skills/agent-sec-core/scripts/asset-verify/trusted-keys/`） |
+| **批量签名** | `--batch <parent_dir> [--force]` | 签名目录下所有子目录。 |
+| **导出公钥** | `--export-key [DIR]` | 导出公钥（默认：`agent-sec-cli/src/agent_sec_cli/asset_verify/trusted-keys/`） |
 
 常用选项：
 
