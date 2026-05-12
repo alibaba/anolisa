@@ -5,7 +5,7 @@ Implements ``agent-sec-cli skill-ledger certify`` with two input modes:
 - **External findings mode** (``--findings``): read a findings file produced
   by an external scanner (e.g. skill-vetter via Agent).
 - **Auto-invoke mode** (no ``--findings``): auto-invoke registered non-``skill``
-  scanners from the registry.  In v1 no such scanners exist; framework only.
+  scanners from the registry.
 
 Three execution phases:
 
@@ -41,8 +41,12 @@ from agent_sec_cli.skill_ledger.models.scan import (
     ScanEntry,
     aggregate_scan_status,
 )
+from agent_sec_cli.skill_ledger.scanner import skill_code_scanner
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
-from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
+from agent_sec_cli.skill_ledger.scanner.registry import (
+    ScannerInfo,
+    ScannerRegistry,
+)
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
 
@@ -136,7 +140,7 @@ def _resolve_parser_and_normalise(
 
 
 # ------------------------------------------------------------------
-# Auto-invoke mode (framework — v1 has no invocable scanners)
+# Auto-invoke mode
 # ------------------------------------------------------------------
 
 
@@ -147,9 +151,8 @@ def _auto_invoke_scanners(
 ) -> list[ScanEntry]:
     """Invoke registered non-``skill`` scanners and collect results.
 
-    In v1 only ``skill-vetter`` (type ``"skill"``) is registered, so this
-    function returns an empty list.  The framework is ready for future
-    ``builtin``/``cli``/``api`` scanner adapters.
+    The built-in ``skill-code-scanner`` adapter is invoked in-process.
+    Other non-skill adapter types are currently skipped.
     """
     invocable = registry.list_invocable_scanners(names=scanner_names)
 
@@ -157,19 +160,59 @@ def _auto_invoke_scanners(
         logger.info("No auto-invocable scanners registered; skipping auto-invoke")
         return []
 
-    # Future: iterate invocable scanners, call adapter, parse, build ScanEntry
     entries: list[ScanEntry] = []
     for scanner_info in invocable:
-        logger.warning(
-            "Scanner %r (type=%r) auto-invoke not yet implemented; skipping",
+        raw_findings = _invoke_scanner(skill_dir, scanner_info)
+        if raw_findings is None:
+            continue
+
+        normalized = _resolve_parser_and_normalise(
+            raw_findings,
             scanner_info.name,
-            scanner_info.type,
+            registry,
         )
-        # TODO: dispatch by scanner_info.type:
-        #   "builtin" → call Python function
-        #   "cli"     → subprocess.run(...)
-        #   "api"     → HTTP POST
+        scanner_version = _scanner_version(scanner_info)
+        entries.append(
+            _build_scan_entry(
+                normalized,
+                scanner_info.name,
+                scanner_version,
+            )
+        )
+
     return entries
+
+
+def _invoke_scanner(
+    skill_dir: str,
+    scanner_info: ScannerInfo,
+) -> list[dict[str, Any]] | None:
+    """Dispatch a registered scanner and return raw findings-array data."""
+    if _is_skill_code_scanner(scanner_info):
+        return skill_code_scanner.scan_skill_code(skill_dir)
+
+    logger.warning(
+        "Scanner %r (type=%r) auto-invoke not implemented; skipping",
+        scanner_info.name,
+        scanner_info.type,
+    )
+    return None
+
+
+def _scanner_version(scanner_info: ScannerInfo) -> str | None:
+    configured_version = scanner_info.extra.get("version")
+    if configured_version is not None:
+        return str(configured_version)
+    if _is_skill_code_scanner(scanner_info):
+        return skill_code_scanner.SCANNER_VERSION
+    return None
+
+
+def _is_skill_code_scanner(scanner_info: ScannerInfo) -> bool:
+    return (
+        scanner_info.type == "builtin"
+        and scanner_info.name == skill_code_scanner.SCANNER_NAME
+    )
 
 
 # ------------------------------------------------------------------

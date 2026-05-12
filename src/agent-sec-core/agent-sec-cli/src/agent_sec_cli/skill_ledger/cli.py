@@ -11,6 +11,7 @@ from typing import Optional
 
 import typer
 from agent_sec_cli.security_middleware import invoke
+from agent_sec_cli.security_middleware.result import ActionResult
 
 app = typer.Typer(
     name="skill-ledger",
@@ -39,7 +40,7 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-def _forward(result) -> None:
+def _forward(result: ActionResult) -> None:
     """Print ActionResult stdout/error and exit with its exit_code."""
     if result.stdout:
         typer.echo(result.stdout, nl=False)
@@ -180,7 +181,7 @@ def cmd_certify(
     scanners: Optional[str] = typer.Option(
         None,
         "--scanners",
-        help="Comma-separated scanner names to auto-invoke (e.g., 'skill-vetter,custom')",
+        help="Comma-separated scanner names to auto-invoke (e.g., 'skill-code-scanner')",
     ),
     all_skills: bool = typer.Option(
         False,
@@ -325,7 +326,7 @@ def cmd_list_scanners() -> None:
     ~/.config/agent-sec/skill-ledger/config.json, including their invocation type,
     result parser, and enabled status.
 
-    Use this to discover valid values for the --scanner flag in certify.
+    Use this to discover valid values for the --scanner and --scanners flags in certify.
     """
     result = invoke("skill_ledger", command="list-scanners")
     _forward(result)

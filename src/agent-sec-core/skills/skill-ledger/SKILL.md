@@ -260,15 +260,26 @@ cat /tmp/skill-vetter-findings-<SKILL_NAME>.json | python3 -c "import json,sys; 
 
 **前置条件**：Phase 2 已完成，至少一个 Skill 有有效的 findings 文件。
 
-对每个成功扫描的 Skill 执行 `certify`：
+对每个成功扫描的 Skill 执行 `certify`，将 Agent 审查结果和确定性代码扫描结果合并到同一个 SignedManifest。
 
 ### 3.1 执行 certify
+
+先写入 `skill-vetter` 的 Agent 审查结果：
 
 ```bash
 agent-sec-cli skill-ledger certify <SKILL_DIR> \
   --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json \
   --scanner skill-vetter
 ```
+
+再触发内置 `skill-code-scanner`，扫描 Skill 目录中的 Python/Shell 代码文件：
+
+```bash
+agent-sec-cli skill-ledger certify <SKILL_DIR> \
+  --scanners skill-code-scanner
+```
+
+这两个 `certify` 调用可按任意顺序执行；manifest 按 scanner 名称合并 `scans[]` 条目。文件未变化时沿用同一个版本号，只替换或追加对应 scanner 的条目，并重新聚合 `scanStatus`。
 
 > 当 Scanner Registry 中有多个 `skill` 类型扫描器时，对每个扫描器分别调用 `certify --findings <对应 findings> --scanner <对应 scanner>`。`certify` 会自动合并同一 Skill 的多个 scanner 条目到 `scans[]` 数组。
 

@@ -27,6 +27,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "parser": "findings-array",
             "description": "LLM-driven 4-phase skill audit",
         },
+        {
+            "name": "skill-code-scanner",
+            "type": "builtin",
+            "parser": "findings-array",
+            "enabled": True,
+            "description": "Scan Skill code files via code-scanner",
+        },
     ],
     "parsers": {
         "findings-array": {

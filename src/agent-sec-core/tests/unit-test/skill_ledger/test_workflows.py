@@ -31,8 +31,6 @@ from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
-    NoEncryption,
-    PrivateFormat,
     PublicFormat,
 )
 
@@ -390,12 +388,19 @@ class TestCertifyWorkflow(SkillDirTestCase):
         self.assertEqual(result["scanStatus"], "deny")
 
     def test_auto_invoke_mode_no_crash(self):
-        """Certify without --findings (auto-invoke) should not crash in v1."""
+        """Certify without --findings auto-invokes skill-code-scanner."""
         # First create a manifest
         check(self.skill_dir, self.backend)
-        # Auto-invoke mode — no invocable scanners, should succeed gracefully
         result = certify(self.skill_dir, self.backend)
         self.assertIn("versionId", result)
+        self.assertEqual(result["scanStatus"], "pass")
+
+        latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
+        with open(latest, "r") as f:
+            data = json.load(f)
+        scans = {scan["scanner"]: scan for scan in data["scans"]}
+        self.assertIn("skill-code-scanner", scans)
+        self.assertEqual(scans["skill-code-scanner"]["status"], "pass")
 
 
 # ---------------------------------------------------------------------------
