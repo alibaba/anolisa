@@ -72,6 +72,8 @@ include = [
     "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
     "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
     "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
+    "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
+    "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
 ]
 # Native module name (must match lib.rs function name)
 module-name = "agent_sec_cli._native"
@@ -159,4 +161,3 @@ explicit = true
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
-

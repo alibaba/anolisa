@@ -34,12 +34,15 @@ class TestDefaultConfig(unittest.TestCase):
     def test_default_signing_backend(self):
         self.assertEqual(_DEFAULT_CONFIG["signingBackend"], "ed25519")
 
-    def test_default_scanners_include_skill_code_scanner(self):
-        scanners = {scanner["name"]: scanner for scanner in _DEFAULT_CONFIG["scanners"]}
+    def test_default_scanners_present(self):
+        scanners = {entry["name"]: entry for entry in _DEFAULT_CONFIG["scanners"]}
         self.assertIn("skill-vetter", scanners)
         self.assertIn("skill-code-scanner", scanners)
+        self.assertIn("cisco-static-scanner", scanners)
         self.assertEqual(scanners["skill-code-scanner"]["type"], "builtin")
+        self.assertEqual(scanners["cisco-static-scanner"]["type"], "builtin")
         self.assertTrue(scanners["skill-code-scanner"]["enabled"])
+        self.assertTrue(scanners["cisco-static-scanner"]["enabled"])
 
 
 class TestAdditiveMerge(unittest.TestCase):

@@ -34,6 +34,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             "description": "Scan Skill code files via code-scanner",
         },
+        {
+            "name": "cisco-static-scanner",
+            "type": "builtin",
+            "parser": "findings-array",
+            "enabled": True,
+            "description": "Static Skill security scanner based on Cisco skill-scanner rules",
+        },
     ],
     "parsers": {
         "findings-array": {

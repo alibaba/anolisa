@@ -119,7 +119,12 @@ def make_skill(parent: Path, name: str, files: dict[str, str]) -> Path:
     ``validate_skill_dir()`` passes.
     """
     if "SKILL.md" not in files:
-        files = {"SKILL.md": f"# {name}\nTest skill.\n", **files}
+        files = {
+            "SKILL.md": (
+                f"---\nname: {name}\ndescription: Test skill\n---\n# {name}\n"
+            ),
+            **files,
+        }
     skill_dir = parent / name
     for rel, content in files.items():
         p = skill_dir / rel
@@ -578,13 +583,27 @@ def test_certify_invalid_json_findings(ws: Workspace):
 
 
 def test_certify_no_findings_auto_invoke(ws: Workspace):
-    """certify without --findings → auto-invoke mode, exit 0."""
-    skill = make_skill(ws.skills_dir, "certify-auto", {"f.txt": "f"})
+    """certify without --findings runs default built-in scanners."""
+    skill = make_skill(
+        ws.skills_dir,
+        "certify-auto",
+        {
+            "SKILL.md": "---\nname: certify-auto\ndescription: Clean test skill\n---\n",
+            "f.txt": "f",
+        },
+    )
     env = ws.env()
     r = run_skill_ledger(["certify", str(skill)], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
-    assert "scanStatus" in out
+    assert out["scanStatus"] == "pass"
+
+    manifest = json.loads((skill / ".skill-meta" / "latest.json").read_text())
+    scans = {entry["scanner"]: entry for entry in manifest["scans"]}
+    assert "skill-code-scanner" in scans
+    assert "cisco-static-scanner" in scans
+    assert scans["skill-code-scanner"]["status"] == "pass"
+    assert scans["cisco-static-scanner"]["status"] == "pass"
 
 
 def test_certify_no_skill_dir_no_all(ws: Workspace):
@@ -819,13 +838,19 @@ def test_rotate_keys_stub(ws: Workspace):
 
 
 def test_list_scanners(ws: Workspace):
-    """list-scanners → exit 0, JSON with scanners array including skill-vetter."""
+    """list-scanners → exit 0, JSON with default scanners."""
     r = run_skill_ledger(["list-scanners"], env_extra=ws.env())
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     assert "scanners" in out, f"Expected 'scanners' key in JSON output: {out}"
     names = [s["name"] for s in out["scanners"]]
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
+    assert (
+        "skill-code-scanner" in names
+    ), f"Expected skill-code-scanner in scanners: {names}"
+    assert (
+        "cisco-static-scanner" in names
+    ), f"Expected cisco-static-scanner in scanners: {names}"
 
 
 def test_certify_empty_skill_dir(ws: Workspace):

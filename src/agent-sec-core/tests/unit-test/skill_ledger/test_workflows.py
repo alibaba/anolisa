@@ -18,6 +18,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_sec_cli.skill_ledger.core.auditor import audit
 from agent_sec_cli.skill_ledger.core.certifier import certify
@@ -91,7 +92,10 @@ class SkillDirTestCase(unittest.TestCase):
         os.makedirs(self.skill_dir)
         # Create sample skill files
         self._write_file("run.sh", "#!/bin/bash\necho hello\n")
-        self._write_file("SKILL.md", "# Test Skill\n")
+        self._write_file(
+            "SKILL.md",
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Test Skill\n",
+        )
         self.backend = InMemoryEd25519Backend()
         # Patch config to avoid touching user's real config
         self._patch_config()
@@ -388,7 +392,7 @@ class TestCertifyWorkflow(SkillDirTestCase):
         self.assertEqual(result["scanStatus"], "deny")
 
     def test_auto_invoke_mode_no_crash(self):
-        """Certify without --findings auto-invokes skill-code-scanner."""
+        """Certify without --findings runs default built-in scanners."""
         # First create a manifest
         check(self.skill_dir, self.backend)
         result = certify(self.skill_dir, self.backend)
@@ -400,7 +404,23 @@ class TestCertifyWorkflow(SkillDirTestCase):
             data = json.load(f)
         scans = {scan["scanner"]: scan for scan in data["scans"]}
         self.assertIn("skill-code-scanner", scans)
+        self.assertIn("cisco-static-scanner", scans)
         self.assertEqual(scans["skill-code-scanner"]["status"], "pass")
+        self.assertEqual(scans["cisco-static-scanner"]["status"], "pass")
+
+    def test_builtin_scanner_failure_is_reported_without_manifest_update(self):
+        with patch(
+            "agent_sec_cli.skill_ledger.scanner.builtins.dispatcher.scan_skill",
+            side_effect=ValueError("invalid bundled rules"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cisco-static-scanner.*invalid bundled rules",
+            ):
+                certify(self.skill_dir, self.backend)
+
+        latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
+        self.assertFalse(os.path.exists(latest))
 
 
 # ---------------------------------------------------------------------------

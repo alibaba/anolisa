@@ -1,7 +1,7 @@
 """Scanner Registry — load scanner/parser definitions from config.json.
 
-The registry provides lookup-by-name for scanners and parsers.  In v1 only
-``skill-vetter`` (type ``"skill"``, parser ``"findings-array"``) is registered.
+The registry provides lookup-by-name for scanners and parsers.  Defaults
+include ``skill-vetter`` and built-in Skill scanners.
 
 Usage::
 
