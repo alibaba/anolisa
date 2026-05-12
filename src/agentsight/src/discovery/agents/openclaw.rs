@@ -47,7 +47,13 @@ impl AgentMatcher for OpenClawMatcher {
         }
 
         // Case 2: Node runtime with "openclaw" and "gateway" in cmdline args
-        let is_node = match_name_with_version_suffix(&comm_lower, "node");
+        // Note: Node.js apps can change process.title (e.g., to "MainThread"),
+        // so we also check if cmdline_args[0] (the actual executable) contains "node".
+        let is_node = match_name_with_version_suffix(&comm_lower, "node")
+            || ctx.cmdline_args.first().map_or(false, |arg| {
+                let basename = arg.rsplit('/').next().unwrap_or(arg);
+                match_name_with_version_suffix(&basename.to_lowercase(), "node")
+            });
         if is_node {
             let has_openclaw = ctx.cmdline_args.iter().any(|arg| {
                 arg.to_lowercase().contains("openclaw")
