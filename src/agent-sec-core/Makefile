@@ -13,11 +13,14 @@ python-lint: ## Run ruff lint check on all Python code (no fix)
 	@echo "🔍 Running ruff lint check..."
 	@uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml .
 
+COMPARE_BRANCH ?= upstream/main
+
 .PHONY: python-lint-ci
 python-lint-ci: ## Run incremental ruff lint check (only changed lines vs main, non-blocking)
 	@echo "🔍 Running incremental ruff lint check (diff-quality)..."
 	@uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml --output-format=concise . > ruff_report.txt || true
-	@diff-quality --violations=flake8 ruff_report.txt || true
+	@sed -i '' 's|^\([^: ]*\.py\)|src/agent-sec-core/\1|' ruff_report.txt
+	@cd "$(shell git rev-parse --show-toplevel)" && diff-quality --violations=flake8 --compare-branch=$(COMPARE_BRANCH) src/agent-sec-core/ruff_report.txt || true
 	@rm -f ruff_report.txt
 
 # =============================================================================

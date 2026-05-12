@@ -64,7 +64,7 @@
 ## 9. 代码格式化与 Lint
 
 - **格式化**: 使用 [black](https://black.readthedocs.io/) + [isort](https://pycqa.github.io/isort/)（保持现有风格不变）
-- **静态检查**: 使用 [ruff](https://docs.astral.sh/ruff/) 进行 lint（仅对增量代码卡点）
+- **静态检查**: 使用 [ruff](https://docs.astral.sh/ruff/) 进行 lint（仅对增量代码 warning，不卡点）
 
 ```bash
 # 从 agent-sec-core 目录
@@ -83,4 +83,4 @@ CI 对 Python 代码执行以下检查：
 | `pytest --cov` | 全量测试 | 测试失败则失败 |
 | `uv lock --check` | 依赖锁文件 | uv.lock 与 pyproject.toml 不同步则失败 |
 
-> **重要**: Lint 检查仅在 PR 触发时对增量代码卡点，不检查历史代码。
+> **重要**: Lint 检查仅在 PR 触发时对增量代码报 warning，不检查历史代码，不卡点。

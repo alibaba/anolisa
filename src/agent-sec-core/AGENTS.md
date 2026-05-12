@@ -133,9 +133,14 @@ make python-code-pretty
 # 全量检查（从 agent-sec-core 目录）
 make python-lint
 
-# 注意: ruff 需显式指定配置文件
-# ruff check --config agent-sec-cli/pyproject.toml .
+# 增量检查（仅报告相对 upstream/main 变更行的违规，含未提交修改）
+make python-lint-ci
+
+# 自定义对比分支
+make python-lint-ci COMPARE_BRANCH=origin/main
 ```
+
+> `python-lint-ci` 对比范围包含 committed + staged + unstaged 变更，无需先 commit。
 
 ### 6. 导入规范
 
