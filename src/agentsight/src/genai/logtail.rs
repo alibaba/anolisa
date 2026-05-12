@@ -114,6 +114,7 @@ impl GenAIExporter for LogtailExporter {
 /// 此函数被 Logtail 文件导出器使用，由 iLogtail 采集后上传到 SLS。
 pub fn events_to_flat_records(events: &[GenAISemanticEvent]) -> Vec<BTreeMap<String, String>> {
     let hostname = instance_id::get_instance_id();
+    let uid = instance_id::get_owner_account_id();
     let mut records = Vec::with_capacity(events.len());
 
     for event in events {
@@ -122,11 +123,16 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent]) -> Vec<BTreeMap<Str
 
         // iLogtail 保留字段
         m.insert("__time__".to_string(), timestamp.to_string());
-        m.insert("__source__".to_string(), hostname.clone());
+        m.insert("__source__".to_string(), hostname.to_string());
         m.insert("__topic__".to_string(), "agentsight".to_string());
 
         // 每条日志都写入 instance
-        m.insert("instance".to_string(), hostname.clone());
+        m.insert("instance".to_string(), hostname.to_string());
+
+        // 写入 uid (owner-account-id)
+        if !uid.is_empty() {
+            m.insert("uid".to_string(), uid.to_string());
+        }
 
         match event {
             GenAISemanticEvent::LLMCall(call) => {
