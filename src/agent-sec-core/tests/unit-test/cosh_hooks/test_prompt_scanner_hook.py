@@ -1,13 +1,13 @@
 """Unit tests for cosh-extension/hooks/prompt_scanner_hook.py.
 
 The hook is self-contained (no agent_sec_cli imports), so we test it
-by importing the _format_cosh helper directly and piping JSON via
-subprocess for integration-style tests.
+by importing helpers directly and piping JSON via subprocess for
+integration-style tests.
 
 Tests cover:
 1. verdict → decision mapping (pass, warn, deny, error, unknown)
-2. Warmup detection via string matching in summary
-3. Non-warmup error verdict still fails open
+2. Error verdict fails open (warmup no longer handled in _format_cosh)
+3. Model directory detection + permanent warmup suppression logic
 4. Subprocess integration: pipe JSON into the hook and verify stdout
 """
 
@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -27,9 +28,15 @@ _COSH_HOOK = str(
     / "prompt_scanner_hook.py"
 )
 
-# Import _format_cosh for direct unit testing
+# Import helpers for direct unit testing
 sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-from prompt_scanner_hook import _WARMUP_HINT, _format_cosh
+from prompt_scanner_hook import (
+    _cleanup_warmup_marker,
+    _format_cosh,
+    _is_model_downloaded,
+    _is_warmup_reminded,
+    _mark_warmup_reminded,
+)
 
 # ---------------------------------------------------------------------------
 # Unit tests: _format_cosh
@@ -83,37 +90,20 @@ class TestFormatCoshDeny:
         assert "jailbreak detected" in result["reason"]
 
 
-class TestFormatCoshErrorWarmup:
-    """verdict=error + summary contains warmup hint → decision=ask with warmup message."""
+class TestFormatCoshError:
+    """verdict=error → fail-open allow (warmup handled in main, not _format_cosh)."""
 
-    def test_error_with_warmup_hint_in_summary_returns_ask(self):
+    def test_error_with_warmup_hint_returns_allow(self):
+        """_format_cosh no longer handles warmup — it just fails open."""
         result = json.loads(
             _format_cosh(
                 {
                     "verdict": "error",
-                    "summary": f"Scanner error: Model not found. Run {_WARMUP_HINT}",
+                    "summary": "Model not found. Run agent-sec-cli scan-prompt warmup",
                 }
             )
         )
-        assert result["decision"] == "ask"
-        assert "warmup" in result["reason"]
-        assert "agent-sec-cli scan-prompt warmup" in result["reason"]
-
-    def test_warmup_message_contains_chinese_instructions(self):
-        result = json.loads(
-            _format_cosh(
-                {
-                    "verdict": "error",
-                    "summary": f"Model not available. {_WARMUP_HINT}",
-                }
-            )
-        )
-        assert result["decision"] == "ask"
-        assert "agent-sec-cli scan-prompt warmup" in result["reason"]
-
-
-class TestFormatCoshErrorOther:
-    """verdict=error without warmup hint → fail-open allow."""
+        assert result["decision"] == "allow"
 
     def test_error_without_warmup_hint_returns_allow(self):
         result = json.loads(
@@ -142,6 +132,111 @@ class TestFormatCoshUnknown:
         """When verdict key is missing, default is 'pass' → allow."""
         result = json.loads(_format_cosh({}))
         assert result["decision"] == "allow"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: model detection & suppression
+# ---------------------------------------------------------------------------
+
+
+class TestModelDetection:
+    """_is_model_downloaded checks for model.safetensors two levels under cache dir."""
+
+    def test_returns_false_when_cache_dir_missing(self):
+        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", Path("/nonexistent")):
+            assert _is_model_downloaded() is False
+
+    def test_returns_false_when_no_model_safetensors(self, tmp_path):
+        model_dir = tmp_path / "some-org" / "some-model"
+        model_dir.mkdir(parents=True)
+        # No model.safetensors → not downloaded
+        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
+            assert _is_model_downloaded() is False
+
+    def test_returns_true_when_model_safetensors_exists(self, tmp_path):
+        model_dir = tmp_path / "some-org" / "some-model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.safetensors").write_text("")
+        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
+            assert _is_model_downloaded() is True
+
+    def test_decoupled_from_specific_model_name(self, tmp_path):
+        """Any model with model.safetensors qualifies — no hardcoded model name."""
+        model_dir = tmp_path / "future-org" / "future-model-v3"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.safetensors").write_text("")
+        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
+            assert _is_model_downloaded() is True
+
+    def test_config_json_alone_does_not_count(self, tmp_path):
+        """config.json without model.safetensors (e.g. incomplete download) → False."""
+        model_dir = tmp_path / "some-org" / "some-model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}")
+        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
+            assert _is_model_downloaded() is False
+
+
+class TestWarmupSuppression:
+    """Permanent marker-based suppression: ask once, then allow forever."""
+
+    def test_not_reminded_initially(self, tmp_path):
+        marker = tmp_path / "warmup-reminded"
+        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
+            assert _is_warmup_reminded() is False
+
+    def test_mark_creates_marker(self, tmp_path):
+        marker = tmp_path / "warmup-reminded"
+        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
+            with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", tmp_path):
+                _mark_warmup_reminded()
+                assert marker.exists()
+                assert _is_warmup_reminded() is True
+
+    def test_suppression_is_permanent(self, tmp_path):
+        """Once reminded, marker persists — no TTL expiry."""
+        marker = tmp_path / "warmup-reminded"
+        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
+            with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", tmp_path):
+                _mark_warmup_reminded()
+                # Even after "a long time", still suppressed
+                assert _is_warmup_reminded() is True
+
+    def test_mark_best_effort_on_failure(self):
+        """_mark_warmup_reminded should not raise on permission errors."""
+        with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", Path("/nonexistent")):
+            with patch(
+                "prompt_scanner_hook._REMINDER_MARKER_FILE",
+                Path("/nonexistent/warmup-reminded"),
+            ):
+                # Should not raise
+                _mark_warmup_reminded()
+
+
+class TestWarmupCleanup:
+    """_cleanup_warmup_marker removes the marker when the model is present."""
+
+    def test_cleanup_removes_existing_marker(self, tmp_path):
+        marker = tmp_path / "warmup-reminded"
+        marker.write_text("reminded")
+        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
+            _cleanup_warmup_marker()
+            assert not marker.exists()
+
+    def test_cleanup_is_noop_when_no_marker(self, tmp_path):
+        marker = tmp_path / "warmup-reminded"
+        # marker does not exist yet
+        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
+            _cleanup_warmup_marker()  # should not raise
+            assert not marker.exists()
+
+    def test_cleanup_best_effort_on_failure(self):
+        """_cleanup_warmup_marker should not raise on permission errors."""
+        with patch(
+            "prompt_scanner_hook._REMINDER_MARKER_FILE",
+            Path("/nonexistent/warmup-reminded"),
+        ):
+            _cleanup_warmup_marker()  # should not raise
 
 
 # ---------------------------------------------------------------------------
