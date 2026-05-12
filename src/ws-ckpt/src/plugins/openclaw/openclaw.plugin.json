@@ -1,0 +1,17 @@
+{
+  "id": "ws-ckpt",
+  "kind": "tool",
+  "install": {
+    "npmSpec": "@openclaw/ws-ckpt"
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "autoCheckpoint": {
+        "type": "boolean",
+        "description": "Automatically create a checkpoint before each tool call (default: false)"
+      }
+    }
+  }
+}
