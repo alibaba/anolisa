@@ -3,15 +3,15 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import agent_sec_cli.security_events as security_events
+from agent_sec_cli.security_events import log_event
 from agent_sec_cli.security_events.schema import SecurityEvent
 
 
 class TestGetWriter(unittest.TestCase):
     def test_singleton_returns_same_instance(self):
-        import agent_sec_cli.security_events
-
-        w1 = agent_sec_cli.security_events.get_writer()
-        w2 = agent_sec_cli.security_events.get_writer()
+        w1 = security_events.get_writer()
+        w2 = security_events.get_writer()
         self.assertIs(w1, w2)
 
 
@@ -20,8 +20,6 @@ class TestLogEvent(unittest.TestCase):
     def test_log_event_delegates_to_writer(self, mock_get_writer):
         mock_writer = MagicMock()
         mock_get_writer.return_value = mock_writer
-
-        from agent_sec_cli.security_events import log_event
 
         evt = SecurityEvent(event_type="t", category="c", details={})
         log_event(evt)
@@ -34,8 +32,6 @@ class TestLogEvent(unittest.TestCase):
         mock_writer.write.side_effect = RuntimeError("disk full")
         mock_get_writer.return_value = mock_writer
 
-        from agent_sec_cli.security_events import log_event
-
         evt = SecurityEvent(event_type="t", category="c", details={})
         # Should not raise
         log_event(evt)
@@ -43,10 +39,8 @@ class TestLogEvent(unittest.TestCase):
 
 class TestGetSqliteWriter(unittest.TestCase):
     def test_singleton_returns_same_instance(self):
-        import agent_sec_cli.security_events
-
-        w1 = agent_sec_cli.security_events.get_sqlite_writer()
-        w2 = agent_sec_cli.security_events.get_sqlite_writer()
+        w1 = security_events.get_sqlite_writer()
+        w2 = security_events.get_sqlite_writer()
         self.assertIs(w1, w2)
 
 
@@ -58,8 +52,6 @@ class TestDualWrite(unittest.TestCase):
         mock_sqlite = MagicMock()
         mock_get_writer.return_value = mock_jsonl
         mock_get_sqlite_writer.return_value = mock_sqlite
-
-        from agent_sec_cli.security_events import log_event
 
         evt = SecurityEvent(event_type="t", category="c", details={})
         log_event(evt)
@@ -77,8 +69,6 @@ class TestDualWrite(unittest.TestCase):
         mock_get_writer.return_value = mock_jsonl
         mock_get_sqlite_writer.return_value = mock_sqlite
 
-        from agent_sec_cli.security_events import log_event
-
         evt = SecurityEvent(event_type="t", category="c", details={})
         log_event(evt)
         # SQLite write should still be called even though JSONL failed
@@ -94,8 +84,6 @@ class TestDualWrite(unittest.TestCase):
         mock_sqlite.write.side_effect = RuntimeError("corruption")
         mock_get_writer.return_value = mock_jsonl
         mock_get_sqlite_writer.return_value = mock_sqlite
-
-        from agent_sec_cli.security_events import log_event
 
         evt = SecurityEvent(event_type="t", category="c", details={})
         log_event(evt)

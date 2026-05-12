@@ -79,7 +79,7 @@ include = [
 module-name = "agent_sec_cli._native"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["../tests/unit-test", "../tests/integration-test", "../tests/e2e/cli"]
 addopts = "-v"
 
 [tool.coverage.run]

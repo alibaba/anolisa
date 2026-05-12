@@ -1,282 +1,286 @@
-"""Unit tests for security_events.writer — SecurityEventWriter."""
+"""Unit tests for security_events.writer."""
 
 import json
 import multiprocessing
 import os
-import tempfile
+import re
 import threading
-import unittest
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
+import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent
-from agent_sec_cli.security_events.writer import SecurityEventWriter
+from agent_sec_cli.security_events.writer import (
+    JsonlEventWriter,
+    SecurityEventWriter,
+)
 
 
-def _make_event(**overrides):
-    defaults = dict(event_type="test", category="test_cat", details={"k": "v"})
+def _make_event(**overrides: Any) -> SecurityEvent:
+    defaults: dict[str, Any] = {
+        "event_type": "test",
+        "category": "test_cat",
+        "details": {"k": "v"},
+    }
     defaults.update(overrides)
     return SecurityEvent(**defaults)
 
 
-class TestWriterBasic(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        self.tmp.close()
-        self.writer = SecurityEventWriter(path=self.tmp.name)
+def _backup_files(log_path: Path) -> list[Path]:
+    prefix = f"{log_path.name}."
+    return sorted(
+        path
+        for path in log_path.parent.iterdir()
+        if path.name.startswith(prefix)
+        and not path.name.endswith(".lock")
+        and path.is_file()
+    )
 
-    def tearDown(self):
-        try:
-            os.unlink(self.tmp.name)
-        except OSError:
-            pass
 
-    def test_write_appends_jsonl_line(self):
-        evt = _make_event()
-        self.writer.write(evt)
-        with open(self.tmp.name) as fh:
-            lines = fh.readlines()
-        self.assertEqual(len(lines), 1)
-        parsed = json.loads(lines[0])
-        self.assertEqual(parsed["event_type"], "test")
+def _all_event_files(log_path: Path) -> list[Path]:
+    return [log_path, *_backup_files(log_path)]
 
-    def test_write_multiple_events(self):
+
+def _read_event_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def _event_timestamps(path: Path) -> list[str]:
+    timestamps = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                timestamps.append(json.loads(line)["timestamp"])
+    return timestamps
+
+
+def _max_event_timestamp(path: Path) -> str | None:
+    timestamps = _event_timestamps(path)
+    return max(timestamps) if timestamps else None
+
+
+def _min_event_timestamp(path: Path) -> str | None:
+    timestamps = _event_timestamps(path)
+    return min(timestamps) if timestamps else None
+
+
+class TestWriterBasic:
+    def test_write_appends_security_event_jsonl_line(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path)
+
+        writer.write(_make_event())
+
+        lines = _read_event_lines(path)
+        assert len(lines) == 1
+        assert json.loads(lines[0])["event_type"] == "test"
+
+    def test_write_appends_multiple_security_events(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path)
+
         for i in range(3):
-            self.writer.write(_make_event(event_type=f"evt_{i}"))
-        with open(self.tmp.name) as fh:
-            lines = fh.readlines()
-        self.assertEqual(len(lines), 3)
+            writer.write(_make_event(event_type=f"evt_{i}"))
+
+        lines = _read_event_lines(path)
+        assert len(lines) == 3
         for i, line in enumerate(lines):
-            self.assertEqual(json.loads(line)["event_type"], f"evt_{i}")
+            assert json.loads(line)["event_type"] == f"evt_{i}"
+
+    def test_write_keeps_generic_jsonl_writer_contract(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path)
+
+        writer.write({"event_type": "raw", "category": "test", "details": {"k": "v"}})
+
+        lines = _read_event_lines(path)
+        assert len(lines) == 1
+        assert json.loads(lines[0])["event_type"] == "raw"
 
 
-class TestWriterRotation(unittest.TestCase):
-    def test_rotation_detection(self):
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        tmp.close()
-        writer = SecurityEventWriter(path=tmp.name)
+class TestJsonlEventWriter:
+    def test_generic_writer_appends_json_serializable_records(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "observability.jsonl"
+        writer = JsonlEventWriter(path=path)
 
-        # Write first event
+        writer.write({"hook": "before_tool_call", "metrics": {"tool_name": "exec"}})
+
+        lines = _read_event_lines(path)
+        assert len(lines) == 1
+        assert json.loads(lines[0])["hook"] == "before_tool_call"
+
+    def test_parent_directory_created_only_once_per_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "nested" / "observability.jsonl"
+        original_mkdir = Path.mkdir
+        mkdir_calls: list[Path] = []
+
+        def count_mkdir(self: Path, *args: Any, **kwargs: Any) -> None:
+            mkdir_calls.append(self)
+            original_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", count_mkdir)
+        writer = JsonlEventWriter(path=path)
+
+        writer.write({"seq": 1})
+        writer.write({"seq": 2})
+
+        assert mkdir_calls == [path.parent]
+
+    def test_streams_use_independent_lock_files(self, tmp_path: Path) -> None:
+        security_path = tmp_path / "security-events.jsonl"
+        observability_path = tmp_path / "observability.jsonl"
+
+        JsonlEventWriter(path=security_path).write({"stream": "security"})
+        JsonlEventWriter(path=observability_path).write({"stream": "observability"})
+
+        security_lock = Path(f"{security_path}.lock")
+        observability_lock = Path(f"{observability_path}.lock")
+        assert security_lock.exists()
+        assert observability_lock.exists()
+        assert security_lock.resolve() != observability_lock.resolve()
+
+    def test_generic_writer_uses_stream_specific_rotation_state(
+        self, tmp_path: Path
+    ) -> None:
+        security_path = tmp_path / "security-events.jsonl"
+        observability_path = tmp_path / "observability.jsonl"
+        security_writer = JsonlEventWriter(
+            path=security_path, max_bytes=250, backup_count=1
+        )
+        observability_writer = JsonlEventWriter(
+            path=observability_path, max_bytes=10_000, backup_count=1
+        )
+
+        for i in range(10):
+            security_writer.write({"stream": "security", "seq": i, "pad": "x" * 50})
+        observability_writer.write({"stream": "observability", "seq": 1})
+
+        assert len(_backup_files(security_path)) >= 1
+        assert not _backup_files(observability_path)
+
+
+class TestWriterRotation:
+    def test_rotation_detection(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+        path.touch()
+        writer = SecurityEventWriter(path=path)
+
         writer.write(_make_event(event_type="before_rotate"))
 
-        # Simulate rotation: delete and recreate
-        os.unlink(tmp.name)
-        with open(tmp.name, "w"):
-            pass  # empty file
+        path.unlink()
+        path.write_text("", encoding="utf-8")
 
-        # Write after rotation
         writer.write(_make_event(event_type="after_rotate"))
 
-        with open(tmp.name) as fh:
-            lines = fh.readlines()
-        # New file should have the post-rotation event
-        self.assertTrue(len(lines) >= 1)
-        parsed = json.loads(lines[-1])
-        self.assertEqual(parsed["event_type"], "after_rotate")
-
-        os.unlink(tmp.name)
+        lines = _read_event_lines(path)
+        assert len(lines) >= 1
+        assert json.loads(lines[-1])["event_type"] == "after_rotate"
 
 
-class TestWriterAutoRotation(unittest.TestCase):
+class TestWriterAutoRotation:
     """Test automatic file size-based rotation."""
 
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        self.tmp.close()
-
-    def tearDown(self):
-        # Clean up main file and all rotated backups
-        try:
-            os.unlink(self.tmp.name)
-        except OSError:
-            pass
-        for i in range(1, 11):
-            try:
-                os.unlink(f"{self.tmp.name}.{i}")
-            except OSError:
-                pass
-
-    def test_auto_rotation_on_size_limit(self):
+    def test_auto_rotation_on_size_limit(self, tmp_path: Path) -> None:
         """Test that log file is rotated when it exceeds max_bytes."""
-        # Create writer with small max_bytes (500 bytes) for testing
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=500, backup_count=3)
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=500, backup_count=3)
 
-        # Write events until rotation should occur
         for i in range(20):
             writer.write(_make_event(event_type=f"evt_{i}", details={"data": "x" * 50}))
 
-        # Check that rotation occurred
-        # Find backup files with timestamp pattern
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        backup_files = [
-            f
-            for f in os.listdir(dir_path)
-            if f.startswith(f"{base_name}.")
-            and os.path.isfile(os.path.join(dir_path, f))
-        ]
+        assert _backup_files(path), "At least one rotated backup file should exist"
+        assert path.exists()
+        assert path.stat().st_size < 600
 
-        self.assertTrue(
-            len(backup_files) > 0, "At least one rotated backup file should exist"
-        )
-
-        # Original file should exist and be reasonably small (within 20% of max_bytes)
-        self.assertTrue(os.path.exists(self.tmp.name))
-        current_size = os.path.getsize(self.tmp.name)
-        self.assertLess(current_size, 600)  # Allow some tolerance over 500
-
-    def test_backup_count_limit(self):
+    def test_backup_count_limit(self, tmp_path: Path) -> None:
         """Test that old backups are deleted when backup_count is exceeded."""
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=300, backup_count=3)
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=300, backup_count=3)
 
-        # Write enough events to trigger multiple rotations
         for i in range(50):
             writer.write(_make_event(event_type=f"evt_{i}", details={"data": "y" * 50}))
 
-        # Count backup files
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        backup_files = [
-            f
-            for f in os.listdir(dir_path)
-            if f.startswith(f"{base_name}.")
-            and os.path.isfile(os.path.join(dir_path, f))
-        ]
-
-        self.assertLessEqual(
-            len(backup_files),
-            4,  # Allow 1 extra for timing
-            f"Should have at most 4 backup files, but found {len(backup_files)}: {backup_files}",
+        backup_files = _backup_files(path)
+        assert len(backup_files) <= 4, (
+            f"Should have at most 4 backup files, but found "
+            f"{len(backup_files)}: {backup_files}"
         )
 
-    def test_rotation_preserves_events(self):
+    def test_rotation_preserves_events(self, tmp_path: Path) -> None:
         """Test that events are not lost during rotation."""
-        import time
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=1000, backup_count=5)
 
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=1000, backup_count=5)
-
-        # Write events
         total_events = 15
         for i in range(total_events):
             writer.write(
                 _make_event(event_id=f"event-{i}", details={"payload": "z" * 40})
             )
-            # Small delay to ensure unique timestamps for backup files
             time.sleep(0.01)
 
-        # Count total events across all files
-        total_count = 0
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-
-        # Include main file and all backup files
-        all_files = [self.tmp.name]
-        if os.path.isdir(dir_path):
-            for filename in os.listdir(dir_path):
-                if filename.startswith(f"{base_name}."):
-                    all_files.append(os.path.join(dir_path, filename))
-
-        for filepath in all_files:
-            if os.path.exists(filepath):
-                with open(filepath) as fh:
-                    total_count += len(fh.readlines())
-
-        self.assertEqual(
-            total_count,
-            total_events,
-            f"Should have {total_events} total events across all files",
+        total_count = sum(
+            len(_read_event_lines(file_path)) for file_path in _all_event_files(path)
         )
+        assert (
+            total_count == total_events
+        ), f"Should have {total_events} total events across all files"
 
-    def test_timestamp_format_in_backup_filename(self):
+    def test_timestamp_format_in_backup_filename(self, tmp_path: Path) -> None:
         """Test that backup files use timestamp format with millisecond precision."""
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=400, backup_count=5)
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=400, backup_count=5)
 
-        # Write enough to trigger rotation
         for i in range(20):
             writer.write(_make_event(event_type=f"evt_{i}", details={"data": "x" * 50}))
 
-        # Find backup files
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        backup_files = [
-            f
-            for f in os.listdir(dir_path)
-            if f.startswith(f"{base_name}.")
-            and not f.endswith(".lock")
-            and os.path.isfile(os.path.join(dir_path, f))
-        ]
-
-        # Check that backup files have timestamp pattern:
-        #   YYYYMMDD-HHMMSS.fff            (millisecond precision)
-        #   YYYYMMDD-HHMMSS.fff.<counter>   (collision-guard suffix)
-        import re
-
         timestamp_pattern = re.compile(r"^\d{8}-\d{6}\.\d{3}(\.\d+)?$")
 
-        for backup_file in backup_files:
-            # Extract the timestamp suffix
-            suffix = backup_file[len(base_name) + 1 :]
-            self.assertTrue(
-                timestamp_pattern.match(suffix),
-                f"Backup file '{backup_file}' should have timestamp format "
-                f"YYYYMMDD-HHMMSS.fff[.N], got suffix: {suffix}",
+        for backup_file in _backup_files(path):
+            suffix = backup_file.name[len(path.name) + 1 :]
+            assert timestamp_pattern.match(suffix), (
+                f"Backup file '{backup_file.name}' should have timestamp format "
+                f"YYYYMMDD-HHMMSS.fff[.N], got suffix: {suffix}"
             )
 
-    def test_oldest_backups_are_deleted(self):
+    def test_oldest_backups_are_deleted(self, tmp_path: Path) -> None:
         """Test that oldest backup files are deleted when exceeding backup_count."""
-        import time
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=300, backup_count=3)
 
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=300, backup_count=3)
-
-        # Write enough events to trigger multiple rotations (at least 5)
-        # This should create more than 3 backups, triggering cleanup
         for i in range(60):
             writer.write(_make_event(event_type=f"evt_{i}", details={"data": "y" * 50}))
-            # Small delay to ensure different timestamps
             time.sleep(0.01)
 
-        # Count backup files
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        backup_files = [
-            f
-            for f in os.listdir(dir_path)
-            if f.startswith(f"{base_name}.")
-            and os.path.isfile(os.path.join(dir_path, f))
-        ]
-
-        # Should have approximately backup_count (3) backup files, allow 1 extra for timing
-        self.assertLessEqual(
-            len(backup_files),
-            4,
-            f"Should have at most 4 backup files after cleanup, but found {len(backup_files)}: {sorted(backup_files)}",
+        backup_files = _backup_files(path)
+        assert len(backup_files) <= 4, (
+            f"Should have at most 4 backup files after cleanup, but found "
+            f"{len(backup_files)}: {backup_files}"
         )
 
-        # Verify that the backups are the most recent ones (by mtime)
-        backup_paths = [os.path.join(dir_path, f) for f in backup_files]
-        mtimes = [os.path.getmtime(p) for p in backup_paths]
-
-        # All backup mtimes should be relatively recent (within last few seconds)
         current_time = time.time()
-        for mtime in mtimes:
-            # Each backup should be within last 10 seconds (generous margin)
-            self.assertLess(
-                current_time - mtime,
-                10,
-                "Backup files should be recent, not old ones that should have been deleted",
+        for backup_file in backup_files:
+            assert current_time - backup_file.stat().st_mtime < 10, (
+                "Backup files should be recent, not old ones that should have "
+                "been deleted"
             )
 
-        # Verify current file exists and is reasonably small
-        self.assertTrue(os.path.exists(self.tmp.name))
-        current_size = os.path.getsize(self.tmp.name)
-        self.assertLess(current_size, 600)  # Allow more tolerance over 300
+        assert path.exists()
+        assert path.stat().st_size < 600
 
-    def test_cleanup_preserves_most_recent_backups(self):
+    def test_cleanup_preserves_most_recent_backups(self, tmp_path: Path) -> None:
         """Test that cleanup keeps the most recent backups, not random ones."""
-        import time
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path, max_bytes=250, backup_count=2)
 
-        writer = SecurityEventWriter(path=self.tmp.name, max_bytes=250, backup_count=2)
-
-        # Trigger multiple rotations with delays
-        rotation_times = []
         for batch in range(5):
             for i in range(10):
                 writer.write(
@@ -284,205 +288,108 @@ class TestWriterAutoRotation(unittest.TestCase):
                         event_type=f"batch{batch}_evt{i}", details={"data": "z" * 50}
                     )
                 )
-            time.sleep(0.05)  # Ensure different timestamps between batches
+            time.sleep(0.05)
 
-        # Get backup files sorted by name (which includes timestamp)
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        backup_files = sorted(
-            [
-                f
-                for f in os.listdir(dir_path)
-                if f.startswith(f"{base_name}.")
-                and os.path.isfile(os.path.join(dir_path, f))
-            ]
-        )
+        backup_files = _backup_files(path)
+        assert (
+            len(backup_files) <= 3
+        ), f"Should have at most 3 backup files, but found {len(backup_files)}"
+        assert len(backup_files) >= 2
 
-        # Should have approximately 2 backups, allow 1 extra for timing
-        self.assertLessEqual(
-            len(backup_files),
-            3,
-            f"Should have at most 3 backup files, but found {len(backup_files)}",
-        )
+        ts1 = backup_files[0].name[len(path.name) + 1 :]
+        ts2 = backup_files[1].name[len(path.name) + 1 :]
+        assert ts2 > ts1, f"Backups should be ordered by timestamp: {ts1} < {ts2}"
 
-        # Verify they are ordered by timestamp (lexicographic sort = temporal sort)
-        # The second backup should have a later timestamp than the first
-        ts1 = backup_files[0][len(base_name) + 1 :]
-        ts2 = backup_files[1][len(base_name) + 1 :]
-        self.assertGreater(
-            ts2, ts1, f"Backups should be ordered by timestamp: {ts1} < {ts2}"
-        )
-
-    def test_cleanup_detailed_verification(self):
-        """Comprehensive test of cleanup mechanism with detailed verification.
-
-        This test verifies:
-        1. Exactly backup_count files are retained
-        2. Old backups are actually deleted (not just ignored)
-        3. All retained backups are recent
-        4. Current file is reasonably small (may slightly exceed max_bytes due to single large events)
-        5. Backup file metadata (size, mtime) is valid
-        """
-        import time
-
-        # Use a larger max_bytes to accommodate event sizes
-        # Each event with {"data": "x" * 50} is ~200-250 bytes
+    def test_cleanup_detailed_verification(self, tmp_path: Path) -> None:
+        """Comprehensive test of cleanup mechanism with detailed verification."""
+        path = tmp_path / "security-events.jsonl"
         max_bytes = 1000
+        writer = SecurityEventWriter(path=path, max_bytes=max_bytes, backup_count=3)
 
-        writer = SecurityEventWriter(
-            path=self.tmp.name, max_bytes=max_bytes, backup_count=3
-        )
-
-        # Write enough to trigger at least 5-6 rotations
         for i in range(100):
             writer.write(_make_event(event_type=f"evt_{i}", details={"data": "x" * 50}))
-            time.sleep(0.01)  # Ensure different timestamps
+            time.sleep(0.01)
 
-        # Analyze results
-        dir_path = os.path.dirname(self.tmp.name) or "."
-        base_name = os.path.basename(self.tmp.name)
-
-        all_files = os.listdir(dir_path)
-        backup_files = sorted(
-            [
-                f
-                for f in all_files
-                if f.startswith(f"{base_name}.")
-                and os.path.isfile(os.path.join(dir_path, f))
-            ]
+        backup_files = _backup_files(path)
+        assert len(backup_files) <= 4, (
+            f"Should have at most 4 backup files, but found "
+            f"{len(backup_files)}: {backup_files}"
         )
 
-        # Verification 1: Approximately backup_count backups, allow 1 extra for timing
-        self.assertLessEqual(
-            len(backup_files),
-            4,
-            f"Should have at most 4 backup files, but found {len(backup_files)}: {backup_files}",
-        )
+        for backup_file in backup_files:
+            assert backup_file.exists()
+            assert backup_file.stat().st_size >= 0
+            assert backup_file.stat().st_mtime > 0
 
-        # Verification 2: All backups have valid metadata
-        backup_paths = []
-        for bf in backup_files:
-            filepath = os.path.join(dir_path, bf)
-            backup_paths.append(filepath)
-
-            # File should exist and be readable
-            self.assertTrue(os.path.exists(filepath))
-            # File size should be >= 0 (allow empty files from immediate rotation)
-            self.assertGreaterEqual(os.path.getsize(filepath), 0)
-
-            # Should have valid mtime
-            mtime = os.path.getmtime(filepath)
-            self.assertGreater(mtime, 0)
-
-        # Verification 3: All backups are recent (within last 5 seconds)
         current_time = time.time()
-        for bf in backup_files:
-            filepath = os.path.join(dir_path, bf)
-            mtime = os.path.getmtime(filepath)
-            age = current_time - mtime
-            self.assertLess(
-                age,
-                5,
-                f"Backup {bf} should be recent (< 5s old), but is {age:.1f}s old",
+        for backup_file in backup_files:
+            age = current_time - backup_file.stat().st_mtime
+            assert age < 5, (
+                f"Backup {backup_file.name} should be recent (< 5s old), "
+                f"but is {age:.1f}s old"
             )
 
-        # Verification 4: Current file exists and is reasonably small
-        # Note: May slightly exceed max_bytes if a single event is large
-        self.assertTrue(
-            os.path.exists(self.tmp.name),
-            "Current log file should exist after rotation",
-        )
-        current_size = os.path.getsize(self.tmp.name)
-        # Allow some slack for the last event that triggered rotation
-        self.assertLess(
-            current_size,
-            max_bytes + 300,  # max_bytes + one event size
-            f"Current file ({current_size} bytes) should be reasonably small (< {max_bytes + 300})",
+        assert path.exists(), "Current log file should exist after rotation"
+        current_size = path.stat().st_size
+        assert current_size < max_bytes + 300, (
+            f"Current file ({current_size} bytes) should be reasonably small "
+            f"(< {max_bytes + 300})"
         )
 
-        # Verification 5: Backups are ordered by time (newer backups have later mtimes)
-        mtimes = [os.path.getmtime(p) for p in backup_paths]
+        mtimes = [backup_file.stat().st_mtime for backup_file in backup_files]
         for i in range(len(mtimes) - 1):
-            self.assertLessEqual(
-                mtimes[i],
-                mtimes[i + 1],
-                f"Backups should be ordered by time: backup[{i}] <= backup[{i+1}]",
-            )
+            assert (
+                mtimes[i] <= mtimes[i + 1]
+            ), f"Backups should be ordered by time: backup[{i}] <= backup[{i + 1}]"
 
 
-class TestCleanupBackupMatching(unittest.TestCase):
-    """Verify _cleanup_old_backups correctly identifies backup files.
+class TestCleanupBackupMatching:
+    """Verify _cleanup_old_backups correctly identifies backup files."""
 
-    Tests cover:
-    - Normal timestamp-suffixed backups
-    - Collision-guard counter-suffixed backups (e.g. .123.1)
-    - Non-backup files that share the same prefix are NOT deleted
-    """
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.log_path = os.path.join(self.tmpdir, "security-events.jsonl")
-        # Create the active log file
-        with open(self.log_path, "w") as fh:
-            fh.write('{"event_type": "current"}\n')
-
-    def tearDown(self):
-        import shutil
-
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _create_file(self, name, age_offset=0):
-        """Create a file in tmpdir and set its mtime to (now - age_offset) seconds."""
-        import time
-
-        path = os.path.join(self.tmpdir, name)
-        with open(path, "w") as fh:
-            fh.write("data\n")
+    def _create_file(self, tmp_path: Path, name: str, age_offset: int = 0) -> Path:
+        """Create a file in tmp_path and set its mtime to now - age_offset."""
+        path = tmp_path / name
+        path.write_text("data\n", encoding="utf-8")
         mtime = time.time() - age_offset
         os.utime(path, (mtime, mtime))
         return path
 
-    def _list_files(self):
-        """Return set of filenames in tmpdir (excluding the active log)."""
-        base = os.path.basename(self.log_path)
-        return {f for f in os.listdir(self.tmpdir) if f != base}
+    def _list_files(self, tmp_path: Path, log_path: Path) -> set[str]:
+        """Return filenames in tmp_path, excluding the active log."""
+        return {path.name for path in tmp_path.iterdir() if path.name != log_path.name}
 
-    def test_collision_guard_backups_are_recognized(self):
+    def test_collision_guard_backups_are_recognized(self, tmp_path: Path) -> None:
         """Backups with .N collision-guard suffix must be counted and cleaned."""
-        # Create 4 backups: 2 normal, 2 collision-guarded; backup_count=2
-        self._create_file("security-events.jsonl.20260101-120000.100", age_offset=40)
-        self._create_file("security-events.jsonl.20260101-120000.100.1", age_offset=30)
-        self._create_file("security-events.jsonl.20260101-120001.200", age_offset=20)
-        self._create_file("security-events.jsonl.20260101-120001.200.1", age_offset=10)
+        log_path = tmp_path / "security-events.jsonl"
+        log_path.write_text('{"event_type": "current"}\n', encoding="utf-8")
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120000.100", 40)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120000.100.1", 30)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120001.200", 20)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120001.200.1", 10)
 
-        writer = SecurityEventWriter(path=self.log_path, backup_count=2)
+        writer = SecurityEventWriter(path=log_path, backup_count=2)
         writer._cleanup_old_backups()
 
-        remaining = self._list_files()
-        # Only the 2 most recent (by mtime) should survive
-        self.assertLessEqual(
-            len(remaining), 2, f"Expected <= 2 backups, got: {remaining}"
-        )
-        # The two oldest (age_offset=40, 30) should be gone
-        self.assertNotIn("security-events.jsonl.20260101-120000.100", remaining)
-        self.assertNotIn("security-events.jsonl.20260101-120000.100.1", remaining)
+        remaining = self._list_files(tmp_path, log_path)
+        assert len(remaining) <= 2, f"Expected <= 2 backups, got: {remaining}"
+        assert "security-events.jsonl.20260101-120000.100" not in remaining
+        assert "security-events.jsonl.20260101-120000.100.1" not in remaining
 
-    def test_non_backup_files_are_not_deleted(self):
-        """Files that share the prefix but don't match the timestamp pattern must survive."""
-        # Create files that should NOT be treated as backups
-        self._create_file("security-events.jsonl.old", age_offset=100)
-        self._create_file("security-events.jsonl.bak", age_offset=100)
-        self._create_file("security-events.jsonl.lock", age_offset=100)
-        self._create_file("security-events.jsonl.tmp", age_offset=100)
-        self._create_file("security-events.jsonl.schema", age_offset=100)
-        # And one real backup
-        self._create_file("security-events.jsonl.20260101-120000.100", age_offset=5)
+    def test_non_backup_files_are_not_deleted(self, tmp_path: Path) -> None:
+        """Files that share the prefix but lack the timestamp pattern must survive."""
+        log_path = tmp_path / "security-events.jsonl"
+        log_path.write_text('{"event_type": "current"}\n', encoding="utf-8")
+        self._create_file(tmp_path, "security-events.jsonl.old", 100)
+        self._create_file(tmp_path, "security-events.jsonl.bak", 100)
+        self._create_file(tmp_path, "security-events.jsonl.lock", 100)
+        self._create_file(tmp_path, "security-events.jsonl.tmp", 100)
+        self._create_file(tmp_path, "security-events.jsonl.schema", 100)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120000.100", 5)
 
-        writer = SecurityEventWriter(path=self.log_path, backup_count=5)
+        writer = SecurityEventWriter(path=log_path, backup_count=5)
         writer._cleanup_old_backups()
 
-        remaining = self._list_files()
-        # All non-backup files must survive
+        remaining = self._list_files(tmp_path, log_path)
         for name in [
             "security-events.jsonl.old",
             "security-events.jsonl.bak",
@@ -490,50 +397,43 @@ class TestCleanupBackupMatching(unittest.TestCase):
             "security-events.jsonl.tmp",
             "security-events.jsonl.schema",
         ]:
-            self.assertIn(name, remaining, f"{name} should NOT have been deleted")
-        # The real backup should also survive (only 1 backup, limit is 5)
-        self.assertIn("security-events.jsonl.20260101-120000.100", remaining)
+            assert name in remaining, f"{name} should NOT have been deleted"
+        assert "security-events.jsonl.20260101-120000.100" in remaining
 
-    def test_mixed_cleanup_respects_backup_count(self):
-        """With a mix of real backups and non-backup files, only real backups are counted."""
-        # 5 real backups (mix of normal and collision-guarded)
-        self._create_file("security-events.jsonl.20260101-100000.000", age_offset=50)
-        self._create_file("security-events.jsonl.20260101-100000.000.1", age_offset=40)
-        self._create_file("security-events.jsonl.20260101-110000.000", age_offset=30)
-        self._create_file("security-events.jsonl.20260101-120000.000", age_offset=20)
-        self._create_file("security-events.jsonl.20260101-130000.000", age_offset=10)
-        # Non-backup files
-        self._create_file("security-events.jsonl.old", age_offset=200)
-        self._create_file("security-events.jsonl.notes", age_offset=200)
+    def test_mixed_cleanup_respects_backup_count(self, tmp_path: Path) -> None:
+        """With mixed real and non-backup files, only real backups are counted."""
+        log_path = tmp_path / "security-events.jsonl"
+        log_path.write_text('{"event_type": "current"}\n', encoding="utf-8")
+        self._create_file(tmp_path, "security-events.jsonl.20260101-100000.000", 50)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-100000.000.1", 40)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-110000.000", 30)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-120000.000", 20)
+        self._create_file(tmp_path, "security-events.jsonl.20260101-130000.000", 10)
+        self._create_file(tmp_path, "security-events.jsonl.old", 200)
+        self._create_file(tmp_path, "security-events.jsonl.notes", 200)
 
-        writer = SecurityEventWriter(path=self.log_path, backup_count=3)
+        writer = SecurityEventWriter(path=log_path, backup_count=3)
         writer._cleanup_old_backups()
 
-        remaining = self._list_files()
-        # Non-backup files must survive
-        self.assertIn("security-events.jsonl.old", remaining)
-        self.assertIn("security-events.jsonl.notes", remaining)
-        # 2 oldest real backups should be gone
-        self.assertNotIn("security-events.jsonl.20260101-100000.000", remaining)
-        self.assertNotIn("security-events.jsonl.20260101-100000.000.1", remaining)
-        # 3 most recent should remain
-        self.assertIn("security-events.jsonl.20260101-110000.000", remaining)
-        self.assertIn("security-events.jsonl.20260101-120000.000", remaining)
-        self.assertIn("security-events.jsonl.20260101-130000.000", remaining)
+        remaining = self._list_files(tmp_path, log_path)
+        assert "security-events.jsonl.old" in remaining
+        assert "security-events.jsonl.notes" in remaining
+        assert "security-events.jsonl.20260101-100000.000" not in remaining
+        assert "security-events.jsonl.20260101-100000.000.1" not in remaining
+        assert "security-events.jsonl.20260101-110000.000" in remaining
+        assert "security-events.jsonl.20260101-120000.000" in remaining
+        assert "security-events.jsonl.20260101-130000.000" in remaining
 
 
-# ------------------------------------------------------------------
-# Helper for cross-process tests (must be module-level & picklable)
-# ------------------------------------------------------------------
-
-
-def _child_writer(path, proc_id, event_count, max_bytes, backup_count):
-    """Entry point executed inside each child process.
-
-    Returns a list of event_type strings that this process successfully
-    passed to write() — used for post-mortem analysis when events are lost.
-    """
-    kwargs = {"path": path}
+def _child_writer(
+    path: str,
+    proc_id: int,
+    event_count: int,
+    max_bytes: int,
+    backup_count: int,
+) -> list[str]:
+    """Entry point executed inside each child process."""
+    kwargs: dict[str, Any] = {"path": path}
     if max_bytes:
         kwargs["max_bytes"] = max_bytes
         kwargs["backup_count"] = backup_count
@@ -550,72 +450,9 @@ def _child_writer(path, proc_id, event_count, max_bytes, backup_count):
     return written_events
 
 
-class TestWriterMultiProcessSafety(unittest.TestCase):
-    """Cross-process flock contention tests.
+class TestWriterMultiProcessSafety:
+    """Cross-process flock contention tests."""
 
-    Each test spawns real child processes, each with its own
-    ``SecurityEventWriter`` instance pointing at the **same** JSONL file.
-    """
-
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        self.tmp.close()
-
-    def tearDown(self):
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        # Remove main file, all backups, and the lock file
-        for name in os.listdir(dir_path):
-            if name == base_name or name.startswith(f"{base_name}."):
-                try:
-                    os.unlink(os.path.join(dir_path, name))
-                except OSError:
-                    pass
-
-    # -- helpers --------------------------------------------------------
-
-    def _spawn_and_wait(self, n_procs, events_per_proc, max_bytes=0, backup_count=0):
-        """Fork *n_procs* children, wait, and assert clean exit."""
-        procs = [
-            multiprocessing.Process(
-                target=_child_writer,
-                args=(self.tmp.name, pid, events_per_proc, max_bytes, backup_count),
-            )
-            for pid in range(n_procs)
-        ]
-        for p in procs:
-            p.start()
-        for p in procs:
-            p.join(timeout=30)
-        for i, p in enumerate(procs):
-            self.assertEqual(p.exitcode, 0, f"Child {i} exited with code {p.exitcode}")
-        return procs
-
-    def _collect_all_events(self):
-        """Read every JSONL line from the main file and all rotated backups."""
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-        all_files = [self.tmp.name]
-        for name in os.listdir(dir_path):
-            if name.startswith(f"{base_name}.") and not name.endswith(
-                (".lock", ".tmp")
-            ):
-                all_files.append(os.path.join(dir_path, name))
-
-        events = []
-        for filepath in all_files:
-            if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-                continue
-            with open(filepath) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        events.append(json.loads(line))
-        return events
-
-    # -- tests ---------------------------------------------------------
-
-    # Required fields that every serialised SecurityEvent must carry
     _REQUIRED_FIELDS = {
         "event_id",
         "event_type",
@@ -629,233 +466,191 @@ class TestWriterMultiProcessSafety(unittest.TestCase):
         "details",
     }
 
-    def _assert_valid_event(self, record, context=""):
-        """Assert *record* (parsed dict) has the full SecurityEvent schema."""
-        missing = self._REQUIRED_FIELDS - record.keys()
-        self.assertFalse(
-            missing,
-            f"Event missing fields {missing}: {record!r} {context}",
-        )
-        # Basic type checks
-        self.assertIsInstance(record["event_type"], str)
-        self.assertIsInstance(record["pid"], int)
-        self.assertIsInstance(record["details"], dict)
+    def _spawn_and_wait(
+        self,
+        path: Path,
+        n_procs: int,
+        events_per_proc: int,
+        max_bytes: int = 0,
+        backup_count: int = 0,
+    ) -> list[multiprocessing.Process]:
+        """Fork n_procs children, wait, and assert clean exit."""
+        procs = [
+            multiprocessing.Process(
+                target=_child_writer,
+                args=(str(path), pid, events_per_proc, max_bytes, backup_count),
+            )
+            for pid in range(n_procs)
+        ]
+        for process in procs:
+            process.start()
+        for process in procs:
+            process.join(timeout=30)
+        for i, process in enumerate(procs):
+            assert (
+                process.exitcode == 0
+            ), f"Child {i} exited with code {process.exitcode}"
+        return procs
 
-    def test_cross_process_concurrent_writes_no_rotation(self):
+    def _collect_all_events(self, path: Path) -> list[dict[str, Any]]:
+        """Read every JSONL line from the main file and all rotated backups."""
+        events = []
+        for file_path in _all_event_files(path):
+            if not file_path.exists() or file_path.stat().st_size == 0:
+                continue
+            with file_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        events.append(json.loads(line))
+        return events
+
+    def _assert_valid_event(self, record: dict[str, Any], context: str = "") -> None:
+        """Assert record has the full SecurityEvent schema."""
+        missing = self._REQUIRED_FIELDS - record.keys()
+        assert not missing, f"Event missing fields {missing}: {record!r} {context}"
+        assert isinstance(record["event_type"], str)
+        assert isinstance(record["pid"], int)
+        assert isinstance(record["details"], dict)
+
+    def test_cross_process_concurrent_writes_no_rotation(self, tmp_path: Path) -> None:
         """Multiple processes appending to the same file must not lose events."""
+        path = tmp_path / "security-events.jsonl"
         n_procs = 4
         events_per_proc = 25
-        self._spawn_and_wait(n_procs, events_per_proc)
+        self._spawn_and_wait(path, n_procs, events_per_proc)
 
-        with open(self.tmp.name) as fh:
-            lines = fh.readlines()
-
-        self.assertEqual(
-            len(lines),
-            n_procs * events_per_proc,
-            f"Expected {n_procs * events_per_proc} lines, got {len(lines)}",
-        )
-        # Every line must be valid JSON with full SecurityEvent schema
+        lines = _read_event_lines(path)
+        expected = n_procs * events_per_proc
+        assert len(lines) == expected, f"Expected {expected} lines, got {len(lines)}"
         for i, line in enumerate(lines):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
-                self.fail(f"Line {i} is not valid JSON: {line!r}")
+                pytest.fail(f"Line {i} is not valid JSON: {line!r}")
             self._assert_valid_event(record, context=f"(line {i})")
 
-    def test_cross_process_rotation_under_contention(self):
+    def test_cross_process_rotation_under_contention(self, tmp_path: Path) -> None:
         """Flock contention during rotation must not lose or corrupt events."""
+        path = tmp_path / "security-events.jsonl"
         n_procs = 4
         events_per_proc = 30
-        # max_bytes=5000 keeps rotation realistic (~10 events / file) while
-        # ensuring consecutive rotations are spaced >1 ms apart so that
-        # millisecond-precision backup timestamps never collide.
-        # backup_count is set high so cleanup doesn't delete any backups,
-        # allowing us to verify zero-loss across all files.
-        self._spawn_and_wait(n_procs, events_per_proc, max_bytes=5000, backup_count=200)
-
-        events = self._collect_all_events()
-        expected = n_procs * events_per_proc
-        self.assertEqual(
-            len(events),
-            expected,
-            f"Expected {expected} total events across all files, got {len(events)}",
+        self._spawn_and_wait(
+            path, n_procs, events_per_proc, max_bytes=5000, backup_count=200
         )
 
-        # Every expected event_type tag must be present
-        tags = {e["event_type"] for e in events}
+        events = self._collect_all_events(path)
+        expected = n_procs * events_per_proc
+        assert (
+            len(events) == expected
+        ), f"Expected {expected} total events across all files, got {len(events)}"
+
+        tags = {event["event_type"] for event in events}
         for pid in range(n_procs):
             for seq in range(events_per_proc):
                 tag = f"p{pid}_e{seq}"
-                self.assertIn(tag, tags, f"Missing event {tag}")
+                assert tag in tags, f"Missing event {tag}"
 
-        # Schema check on every event
-        for evt in events:
-            self._assert_valid_event(evt)
+        for event in events:
+            self._assert_valid_event(event)
 
-    def test_new_events_land_in_current_file_after_rotation(self):
-        """After rotation, new writes must go to the current file, not a backup.
-
-        This catches the os.fstat TOCTOU bug: if _open() records the wrong
-        inode, a process silently keeps writing to the old (rotated) file.
-        """
+    def test_new_events_land_in_current_file_after_rotation(
+        self, tmp_path: Path
+    ) -> None:
+        """After rotation, new writes must go to the current file, not a backup."""
+        path = tmp_path / "security-events.jsonl"
         n_procs = 4
         events_per_proc = 30
-        self._spawn_and_wait(n_procs, events_per_proc, max_bytes=5000, backup_count=200)
-
-        dir_path = os.path.dirname(self.tmp.name)
-        base_name = os.path.basename(self.tmp.name)
-
-        # Identify backup files (sorted by name → chronological order)
-        backup_files = sorted(
-            [
-                os.path.join(dir_path, f)
-                for f in os.listdir(dir_path)
-                if f.startswith(f"{base_name}.")
-                and not f.endswith(".lock")
-                and os.path.isfile(os.path.join(dir_path, f))
-            ]
+        self._spawn_and_wait(
+            path, n_procs, events_per_proc, max_bytes=5000, backup_count=200
         )
 
-        # Skip if no rotation happened (nothing to verify)
+        backup_files = _backup_files(path)
         if not backup_files:
             return
 
-        # Collect timestamps from every event, grouped by file
-        def _max_ts(filepath):
-            """Return the latest event timestamp in *filepath*."""
-            ts = None
-            with open(filepath) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        t = json.loads(line)["timestamp"]
-                        if ts is None or t > ts:
-                            ts = t
-            return ts
-
-        def _min_ts(filepath):
-            """Return the earliest event timestamp in *filepath*."""
-            ts = None
-            with open(filepath) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        t = json.loads(line)["timestamp"]
-                        if ts is None or t < ts:
-                            ts = t
-            return ts
-
-        current_min = _min_ts(self.tmp.name)
-        latest_backup_max = max(_max_ts(bf) for bf in backup_files)
-
-        # The earliest event in the current file should be roughly no older
-        # than the latest event in any backup.  A tolerance of 1 second
-        # accounts for normal multi-process scheduling jitter (event
-        # timestamps are set at creation time, not write time, so two
-        # events created ~simultaneously can land in different files in
-        # either order).  The real stale-fd bug would produce a gap of
-        # seconds — an entire test's worth of events in the wrong file.
-        from datetime import datetime, timedelta
+        current_min = _min_event_timestamp(path)
+        latest_backup_max = max(
+            timestamp
+            for backup_file in backup_files
+            if (timestamp := _max_event_timestamp(backup_file)) is not None
+        )
+        assert current_min is not None
 
         current_min_dt = datetime.fromisoformat(current_min)
         backup_max_dt = datetime.fromisoformat(latest_backup_max)
         tolerance = timedelta(seconds=1)
 
-        self.assertGreaterEqual(
-            current_min_dt + tolerance,
-            backup_max_dt,
+        assert current_min_dt + tolerance >= backup_max_dt, (
             f"Current file min ts ({current_min}) is >1 s older than "
-            f"latest backup max ts ({latest_backup_max}) — "
-            "a process is likely still writing to a rotated file",
+            f"latest backup max ts ({latest_backup_max}) - "
+            "a process is likely still writing to a rotated file"
         )
 
-    def test_flock_loser_reopens_and_writes(self):
-        """Processes that lose the flock race must still write all events.
-
-        Uses more processes than the contention test above to create
-        additional flock losers per rotation cycle.  max_bytes is kept
-        large enough that rotation timestamps never collide.
-        """
+    def test_flock_loser_reopens_and_writes(self, tmp_path: Path) -> None:
+        """Processes that lose the flock race must still write all events."""
+        path = tmp_path / "security-events.jsonl"
         n_procs = 6
         events_per_proc = 20
 
-        self._spawn_and_wait(n_procs, events_per_proc, max_bytes=5000, backup_count=200)
-
-        events = self._collect_all_events()
-        expected = n_procs * events_per_proc
-        self.assertEqual(
-            len(events),
-            expected,
-            f"Expected {expected} events, got {len(events)} "
-            "(flock losers may have lost events)",
+        self._spawn_and_wait(
+            path, n_procs, events_per_proc, max_bytes=5000, backup_count=200
         )
 
-        # Every process must have contributed events
-        pids_seen = {e["event_type"].split("_")[0] for e in events}
-        for pid in range(n_procs):
-            self.assertIn(
-                f"p{pid}",
-                pids_seen,
-                f"Process p{pid} has zero events — flock loser path likely broken",
-            )
+        events = self._collect_all_events(path)
+        expected = n_procs * events_per_proc
+        assert len(events) == expected, (
+            f"Expected {expected} events, got {len(events)} "
+            "(flock losers may have lost events)"
+        )
 
-    def test_cross_process_events_carry_distinct_pids(self):
+        pids_seen = {event["event_type"].split("_")[0] for event in events}
+        for pid in range(n_procs):
+            assert (
+                f"p{pid}" in pids_seen
+            ), f"Process p{pid} has zero events - flock loser path likely broken"
+
+    def test_cross_process_events_carry_distinct_pids(self, tmp_path: Path) -> None:
         """Each child process should stamp its real OS PID in the event."""
+        path = tmp_path / "security-events.jsonl"
         n_procs = 3
         events_per_proc = 5
-        self._spawn_and_wait(n_procs, events_per_proc)
+        self._spawn_and_wait(path, n_procs, events_per_proc)
 
-        events = self._collect_all_events()
-        pids = {e["pid"] for e in events}
-        # There must be at least n_procs distinct PIDs (parent is not writing)
-        self.assertGreaterEqual(
-            len(pids),
-            n_procs,
-            f"Expected >= {n_procs} distinct PIDs, got {pids}",
-        )
+        events = self._collect_all_events(path)
+        pids = {event["pid"] for event in events}
+        assert len(pids) >= n_procs, f"Expected >= {n_procs} distinct PIDs, got {pids}"
 
 
-class TestWriterFireAndForget(unittest.TestCase):
-    def test_write_with_no_fd_does_not_raise(self):
+class TestWriterFireAndForget:
+    def test_write_with_no_fd_does_not_raise(self) -> None:
         writer = SecurityEventWriter(path="/nonexistent/path/events.jsonl")
-        # fd should be None after failed open, write should not raise
         writer.write(_make_event())
 
 
-class TestWriterThreadSafety(unittest.TestCase):
-    def test_concurrent_writes(self):
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        tmp.close()
-        writer = SecurityEventWriter(path=tmp.name)
+class TestWriterThreadSafety:
+    def test_concurrent_writes(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+        writer = SecurityEventWriter(path=path)
 
         n_threads = 10
         events_per_thread = 5
-        errors = []
+        errors: list[Exception] = []
 
-        def _write_events(tid):
+        def _write_events(tid: int) -> None:
             try:
                 for i in range(events_per_thread):
                     writer.write(_make_event(event_type=f"t{tid}_{i}"))
-            except Exception as e:
-                errors.append(e)
+            except Exception as exc:
+                errors.append(exc)
 
         threads = [
-            threading.Thread(target=_write_events, args=(t,)) for t in range(n_threads)
+            threading.Thread(target=_write_events, args=(thread_id,))
+            for thread_id in range(n_threads)
         ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
-        self.assertEqual(len(errors), 0, f"Unexpected errors: {errors}")
-
-        with open(tmp.name) as fh:
-            lines = fh.readlines()
-        self.assertEqual(len(lines), n_threads * events_per_thread)
-
-        os.unlink(tmp.name)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert errors == []

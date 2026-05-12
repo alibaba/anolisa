@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import typer
+from agent_sec_cli.observability.cli import app as observability_app
 from agent_sec_cli.prompt_scanner.cli import scanner_app
 from agent_sec_cli.security_events import get_reader
 from agent_sec_cli.security_events.summary_formatter import format_summary
@@ -51,6 +52,7 @@ def main_callback(
 
 # Mount skill-ledger as a subcommand group: agent-sec-cli skill-ledger <cmd>
 app.add_typer(skill_ledger_app, name="skill-ledger")
+app.add_typer(observability_app, name="observability")
 
 # ---------------------------------------------------------------------------
 # Command: harden

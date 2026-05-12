@@ -10,9 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -62,7 +60,11 @@ def isolated_data_dir(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def run_cli(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+def run_cli(
+    *args: str,
+    check: bool = False,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run agent-sec-cli command and return CompletedProcess.
 
     Automatically detects whether to use the installed binary or
@@ -71,6 +73,7 @@ def run_cli(*args: str, check: bool = False) -> subprocess.CompletedProcess:
     Args:
         *args: CLI arguments to pass to the command.
         check: If True, raise CalledProcessError on non-zero exit code.
+        input_text: Optional text to pass to the command's stdin.
 
     Returns:
         subprocess.CompletedProcess with stdout, stderr, and returncode.
@@ -84,6 +87,7 @@ def run_cli(*args: str, check: bool = False) -> subprocess.CompletedProcess:
         cmd,
         capture_output=True,
         text=True,
+        input=input_text,
         check=check,
         timeout=30,
         env=os.environ.copy(),  # inherits AGENT_SEC_DATA_DIR
