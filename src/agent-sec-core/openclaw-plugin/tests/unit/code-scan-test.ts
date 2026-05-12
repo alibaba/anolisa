@@ -1,4 +1,4 @@
-// tests/unit/code-scan.test.ts
+// tests/unit/code-scan-test.ts
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { codeScan } from "../../src/capabilities/code-scan.js";

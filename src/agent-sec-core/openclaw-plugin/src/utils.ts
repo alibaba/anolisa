@@ -9,10 +9,15 @@ export type CliResult = {
   exitCode: number;
 };
 
+export type CliCallOptions = {
+  timeout?: number;
+  stdin?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Test-only mock support
 // ---------------------------------------------------------------------------
-type CliMockFn = (args: string[], opts: { timeout?: number }) => Promise<CliResult>;
+type CliMockFn = (args: string[], opts: CliCallOptions) => Promise<CliResult>;
 
 let _mockFn: CliMockFn | undefined;
 
@@ -32,7 +37,7 @@ export function _resetCliMock(): void {
  */
 export async function callAgentSecCli(
   args: string[],
-  opts: { timeout?: number } = {},
+  opts: CliCallOptions = {},
 ): Promise<CliResult> {
 
   // If a mock is active, delegate to it instead of spawning a real process.
@@ -42,15 +47,15 @@ export async function callAgentSecCli(
 
   const timeout = opts.timeout ?? 5000;
 
-  return new Promise((resolve, reject) => {
-    execFile(
+  return new Promise((resolve) => {
+    const child = execFile(
       "agent-sec-cli",
       args,
-      { timeout, maxBuffer: 1024 * 1024 },
+      { timeout, maxBuffer: 1024 * 1024, encoding: "utf8" },
       (error, stdout, stderr) => {
         // Fail-open: Never reject. Always resolve with error status.
         // Capabilities check exitCode !== 0 to handle CLI failures gracefully.
-        
+
         // Timeout: execFile sets error.killed = true
         if (error && error.killed) {
           resolve({
@@ -60,7 +65,7 @@ export async function callAgentSecCli(
           });
           return;
         }
-        
+
         // Return raw output — let each capability decide what to do
         resolve({
           stdout: stdout.trim(),
@@ -69,5 +74,33 @@ export async function callAgentSecCli(
         });
       },
     );
+
+    if (opts.stdin !== undefined) {
+      child.stdin?.on("error", () => {
+        // The CLI may fail before reading stdin; fail-open via the process callback.
+      });
+      try {
+        child.stdin?.end(opts.stdin);
+      } catch {
+        // stdin write failures are reported through the process callback.
+      }
+    }
   });
+}
+
+export type OpenClawObservabilityRecord = Record<string, unknown>;
+
+/**
+ * Emit one OpenClaw observability record to agent-sec-cli via stdin.
+ * Logging is best-effort: callers must not use failures to alter OpenClaw behavior.
+ */
+export async function recordOpenClawObservability(
+  event: OpenClawObservabilityRecord,
+): Promise<CliResult> {
+  return callAgentSecCli(
+    ["observability", "record", "--format", "json", "--stdin"],
+    {
+      stdin: JSON.stringify(event),
+    },
+  );
 }

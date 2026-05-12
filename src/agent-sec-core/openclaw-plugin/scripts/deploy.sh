@@ -38,6 +38,9 @@ echo "安装插件..."
 openclaw plugins install "$PLUGIN_DIR" --force --dangerously-force-unsafe-install
 
 echo "  ✓ 插件已安装/更新"
+echo "允许 agent-sec 检查大模型输入输出安全"
+echo "  openclaw config set plugins.entries.agent-sec.hooks.allowConversationAccess true"
+openclaw config set plugins.entries.agent-sec.hooks.allowConversationAccess true
 
 echo ""
 echo "提示: 请重启 OpenClaw gateway 以加载插件"

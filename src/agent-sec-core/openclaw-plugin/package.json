@@ -14,7 +14,8 @@
     ]
   },
   "scripts": {
-    "build": "tsc --project tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc --project tsconfig.json",
     "pack": "npm run build && npm pack",
     "smoke": "npx tsx tests/smoke-test.ts",
     "test": "npx tsx --test tests/unit/*test.ts",
@@ -25,8 +26,8 @@
   },
   "devDependencies": {
     "@types/node": ">=22",
-    "openclaw": ">=0.8.0",
     "c8": "^10.1.0",
+    "openclaw": "2026.5.7",
     "tsx": "^4.21.0",
     "typescript": "^5.8.0"
   }

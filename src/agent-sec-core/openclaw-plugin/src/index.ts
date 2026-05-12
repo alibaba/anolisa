@@ -2,6 +2,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { SecurityCapability } from "./types.js";
 import { codeScan } from "./capabilities/code-scan.js";
+import { observability } from "./capabilities/observability.js";
 import { promptScan } from "./capabilities/prompt-scan.js";
 import { skillLedger } from "./capabilities/skill-ledger.js";
 
@@ -9,6 +10,7 @@ const capabilities: SecurityCapability[] = [
   codeScan,
   promptScan,
   skillLedger,
+  observability,
 ];
 
 export default definePluginEntry({

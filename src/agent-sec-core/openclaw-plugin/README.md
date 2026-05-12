@@ -1,6 +1,6 @@
 # agent-sec OpenClaw Plugin
 
-OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`, providing code scanning, skill integrity verification and prompt analysis.
+OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`, providing code scanning, skill integrity verification, prompt analysis, and best-effort agent observability logging.
 
 ---
 
@@ -10,9 +10,11 @@ OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`
 |----------------|-----------|------------------------------|
 | Node.js        | >= 20     | `node --version`             |
 | npm            | >= 10     | `npm --version`              |
-| OpenClaw       | >= 0.8.0  | `openclaw --version`         |
+| OpenClaw       | Typed plugin runtime | `openclaw --version`       |
 | agent-sec-cli  | (latest)  | `agent-sec-cli --help`       |
 | jq             | >= 1.6    | `jq --version`               |
+
+Development and test builds use the `openclaw` dev dependency pinned in `package.json` so TypeScript can compile against the newest typed hook definitions. The OpenClaw runtime does not need to match that dev dependency. Runtime compatibility is capability-based: older runtimes that do not know a typed hook ignore that hook registration with a diagnostic instead of crashing the gateway.
 
 ---
 
@@ -24,15 +26,25 @@ openclaw-plugin/
 │   ├── index.ts                # Plugin entry point (definePluginEntry)
 │   ├── types.ts                # SecurityCapability interface
 │   ├── utils.ts                # CLI invocation utility (callAgentSecCli)
-│   └── capabilities/           # One file per security capability
-│       ├── skill-ledger.ts     #   before_tool_call 
-│       ├── code-scan.ts        #   before_tool_call hook
-│       └── prompt-scan.ts      #   before_dispatch hook
+│   ├── capabilities/           # Four security capability entry files
+│   │   ├── skill-ledger.ts     #   before_tool_call
+│   │   ├── code-scan.ts        #   before_tool_call hook
+│   │   ├── prompt-scan.ts      #   before_dispatch hook
+│   │   └── observability.ts    #   observability hook registration
+│   └── helpers/                # Capability support code
+│       └── observability/      #   OpenClaw → agent-sec observability adapter
+│           ├── schema.ts       #     hook mapping + metric allowlist
+│           ├── record.ts       #     record assembly + metadata validation
+│           ├── metrics.ts      #     hook-specific metric extraction
+│           ├── extractors.ts   #     response/error extraction helpers
+│           ├── helpers.ts      #     generic parsing helpers
+│           └── types.ts        #     shared observability types
 ├── tests/                      # Test utilities (not compiled into dist/)
 │   ├── test-harness.ts         # Mock OpenClaw API for local testing
 │   ├── smoke-test.ts           # Smoke test for all capabilities
 │   └── unit/                   # Unit tests
-│       ├── code-scan.test.ts   #   code-scan handler tests
+│       ├── code-scan-test.ts   #   scan-code handler tests
+│       ├── observability-test.ts # observability handler tests
 │       └── skill-ledger-test.ts #  skill-ledger handler tests
 ├── scripts/
 │   └── deploy.sh               # Deployment and registration script
@@ -91,11 +103,11 @@ npm run build
 ```bash
 # Create tarball
 npm run pack
-# Output: agent-sec-openclaw-plugin-0.3.0.tgz
+# Output: agent-sec-openclaw-plugin-0.x.y.tgz
 
 # Extract to target directory
 mkdir -p /opt/agent-sec/openclaw-plugin
-tar -xzf agent-sec-openclaw-plugin-0.3.0.tgz \
+tar -xzf agent-sec-openclaw-plugin-0.x.y.tgz \
     --strip-components=1 \
     -C /opt/agent-sec/openclaw-plugin
 
@@ -132,9 +144,10 @@ The deployment script performs these steps:
 
 1. **Pre-checks** — Verifies `openclaw` and `agent-sec-cli` are in PATH; validates `openclaw.plugin.json` and `dist/` exist
 2. **Plugin installation** — Runs `openclaw plugins install <path> --force --dangerously-force-unsafe-install` to register the plugin
-3. **User guidance** — Displays instructions to restart the OpenClaw gateway (does NOT restart automatically)
+3. **Conversation access policy** — Sets `plugins.entries.agent-sec.hooks.allowConversationAccess=true` so conversation observability hooks can register
+4. **User guidance** — Displays instructions to restart the OpenClaw gateway (does NOT restart automatically)
 
-> **Important:** `deploy.sh` only registers the plugin with OpenClaw config. It does **NOT** start/stop/restart the gateway service.
+> **Important:** `deploy.sh` installs the plugin and applies required OpenClaw config. It does **NOT** start/stop/restart the gateway service.
 > 
 > To restart the gateway:
 > ```bash
@@ -167,13 +180,20 @@ id: agent-sec
 Security hooks powered by agent-sec-cli
 
 Status: loaded
-Version: 0.3.0
+Version: 0.x.y
 Source: ~/path/to/openclaw-plugin/dist/index.js
 
 Typed hooks:
 before_dispatch (priority 190)
+llm_input (priority 1000)
+model_call_started (priority 1000)
+model_call_ended (priority 1000)
+llm_output (priority 1000)
+agent_end (priority 1000)
 before_tool_call (priority 80)
 before_tool_call (priority 0)
+before_tool_call (priority -10000)
+after_tool_call (priority 1000)
 ```
 
 Also check the plugin is activated by gateway after openclaw **v2026.4.25**
@@ -211,8 +231,66 @@ AGENT_SEC_LIVE=1 npm run smoke
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
-| `code-scan`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
+| `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read         |
+| `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
+
+### Configuring `observability`
+
+The `observability` capability is enabled by default and invokes:
+
+```bash
+agent-sec-cli observability record --format json --stdin
+```
+
+Each hook emits one JSON record with `hook`, `observedAt`, `metadata`, and hook-specific `metrics`. The plugin registers OpenClaw hook names, but sends the generic `agent-sec-cli` hook name in `payload.hook`. Failures, missing CLI, malformed output, and timeouts are fail-open and never block OpenClaw behavior.
+
+OpenClaw runtimes that expose `model_call_started` and `model_call_ended` provide model-call telemetry. Older runtimes load the plugin but skip unknown telemetry sources. Newer OpenClaw versions may provide richer fields on those hooks; the plugin sends whichever accepted metrics are present.
+
+Observed hooks and metrics:
+
+| OpenClaw hook | agent-sec-cli hook | Metrics sent |
+|---------------|--------------------|--------------|
+| `llm_input` | `before_agent_run` | `prompt`, `system_prompt`, `user_input`, `history_messages_count`, `images_count`, `context_window_utilization`, `model_id`, `model_provider` |
+| `model_call_started` | `before_llm_call` | `model_id`, `model_provider`, `api`, `transport` |
+| `model_call_ended` | `after_llm_call` | `latency_ms`, `outcome`, `error_category`, `failure_kind`, `request_payload_bytes`, `response_stream_bytes`, `time_to_first_byte_ms`, `upstream_request_id_hash` |
+| `llm_output` | `after_agent_run` | `response`, `output_kind`, `stop_reason`, `assistant_texts_count`, `tool_calls_count`, `tool_calls` |
+| `before_tool_call` | `before_tool_call` | `tool_name`, `parameters` |
+| `after_tool_call` | `after_tool_call` | `result`, `error`, `duration_ms`, `status`, `exit_code`, `result_size_bytes` |
+| `agent_end` | `after_agent_run` | `success`, `error`, `duration_ms`, `total_api_calls`, `total_tool_calls`, `final_model_id`, `final_model_provider` |
+
+If an OpenClaw hook does not provide required metadata or any metric accepted by the current `agent-sec-cli` schema, the plugin skips the record instead of sending an invalid payload.
+`llm_input` and `llm_output` are run-level OpenClaw hooks in current runtimes, so the plugin maps them to `before_agent_run` and `after_agent_run`. Per-call telemetry remains on `model_call_started` and `model_call_ended`.
+`agent_end` records run status and aggregate counters only; final response content comes from `llm_output`.
+
+Supported OpenClaw plugin entry config:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "agent-sec": {
+        "config": {
+          "promptScanBlock": false,
+          "capabilities": {
+            "scan-code": { "enabled": true },
+            "prompt-scan": { "enabled": true },
+            "skill-ledger": { "enabled": true },
+            "observability": { "enabled": true }
+          }
+        },
+        "hooks": {
+          "allowConversationAccess": true
+        }
+      }
+    }
+  }
+}
+```
+
+Set a capability's `enabled` value to `false` to skip registering only that capability while keeping the rest of the `agent-sec` plugin active.
+
+`llm_input`, `llm_output`, and `agent_end` require OpenClaw to allow conversation access for this external plugin with `plugins.entries.agent-sec.hooks.allowConversationAccess=true`. Without that OpenClaw setting, those hooks are blocked by OpenClaw before this plugin sees them.
 
 ### Configuring `skill-ledger`
 
