@@ -618,8 +618,11 @@ skill-ledger 需适配两个宿主系统，两者 Skill 模型和 Hook 机制存
 }
 ```
 
-**Skill 目录定位**：`tool_input` 仅含 skill 名称，hook 脚本按 project → custom → user → extension → system 优先级自行查找。project 级路径通过 event 的 `cwd` 字段推断。
+**Skill 目录定位（当前版本范围）**：copilot-shell hook 仅覆盖 project → user → system 三类 skill：
+- project：`<cwd>/.copilot-shell/skills/<skill>/`
+- user：`~/.copilot-shell/skills/<skill>/`
+- system：`/usr/share/anolisa/skills/<skill>/`
 
-**extension Skills**：读取 `~/.copilot-shell/extensions/<ext>/` 下的 `cosh-extension.json` 配置，按 `skills` 字段确定 skill 基目录，支持 `link` 类型安装（跟随 `.qwen-extension-install.json` 中的 `source` 路径）。extension skill 与其他级别 skill 享有相同的安全检查。
+当 PreToolUse 事件包含 `skill_context.file_path` 时，hook 优先使用该路径解决 `SKILL.md` 中 `name` 与目录名不一致的问题；但该路径仍必须落在上述 project/user/system 根目录内。若路径落在 custom、extension、remote 或其他目录，当前版本不执行 skill-ledger 检查，hook fail-open，并仅写入 debug 日志说明该 skill 不在当前 hook 支持范围内。
 
-**remote Skills**：首次下载的 remote skill 无 `.skill-meta/`，hook 返回 `unscanned`，输出告警但不阻断。
+**custom / extension / remote Skills**：当前版本的 copilot-shell hook 不覆盖这些来源。未来若扩展覆盖范围，需要单独补充目录解析、信任边界和测试用例。

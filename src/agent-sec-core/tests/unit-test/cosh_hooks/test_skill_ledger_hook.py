@@ -39,7 +39,7 @@ _COSH_HOOK = str(
 # ---------------------------------------------------------------------------
 
 
-def _run_hook(input_data, *, env_override=None):
+def _run_hook(input_data, *, env_override=None, return_stderr=False):
     """Run the hook as a subprocess with *input_data* as stdin JSON.
 
     Returns the parsed JSON output dict.
@@ -56,28 +56,38 @@ def _run_hook(input_data, *, env_override=None):
         env=env,
     )
     assert proc.returncode == 0, f"Hook stderr: {proc.stderr}"
-    return json.loads(proc.stdout)
+    output = json.loads(proc.stdout)
+    if return_stderr:
+        return output, proc.stderr
+    return output
 
 
-def _make_skill_event(skill_name, cwd="."):
+def _make_skill_event(skill_name, cwd=".", skill_file_path=None):
     """Build a minimal PreToolUse event for the skill tool."""
-    return {
+    event = {
         "hook_event_name": "PreToolUse",
         "tool_name": "skill",
         "tool_input": {"skill": skill_name},
         "cwd": cwd,
     }
+    if skill_file_path is not None:
+        event["skill_context"] = {
+            "skill_name": skill_name,
+            "file_path": str(skill_file_path),
+        }
+    return event
 
 
-def _create_skill_dir(parent, name="test-skill"):
+def _create_skill_dir(parent, name="test-skill", manifest_name=None):
     """Create a minimal skill directory with a SKILL.md file.
 
     Returns the absolute path to ``<parent>/.copilot-shell/skills/<name>/``.
     """
+    manifest_name = manifest_name or name
     skill_dir = Path(parent) / ".copilot-shell" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: test-skill\ndescription: A test skill\n---\nHello\n"
+        f"---\nname: {manifest_name}\ndescription: A test skill\n---\nHello\n"
     )
     return str(skill_dir)
 
@@ -185,6 +195,91 @@ class TestSkillDirResolution:
         )
         assert output["decision"] == "allow"
         assert "reason" in output, "Skill dir not found — CLI was never called"
+
+    def test_skill_context_resolves_name_directory_mismatch(self, mock_cli_env):
+        """skill_context.file_path should locate project skills by real path.
+
+        This covers the case where the Skill tool receives the frontmatter
+        name, but the on-disk directory uses a different name.
+        """
+        skill_dir = _create_skill_dir(
+            mock_cli_env["cwd"],
+            name="directory-name",
+            manifest_name="frontmatter-name",
+        )
+        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
+        output = _run_hook(
+            _make_skill_event(
+                "frontmatter-name",
+                mock_cli_env["cwd"],
+                Path(skill_dir) / "SKILL.md",
+            ),
+            env_override=env,
+        )
+        assert output["decision"] == "allow"
+        assert "low-risk" in output["reason"]
+
+    def test_skill_context_skips_only_unresolvable_supported_base(self, mock_cli_env):
+        """A bad project base should not discard user/system base checks."""
+        home = Path(mock_cli_env["cwd"]).parent / "home"
+        skill_dir = home / ".copilot-shell" / "skills" / "user-dir"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: user-skill\ndescription: A user skill\n---\nHello\n"
+        )
+
+        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
+        env["HOME"] = str(home)
+        output = _run_hook(
+            _make_skill_event("user-skill", "\0bad-project", skill_file),
+            env_override=env,
+        )
+
+        assert output["decision"] == "allow"
+        assert "low-risk" in output["reason"]
+
+    @pytest.mark.parametrize("scope_name", ["custom", "extension", "remote"])
+    def test_skill_context_outside_supported_scope_debug_skips(
+        self, tmp_path, scope_name
+    ):
+        """custom/extension/remote paths are out of scope for this hook."""
+        home = tmp_path / "home"
+        project = tmp_path / "project"
+        home.mkdir()
+        project.mkdir()
+
+        if scope_name == "custom":
+            skill_dir = tmp_path / "custom-skills" / "custom-skill"
+        elif scope_name == "extension":
+            skill_dir = (
+                home
+                / ".copilot-shell"
+                / "extensions"
+                / "test-ext"
+                / "skills"
+                / "extension-skill"
+            )
+        else:
+            skill_dir = (
+                home / ".copilot-shell" / "remote-skills" / "system" / "remote-skill"
+            )
+
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            f"---\nname: {scope_name}-skill\ndescription: A test skill\n---\n"
+        )
+
+        output, stderr = _run_hook(
+            _make_skill_event(f"{scope_name}-skill", str(project), skill_file),
+            env_override={"HOME": str(home)},
+            return_stderr=True,
+        )
+
+        assert output == {"decision": "allow"}
+        assert "outside current skill-ledger hook scope" in stderr
+        assert "project/user/system" in stderr
 
     def test_missing_skill_md_not_found(self):
         """Directory exists but no SKILL.md → not recognized as a skill."""

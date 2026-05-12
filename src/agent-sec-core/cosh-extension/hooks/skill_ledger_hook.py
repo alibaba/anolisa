@@ -2,7 +2,7 @@
 """Cosh hook script for skill-ledger.
 
 Reads a cosh PreToolUse JSON from stdin, resolves the skill directory
-from the skill name, invokes ``agent-sec-cli skill-ledger check`` via
+from the skill context or skill name, invokes ``agent-sec-cli skill-ledger check`` via
 subprocess, and writes a cosh HookOutput JSON to stdout.
 
 Hook point: **PreToolUse** — matcher: ``skill``
@@ -82,10 +82,99 @@ def _allow_with_reason(reason: str) -> str:
     return json.dumps({"decision": "allow", "reason": reason}, ensure_ascii=False)
 
 
+def _debug(message: str) -> None:
+    """Write debug-only hook details to stderr."""
+    print(f"[skill-ledger debug] {message}", file=sys.stderr)
+
+
+def _supported_skill_bases(cwd: str) -> list[Path]:
+    """Return the skill roots currently covered by this hook.
+
+    Current scope is intentionally limited to:
+    project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
+    → system (/usr/share/anolisa/skills/).
+    """
+    return [
+        Path(cwd) / ".copilot-shell" / "skills",
+        Path.home() / ".copilot-shell" / "skills",
+        Path("/usr/share/anolisa/skills"),
+    ]
+
+
+def _resolve_supported_skill_bases(cwd: str, skill_name: str) -> list[Path]:
+    """Resolve supported skill roots, skipping only roots that fail."""
+    supported_bases: list[Path] = []
+    for base in _supported_skill_bases(cwd):
+        try:
+            supported_bases.append(base.resolve())
+        except (OSError, ValueError) as exc:
+            _debug(
+                "Skill '{}' check skipped for base '{}': failed to resolve: {}".format(
+                    skill_name, base, exc
+                )
+            )
+    return supported_bases
+
+
+def _resolve_skill_dir_from_context(
+    input_data: dict, cwd: str, skill_name: str
+) -> tuple[str | None, bool]:
+    """Resolve the skill dir from ``skill_context.file_path`` when available.
+
+    Returns ``(skill_dir, handled)``.  ``handled`` is True whenever a
+    well-formed ``skill_context.file_path`` was present, even if the path is
+    outside the supported project/user/system scope.  In that case the caller
+    should fail open without falling back to name-based lookup, because the
+    context identifies the actual skill that copilot-shell resolved.
+    """
+    skill_context = input_data.get("skill_context")
+    if not isinstance(skill_context, dict):
+        return None, False
+
+    file_path = skill_context.get("file_path")
+    if not isinstance(file_path, str) or not file_path.strip():
+        return None, False
+
+    try:
+        skill_file = Path(file_path).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        _debug(
+            "Skill '{}' check skipped: invalid skill_context.file_path '{}': {}".format(
+                skill_name, file_path, exc
+            )
+        )
+        return None, True
+
+    supported_bases = _resolve_supported_skill_bases(cwd, skill_name)
+    if not supported_bases:
+        _debug(
+            "Skill '{}' check skipped: no supported skill bases could be resolved".format(
+                skill_name
+            )
+        )
+        return None, True
+
+    if not any(skill_file.is_relative_to(base) for base in supported_bases):
+        _debug(
+            "Skill '{}' at '{}' is outside current skill-ledger hook scope "
+            "(project/user/system); check skipped".format(skill_name, skill_file)
+        )
+        return None, True
+
+    if skill_file.name != "SKILL.md" or not skill_file.is_file():
+        _debug(
+            "Skill '{}' check skipped: skill_context.file_path '{}' does not "
+            "point to an existing SKILL.md".format(skill_name, skill_file)
+        )
+        return None, True
+
+    return str(skill_file.parent), True
+
+
 def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
     """Resolve a skill name to its on-disk directory.
 
-    Search order mirrors copilot-shell's SkillManager priority:
+    Current hook scope is intentionally limited to:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
     → system (/usr/share/anolisa/skills/).
 
@@ -95,18 +184,15 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
     - ``(None, False)`` — not found (remote or unknown skill).
     """
     traversal_detected = False
-    bases = [
-        Path(cwd) / ".copilot-shell" / "skills",
-        Path.home() / ".copilot-shell" / "skills",
-        Path("/usr/share/anolisa/skills"),
-    ]
+    bases = _supported_skill_bases(cwd)
     for base in bases:
         candidate = base / skill_name
         try:
+            resolved_base = base.resolve()
             resolved = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if not resolved.is_relative_to(base.resolve()):
+        if not resolved.is_relative_to(resolved_base):
             traversal_detected = True
             continue  # path-traversal attempt — skip this base
         if resolved.is_dir() and (resolved / "SKILL.md").is_file():
@@ -198,9 +284,21 @@ def main() -> None:
         )
         return
 
-    # 3. Resolve skill directory
+    # 3. Resolve skill directory.  Prefer copilot-shell's resolved file path
+    # when present so SKILL.md names may differ from directory names, but only
+    # within the current project/user/system scope.
     cwd = input_data.get("cwd", os.environ.get("COPILOT_SHELL_PROJECT_DIR", "."))
-    skill_dir, traversal = _resolve_skill_dir(skill_name, cwd)
+    skill_dir, context_handled = _resolve_skill_dir_from_context(
+        input_data, cwd, skill_name
+    )
+    if context_handled:
+        if skill_dir is None:
+            print(_allow())
+            return
+        traversal = False
+    else:
+        skill_dir, traversal = _resolve_skill_dir(skill_name, cwd)
+
     if traversal:
         reason = "\U0001f6a8 Skill '{}' rejected: path traversal detected".format(
             skill_name
@@ -208,7 +306,7 @@ def main() -> None:
         print(_allow_with_reason(reason))
         return
     if skill_dir is None:
-        # Not found in any location (project/user/system) — remote or unknown → fail-open
+        # Not found in any supported location (project/user/system) → fail-open
         reason = (
             "\u26a0\ufe0f Skill '{}' not found on disk \u2014 check skipped".format(
                 skill_name
