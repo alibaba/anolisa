@@ -28,12 +28,16 @@ static RE_AVAILABLE_SKILLS: LazyLock<Regex> =
 static RE_SKILL_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<skill>.*?<name>(.*?)</name>.*?</skill>").unwrap());
 
+/// Regex for Hermes-style plain-text skill entries: `  - skill-name: description`
+static RE_HERMES_SKILL_ENTRY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*-\s+([\w-]+):.*$").unwrap());
+
 /// Function names that indicate a file read operation (case-insensitive match).
 const READ_FUNCTION_NAMES: &[&str] = &["read", "readfile", "read_file"];
 
 /// Function names that indicate a skill invocation (case-insensitive match).
-/// Used by cosh/copilot-shell which calls skills via a "Skill" tool_call.
-const SKILL_FUNCTION_NAMES: &[&str] = &["skill"];
+/// Used by cosh/copilot-shell ("Skill") and Hermes ("skill_view") tool_calls.
+const SKILL_FUNCTION_NAMES: &[&str] = &["skill", "skill_view"];
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -287,16 +291,32 @@ fn scan_skills_dir_recursive(dir: &str, depth: u32) -> Vec<String> {
     names
 }
 
-/// Parse `<available_skills>` XML block and extract skill names.
+/// Parse `<available_skills>` block and extract skill names.
+///
+/// Supports two formats:
+/// 1. XML (cosh): `<skill><name>foo</name>...</skill>`
+/// 2. Plain-text indented (Hermes): `  - skill-name: description`
 fn parse_available_skills(text: &str) -> Vec<String> {
     let mut skill_names = Vec::new();
 
     for block_match in RE_AVAILABLE_SKILLS.captures_iter(text) {
         let block = &block_match[1];
+
+        // Try XML format first (cosh/generic agents)
         for name_match in RE_SKILL_NAME.captures_iter(block) {
             let name = name_match[1].trim().to_string();
             if !name.is_empty() && !skill_names.contains(&name) {
                 skill_names.push(name);
+            }
+        }
+
+        // If no XML skills found, try Hermes plain-text format
+        if skill_names.is_empty() {
+            for name_match in RE_HERMES_SKILL_ENTRY.captures_iter(block) {
+                let name = name_match[1].to_string();
+                if !name.is_empty() && !skill_names.contains(&name) {
+                    skill_names.push(name);
+                }
             }
         }
     }
@@ -328,10 +348,20 @@ fn extract_file_path(args: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract skill name from Skill tool_call arguments.
-/// Supports: {"skill": "pdf"} or {"skill": "ms-office-suite:pdf"}
+/// Supports:
+/// - Cosh: {"skill": "pdf"} or {"skill": "ms-office-suite:pdf"}
+/// - Hermes: {"name": "test-driven-development"}
 fn extract_skill_name_from_args(args: &serde_json::Value) -> Option<String> {
     if let Some(obj) = args.as_object() {
+        // Cosh format: {"skill": "skill-name"}
         if let Some(name) = obj.get("skill").and_then(|v| v.as_str()) {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        // Hermes format: {"name": "skill-name"}
+        if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
