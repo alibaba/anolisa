@@ -44,9 +44,11 @@
 #define DNS_PORT       53
 
 // Max labels to parse (real domains rarely exceed 10 labels)
-#define MAX_LABELS 32
-// Max label length per RFC 1035
-#define MAX_LABEL_LEN 63
+// Reduced from 32 to 10 to avoid BPF verifier -E2BIG with nested loops
+#define MAX_LABELS 10
+// Max label length per RFC 1035 — capped at 32 for verifier budget
+// (real labels > 32 chars are extremely rare in practice)
+#define MAX_LABEL_LEN 32
 
 // Deduplication key: {pid, domain_hash}
 struct dns_dedup_key {
@@ -71,13 +73,15 @@ struct {
 } dns_scratch SEC(".maps");
 
 // Simple djb2 hash for domain deduplication
+// Uses bounded loop (no #pragma unroll) to avoid instruction explosion.
+// Kernel 5.3+ verifier handles bounded loops natively.
 static __always_inline __u32 djb2_hash(const char *str, __u32 len)
 {
     __u32 hash = 5381;
-    #pragma unroll
-    for (int i = 0; i < MAX_DOMAIN_LEN; i++) {
-        if ((__u32)i >= len)
-            break;
+    __u32 cap = len;
+    if (cap > MAX_DOMAIN_LEN)
+        cap = MAX_DOMAIN_LEN;
+    for (__u32 i = 0; i < cap && i < MAX_DOMAIN_LEN; i++) {
         hash = ((hash << 5) + hash) + (unsigned char)str[i];
     }
     return hash;
@@ -157,7 +161,8 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
 
     __builtin_memset(event->domain, 0, MAX_DOMAIN_LEN);
 
-    #pragma unroll
+    // Parse DNS labels into dotted domain notation.
+    // Use bounded loops (no #pragma unroll) to stay within verifier budget.
     for (int i = 0; i < MAX_LABELS; i++) {
         if (off >= read_len)
             break;
@@ -168,7 +173,7 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         if (label_len == 0)
             break;
 
-        // Sanity: label length must be <= 63 and not a pointer (0xC0 prefix)
+        // Sanity: label length must be <= MAX_LABEL_LEN and not a pointer (0xC0 prefix)
         if (label_len > MAX_LABEL_LEN || (label_len & 0xC0) != 0)
             break;
 
@@ -181,7 +186,6 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         }
 
         // Copy label bytes
-        #pragma unroll
         for (int j = 0; j < MAX_LABEL_LEN; j++) {
             if ((__u32)j >= label_len)
                 break;
