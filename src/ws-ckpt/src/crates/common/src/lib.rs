@@ -17,8 +17,8 @@ pub const DEFAULT_MOUNT_PATH: &str = "/mnt/btrfs-workspace";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/ws-ckpt/ws-ckpt.sock";
 pub const SNAPSHOTS_DIR: &str = "snapshots";
 pub const INDEX_FILE: &str = "index.json";
-pub const BTRFS_IMG_PATH: &str = "/data/ws-ckpt/btrfs-data.img";
-pub const BTRFS_IMG_DIR: &str = "/data/ws-ckpt";
+pub const BTRFS_IMG_PATH: &str = "/var/lib/ws-ckpt/btrfs-data.img";
+pub const BTRFS_IMG_DIR: &str = "/var/lib/ws-ckpt";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
@@ -1331,7 +1331,7 @@ mod tests {
                 auto_cleanup_keep: CleanupRetention::Count(20),
                 auto_cleanup_interval_secs: 86_400,
                 health_check_interval_secs: 300,
-                img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
+                img_path: "/var/lib/ws-ckpt/btrfs-data.img".to_string(),
                 img_size: 30,
                 img_max_percent: 40.0,
             },

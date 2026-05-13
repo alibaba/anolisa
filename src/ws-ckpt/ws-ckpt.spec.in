@@ -60,7 +60,24 @@ install -p -m 0644 src/skills/ws-ckpt/SKILL.md %{buildroot}%{_datadir}/anolisa/r
 
 %pre
 modprobe btrfs 2>/dev/null || { echo "ERROR: kernel does not support btrfs"; exit 1; }
-mkdir -p /run/ws-ckpt /data/ws-ckpt /mnt/btrfs-workspace /etc/ws-ckpt
+
+# Upgrade-only: migrate legacy image /data/ws-ckpt -> /var/lib/ws-ckpt (FHS)
+if [ $1 -gt 1 ] && [ -f /data/ws-ckpt/btrfs-data.img ] && [ ! -f /var/lib/ws-ckpt/btrfs-data.img ]; then
+    systemctl stop ws-ckpt.service 2>/dev/null || true
+    umount /mnt/btrfs-workspace 2>/dev/null \
+        || umount -l /mnt/btrfs-workspace 2>/dev/null \
+        || true
+
+    losetup -j /data/ws-ckpt/btrfs-data.img 2>/dev/null | \
+        cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true
+    mkdir -p /var/lib/ws-ckpt
+    if mv /data/ws-ckpt/btrfs-data.img /var/lib/ws-ckpt/btrfs-data.img; then
+        rmdir /data/ws-ckpt 2>/dev/null || true
+        echo "Migrated btrfs image: /data/ws-ckpt -> /var/lib/ws-ckpt"
+    else
+        echo "WARNING: failed to migrate /data/ws-ckpt -> /var/lib/ws-ckpt; please migrate manually"
+    fi
+fi
 
 %post
 systemctl daemon-reload
@@ -84,15 +101,13 @@ fi
 %postun
 if [ $1 -eq 0 ]; then
     # BtrfsLoop backend: umount + release loop + remove img
-    if [ -f "/data/ws-ckpt/btrfs-data.img" ]; then
+    if [ -f "/var/lib/ws-ckpt/btrfs-data.img" ]; then
         umount /mnt/btrfs-workspace 2>/dev/null || true
-        losetup -j /data/ws-ckpt/btrfs-data.img 2>/dev/null | \
+        losetup -j /var/lib/ws-ckpt/btrfs-data.img 2>/dev/null | \
             cut -d: -f1 | xargs -r losetup -d 2>/dev/null || true
-        rm -f /data/ws-ckpt/btrfs-data.img 2>/dev/null || true
+        rm -f /var/lib/ws-ckpt/btrfs-data.img 2>/dev/null || true
     fi
     rmdir /mnt/btrfs-workspace 2>/dev/null || true
-    rmdir /data/ws-ckpt 2>/dev/null || true
-    rmdir /run/ws-ckpt 2>/dev/null || true
     systemctl daemon-reload
 fi
 

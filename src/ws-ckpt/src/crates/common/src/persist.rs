@@ -199,7 +199,7 @@ mod tests {
                 data_root: PathBuf::from("/mnt/btrfs-workspace"),
                 snapshots_root: PathBuf::from("/mnt/btrfs-workspace/snapshots"),
                 loop_img: Some(LoopImgState {
-                    img_path: PathBuf::from("/data/ws-ckpt/btrfs-data.img"),
+                    img_path: PathBuf::from("/var/lib/ws-ckpt/btrfs-data.img"),
                     img_size_bytes: 30 * 1024 * 1024 * 1024,
                     last_loop_device: Some("/dev/loop0".to_string()),
                 }),

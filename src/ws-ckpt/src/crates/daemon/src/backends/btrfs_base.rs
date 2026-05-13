@@ -23,7 +23,7 @@ pub enum BtrfsBaseScenario {
 }
 
 pub struct BtrfsBaseBackend {
-    /// Data root on the btrfs partition (e.g. /data/ws-ckpt-data or <btrfs_mount>/ws-ckpt-data)
+    /// Data root on the btrfs partition (e.g. <btrfs_mount>/ws-ckpt-data)
     data_root: PathBuf,
     /// Snapshot storage directory: {data_root}/snapshots
     snapshots_dir: PathBuf,

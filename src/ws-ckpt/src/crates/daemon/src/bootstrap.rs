@@ -252,7 +252,7 @@ pub async fn is_mounted(mount_path: &str) -> anyhow::Result<bool> {
 /// Derive the parent directory of the configured image path.
 ///
 /// `img_path` is expected to be an absolute path such as
-/// `/data/ws-ckpt/btrfs-data.img`. A bare filename (e.g. `data.img`)
+/// `/var/lib/ws-ckpt/btrfs-data.img`. A bare filename (e.g. `data.img`)
 /// yields `Some("")` from `Path::parent`, and `"/"` yields `None`; both
 /// cases indicate a malformed config and are rejected up-front instead
 /// of being silently rewritten to some hard-coded default that may not
@@ -470,7 +470,7 @@ async fn check_mount_busy(mount_path: &str) -> Option<String> {
 /// Find the loop device currently backing `img_path` by parsing `losetup -j`.
 ///
 /// Expected output format (one entry per line):
-///     /dev/loop0: [2049]:12345 (/data/ws-ckpt/btrfs-data.img)
+///     /dev/loop0: [2049]:12345 (/var/lib/ws-ckpt/btrfs-data.img)
 async fn find_loop_device_for(img_path: &str) -> anyhow::Result<String> {
     let out = run_command("losetup", &["-j", img_path])
         .await
@@ -623,17 +623,17 @@ mod tests {
 
     #[test]
     fn parses_loop_device_from_losetup_j() {
-        let out = "/dev/loop0: [2049]:12345 (/data/ws-ckpt/btrfs-data.img)\n";
+        let out = "/dev/loop0: [2049]:12345 (/var/lib/ws-ckpt/btrfs-data.img)\n";
         assert_eq!(
-            parse_losetup_j(out, "/data/ws-ckpt/btrfs-data.img").unwrap(),
+            parse_losetup_j(out, "/var/lib/ws-ckpt/btrfs-data.img").unwrap(),
             "/dev/loop0"
         );
     }
 
     #[test]
     fn parse_losetup_j_returns_err_on_empty() {
-        assert!(parse_losetup_j("", "/data/ws-ckpt/btrfs-data.img").is_err());
-        assert!(parse_losetup_j("\n", "/data/ws-ckpt/btrfs-data.img").is_err());
+        assert!(parse_losetup_j("", "/var/lib/ws-ckpt/btrfs-data.img").is_err());
+        assert!(parse_losetup_j("\n", "/var/lib/ws-ckpt/btrfs-data.img").is_err());
     }
 
     #[test]
@@ -682,8 +682,8 @@ mod tests {
 
     #[test]
     fn derive_img_dir_returns_parent_for_absolute_path() {
-        let got = super::derive_img_dir("/data/ws-ckpt/btrfs-data.img").unwrap();
-        assert_eq!(got, "/data/ws-ckpt");
+        let got = super::derive_img_dir("/var/lib/ws-ckpt/btrfs-data.img").unwrap();
+        assert_eq!(got, "/var/lib/ws-ckpt");
     }
 
     #[test]
