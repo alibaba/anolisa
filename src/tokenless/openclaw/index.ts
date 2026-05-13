@@ -5,8 +5,8 @@
  *
  *   1. RTK command rewriting  — transparently rewrites exec tool commands to
  *      their RTK equivalents (delegated to `rtk rewrite`).
- *   2. Tokenless schema / response compression — compresses tool schemas and
- *      tool responses via `tokenless compress-schema` / `tokenless compress-response`.
+ *   2. Tokenless response compression — compresses tool responses via
+ *      `tokenless compress-response` (removes debug/null/empty values).
  *   3. TOON context compression — encodes JSON tool responses to TOON format
  *      via `toon -e`, reducing token usage for structured data. When both
  *      response and TOON compression are enabled, they run sequentially:
@@ -181,27 +181,6 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
   }
 }
 
-function tryCompressSchema(schema: Record<string, unknown>): Record<string, unknown> | null {
-  try {
-    const input = JSON.stringify(schema);
-    const args = ["compress-schema", "--agent-id", "openclaw"];
-    const result = execFileSync(tokenlessPath, args, {
-      encoding: "utf-8",
-      timeout: 3000,
-      input,
-    }).trim();
-
-    // Only return the compressed result if it differs from the input
-    if (result === input) {
-      return null; // No actual compression occurred
-    }
-
-    return JSON.parse(result);
-  } catch {
-    return null;
-  }
-}
-
 function tryCompressToon(response: any): { toonText: string; savingsPct: number } | null {
   try {
     const input = JSON.stringify(response);
@@ -267,7 +246,6 @@ export default {
   const pluginConfig = api.config ?? {};
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
-  const schemaCompressionEnabled = pluginConfig.schema_compression_enabled !== false;
   const toonCompressionEnabled = pluginConfig.toon_compression_enabled !== false;
   const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;
   const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead"]).map((t: string) => t.toLowerCase()));
@@ -336,30 +314,7 @@ export default {
     );
   }
 
-  // ---- 3. Schema compression (before_tool_register) ---------------------------
-
-  if (schemaCompressionEnabled && checkTokenless()) {
-    api.on(
-      "before_tool_register",
-      (event: { toolName: string; schema: Record<string, unknown> }) => {
-        const compressed = tryCompressSchema(event.schema);
-        if (!compressed) return;
-
-        if (verbose) {
-          const before = JSON.stringify(event.schema).length;
-          const after = JSON.stringify(compressed).length;
-          console.log(
-            `[tokenless/schema] ${event.toolName}: ${before} -> ${after} chars (${Math.round((1 - after / before) * 100)}% reduction)`,
-          );
-        }
-
-        return { schema: compressed };
-      },
-      { priority: 10 },
-    );
-  }
-
-  // ---- 4. Response / TOON compression (tool_result_persist) -------------------
+  // ---- 3. Response / TOON compression (tool_result_persist) -------------------
   // Pipeline: Response Compression → TOON (sequential, not mutually exclusive)
   //   1. Strip debug/nulls/empty, truncate long strings/arrays
   //   2. If result is still valid JSON and TOON is enabled, encode to TOON format
@@ -479,7 +434,6 @@ export default {
     const features = [
       rtkEnabled && rtkAvailable ? "rtk-rewrite" : null,
       toolReadyEnabled && tokenlessAvailable ? "tool-ready" : null,
-      schemaCompressionEnabled && tokenlessAvailable ? "schema-compression" : null,
       responseCompressionEnabled && tokenlessAvailable ? "response-compression" : null,
       toonCompressionEnabled && toonAvailable ? "toon-compression" : null,
     ].filter(Boolean);

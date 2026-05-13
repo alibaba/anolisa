@@ -55,7 +55,7 @@ pub fn format_summary(records: &[StatsRecord], title: Option<&str>) -> String {
     output.push('\n');
 
     let mut ops: Vec<_> = by_op.iter().collect();
-    ops.sort_by(|a, b| b.1.total_records.cmp(&a.1.total_records));
+    ops.sort_by_key(|b| std::cmp::Reverse(b.1.total_records));
 
     for (op, s) in ops {
         output.push_str(&format!("  {}: {} records\n", op, s.total_records));

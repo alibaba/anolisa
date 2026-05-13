@@ -22,6 +22,23 @@ FIX_LOG="${FIX_LOG_DIR}/env-fix.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPEC_FILE="${SCRIPT_DIR}/tool-ready-spec.json"
 
+# Detect system package manager by underlying mechanism (rpm/dpkg/apk),
+# then pick the best frontend within that family.
+# Priority: rpm-based > dpkg-based > apk-based.
+PACKAGE_MANAGER="rpm"
+if command -v rpm &>/dev/null; then
+  # rpm-based system: prefer dnf (modern), then yum (legacy)
+  if command -v dnf &>/dev/null; then
+    PACKAGE_MANAGER="dnf"
+  else
+    PACKAGE_MANAGER="yum"
+  fi
+elif command -v dpkg &>/dev/null; then
+  PACKAGE_MANAGER="apt"
+elif command -v apk &>/dev/null; then
+  PACKAGE_MANAGER="apk"
+fi
+
 # --- Logging helpers ---
 
 log_fix() {
@@ -42,7 +59,7 @@ was_recently_fixed() {
 }
 
 # --- Normalize a dep spec to object format ---
-# Input: string like "jq" → {binary:"jq",package:"jq",manager:"apt"}
+# Input: string like "jq" → {binary:"jq",package:"jq",manager:"rpm"}
 # Input: object like {"binary":"jq",...} → pass through
 # Output: JSON object
 
@@ -59,11 +76,11 @@ normalize_dep() {
   base_name=$(echo "$input" | sed 's/[>=<].*//')
   version_constraint=$(echo "$input" | grep -oE '[>=<]+[0-9.]+' || echo "")
   if [ -n "$version_constraint" ]; then
-    jq -n --arg bn "$base_name" --arg vc "$version_constraint" --arg pk "$base_name" \
-      '{binary:$bn, version:$vc, package:$pk, manager:"apt"}'
+    jq -n --arg bn "$base_name" --arg vc "$version_constraint" --arg pk "$base_name" --arg mgr "$PACKAGE_MANAGER" \
+      '{binary:$bn, version:$vc, package:$pk, manager:$mgr}'
   else
-    jq -n --arg bn "$base_name" --arg pk "$base_name" \
-      '{binary:$bn, package:$pk, manager:"apt"}'
+    jq -n --arg bn "$base_name" --arg pk "$base_name" --arg mgr "$PACKAGE_MANAGER" \
+      '{binary:$bn, package:$pk, manager:$mgr}'
   fi
 }
 
@@ -71,9 +88,16 @@ normalize_dep() {
 # Each installs a package via the declared manager.
 # Returns 0 on success, 1 on failure.
 
-install_via_apt() {
+install_via_system() {
   local package="$1"
-  $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null
+  # Try detected system manager first, then others as fallback (rpm > apt > apk)
+  case "$PACKAGE_MANAGER" in
+    dnf)  $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
+    yum)  $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
+    apt)  $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
+    apk)  $SUDO_PREFIX apk add "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null ;;
+    *)    $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
+  esac
 }
 
 install_via_rpm() {
@@ -83,7 +107,21 @@ install_via_rpm() {
 install_via_pip() {
   local package="$1"
   local pip_name="${2:-$package}"
-  pip install "$pip_name" 2>/dev/null || pip3 install "$pip_name" 2>/dev/null
+  local pip_cmd=""
+  command -v pip3 &>/dev/null && pip_cmd="pip3" || { command -v pip &>/dev/null && pip_cmd="pip"; }
+  if [ -z "$pip_cmd" ]; then return 1; fi
+
+  # Stage 1: default mirror (Alinux internal mirror on this platform)
+  $pip_cmd install "$pip_name" 2>/dev/null && return 0
+
+  # Stage 2: purge cache and retry (stale cache can cause hash mismatch)
+  $pip_cmd cache purge 2>/dev/null
+  $pip_cmd install --no-cache-dir "$pip_name" 2>/dev/null && return 0
+
+  # Stage 3: fallback to official PyPI (mirror may be broken/sync-lag)
+  $pip_cmd install --no-cache-dir --index-url https://pypi.org/simple/ "$pip_name" 2>/dev/null && return 0
+
+  return 1
 }
 
 install_via_uv() {
@@ -151,24 +189,25 @@ install_via_dir() {
 install_via_curl_pipe_sh() {
   local url="$1"
   local args="${2:-}"
+  local timeout_secs="${3:-120}"
   # Only allow URLs from trusted domains
-  local allowed_domains="^(https?://)?(github\.com|raw\.githubusercontent\.com|sh\.rustup\.rs|get\.docker\.com|cli\.run\.nu|get\.starship\.rs)"
+  local allowed_domains="^(https?://)?(github\.com|raw\.githubusercontent\.com|sh\.rustup\.rs|get\.docker\.com|cli\.run\.nu|get\.starship\.rs|astral\.sh)"
   if ! echo "$url" | grep -qE "$allowed_domains"; then
     echo "[tokenless-env-fix] WARNING: curl|sh blocked — untrusted URL: $url"
     return 1
   fi
-  echo "[tokenless-env-fix] NOTE: executing remote script from $url"
+  echo "[tokenless-env-fix] NOTE: executing remote script from $url (timeout: ${timeout_secs}s)"
   if command -v curl &>/dev/null; then
     if [ -n "$args" ]; then
-      curl -fsSL "$url" 2>/dev/null | sh $args 2>/dev/null
+      timeout "$timeout_secs" curl -fsSL "$url" 2>/dev/null | timeout "$timeout_secs" sh $args
     else
-      curl -fsSL "$url" 2>/dev/null | sh 2>/dev/null
+      timeout "$timeout_secs" curl -fsSL "$url" 2>/dev/null | timeout "$timeout_secs" sh
     fi
   elif command -v wget &>/dev/null; then
     if [ -n "$args" ]; then
-      wget -qO- "$url" 2>/dev/null | sh $args 2>/dev/null
+      timeout "$timeout_secs" wget -qO- "$url" | timeout "$timeout_secs" sh $args
     else
-      wget -qO- "$url" 2>/dev/null | sh 2>/dev/null
+      timeout "$timeout_secs" wget -qO- "$url" | timeout "$timeout_secs" sh
     fi
   else
     return 1
@@ -184,7 +223,7 @@ fix_dep() {
 
   binary=$(echo "$dep_json" | jq -r '.binary // empty')
   package=$(echo "$dep_json" | jq -r '.package // empty')
-  manager=$(echo "$dep_json" | jq -r '.manager // "apt"')
+  manager=$(echo "$dep_json" | jq -r '.manager // "rpm"')
   version=$(echo "$dep_json" | jq -r '.version // empty')
   pip_name=$(echo "$dep_json" | jq -r '.pip_name // empty')
   uv_name=$(echo "$dep_json" | jq -r '.uv_name // empty')
@@ -198,7 +237,8 @@ fix_dep() {
   [ -z "$uv_name" ] && uv_name="$package"
   [ -z "$npm_name" ] && npm_name="$package"
 
-  # Skip if already available
+  # Skip if already available (clear hash cache first)
+  hash -r
   if command -v "$binary" &>/dev/null; then
     # Check version constraint if present
     if [ -n "$version" ]; then
@@ -225,10 +265,15 @@ fix_dep() {
     fi
   fi
 
-  # Skip if recently fixed successfully
+  # Skip if recently fixed successfully AND binary still present
+  # (handles the case where dep was fixed then later uninstalled)
   if was_recently_fixed "$binary"; then
-    echo "[tokenless-env-fix] ${binary}: skipped (recently fixed)"
-    return 0
+    hash -r
+    if command -v "$binary" &>/dev/null; then
+      echo "[tokenless-env-fix] ${binary}: skipped (recently fixed, still present)"
+      return 0
+    fi
+    echo "[tokenless-env-fix] ${binary}: recently fixed but missing, re-installing"
   fi
 
   echo "[tokenless-env-fix] ${binary}: attempting install via ${manager}..."
@@ -236,8 +281,7 @@ fix_dep() {
   # --- Primary install via declared manager ---
   local primary_ok=false
   case "$manager" in
-    apt)     install_via_apt "$package" && primary_ok=true ;;
-    rpm)     install_via_rpm "$package" && primary_ok=true ;;
+    rpm|apt|dnf|yum|apk)  install_via_system "$package" && primary_ok=true ;;
     pip)     install_via_pip "$package" "$pip_name" && primary_ok=true ;;
     uv)      install_via_uv "$package" "$uv_name" && primary_ok=true ;;
     npm)     install_via_npm "$package" "$npm_name" && primary_ok=true ;;
@@ -252,7 +296,8 @@ fix_dep() {
       ;;
   esac
 
-  # Verify primary install
+  # Verify primary install (clear hash cache so newly installed binaries are discoverable)
+  hash -r
   if $primary_ok && command -v "$binary" &>/dev/null; then
     log_fix "$binary" "success" "installed via ${manager}"
     echo "[tokenless-env-fix] ${binary}: installed via ${manager}"
@@ -270,7 +315,7 @@ fix_dep() {
       local fb_method fb_package fb_binary fb_source fb_manifest fb_features fb_url fb_args
       fb_method=$(echo "$fallbacks" | jq -r ".[$i].method // empty")
       fb_package=$(echo "$fallbacks" | jq -r ".[$i].package // empty")
-      fb_binary=$(echo "$fallbacks" | jq -r ".[$i].binary // $binary")
+      fb_binary=$(echo "$fallbacks" | jq -r --arg def "$binary" ".[$i].binary // \$def")
       fb_source=$(echo "$fallbacks" | jq -r ".[$i].source // empty")
       fb_manifest=$(echo "$fallbacks" | jq -r ".[$i].manifest // empty")
       fb_features=$(echo "$fallbacks" | jq -r ".[$i].features // empty")
@@ -281,8 +326,7 @@ fix_dep() {
 
       local fb_ok=false
       case "$fb_method" in
-        apt)     [ -n "$fb_package" ] && install_via_apt "$fb_package" && fb_ok=true ;;
-        rpm)     [ -n "$fb_package" ] && install_via_rpm "$fb_package" && fb_ok=true ;;
+        rpm|apt|dnf|yum|apk)  [ -n "$fb_package" ] && install_via_system "$fb_package" && fb_ok=true ;;
         pip)     [ -n "$fb_package" ] && install_via_pip "$fb_package" && fb_ok=true ;;
         uv)      [ -n "$fb_package" ] && install_via_uv "$fb_package" && fb_ok=true ;;
         npm)     [ -n "$fb_package" ] && install_via_npm "$fb_package" && fb_ok=true ;;
@@ -296,6 +340,7 @@ fix_dep() {
         *) echo "[tokenless-env-fix] ${binary}: unknown fallback method '${fb_method}'" ;;
       esac
 
+      hash -r
       if $fb_ok && command -v "$fb_binary" &>/dev/null; then
         log_fix "$binary" "success" "installed via fallback ${fb_method}"
         echo "[tokenless-env-fix] ${binary}: installed via fallback ${fb_method}"
@@ -328,7 +373,7 @@ fix_tool_from_spec() {
 
   # Collect all dep entries from required + recommended
   local all_deps
-  all_deps=$(echo "$tool_spec" | jq -c '[(.required // []) + (.recommended // []) | .[] | if type == "string" then (if test("[>=<]") then {binary: (split("[>=<]") | .[0]), version: (capture("[>=<]+[0-9.]+"; "g") | .[0]), package: (split("[>=<]") | .[0]), manager: "apt"} else {binary: ., package: ., manager: "apt"} end) else . end]' 2>/dev/null || echo '[]')
+  all_deps=$(echo "$tool_spec" | jq -c --arg mgr "$PACKAGE_MANAGER" '[(.required // []) + (.recommended // []) | .[] | if type == "string" then (if test("[>=<]") then {binary: (split("[>=<]") | .[0]), version: (capture("[>=<]+[0-9.]+"; "g") | .[0]), package: (split("[>=<]") | .[0]), manager: $mgr} else {binary: ., package: ., manager: $mgr} end) else . end]' 2>/dev/null || echo '[]')
 
   local count
   count=$(echo "$all_deps" | jq 'length' 2>/dev/null || echo 0)
@@ -354,33 +399,30 @@ case "${1:-}" in
       fix_dep "$2"
     else
       # Simple name — normalize to object with optional manager
-      local manager="${3:-apt}"
-      local dep_json
+      manager="${3:-$PACKAGE_MANAGER}"
       dep_json=$(jq -n --arg bn "$2" --arg pk "$2" --arg mgr "$manager" '{binary:$bn, package:$pk, manager:$mgr}')
       fix_dep "$dep_json"
     fi
     ;;
   fix-simple)
-    # Fix by binary name with optional manager (defaults to apt)
+    # Fix by binary name with optional manager (defaults to detected PACKAGE_MANAGER)
     if [ -z "${2:-}" ]; then
       echo "Usage: tokenless-env-fix.sh fix-simple <binary> [manager]"
       exit 1
     fi
-    manager="${3:-apt}"
+    manager="${3:-$PACKAGE_MANAGER}"
     dep_json=$(jq -n --arg bn "$2" --arg pk "$2" --arg mgr "$manager" '{binary:$bn, package:$pk, manager:$mgr}')
     fix_dep "$dep_json"
     ;;
   fix-all)
-    local input
+    input=""
     if [ -n "${2:-}" ] && [ "$2" != "-" ]; then
       input="$2"
     else
       input=$(cat)
     fi
     # Normalize all entries
-    local normalized
-    normalized=$(echo "$input" | jq -c '[.[] | if type == "string" then {binary: ., package: ., manager: "apt"} else . end]' 2>/dev/null || echo '[]')
-    local count
+    normalized=$(echo "$input" | jq -c --arg mgr "$PACKAGE_MANAGER" '[.[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' 2>/dev/null || echo '[]')
     count=$(echo "$normalized" | jq 'length' 2>/dev/null || echo 0)
     for i in $(seq 0 $((count - 1))); do
       fix_dep "$(echo "$normalized" | jq -c ".[$i]")" || true
@@ -402,7 +444,7 @@ case "${1:-}" in
     fi
     echo "Auto-fixable dependencies (from spec):"
     # Collect all dep entries across all tools
-    all_deps=$(jq -c '[del(."_comment") | to_entries[] | .value | (.required // []) + (.recommended // []) | .[] | if type == "string" then {binary: ., package: ., manager: "apt"} else . end]' "$SPEC_FILE" 2>/dev/null || echo '[]')
+    all_deps=$(jq -c --arg mgr "$PACKAGE_MANAGER" '[del(."_comment") | to_entries[] | .value | (.required // []) + (.recommended // []) | .[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' "$SPEC_FILE" 2>/dev/null || echo '[]')
     count=$(echo "$all_deps" | jq 'length' 2>/dev/null || echo 0)
     for i in $(seq 0 $((count - 1))); do
       dep_json=$(echo "$all_deps" | jq -c ".[$i]")
@@ -414,8 +456,8 @@ case "${1:-}" in
     done
     echo ""
     echo "Supported managers:"
-    echo "  apt       — apt-get / yum / dnf / apk"
-    echo "  rpm       — yum / dnf / rpm"
+    echo "  rpm       — system package manager (auto-detect: yum/dnf/apt/apk, current: $PACKAGE_MANAGER)"
+    echo "  apt       — apt-get (Debian/Ubuntu)"
     echo "  pip       — pip / pip3"
     echo "  uv        — uv tool install / uv pip install"
     echo "  npm       — npm install -g"

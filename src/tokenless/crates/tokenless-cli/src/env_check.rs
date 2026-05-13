@@ -35,11 +35,14 @@ struct FallbackEntry {
     source: Option<String>,
     manifest: Option<String>,
     features: Option<String>,
+    url: Option<String>,
+    args: Option<String>,
 }
 
 /// Per-tool dependency specification.
 #[derive(Debug, Clone)]
 struct ToolDepSpec {
+    aliases: Vec<String>,
     required: Vec<DepEntry>,
     recommended: Vec<DepEntry>,
     config_files: Vec<String>,
@@ -80,7 +83,7 @@ struct ToolReadyResult {
 }
 
 /// Normalize a JSON value (string or object) into a DepEntry.
-/// String "jq" → DepEntry { binary: "jq", package: "jq", manager: "apt" }
+/// String "jq" → DepEntry { binary: "jq", package: "jq", manager: "rpm" }
 /// Object {binary, version, package, manager, ...} → DepEntry
 fn normalize_dep(value: &Value) -> DepEntry {
     match value {
@@ -93,7 +96,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
                     binary,
                     version,
                     package: s[..idx].to_string(),
-                    manager: "apt".to_string(),
+                    manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,
                     npm_name: None,
@@ -105,7 +108,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
                     binary: s.clone(),
                     version: None,
                     package: s.clone(),
-                    manager: "apt".to_string(),
+                    manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,
                     npm_name: None,
@@ -132,7 +135,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
             let manager = obj
                 .get("manager")
                 .and_then(|v| v.as_str())
-                .unwrap_or("apt")
+                .unwrap_or("rpm")
                 .to_string();
             let pip_name = obj
                 .get("pip_name")
@@ -184,6 +187,14 @@ fn normalize_dep(value: &Value) -> DepEntry {
                                         .get("features")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string()),
+                                    url: fb_obj
+                                        .get("url")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    args: fb_obj
+                                        .get("args")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
                                 })
                             } else {
                                 None
@@ -209,7 +220,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
             binary: "".to_string(),
             version: None,
             package: "".to_string(),
-            manager: "apt".to_string(),
+            manager: "rpm".to_string(),
             pip_name: None,
             uv_name: None,
             npm_name: None,
@@ -225,6 +236,69 @@ fn normalize_deps(array: &Value) -> Vec<DepEntry> {
         .as_array()
         .map(|arr| arr.iter().map(normalize_dep).collect())
         .unwrap_or_default()
+}
+
+/// Detect the system's native package manager by checking the underlying
+/// package management mechanism (rpm vs dpkg vs apk), then selecting the
+/// best frontend within that family. Override via TOKENLESS_PACKAGE_MANAGER
+/// env var (useful for testing).
+fn detect_system_manager() -> String {
+    if let Ok(mgr) = std::env::var("TOKENLESS_PACKAGE_MANAGER") {
+        return mgr;
+    }
+    // Detect by underlying mechanism first, then pick frontend within family
+    // rpm-based: prefer dnf (modern), then yum (legacy)
+    // dpkg-based: apt-get
+    // apk-based: apk
+    let rpm_exists = Command::new("command")
+        .arg("-v")
+        .arg("rpm")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let dpkg_exists = Command::new("command")
+        .arg("-v")
+        .arg("dpkg")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let apk_exists = Command::new("command")
+        .arg("-v")
+        .arg("apk")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if rpm_exists {
+        // Pick best frontend: dnf (modern Fedora/RHEL 8+) > yum (legacy)
+        if Command::new("command")
+            .arg("-v")
+            .arg("dnf")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return "dnf".to_string();
+        }
+        return "yum".to_string();
+    }
+    if dpkg_exists {
+        return "apt".to_string();
+    }
+    if apk_exists {
+        return "apk".to_string();
+    }
+    "rpm".to_string()
+}
+
+/// Resolve a semantic manager label to the actual system package manager.
+/// "rpm" maps to the detected system manager; other labels pass through unchanged.
+fn resolve_manager(manager: &str) -> String {
+    if manager == "rpm" {
+        detect_system_manager()
+    } else {
+        manager.to_string()
+    }
 }
 
 /// Extract the required version from a constraint string like ">=0.35".
@@ -329,9 +403,6 @@ fn check_permission(perm: &str) -> bool {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false),
-        "docker_socket" => {
-            fs::metadata("/var/run/docker.sock").is_ok() || fs::metadata("/run/docker.sock").is_ok()
-        }
         _ => true,
     }
 }
@@ -365,6 +436,15 @@ fn load_spec(
                 continue;
             }
             if let Value::Object(spec_obj) = tool_spec {
+                let aliases = spec_obj
+                    .get("aliases")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let required = normalize_deps(
                     spec_obj
                         .get("required")
@@ -406,6 +486,7 @@ fn load_spec(
                 specs.insert(
                     tool_name,
                     ToolDepSpec {
+                        aliases,
                         required,
                         recommended,
                         config_files,
@@ -480,7 +561,7 @@ fn check_tool(tool_name: &str, spec: &ToolDepSpec) -> ToolReadyResult {
     }
 }
 
-/// Format a DepStatus as a human-readable string.
+/// Format a DepStatus as a human-readable string (with icon).
 fn format_dep_status(status: &DepStatus) -> String {
     match status {
         DepStatus::Available => "✓".to_string(),
@@ -490,6 +571,20 @@ fn format_dep_status(status: &DepStatus) -> String {
             required,
         } => {
             format!("version low ({} < {})", installed, required)
+        }
+    }
+}
+
+/// Format a DepStatus as a text status label (no icon, no emoji).
+fn format_dep_status_label(status: &DepStatus) -> String {
+    match status {
+        DepStatus::Available => "INSTALLED".to_string(),
+        DepStatus::Missing => "MISSING".to_string(),
+        DepStatus::VersionLow {
+            installed,
+            required,
+        } => {
+            format!("OUTDATED ({}/{})", installed, required)
         }
     }
 }
@@ -504,50 +599,41 @@ fn format_status(status: &ReadyStatus) -> &'static str {
     }
 }
 
-/// Generate a full checklist string.
+/// Generate a full checklist string — two-level layout:
+/// Level 1: Agent tool category (Shell/WebFetch/Read/Write)
+/// Level 2: Binary list under each category, with text status labels.
 fn generate_checklist(results: &[ToolReadyResult]) -> String {
     let mut output = String::new();
     output.push_str("Tool Environment Ready Checklist\n");
-    output.push_str("=================================\n");
+    output.push_str("=================================\n\n");
 
     for result in results {
-        let status_icon = match result.status {
-            ReadyStatus::Ready => "✅",
-            ReadyStatus::Partial => "⚠️",
-            ReadyStatus::NotReady => "❌",
-            ReadyStatus::Unknown => "❓",
-        };
+        let category_status = format_status(&result.status);
+        output.push_str(&format!("{} [{}]\n", result.tool_name, category_status));
 
-        let mut details = Vec::new();
         for (dep, status) in &result.required_results {
-            details.push(format!(
-                "{} {} ({})",
-                dep.binary,
-                format_dep_status(status),
-                dep.manager
-            ));
+            let label = format_dep_status_label(status);
+            output.push_str(&format!("  required:   {:12} {}\n", dep.binary, label));
         }
         for (dep, status) in &result.recommended_results {
-            details.push(format!(
-                "{} {} ({})",
-                dep.binary,
-                format_dep_status(status),
-                dep.manager
-            ));
+            let label = format_dep_status_label(status);
+            output.push_str(&format!("  recommended:{:12} {}\n", dep.binary, label));
         }
-        let details_str = if details.is_empty() {
-            "no dependencies"
-        } else {
-            &details.join(", ")
-        };
-
-        output.push_str(&format!(
-            "{} {:10} — {:9} ({})\n",
-            status_icon,
-            result.tool_name,
-            format_status(&result.status),
-            details_str
-        ));
+        for (cfg, ok) in &result.config_results {
+            let label = if *ok { "INSTALLED" } else { "MISSING" };
+            output.push_str(&format!("  config:     {:12} {}\n", cfg, label));
+        }
+        for (perm, ok) in &result.permission_results {
+            let label = if *ok { "GRANTED" } else { "DENIED" };
+            output.push_str(&format!("  permission: {:12} {}\n", perm, label));
+        }
+        if !result.required_results.is_empty()
+            || !result.recommended_results.is_empty()
+            || !result.config_results.is_empty()
+            || !result.permission_results.is_empty()
+        {
+            output.push('\n');
+        }
     }
 
     let ready_count = results
@@ -567,7 +653,6 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
         .filter(|r| r.status == ReadyStatus::Unknown)
         .count();
 
-    output.push('\n');
     let mut summary = format!(
         "Summary: {} ready, {} partial, {} not ready",
         ready_count, partial_count, not_ready_count
@@ -632,6 +717,12 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
                         if let Some(ref f) = fb.features {
                             fb_obj.insert("features".to_string(), Value::String(f.clone()));
                         }
+                        if let Some(ref u) = fb.url {
+                            fb_obj.insert("url".to_string(), Value::String(u.clone()));
+                        }
+                        if let Some(ref a) = fb.args {
+                            fb_obj.insert("args".to_string(), Value::String(a.clone()));
+                        }
                         Value::Object(fb_obj)
                     })
                     .collect();
@@ -644,7 +735,9 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let json_str = serde_json::to_string(&deps_json)
         .map_err(|e| format!("Failed to serialize deps: {}", e))?;
 
-    let mut child = Command::new("bash")
+    let mut child = Command::new("timeout")
+        .arg("120")
+        .arg("bash")
         .arg(&fix_script)
         .arg("fix-all")
         .stdin(std::process::Stdio::piped())
@@ -756,16 +849,34 @@ pub fn run(
     let tool_names: Vec<String> = if all {
         specs.keys().cloned().collect()
     } else if let Some(t) = tool {
-        if !specs.contains_key(t) {
+        // Resolve tool name: exact key → aliases → case-insensitive
+        let resolved = if specs.contains_key(t) {
+            t.to_string()
+        } else {
+            // Try alias reverse lookup: find spec key whose aliases contain t
+            specs
+                .iter()
+                .find(|(_, spec)| spec.aliases.iter().any(|a| a == t))
+                .map(|(k, _)| k.clone())
+                .unwrap_or_else(|| {
+                    // Case-insensitive fallback
+                    specs
+                        .keys()
+                        .find(|k| k.eq_ignore_ascii_case(t))
+                        .cloned()
+                        .unwrap_or_else(|| t.to_string())
+                })
+        };
+        if !specs.contains_key(&resolved) {
             if json {
-                let result = build_json_result(t, &ReadyStatus::Unknown, &[], &[]);
+                let result = build_json_result(&resolved, &ReadyStatus::Unknown, &[], &[]);
                 println!("{}", serde_json::to_string(&result).unwrap());
                 return Ok(());
             }
             println!("{}: {}", t, format_status(&ReadyStatus::Unknown));
             return Ok(());
         }
-        vec![t.to_string()]
+        vec![resolved]
     } else {
         return Err(("Specify --tool <name> or --all".to_string(), 1));
     };
@@ -788,7 +899,7 @@ pub fn run(
         if fix && !missing_deps.is_empty() {
             if !json {
                 println!(
-                    "{}: {} (missing: {})",
+                    "{}: {} (fixing: {})",
                     tool_name,
                     format_status(&result.status),
                     missing_names.join(", ")
@@ -849,7 +960,7 @@ pub fn run(
                     "  required: {} — {} [{}]",
                     dep.binary,
                     format_dep_status(status),
-                    dep.manager
+                    resolve_manager(&dep.manager)
                 );
             }
             for (dep, status) in &result.recommended_results {
@@ -857,7 +968,7 @@ pub fn run(
                     "  recommended: {} — {} [{}]",
                     dep.binary,
                     format_dep_status(status),
-                    dep.manager
+                    resolve_manager(&dep.manager)
                 );
             }
             for (cfg, ok) in &result.config_results {
@@ -904,7 +1015,7 @@ mod tests {
         let dep = normalize_dep(&json!("jq"));
         assert_eq!(dep.binary, "jq");
         assert_eq!(dep.package, "jq");
-        assert_eq!(dep.manager, "apt");
+        assert_eq!(dep.manager, "rpm");
         assert!(dep.version.is_none());
         assert!(dep.fallback.is_empty());
     }
@@ -915,7 +1026,7 @@ mod tests {
         assert_eq!(dep.binary, "rtk");
         assert_eq!(dep.version.as_deref(), Some(">=0.35"));
         assert_eq!(dep.package, "rtk");
-        assert_eq!(dep.manager, "apt");
+        assert_eq!(dep.manager, "rpm");
     }
 
     #[test]
@@ -923,11 +1034,11 @@ mod tests {
         let dep = normalize_dep(&json!({
             "binary": "curl",
             "package": "curl",
-            "manager": "apt"
+            "manager": "rpm"
         }));
         assert_eq!(dep.binary, "curl");
         assert_eq!(dep.package, "curl");
-        assert_eq!(dep.manager, "apt");
+        assert_eq!(dep.manager, "rpm");
         assert!(dep.version.is_none());
     }
 
@@ -966,21 +1077,21 @@ mod tests {
         let dep = normalize_dep(&json!(null));
         assert_eq!(dep.binary, "");
         assert_eq!(dep.package, "");
-        assert_eq!(dep.manager, "apt");
+        assert_eq!(dep.manager, "rpm");
     }
 
     #[test]
     fn normalize_deps_mixed_array() {
         let deps = normalize_deps(
-            &json!(["jq", "rtk>=0.35", {"binary": "curl", "package": "curl", "manager": "apt"}]),
+            &json!(["jq", "rtk>=0.35", {"binary": "curl", "package": "curl", "manager": "rpm"}]),
         );
         assert_eq!(deps.len(), 3);
         assert_eq!(deps[0].binary, "jq");
-        assert_eq!(deps[0].manager, "apt");
+        assert_eq!(deps[0].manager, "rpm");
         assert_eq!(deps[1].binary, "rtk");
         assert_eq!(deps[1].version.as_deref(), Some(">=0.35"));
         assert_eq!(deps[2].binary, "curl");
-        assert_eq!(deps[2].manager, "apt");
+        assert_eq!(deps[2].manager, "rpm");
     }
 
     #[test]
@@ -1141,7 +1252,7 @@ mod tests {
         let spec_path = tmp_dir.join("test-mixed-spec.json");
         let spec_content = json!({
             "Shell": {
-                "required": ["jq", "rtk>=0.35", {"binary": "curl", "package": "curl", "manager": "apt"}],
+                "required": ["jq", "rtk>=0.35", {"binary": "curl", "package": "curl", "manager": "rpm"}],
                 "recommended": [],
                 "config_files": [],
                 "permissions": [],
@@ -1154,11 +1265,11 @@ mod tests {
         let shell_spec = specs.get("Shell").unwrap();
         assert_eq!(shell_spec.required.len(), 3);
         assert_eq!(shell_spec.required[0].binary, "jq");
-        assert_eq!(shell_spec.required[0].manager, "apt");
+        assert_eq!(shell_spec.required[0].manager, "rpm");
         assert_eq!(shell_spec.required[1].binary, "rtk");
         assert_eq!(shell_spec.required[1].version.as_deref(), Some(">=0.35"));
         assert_eq!(shell_spec.required[2].binary, "curl");
-        assert_eq!(shell_spec.required[2].manager, "apt");
+        assert_eq!(shell_spec.required[2].manager, "rpm");
 
         std::fs::remove_file(&spec_path).ok();
     }
@@ -1173,7 +1284,7 @@ mod tests {
                     binary: "fake".to_string(),
                     version: None,
                     package: "fake".to_string(),
-                    manager: "apt".to_string(),
+                    manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,
                     npm_name: None,

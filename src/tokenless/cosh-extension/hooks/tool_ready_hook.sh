@@ -62,12 +62,39 @@ if [ -z "$TOOL_NAME" ]; then exit 0; fi
 
 if [ ! -f "$SPEC_FILE" ]; then log_v "spec file not found, skipping"; exit 0; fi
 
-TOOL_SPEC=$(jq -c --arg name "$TOOL_NAME" '.[$name]' "$SPEC_FILE" 2>/dev/null || echo '')
-if [ -z "$TOOL_SPEC" ] || [ "$TOOL_SPEC" = "null" ]; then
+# Resolve: aliases reverse lookup → exact key → case-insensitive fallback
+# Each spec entry has an "aliases" array listing tool names from all agent
+# frameworks (cosh, openclaw, hermes). We reverse-lookup from the input
+# tool_name to find the matching spec key.
+SPEC_KEY=$(jq -r --arg name "$TOOL_NAME" '
+  to_entries[] | select(.key != "_meta") |
+  .key as $spec_key |
+  (.value.aliases // [])[] |
+  select(. == $name) |
+  $spec_key
+' "$SPEC_FILE" 2>/dev/null | head -1)
+
+# Fallback: exact spec key match
+if [ -z "$SPEC_KEY" ]; then
+  SPEC_KEY=$(jq -r --arg name "$TOOL_NAME" '
+    to_entries[] | select(.key != "_meta") |
+    select(.key == $name) | .key
+  ' "$SPEC_FILE" 2>/dev/null | head -1)
+fi
+
+# Fallback: case-insensitive spec key match
+if [ -z "$SPEC_KEY" ]; then
+  SPEC_KEY=$(jq -r --arg name "$TOOL_NAME" '
+    to_entries[] | select(.key != "_meta") |
+    select(.key | ascii_downcase == ($name | ascii_downcase)) | .key
+  ' "$SPEC_FILE" 2>/dev/null | head -1)
+fi
+
+if [ -z "$SPEC_KEY" ]; then
     log_v "Phase 1: $TOOL_NAME not in spec dict → skip"
     exit 0
 fi
-log_v "Phase 1: $TOOL_NAME found in spec dict"
+log_v "Phase 1: $TOOL_NAME → $SPEC_KEY found in spec dict"
 
 # ============================================================================
 # Phase 2: CHECK — Scan system readiness
@@ -91,9 +118,9 @@ normalize_deps() {
   else . end]' 2>/dev/null || echo '[]'
 }
 
-REQUIRED=$(normalize_deps "$(echo "$TOOL_SPEC" | jq -c '.required // []')")
-RECOMMENDED=$(normalize_deps "$(echo "$TOOL_SPEC" | jq -c '.recommended // []')")
-PERMISSIONS=$(echo "$TOOL_SPEC" | jq -r '.permissions[] // empty' 2>/dev/null || echo '')
+REQUIRED=$(normalize_deps "$(jq -c --arg key "$SPEC_KEY" '.[$key].required // []' "$SPEC_FILE")")
+RECOMMENDED=$(normalize_deps "$(jq -c --arg key "$SPEC_KEY" '.[$key].recommended // []' "$SPEC_FILE")")
+PERMISSIONS=$(jq -r --arg key "$SPEC_KEY" '.[$key].permissions[] // empty' "$SPEC_FILE" 2>/dev/null || echo '')
 
 # --- Version comparison helper ---
 version_ge() {
@@ -180,27 +207,42 @@ done
 
 # Check recommended deps
 rec_count=$(echo "$RECOMMENDED" | jq 'length')
+missing_count_rec=0
+RECOMMENDED_MISSING_LIST=""
 for i in $(seq 0 $((rec_count - 1))); do
   dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
   status=$(check_dep "$dep_json")
   case "$status" in
     missing)
       MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
+      binary=$(echo "$dep_json" | jq -r '.binary')
+      RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
+      missing_count_rec=$((missing_count_rec + 1))
       ;;
   esac
 done
 
 # --- Determine readiness ---
 IS_READY=true
+IS_PARTIAL=false
 $HAS_REQUIRED_MISSING && IS_READY=false
 $HAS_VERSION_LOW && IS_READY=false
 [ -n "$PERM_MISSING" ] && IS_READY=false
 
-if $IS_READY; then
+# Recommended deps missing → PARTIAL (not blocking, but trigger auto-fix)
+if $IS_READY && [ "$missing_count_rec" -gt 0 ]; then
+    IS_PARTIAL=true
+fi
+
+if $IS_READY && ! $IS_PARTIAL; then
     log_v "Phase 2 CHECK: $TOOL_NAME → READY, silent pass"
     exit 0
 fi
-log_v "Phase 2 CHECK: $TOOL_NAME → NOT_READY (missing=$HAS_REQUIRED_MISSING version_low=$HAS_VERSION_LOW perm=$PERM_MISSING)"
+if $IS_PARTIAL; then
+    log_v "Phase 2 CHECK: $TOOL_NAME → PARTIAL (recommended missing: ${RECOMMENDED_MISSING_LIST})"
+else
+    log_v "Phase 2 CHECK: $TOOL_NAME → NOT_READY (missing=$HAS_REQUIRED_MISSING version_low=$HAS_VERSION_LOW perm=$PERM_MISSING)"
+fi
 
 # ============================================================================
 # Phase 3: FIX — Auto-install missing dependencies
@@ -224,7 +266,22 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     done
 
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
-        # 如果安装成功，则继续
+        # All missing deps installed successfully
+        exit 0
+    fi
+
+    # After fix, re-check readiness
+    # If only recommended still missing but required OK → PARTIAL, don't block
+    if ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
+        log_v "Phase 3 FIX: recommended deps partially installed, remaining: ${STILL_MISSING}"
+        # Still missing some recommended → inform Agent but don't block
+        DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${STILL_MISSING}. Core tool is functional."
+        jq -n --arg context "$DIAG_MSG" '{
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": $context
+          }
+        }' || exit 0
         exit 0
     fi
 fi
@@ -234,6 +291,20 @@ fi
 # ============================================================================
 # 如果安装失败，则向 Agent 反馈工具不可用。
 
+# PARTIAL (no fix script available): inform Agent but don't block
+if $IS_PARTIAL && ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
+    DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps missing:${RECOMMENDED_MISSING_LIST}. Core tool is functional, extended deps may be unavailable."
+    log_v "Phase 4 FEEDBACK: $TOOL_NAME → PARTIAL → injecting additionalContext (non-blocking)"
+    jq -n --arg context "$DIAG_MSG" '{
+      "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "additionalContext": $context
+      }
+    }' || exit 0
+    exit 0
+fi
+
+# NOT_READY: required deps or permissions missing → block with "Skip retry"
 # Collect human-readable missing list
 MISSING_LIST=""
 for i in $(seq 0 $((missing_count - 1))); do
