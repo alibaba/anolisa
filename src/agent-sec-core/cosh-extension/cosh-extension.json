@@ -1,6 +1,6 @@
 {
   "name": "agent-sec-core",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "hooks": {
     "PreToolUse": [
       {
