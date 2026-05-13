@@ -5,7 +5,7 @@ pub mod proctrace;
 pub mod procmon;
 pub mod filewatch;
 pub mod filewrite;
-pub mod tlssni;
+pub mod udpdns;
 pub mod probes;
 
 // Re-export commonly used types
@@ -15,4 +15,4 @@ pub use sslsniff::{SslSniff, SslPoller, SslEvent};
 pub use procmon::{ProcMon, ProcMonEvent, Event as ProcMonEventExt};
 pub use filewatch::{FileWatch, FileWatchEvent};
 pub use filewrite::{FileWrite as FileWriteProbe, FileWriteEvent};
-pub use tlssni::{TlsSni, TlsSniEvent};
+pub use udpdns::{UdpDns, UdpDnsEvent};

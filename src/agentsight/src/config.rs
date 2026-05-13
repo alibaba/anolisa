@@ -114,7 +114,7 @@ pub struct CmdlineRule {
     pub allow: bool,
 }
 
-/// Domain rule for SNI-based SSL attachment filtering
+/// Domain rule for DNS-based SSL attachment filtering
 #[derive(Debug, Clone)]
 pub struct DomainRule {
     /// Glob pattern for domain matching
@@ -312,7 +312,7 @@ pub struct AgentsightConfig {
     // --- FFI Rule Configuration ---
     /// User-defined cmdline rules for process allowlist/denylist
     pub cmdline_rules: Vec<CmdlineRule>,
-    /// User-defined domain rules for SNI-based SSL attachment
+    /// User-defined domain rules for DNS-based SSL attachment
     pub domain_rules: Vec<DomainRule>,
 
     // --- Config File Path ---

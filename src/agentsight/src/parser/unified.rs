@@ -140,7 +140,7 @@ impl Parser {
             Event::ProcMon(_) => ParseResult { messages: Vec::new() },
             Event::FileWatch(_) => ParseResult { messages: Vec::new() },
             Event::FileWrite(_) => ParseResult { messages: Vec::new() },
-            Event::TlsSni(_) => ParseResult { messages: Vec::new() },
+            Event::UdpDns(_) => ParseResult { messages: Vec::new() },
         }
     }
 

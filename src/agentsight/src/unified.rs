@@ -149,9 +149,9 @@ impl AgentSight {
         let all_cmdline_rules = config.cmdline_rules.clone();
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
-        let enable_tlssni = !config.domain_rules.is_empty();
+        let enable_udpdns = !config.domain_rules.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_tlssni).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -396,16 +396,16 @@ impl AgentSight {
             return None;
         }
 
-        // Handle TLS SNI events (domain-based attachment)
-        if let Event::TlsSni(ref sni_event) = event {
-            log::debug!("[TLS-SNI] pid={} comm={} sni={}",
-                sni_event.pid, sni_event.comm, sni_event.sni_name);
+        // Handle UDP DNS events (domain-based attachment)
+        if let Event::UdpDns(ref dns_event) = event {
+            log::debug!("[UDP-DNS] pid={} comm={} domain={}",
+                dns_event.pid, dns_event.comm, dns_event.domain);
 
-            if self.scanner.on_sni_event(sni_event.pid, &sni_event.sni_name) {
-                log::info!("[TLS-SNI] Attaching to pid={} via domain rule (sni={})",
-                    sni_event.pid, sni_event.sni_name);
-                if let Err(e) = self.probes.attach_process(sni_event.pid as i32) {
-                    log::warn!("[TLS-SNI] Failed to attach to pid={}: {}", sni_event.pid, e);
+            if self.scanner.on_dns_event(dns_event.pid, &dns_event.domain) {
+                log::info!("[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
+                    dns_event.pid, dns_event.domain);
+                if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
+                    log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
                 }
             }
             return None;

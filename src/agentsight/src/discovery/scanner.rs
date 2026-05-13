@@ -16,13 +16,13 @@ use crate::config::{CmdlineRule, DomainRule};
 ///
 /// The scanner maintains allow matchers, deny matchers, and domain patterns.
 /// It can scan the /proc filesystem to find running processes that match allow rules,
-/// check deny rules, and match TLS-SNI domain events.
+/// check deny rules, and match DNS domain events.
 pub struct AgentScanner {
     /// Allow matchers (agent discovery)
     matchers: Vec<CmdlineGlobMatcher>,
     /// Deny matchers (blacklist)
     deny_matchers: Vec<CmdlineGlobMatcher>,
-    /// Domain/SNI glob patterns
+    /// Domain/DNS glob patterns
     domain_patterns: Vec<String>,
     /// Currently tracked agent processes: pid -> DiscoveredAgent
     tracked_agents: HashMap<u32, DiscoveredAgent>,
@@ -32,7 +32,7 @@ impl AgentScanner {
     /// Create a scanner from the full set of rules (recommended).
     ///
     /// Separates cmdline_rules into allow matchers and deny matchers,
-    /// and stores domain patterns for SNI-based matching.
+    /// and stores domain patterns for DNS-based matching.
     pub fn from_rules(
         cmdline_rules: &[CmdlineRule],
         domain_rules: &[DomainRule],
@@ -72,17 +72,17 @@ impl AgentScanner {
         match_domain_glob(domain, &self.domain_patterns)
     }
 
-    /// Whether any domain rules are configured (used to enable TLS-SNI probe).
+    /// Whether any domain rules are configured (used to enable UDP DNS probe).
     pub fn has_domain_rules(&self) -> bool {
         !self.domain_patterns.is_empty()
     }
 
-    /// Handle TLS-SNI event: check domain match + deny check.
+    /// Handle DNS query event: check domain match + deny check.
     ///
     /// Returns `true` if the process should be attached (domain matches and
     /// the process cmdline is not denied).
-    pub fn on_sni_event(&self, pid: u32, sni: &str) -> bool {
-        if !self.matches_domain(sni) {
+    pub fn on_dns_event(&self, pid: u32, domain: &str) -> bool {
+        if !self.matches_domain(domain) {
             return false;
         }
         let cmdline = read_cmdline(&format!("/proc/{}/cmdline", pid));

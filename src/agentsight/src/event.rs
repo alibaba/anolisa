@@ -3,7 +3,7 @@ use crate::probes::sslsniff::SslEvent;
 use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
-use crate::probes::tlssni::TlsSniEvent;
+use crate::probes::udpdns::UdpDnsEvent;
 
 /// Unified event type that can represent any probe event
 ///
@@ -15,7 +15,7 @@ pub enum Event {
     ProcMon(ProcMonEvent),
     FileWatch(FileWatchEvent),
     FileWrite(FileWriteEvent),
-    TlsSni(TlsSniEvent),
+    UdpDns(UdpDnsEvent),
 }
 
 impl Event {
@@ -27,7 +27,7 @@ impl Event {
             Event::ProcMon(_) => "ProcMon",
             Event::FileWatch(_) => "FileWatch",
             Event::FileWrite(_) => "FileWrite",
-            Event::TlsSni(_) => "TlsSni",
+            Event::UdpDns(_) => "UdpDns",
         }
     }
 }
@@ -98,15 +98,15 @@ impl Event {
         }
     }
 
-    /// Check if this is a TLS SNI event
-    pub fn is_tlssni(&self) -> bool {
-        matches!(self, Event::TlsSni(_))
+    /// Check if this is a UDP DNS event
+    pub fn is_udpdns(&self) -> bool {
+        matches!(self, Event::UdpDns(_))
     }
 
-    /// Get TLS SNI event if this is one
-    pub fn as_tlssni(&self) -> Option<&TlsSniEvent> {
+    /// Get UDP DNS event if this is one
+    pub fn as_udpdns(&self) -> Option<&UdpDnsEvent> {
         match self {
-            Event::TlsSni(e) => Some(e),
+            Event::UdpDns(e) => Some(e),
             _ => None,
         }
     }

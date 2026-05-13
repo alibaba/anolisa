@@ -471,7 +471,7 @@ pub unsafe extern "C" fn agentsight_config_add_cmdline_rule(
     });
 }
 
-/// Add a domain rule (whitelist for SNI-based attachment).
+/// Add a domain rule (whitelist for DNS-based attachment).
 /// * `rule` — domain glob pattern (e.g. "*.openai.com").
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_add_domain_rule(

@@ -21,7 +21,7 @@ use super::sslsniff::bpf::probe_SSL_data_t as RawSslEvent;
 use super::procmon::{ProcMon, ProcMonEvent};
 use super::filewatch::{FileWatch, RawFileWatchEvent};
 use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
-use super::tlssni::{TlsSni, RawTlsSniEvent};
+use super::udpdns::{UdpDns, RawUdpDnsEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -31,7 +31,7 @@ const EVENT_SOURCE_SSL: u32 = 2;
 const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
 const EVENT_SOURCE_FILEWRITE: u32 = 5;
-const EVENT_SOURCE_TLSSNI: u32 = 6;
+const EVENT_SOURCE_UDPDNS: u32 = 6;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -51,8 +51,8 @@ pub struct Probes {
     filewatch: Option<FileWatch>,
     /// File write probe (reuses traced_processes map and ring buffer, always enabled)
     filewrite: FileWriteProbe,
-    /// TLS SNI probe (reuses ring buffer, captures SNI from ClientHello, optional)
-    tlssni: Option<TlsSni>,
+    /// UDP DNS probe (reuses ring buffer, captures domains from DNS queries, optional)
+    udpdns: Option<UdpDns>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -66,7 +66,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_tlssni: bool) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -99,13 +99,14 @@ impl Probes {
         let filewrite = FileWriteProbe::new_with_maps(&map_handle, &rb_handle)
             .context("failed to create filewrite")?;
 
-        // Optionally create tlssni - it reuses the ring buffer (captures all TLS SNI globally)
-        let tlssni = if enable_tlssni {
-            let sni = TlsSni::new_with_rb(&rb_handle)
-                .context("failed to create tlssni")?;
-            Some(sni)
+        // Optionally create udpdns - it reuses traced_processes map and ring buffer
+        // Skips already-traced processes to avoid redundant discovery events
+        let udpdns = if enable_udpdns {
+            let dns = UdpDns::new_with_maps(&map_handle, &rb_handle)
+                .context("failed to create udpdns")?;
+            Some(dns)
         } else {
-            log::info!("TLS SNI probe disabled (no domain_rules configured)");
+            log::info!("UDP DNS probe disabled (no domain_rules configured)");
             None
         };
 
@@ -117,7 +118,7 @@ impl Probes {
             procmon,
             filewatch,
             filewrite,
-            tlssni,
+            udpdns,
             rb_handle,
             event_tx,
             event_rx,
@@ -138,10 +139,10 @@ impl Probes {
         // Attach filewrite for JSON write monitoring (always enabled)
         self.filewrite.attach()
             .context("failed to attach filewrite")?;
-        // Attach tlssni for TLS SNI capture (if enabled)
-        if let Some(ref mut sni) = self.tlssni {
-            sni.attach()
-                .context("failed to attach tlssni")?;
+        // Attach udpdns for DNS query capture (if enabled)
+        if let Some(ref mut dns) = self.udpdns {
+            dns.attach()
+                .context("failed to attach udpdns")?;
         }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
@@ -169,7 +170,7 @@ impl Probes {
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
         let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
-        let tlssni_event_size = mem::size_of::<RawTlsSniEvent>();
+        let udpdns_event_size = mem::size_of::<RawUdpDnsEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -228,10 +229,10 @@ impl Probes {
                             None
                         }
                     }
-                    EVENT_SOURCE_TLSSNI => {
-                        // TLS SNI event (domain name from ClientHello)
-                        if data.len() >= tlssni_event_size {
-                            super::tlssni::TlsSniEvent::from_bytes(data).map(Event::TlsSni)
+                    EVENT_SOURCE_UDPDNS => {
+                        // UDP DNS event (domain name from DNS query)
+                        if data.len() >= udpdns_event_size {
+                            super::udpdns::UdpDnsEvent::from_bytes(data).map(Event::UdpDns)
                         } else {
                             None
                         }
