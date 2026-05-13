@@ -138,48 +138,9 @@ setup_openclaw() {
     info "Configuring OpenClaw plugin..."
     info "  Source: $openclaw_src"
 
-    # Install plugin files to ~/.openclaw/extensions/tokenless/
-    local ext_dir="$HOME/.openclaw/extensions/tokenless"
-    mkdir -p "$ext_dir"
-
-    cp "${openclaw_src}/index.ts" "$ext_dir/" 2>/dev/null || true
-    cp "${openclaw_src}/openclaw.plugin.json" "$ext_dir/"
-    cp "${openclaw_src}/package.json" "$ext_dir/"
-    info "  Copied plugin files to $ext_dir"
-
-    # Compile TypeScript to JavaScript
-    if command -v npx &>/dev/null; then
-        if npx --yes esbuild "${ext_dir}/index.ts" --bundle --platform=node --format=esm --outfile="${ext_dir}/index.js" 2>/dev/null; then
-            info "  Compiled index.ts -> index.js (esbuild)"
-        else
-            sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${ext_dir}/index.ts" > "${ext_dir}/index.js"
-            info "  Compiled index.ts -> index.js (sed fallback)"
-        fi
-    else
-        sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' "${ext_dir}/index.ts" > "${ext_dir}/index.js"
-        info "  Compiled index.ts -> index.js (sed fallback)"
-    fi
-
-    # Register plugin in openclaw.json
-    local openclaw_config="$HOME/.openclaw/openclaw.json"
-    if [ -f "$openclaw_config" ] && command -v jq &>/dev/null; then
-        local temp_file
-        temp_file=$(mktemp)
-        jq '
-            .plugins.enabled = true |
-            .plugins.entries["tokenless-openclaw"] = {"enabled": true} |
-            .plugins.allow = (.plugins.allow // [] | map(select(. != "tokenless-openclaw")) + ["tokenless-openclaw"])
-        ' "$openclaw_config" > "$temp_file" 2>/dev/null
-        if [ -s "$temp_file" ]; then
-            mv "$temp_file" "$openclaw_config"
-            info "  Registered tokenless-openclaw in $openclaw_config"
-        else
-            rm -f "$temp_file"
-            warn "  Failed to update openclaw.json"
-        fi
-    else
-        warn "  jq not found — manually add tokenless-openclaw to $openclaw_config"
-    fi
+    # Install plugin via openclaw CLI (handles file copy, TS compilation, and registration)
+    openclaw plugins install "$openclaw_src" --force --dangerously-force-unsafe-install || true
+    info "  OpenClaw plugin installed from $openclaw_src"
 }
 
 cleanup_openclaw() {
@@ -190,31 +151,23 @@ cleanup_openclaw() {
         return 0
     fi
 
-    info "Cleaning up OpenClaw plugin..."
-
-    # Remove extension directory
-    local ext_dir="$HOME/.openclaw/extensions/tokenless"
-    if [ -d "$ext_dir" ]; then
-        rm -rf "$ext_dir"
-        info "  Removed $ext_dir"
+    # Check if plugin is actually installed before attempting cleanup
+    local ext_dir="$HOME/.openclaw/extensions/tokenless-openclaw"
+    if [ ! -d "$ext_dir" ]; then
+        info "OpenClaw plugin not installed, skipping cleanup"
+        return 0
     fi
 
-    # Unregister from openclaw.json
-    local openclaw_config="$HOME/.openclaw/openclaw.json"
-    if [ -f "$openclaw_config" ] && command -v jq &>/dev/null; then
-        local temp_file
-        temp_file=$(mktemp)
-        jq '
-            del(.plugins.entries["tokenless-openclaw"]) |
-            .plugins.allow = (.plugins.allow // [] | map(select(. != "tokenless-openclaw")))
-        ' "$openclaw_config" > "$temp_file" 2>/dev/null
-        if [ -s "$temp_file" ]; then
-            mv "$temp_file" "$openclaw_config"
-            info "  Unregistered tokenless-openclaw from $openclaw_config"
-        else
-            rm -f "$temp_file"
-            warn "  Failed to update openclaw.json"
-        fi
+    info "Cleaning up OpenClaw plugin..."
+
+    # Uninstall plugin via openclaw CLI (handles file removal + config cleanup)
+    if command -v openclaw &>/dev/null; then
+        openclaw plugins uninstall tokenless-openclaw --force || true
+        info "  Uninstalled tokenless-openclaw via openclaw CLI"
+    else
+        rm -rf "$ext_dir"
+        info "  Removed $ext_dir"
+        warn "  openclaw not found — manually clean up tokenless-openclaw in openclaw.json"
     fi
 }
 
@@ -342,8 +295,11 @@ rpm_postinstall() {
         chmod +x "$user_dir/tokenless-env-fix.sh" 2>/dev/null || true
         info "  Core env-check config installed to $user_dir"
     fi
+
     # Migrate legacy bash hooks from settings.json to extension format
     cleanup_legacy_cosh_hooks || true
+
+    info "For openclaw plugin, run:  install.sh --openclaw"
 }
 
 # ============================================================================
@@ -355,11 +311,11 @@ rpm_preuninstall() {
     info "Token-Less Pre-Uninstallation Cleanup"
     info "=========================================="
 
-    # Clean up OpenClaw plugin
-    cleanup_openclaw 0
+    # RPM scriptlets run in a minimal shell environment; ensure CLI tools are discoverable
+    export PATH="/usr/local/bin:/usr/bin:/usr/sbin:$PATH"
 
-    # Clean up legacy cosh hooks from settings.json
-    cleanup_legacy_cosh_hooks || true
+    # Clean up openclaw plugin if it was manually installed
+    cleanup_openclaw 0
 
     # Clean up stats data
     if [ -d "$HOME/.tokenless" ]; then

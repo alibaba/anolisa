@@ -64,6 +64,14 @@ cargo build --release --manifest-path third_party/rtk/Cargo.toml
 # toon requires rust >= 1.88; use pre-built binary if cargo build fails
 cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
 
+# Compile OpenClaw TypeScript plugin to JS
+if command -v npx &>/dev/null; then
+    npx --yes esbuild openclaw/index.ts --bundle --platform=node --format=esm --outfile=openclaw/index.js 2>/dev/null || \
+    sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' openclaw/index.ts > openclaw/index.js
+else
+    sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' openclaw/index.ts > openclaw/index.js
+fi
+
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}%{_bindir}
@@ -102,7 +110,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
 mkdir -p %{buildroot}%{_datadir}/tokenless/scripts
 
-install -m 0644 openclaw/index.ts %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
+install -m 0644 openclaw/index.js %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
 install -m 0644 openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
 install -m 0644 openclaw/package.json %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
 install -m 0644 openclaw/README.md %{buildroot}%{_datadir}/tokenless/adapters/openclaw/
