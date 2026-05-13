@@ -3,6 +3,9 @@
 //
 // UDP DNS probe - captures domain names from DNS query packets
 // by hooking udp_sendmsg and filtering for destination port 53.
+//
+// Design: BPF kernel side only does minimal filtering and raw payload capture.
+// All DNS QNAME parsing and deduplication is done here in userspace.
 
 use crate::config;
 use anyhow::{Context, Result};
@@ -25,6 +28,13 @@ use bpf::*;
 // Re-export raw type for size calculation in probes.rs
 pub type RawUdpDnsEvent = bpf::udpdns_event;
 
+/// DNS header length in bytes
+const DNS_HEADER_LEN: usize = 12;
+/// Maximum domain name length (RFC 1035: 253 chars for FQDN)
+const MAX_DOMAIN_LEN: usize = 253;
+/// Maximum label length per RFC 1035
+const MAX_LABEL_LEN: usize = 63;
+
 /// User-space UDP DNS event
 #[derive(Debug, Clone)]
 pub struct UdpDnsEvent {
@@ -36,8 +46,78 @@ pub struct UdpDnsEvent {
     pub domain: String,
 }
 
+/// Parse DNS wire-format QNAME from raw payload into dotted domain string.
+///
+/// DNS wire format: sequence of (length_byte, label_bytes...) terminated by 0x00.
+/// Example: \x03api\x06openai\x03com\x00 → "api.openai.com"
+fn parse_dns_qname(payload: &[u8], payload_len: usize) -> Option<String> {
+    if payload_len < DNS_HEADER_LEN + 2 {
+        return None;
+    }
+
+    let data = &payload[..payload_len];
+    let mut off = DNS_HEADER_LEN; // QNAME starts after 12-byte DNS header
+    let mut domain = String::with_capacity(64);
+
+    loop {
+        if off >= data.len() {
+            break;
+        }
+
+        let label_len = data[off] as usize;
+
+        // Root label (terminator)
+        if label_len == 0 {
+            break;
+        }
+
+        // Pointer (compression) — not expected in queries but bail out safely
+        if label_len & 0xC0 != 0 {
+            break;
+        }
+
+        // RFC 1035: label max 63 bytes
+        if label_len > MAX_LABEL_LEN {
+            break;
+        }
+
+        off += 1;
+
+        // Check we have enough bytes for this label
+        if off + label_len > data.len() {
+            break;
+        }
+
+        // Add dot separator between labels
+        if !domain.is_empty() {
+            domain.push('.');
+        }
+
+        // Append label bytes
+        let label_bytes = &data[off..off + label_len];
+        // DNS labels should be ASCII; use lossy conversion for safety
+        for &b in label_bytes {
+            domain.push(b as char);
+        }
+
+        off += label_len;
+
+        // Safety: prevent infinite/oversized domains
+        if domain.len() > MAX_DOMAIN_LEN {
+            break;
+        }
+    }
+
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
+}
+
 impl UdpDnsEvent {
-    /// Parse event from raw ring buffer data
+    /// Parse event from raw ring buffer data.
+    /// Performs DNS QNAME extraction from the raw payload in userspace.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         let event_size = std::mem::size_of::<RawUdpDnsEvent>();
         if data.len() < event_size {
@@ -55,23 +135,10 @@ impl UdpDnsEvent {
             .collect::<Vec<u8>>();
         let comm = String::from_utf8_lossy(&comm).into_owned();
 
-        // Parse domain using domain_len field
-        let domain_len = raw.domain_len as usize;
-        let domain = if domain_len > 0 && domain_len < raw.domain.len() {
-            let domain_bytes: Vec<u8> = raw.domain[..domain_len]
-                .iter()
-                .map(|&c| c as u8)
-                .collect();
-            String::from_utf8_lossy(&domain_bytes).into_owned()
-        } else {
-            // Fallback: read until null terminator
-            let domain_bytes: Vec<u8> = raw.domain
-                .iter()
-                .take_while(|&&c| c != 0)
-                .map(|&c| c as u8)
-                .collect();
-            String::from_utf8_lossy(&domain_bytes).into_owned()
-        };
+        // Parse DNS QNAME from raw payload (userspace parsing — no BPF verifier limits)
+        let payload_len = raw.payload_len as usize;
+        let payload_len = payload_len.min(raw.payload.len());
+        let domain = parse_dns_qname(&raw.payload, payload_len)?;
 
         Some(UdpDnsEvent {
             pid: raw.pid,
