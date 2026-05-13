@@ -77,6 +77,18 @@ impl StatsRecorder {
             [],
         )?;
 
+// Schema migration: add columns introduced in v0.3.0 if missing
+for col in &["before_output", "after_output"] {
+            let check = conn.execute(
+                &format!("ALTER TABLE stats ADD COLUMN {} TEXT", col),
+                [],
+            );
+            // Column already exists → error is expected, ignore
+            if let Err(e) = check && !e.to_string().contains("duplicate column name") {
+                return Err(StatsError::Database(e));
+            }
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
