@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -173,10 +173,18 @@ if [ -x %{_datadir}/tokenless/scripts/install.sh ]; then
 fi
 
 %changelog
-* Sat May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.1-1
+* Wed May 13 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.2-1
+- Bump to v0.3.2 with multiple fixes
+
+* Wed May 13 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.1-2
+- fix(tokenless): add schema migration for before_output/after_output columns
+- fix(tokenless): use official CLI for openclaw plugin and fix RPM install/uninstall
+- fix(tokenless): redesign tool-ready for 4-category spec model and fix env-check bugs
+
+* Sun May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.1-1
 - fix(openclaw): add activation onCapabilities hook for high-version plugin compatibility
 
-* Sat May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.0-1
+* Sun May 10 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.0-1
 - Bump to v0.3.0 with tool-ready env pre-check and multiple fixes
 
 * Wed Apr 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-4
