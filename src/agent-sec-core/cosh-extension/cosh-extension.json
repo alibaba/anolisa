@@ -34,6 +34,17 @@
             "name": "sandbox-guard"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -47,6 +58,56 @@
             "timeout": 10000
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
@@ -56,6 +117,30 @@
             "type": "command",
             "command": "python3 ${extensionPath}/hooks/sandbox-failure-handler.py",
             "name": "sandbox-failure-handler"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "observability-hook",
+            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "description": "Records cosh hook observability metrics.",
+            "timeout": 5000
           }
         ]
       }
