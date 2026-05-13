@@ -602,7 +602,7 @@ def test_certify_no_skill_dir_no_all(ws: Workspace):
 
 
 def test_certify_all_multiple_skills(ws: Workspace):
-    """--all certifies all skills from config.json skillDirs (auto-invoke mode)."""
+    """--all certifies all skills from config.json managedSkillDirs (auto-invoke mode)."""
     env = ws.env()
     batch_root = ws.root / "batch_skills"
     batch_root.mkdir()
@@ -611,7 +611,10 @@ def test_certify_all_multiple_skills(ws: Workspace):
 
     config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config = {"skillDirs": [str(batch_root / "*")]}
+    config = {
+        "enableDefaultSkillDirs": False,
+        "managedSkillDirs": [str(batch_root / "*")],
+    }
     (config_dir / "config.json").write_text(json.dumps(config))
 
     # --all without --findings (auto-invoke mode)
@@ -626,11 +629,11 @@ def test_certify_all_multiple_skills(ws: Workspace):
 
 
 def test_certify_all_no_skill_dirs(ws: Workspace):
-    """--all with empty skillDirs → exit 1."""
+    """--all with default dirs disabled and empty managedSkillDirs → exit 1."""
     env = ws.env()
     config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config = {"skillDirs": []}
+    config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
     r = run_skill_ledger(["certify", "--all"], env_extra=env)
     assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
@@ -735,7 +738,10 @@ def test_status_human_readable_output(ws: Workspace):
 
     config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config = {"skillDirs": [str(batch_root / "*")]}
+    config = {
+        "enableDefaultSkillDirs": False,
+        "managedSkillDirs": [str(batch_root / "*")],
+    }
     (config_dir / "config.json").write_text(json.dumps(config))
 
     r = run_skill_ledger(["status"], env_extra=env)
@@ -775,7 +781,10 @@ def test_status_drifted_shows_details(ws: Workspace):
 
     config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config = {"skillDirs": [str(batch_root / "*")]}
+    config = {
+        "enableDefaultSkillDirs": False,
+        "managedSkillDirs": [str(batch_root / "*")],
+    }
     (config_dir / "config.json").write_text(json.dumps(config))
 
     findings = write_findings_file(

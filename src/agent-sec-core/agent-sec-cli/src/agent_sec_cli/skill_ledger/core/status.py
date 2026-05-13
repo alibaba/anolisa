@@ -10,7 +10,10 @@ import logging
 from typing import Any
 
 from agent_sec_cli.skill_ledger.config import (
+    DEFAULT_SKILL_DIRS,
     config_path,
+    deprecated_skill_dir_entries,
+    effective_skill_dir_entries,
     load_config,
     resolve_skill_dirs,
 )
@@ -65,10 +68,16 @@ def _config_info() -> dict[str, Any]:
     cfg = load_config()
     cp = config_path()
     scanners = cfg.get("scanners", [])
+    effective_skill_dirs = effective_skill_dir_entries(cfg)
+    deprecated_skill_dirs = deprecated_skill_dir_entries(cfg)
     return {
         "configPath": str(cp),
         "customized": cp.is_file(),
-        "skillDirPatterns": len(cfg.get("skillDirs", [])),
+        "defaultSkillDirsEnabled": bool(cfg.get("enableDefaultSkillDirs", True)),
+        "defaultSkillDirPatterns": len(DEFAULT_SKILL_DIRS),
+        "managedSkillDirPatterns": len(cfg.get("managedSkillDirs", [])),
+        "ignoredDeprecatedSkillDirPatterns": len(deprecated_skill_dirs),
+        "effectiveSkillDirPatterns": len(effective_skill_dirs),
         "registeredScanners": [
             s["name"] for s in scanners if isinstance(s, dict) and "name" in s
         ],

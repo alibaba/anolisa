@@ -242,7 +242,7 @@ def certify(
     # Validate skill directory before any work
     validate_skill_dir(skill_dir)
 
-    # Auto-remember: append to skillDirs if not already covered (best-effort)
+    # Auto-remember: append to managedSkillDirs if not already covered (best-effort)
     try:
         remember_skill_dir(Path(skill_dir))
     except Exception:

@@ -1,12 +1,14 @@
 """Unit tests for skill_ledger config — merge, resolve, remember, compact.
 
 These tests protect the configuration-layer invariants:
-1. Additive merge — user skillDirs extend defaults, never replace.
-2. SKILL.md gate — glob resolution only includes dirs with SKILL.md.
-3. Auto-remember — check/certify auto-append uncovered skill dirs.
-4. Compact — specific paths subsumed by a glob are pruned.
+1. Defaults stay enabled unless explicitly disabled.
+2. Dynamic discovery entries are stored in managedSkillDirs.
+3. SKILL.md gate — glob resolution only includes dirs with SKILL.md.
+4. Auto-remember — check/certify auto-append uncovered skill dirs.
+5. Compact — specific paths subsumed by a glob are pruned.
 """
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +16,13 @@ from unittest.mock import patch
 
 from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
+    DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
+    deprecated_skill_dir_entries,
+    effective_skill_dir_entries,
     is_covered,
+    load_config,
     remember_skill_dir,
     resolve_skill_dirs,
 )
@@ -26,10 +32,12 @@ class TestDefaultConfig(unittest.TestCase):
     """Default config must include the three well-known skill directories."""
 
     def test_default_skill_dirs_present(self):
-        dirs = _DEFAULT_CONFIG["skillDirs"]
+        dirs = DEFAULT_SKILL_DIRS
         self.assertIn("~/.openclaw/skills/*", dirs)
         self.assertIn("~/.copilot-shell/skills/*", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
+        self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
+        self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])
 
     def test_default_signing_backend(self):
         self.assertEqual(_DEFAULT_CONFIG["signingBackend"], "ed25519")
@@ -42,34 +50,74 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(scanners["skill-code-scanner"]["enabled"])
 
 
-class TestAdditiveMerge(unittest.TestCase):
-    """skillDirs merge must be additive (union), not replacement."""
+class TestConfigMerge(unittest.TestCase):
+    """Managed dirs are distinct from default discovery dirs."""
 
-    def test_user_dirs_appended_to_defaults(self):
-        defaults = {"skillDirs": ["~/.copilot-shell/skills/*"]}
-        user = {"skillDirs": ["/opt/custom/*"]}
+    def test_managed_dirs_replaced_from_user_config(self):
+        defaults = {"managedSkillDirs": ["/default/managed/*"]}
+        user = {"managedSkillDirs": ["/opt/custom/*"]}
         merged = _deep_merge_config(defaults, user)
-        self.assertEqual(
-            merged["skillDirs"],
-            ["~/.copilot-shell/skills/*", "/opt/custom/*"],
-        )
+        self.assertEqual(merged["managedSkillDirs"], ["/opt/custom/*"])
 
-    def test_duplicate_entries_deduped(self):
-        defaults = {"skillDirs": ["~/.copilot-shell/skills/*"]}
-        user = {"skillDirs": ["~/.copilot-shell/skills/*", "/opt/new/*"]}
+    def test_managed_duplicate_entries_deduped(self):
+        defaults = {"managedSkillDirs": []}
+        user = {"managedSkillDirs": ["/opt/new/*", "/opt/new/*"]}
         merged = _deep_merge_config(defaults, user)
-        self.assertEqual(
-            merged["skillDirs"],
-            ["~/.copilot-shell/skills/*", "/opt/new/*"],
-        )
+        self.assertEqual(merged["managedSkillDirs"], ["/opt/new/*"])
 
-    def test_empty_user_preserves_defaults(self):
-        defaults = {"skillDirs": ["a/*", "b/*"]}
-        user = {"skillDirs": []}
+    def test_empty_managed_dirs_are_preserved(self):
+        defaults = {"managedSkillDirs": ["a/*"]}
+        user = {"managedSkillDirs": []}
         merged = _deep_merge_config(defaults, user)
-        self.assertEqual(merged["skillDirs"], ["a/*", "b/*"])
+        self.assertEqual(merged["managedSkillDirs"], [])
 
-    def test_non_skilldirs_keys_still_replaced(self):
+    def test_effective_entries_include_defaults_by_default(self):
+        config = {"enableDefaultSkillDirs": True, "managedSkillDirs": ["/opt/custom/*"]}
+        entries = effective_skill_dir_entries(config)
+        self.assertEqual(entries, [*DEFAULT_SKILL_DIRS, "/opt/custom/*"])
+
+    def test_effective_entries_can_disable_defaults(self):
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": ["/opt/custom/*"],
+        }
+        entries = effective_skill_dir_entries(config)
+        self.assertEqual(entries, ["/opt/custom/*"])
+
+    def test_deprecated_skilldirs_are_diagnostic_only(self):
+        config = {
+            "enableDefaultSkillDirs": False,
+            "skillDirs": ["/legacy/*"],
+            "managedSkillDirs": ["/managed/*"],
+        }
+        self.assertEqual(deprecated_skill_dir_entries(config), ["/legacy/*"])
+        self.assertEqual(effective_skill_dir_entries(config), ["/managed/*"])
+
+    def test_load_config_warns_when_deprecated_skilldirs_present(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        try:
+            cfg_path = cfg_dir / "config.json"
+            cfg_path.write_text(
+                '{"skillDirs": ["/legacy/*"], "managedSkillDirs": ["/managed/*"]}',
+                encoding="utf-8",
+            )
+            with patch(
+                "agent_sec_cli.skill_ledger.config.get_config_dir",
+                return_value=cfg_dir,
+            ):
+                with self.assertLogs(
+                    "agent_sec_cli.skill_ledger.config", level="WARNING"
+                ) as logs:
+                    cfg = load_config()
+
+            self.assertIn("skillDirs", cfg)
+            self.assertIn("/legacy/*", cfg["skillDirs"])
+            self.assertEqual(cfg["managedSkillDirs"], ["/managed/*"])
+            self.assertTrue(any("Ignoring deprecated" in msg for msg in logs.output))
+        finally:
+            shutil.rmtree(cfg_dir)
+
+    def test_non_managed_keys_still_replaced(self):
         """Other list keys use standard replacement, not additive."""
         defaults = {"otherList": [1, 2]}
         user = {"otherList": [3]}
@@ -86,8 +134,6 @@ class TestResolveSkillDirs(unittest.TestCase):
         self.parent.mkdir()
 
     def tearDown(self):
-        import shutil
-
         shutil.rmtree(self.tmpdir)
 
     def _make_skill(self, name: str, has_manifest: bool = True) -> Path:
@@ -100,7 +146,10 @@ class TestResolveSkillDirs(unittest.TestCase):
     def test_glob_includes_dirs_with_skill_md(self):
         self._make_skill("alpha", has_manifest=True)
         self._make_skill("beta", has_manifest=True)
-        config = {"skillDirs": [str(self.parent) + "/*"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/*"],
+        }
         result = resolve_skill_dirs(config)
         names = [p.name for p in result]
         self.assertIn("alpha", names)
@@ -109,7 +158,10 @@ class TestResolveSkillDirs(unittest.TestCase):
     def test_glob_excludes_dirs_without_skill_md(self):
         self._make_skill("real-skill", has_manifest=True)
         self._make_skill("not-a-skill", has_manifest=False)
-        config = {"skillDirs": [str(self.parent) + "/*"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/*"],
+        }
         result = resolve_skill_dirs(config)
         names = [p.name for p in result]
         self.assertIn("real-skill", names)
@@ -117,7 +169,10 @@ class TestResolveSkillDirs(unittest.TestCase):
 
     def test_glob_excludes_hidden_dirs(self):
         self._make_skill(".hidden", has_manifest=True)
-        config = {"skillDirs": [str(self.parent) + "/*"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/*"],
+        }
         result = resolve_skill_dirs(config)
         names = [p.name for p in result]
         self.assertNotIn(".hidden", names)
@@ -125,26 +180,32 @@ class TestResolveSkillDirs(unittest.TestCase):
     def test_specific_path_requires_skill_md(self):
         """Explicit paths are also filtered by SKILL.md presence."""
         d = self._make_skill("explicit", has_manifest=False)
-        config = {"skillDirs": [str(d)]}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": [str(d)]}
         result = resolve_skill_dirs(config)
         self.assertEqual(result, [])
 
     def test_specific_path_with_skill_md_included(self):
         d = self._make_skill("explicit", has_manifest=True)
-        config = {"skillDirs": [str(d)]}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": [str(d)]}
         result = resolve_skill_dirs(config)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].name, "explicit")
 
     def test_nonexistent_dir_silently_skipped(self):
-        config = {"skillDirs": ["/no/such/path/*", "/no/such/single"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": ["/no/such/path/*", "/no/such/single"],
+        }
         result = resolve_skill_dirs(config)
         self.assertEqual(result, [])
 
     def test_dedup_by_resolved_path(self):
         self._make_skill("dup", has_manifest=True)
         d = self.parent / "dup"
-        config = {"skillDirs": [str(self.parent) + "/*", str(d)]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/*", str(d)],
+        }
         result = resolve_skill_dirs(config)
         resolved = [p.resolve() for p in result]
         self.assertEqual(len(resolved), len(set(resolved)))
@@ -191,8 +252,6 @@ class TestRememberSkillDir(unittest.TestCase):
         self.skills_root.mkdir()
 
     def tearDown(self):
-        import shutil
-
         shutil.rmtree(self.tmpdir)
 
     def _make_skill(self, name: str) -> Path:
@@ -217,31 +276,34 @@ class TestRememberSkillDir(unittest.TestCase):
 
     def test_single_skill_adds_specific_path(self):
         s = self._make_skill("only-one")
-        config = {"skillDirs": []}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
         entry = self._patched_remember(s, config)
         self.assertEqual(entry, str(s))
 
     def test_two_siblings_adds_parent_glob(self):
         self._make_skill("alpha")
         s = self._make_skill("beta")
-        config = {"skillDirs": []}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
         entry = self._patched_remember(s, config)
         self.assertEqual(entry, str(self.skills_root) + "/*")
 
     def test_already_covered_returns_none(self):
         s = self._make_skill("covered")
-        config = {"skillDirs": [str(self.skills_root) + "/*"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.skills_root) + "/*"],
+        }
         entry = self._patched_remember(s, config)
         self.assertIsNone(entry)
 
     def test_compact_prunes_after_glob_promotion(self):
         s1 = self._make_skill("first")
-        config = {"skillDirs": [str(s1)]}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": [str(s1)]}
         # Add second sibling → should promote to parent/* and remove specific
         s2 = self._make_skill("second")
         self._patched_remember(s2, config)
-        self.assertIn(str(self.skills_root) + "/*", config["skillDirs"])
-        self.assertNotIn(str(s1), config["skillDirs"])
+        self.assertIn(str(self.skills_root) + "/*", config["managedSkillDirs"])
+        self.assertNotIn(str(s1), config["managedSkillDirs"])
 
 
 class TestIsCovered(unittest.TestCase):
@@ -253,22 +315,23 @@ class TestIsCovered(unittest.TestCase):
         self.parent.mkdir()
 
     def tearDown(self):
-        import shutil
-
         shutil.rmtree(self.tmpdir)
 
     def test_covered_by_glob(self):
         d = self.parent / "my-skill"
         d.mkdir()
         (d / "SKILL.md").write_text("---\nname: test\n---\n")
-        config = {"skillDirs": [str(self.parent) + "/*"]}
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/*"],
+        }
         self.assertTrue(is_covered(d, config))
 
     def test_not_covered(self):
         d = self.parent / "orphan"
         d.mkdir()
         (d / "SKILL.md").write_text("---\nname: test\n---\n")
-        config = {"skillDirs": []}
+        config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
         self.assertFalse(is_covered(d, config))
 
 

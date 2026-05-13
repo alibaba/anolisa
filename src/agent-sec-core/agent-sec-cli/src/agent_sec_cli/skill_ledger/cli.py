@@ -133,9 +133,10 @@ def cmd_check(
       tampered  Manifest signature verification failed — possible forgery
 
     Use --all to check every registered skill and receive a JSON array of
-    enriched results. Skills are registered in
-    ~/.config/agent-sec/skill-ledger/config.json skillDirs (paths and globs expanded
-    automatically by the CLI).
+    enriched results. Skill discovery uses built-in default directories plus
+    ~/.config/agent-sec/skill-ledger/config.json managedSkillDirs (paths and
+    globs expanded automatically by the CLI). Set enableDefaultSkillDirs=false
+    in config.json for isolated runs that should ignore built-in defaults.
     """
     if all_skills and skill_dir is not None:
         typer.echo(
@@ -205,9 +206,11 @@ def cmd_certify(
       3. Aggregate scanStatus (pass / warn / deny)
       4. Re-sign and write to .skill-meta/latest.json
 
-    Use --all to certify every registered skill at once. Skills are
-    registered in ~/.config/agent-sec/skill-ledger/config.json skillDirs (paths and
-    globs expanded automatically by the CLI).
+    Use --all to certify every registered skill at once. Skill discovery uses
+    built-in default directories plus
+    ~/.config/agent-sec/skill-ledger/config.json managedSkillDirs (paths and
+    globs expanded automatically by the CLI). Set enableDefaultSkillDirs=false
+    in config.json for isolated runs that should ignore built-in defaults.
     """
     scanner_names = [s.strip() for s in scanners.split(",")] if scanners else None
 
@@ -265,7 +268,7 @@ def cmd_status(
     Output is a single JSON object with three sections:
 
       keys     Signing key status (initialized, fingerprint, encrypted)
-      config   Configuration summary (skillDirs, scanners)
+      config   Configuration summary (default/managed skill dirs, scanners)
       skills   Aggregate health (discovered count, per-status breakdown)
 
     Use --verbose to include the full per-skill results array.

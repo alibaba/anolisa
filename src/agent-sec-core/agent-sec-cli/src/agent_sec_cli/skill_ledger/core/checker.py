@@ -124,7 +124,7 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
 
-    # Auto-remember: append to skillDirs if not already covered (best-effort)
+    # Auto-remember: append to managedSkillDirs if not already covered (best-effort)
     try:
         remember_skill_dir(Path(skill_dir))
     except Exception:
