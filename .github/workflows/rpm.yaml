@@ -1,0 +1,487 @@
+name: RPM Build
+
+# Unified RPM build pipeline.
+#
+# Entry points:
+#   - workflow_call      : invoked by docker-nightly.yaml and release.yaml
+#   - workflow_dispatch  : manual trigger for any component at a given ref
+#
+# Internal flow:
+#   resolve -> package (matrix by component)
+#               └─>  build-rpm (matrix by component × arch, runs in alinux4)
+#
+# Architecture selection:
+#   - os-skills is always built as noarch on amd64 only.
+#   - Other components build amd64 + arm64 unless overridden via the
+#     `architectures` workflow_dispatch input.
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: "Component to build (copilot-shell, agent-sec-core, os-skills, tokenless, ws-ckpt)"
+        required: true
+        type: string
+      version:
+        description: "Version string (e.g. 2.1.0 or 2.1.0~nightly.5.abc1234)"
+        required: true
+        type: string
+      artifact-suffix:
+        description: "Suffix appended to artifact names (e.g. '.nightly'). Empty for official builds."
+        required: false
+        type: string
+        default: ""
+      retention-days:
+        description: "Artifact retention in days"
+        required: false
+        type: string
+        default: "7"
+      overlay-ref:
+        description: "Optional. When set, overlay src/<component>/ from this ref onto the build tree (e.g. sec-core release branch for nightly)."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SKILL_SIGN_PRIVATE_KEY:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      component:
+        description: "Component to build (or 'all' to build every component)"
+        type: choice
+        options:
+          - all
+          - copilot-shell
+          - agent-sec-core
+          - os-skills
+          - tokenless
+          - ws-ckpt
+        default: all
+      ref:
+        description: "Git ref to build from: tag (e.g. cosh/v2.3.0), branch (e.g. release/sec-core/v0.3), or commit hash."
+        type: string
+        required: true
+      architectures:
+        description: "Which architectures to build. 'auto' respects per-component defaults."
+        type: choice
+        options: [auto, both, amd64, arm64]
+        default: auto
+      retention-days:
+        description: "Artifact retention in days"
+        type: string
+        default: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  # ==========================================================================
+  # Job 1: Resolve build matrix
+  #
+  # Produces two matrix JSONs on outputs:
+  #   - package-matrix : one entry per component   {component, version, overlay-ref}
+  #   - build-matrix   : per component × arch      {component, version, arch}
+  # ==========================================================================
+  resolve:
+    name: Resolve build matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      package-matrix: ${{ steps.build.outputs.package-matrix }}
+      build-matrix: ${{ steps.build.outputs.build-matrix }}
+      artifact-suffix: ${{ steps.build.outputs.artifact-suffix }}
+      retention-days: ${{ steps.build.outputs.retention-days }}
+      checkout-ref: ${{ steps.build.outputs.checkout-ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # ------------------------------------------------------------------
+      # Version computation (workflow_dispatch only).
+      # Each component has its own conditional step so we reuse the shared
+      # calculate-version composite action instead of duplicating logic.
+      # For workflow_call, the version is supplied by the caller.
+      # ------------------------------------------------------------------
+      - name: "Version: copilot-shell"
+        id: v-cosh
+        if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'copilot-shell')
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "cosh/v*"
+          ref: ${{ inputs.ref }}
+
+      - name: "Version: os-skills"
+        id: v-skill
+        if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'os-skills')
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "skill/v*"
+          ref: ${{ inputs.ref }}
+
+      - name: "Version: agent-sec-core"
+        id: v-sec-core
+        if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'agent-sec-core')
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "sec-core/v*"
+          ref: ${{ inputs.ref }}
+
+      - name: "Version: tokenless"
+        id: v-tokenless
+        if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'tokenless')
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "tokenless/v*"
+          ref: ${{ inputs.ref }}
+
+      - name: "Version: ws-ckpt"
+        id: v-ws-ckpt
+        if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'ws-ckpt')
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "ckpt/v*"
+          ref: ${{ inputs.ref }}
+
+      - name: Build matrix JSON
+        id: build
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          # workflow_call inputs
+          CALL_COMPONENT: ${{ inputs.component }}
+          CALL_VERSION: ${{ inputs.version }}
+          CALL_SUFFIX: ${{ inputs.artifact-suffix }}
+          CALL_RETENTION: ${{ inputs.retention-days }}
+          CALL_OVERLAY_REF: ${{ inputs.overlay-ref }}
+          # workflow_dispatch-specific
+          DISPATCH_ARCH_CHOICE: ${{ inputs.architectures }}
+          DISPATCH_REF: ${{ inputs.ref }}
+          V_COSH: ${{ steps.v-cosh.outputs.version }}
+          V_SKILL: ${{ steps.v-skill.outputs.version }}
+          V_SEC_CORE: ${{ steps.v-sec-core.outputs.version }}
+          V_TOKENLESS: ${{ steps.v-tokenless.outputs.version }}
+          V_WS_CKPT: ${{ steps.v-ws-ckpt.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # ----- resolve suffix / retention -----
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            SUFFIX=""
+            RETENTION="${{ inputs.retention-days }}"
+            CHECKOUT_REF="$DISPATCH_REF"
+          else
+            SUFFIX="$CALL_SUFFIX"
+            RETENTION="$CALL_RETENTION"
+            CHECKOUT_REF=""
+          fi
+          echo "artifact-suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "retention-days=${RETENTION}" >> "$GITHUB_OUTPUT"
+          echo "checkout-ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+
+          # ----- decide arches for a given component -----
+          arches_for() {
+            local comp="$1"
+            if [ "$EVENT" = "workflow_dispatch" ]; then
+              case "$DISPATCH_ARCH_CHOICE" in
+                amd64) echo "amd64" ;;
+                arm64)
+                  # os-skills is noarch: fall back to amd64 even if arm64 requested
+                  if [ "$comp" = "os-skills" ]; then echo "amd64"; else echo "arm64"; fi
+                  ;;
+                both)
+                  if [ "$comp" = "os-skills" ]; then echo "amd64"; else echo "amd64 arm64"; fi
+                  ;;
+                *) # auto
+                  if [ "$comp" = "os-skills" ]; then echo "amd64"; else echo "amd64 arm64"; fi
+                  ;;
+              esac
+            else
+              # workflow_call: per-component defaults
+              if [ "$comp" = "os-skills" ]; then echo "amd64"; else echo "amd64 arm64"; fi
+            fi
+          }
+
+          # ----- gather (component, version, overlay-ref) tuples -----
+          : > /tmp/components.tsv
+          add_component() {
+            local comp="$1" ver="$2" overlay="$3"
+            if [ -z "$ver" ]; then
+              echo "::error::Empty version for component '$comp'"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\n' "$comp" "$ver" "$overlay" >> /tmp/components.tsv
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$CALL_COMPONENT" in
+              all)
+                add_component copilot-shell   "$V_COSH"      ""
+                add_component os-skills       "$V_SKILL"     ""
+                add_component agent-sec-core  "$V_SEC_CORE"  ""
+                add_component tokenless       "$V_TOKENLESS" ""
+                add_component ws-ckpt         "$V_WS_CKPT"   ""
+                ;;
+              copilot-shell)   add_component copilot-shell   "$V_COSH"      "" ;;
+              os-skills)       add_component os-skills       "$V_SKILL"     "" ;;
+              agent-sec-core)  add_component agent-sec-core  "$V_SEC_CORE"  "" ;;
+              tokenless)       add_component tokenless       "$V_TOKENLESS" "" ;;
+              ws-ckpt)         add_component ws-ckpt         "$V_WS_CKPT"   "" ;;
+              *) echo "::error::Unknown component: $CALL_COMPONENT"; exit 1 ;;
+            esac
+          else
+            add_component "$CALL_COMPONENT" "$CALL_VERSION" "$CALL_OVERLAY_REF"
+          fi
+
+          # ----- assemble matrix JSONs -----
+          PACKAGE_MATRIX=$(
+            awk -F'\t' 'BEGIN{printf "["} NR>1{printf ","}
+              {printf "{\"component\":\"%s\",\"version\":\"%s\",\"overlay-ref\":\"%s\"}", $1, $2, $3}
+              END{printf "]"}' /tmp/components.tsv
+          )
+
+          : > /tmp/build.tsv
+          while IFS=$'\t' read -r comp ver overlay; do
+            for arch in $(arches_for "$comp"); do
+              printf '%s\t%s\t%s\n' "$comp" "$ver" "$arch" >> /tmp/build.tsv
+            done
+          done < /tmp/components.tsv
+
+          BUILD_MATRIX=$(
+            awk -F'\t' 'BEGIN{printf "["} NR>1{printf ","}
+              {printf "{\"component\":\"%s\",\"version\":\"%s\",\"arch\":\"%s\"}", $1, $2, $3}
+              END{printf "]"}' /tmp/build.tsv
+          )
+
+          echo "package-matrix=${PACKAGE_MATRIX}" >> "$GITHUB_OUTPUT"
+          echo "build-matrix=${BUILD_MATRIX}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Resolved Matrix"
+            echo ""
+            echo "| Component | Version | Arches | Overlay Ref |"
+            echo "|-----------|---------|--------|-------------|"
+            while IFS=$'\t' read -r comp ver overlay; do
+              arches=$(arches_for "$comp")
+              overlay_cell="${overlay:-_(none)_}"
+              echo "| \`$comp\` | \`$ver\` | ${arches// /, } | \`$overlay_cell\` |"
+            done < /tmp/components.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # Job 2: Package source + vendor archives
+  # One matrix entry per component. Uploads {component}-{version}{suffix}[-vendor].
+  # ==========================================================================
+  package:
+    name: "Package: ${{ matrix.component }}"
+    needs: resolve
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.package-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.checkout-ref || github.ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Overlay component source
+        if: matrix.overlay-ref != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ matrix.overlay-ref }}"
+          case "${{ matrix.component }}" in
+            copilot-shell)   DIR="src/copilot-shell" ;;
+            agent-sec-core)  DIR="src/agent-sec-core" ;;
+            agentsight)      DIR="src/agentsight" ;;
+            os-skills)       DIR="src/os-skills" ;;
+            tokenless)       DIR="src/tokenless" ;;
+            ws-ckpt)         DIR="src/ws-ckpt" ;;
+            *) echo "::error::Unknown component: ${{ matrix.component }}"; exit 1 ;;
+          esac
+          echo "Overlay ${DIR} from ref: ${REF}"
+          git fetch origin "$REF"
+          git checkout FETCH_HEAD -- "$DIR"
+
+      - name: Package source archive
+        uses: ./.github/actions/package-source
+        with:
+          component: ${{ matrix.component }}
+          version: ${{ matrix.version }}
+          artifact-suffix: ${{ needs.resolve.outputs.artifact-suffix }}
+          retention-days: ${{ needs.resolve.outputs.retention-days }}
+          skill-sign-private-key: ${{ secrets.SKILL_SIGN_PRIVATE_KEY }}
+          skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: ${{ matrix.component }}
+          version: ${{ matrix.version }}
+          artifact-suffix: ${{ needs.resolve.outputs.artifact-suffix }}
+          retention-days: ${{ needs.resolve.outputs.retention-days }}
+
+  # ==========================================================================
+  # Job 3: Build RPMs inside alinux4 container
+  # ==========================================================================
+  build-rpm:
+    name: "RPM: ${{ matrix.component }} (${{ matrix.arch }})"
+    needs: [resolve, package]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.build-matrix) }}
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Fix repo mirror
+        run: sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y rpm-build rpmdevtools dnf-plugins-core tar gzip \
+            make gcc gcc-c++ findutils sed coreutils
+
+          # Component-specific dependencies
+          case "${{ matrix.component }}" in
+            copilot-shell)
+              dnf install -y nodejs npm
+              ;;
+            agent-sec-core)
+              dnf install -y clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip
+              ;;
+            agentsight)
+              dnf install -y rust cargo clang-devel elfutils-libelf-devel zlib-devel
+              ;;
+            tokenless)
+              dnf install -y jq
+              ;;
+            ws-ckpt)
+              dnf install -y rust cargo btrfs-progs rsync systemd-rpm-macros
+              ;;
+            os-skills)
+              # noarch, no extra build deps
+              ;;
+          esac
+
+      # agent-sec-core and tokenless both need a newer Rust than alinux4's
+      # bundled one (agent-sec-core requires 1.93+, tokenless's toon submodule
+      # requires >= 1.88). Unified on 1.93.0 for simplicity.
+      - name: "Setup Rust toolchain"
+        if: matrix.component == 'agent-sec-core' || matrix.component == 'tokenless'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+
+      # agent-sec-core additionally needs Python 3.11 + uv and Node.js 20
+      - name: "Setup Python + uv (agent-sec-core)"
+        if: matrix.component == 'agent-sec-core'
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+          enable-cache: false
+
+      - name: "Setup Node.js (agent-sec-core)"
+        if: matrix.component == 'agent-sec-core'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup rpmbuild tree
+        run: rpmdev-setuptree
+
+      - name: Download source archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.component }}-${{ matrix.version }}${{ needs.resolve.outputs.artifact-suffix }}
+          path: /tmp/sources/
+
+      - name: Download vendor archive
+        id: vendor-dl
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.component }}-${{ matrix.version }}${{ needs.resolve.outputs.artifact-suffix }}-vendor
+          path: /tmp/vendor/
+
+      - name: Prepare source and spec
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ matrix.version }}"
+          COMPONENT="${{ matrix.component }}"
+
+          # Find the source tarball
+          SOURCE_TAR=$(find /tmp/sources/ -name "*.tar.gz" | head -1)
+          if [ -z "$SOURCE_TAR" ]; then
+            echo "ERROR: No source tarball found"
+            exit 1
+          fi
+
+          # Rename tarball to match RPM spec Source0: %{name}-%{version}.tar.gz
+          # (strip artifact suffix like .nightly from the filename)
+          EXPECTED_TAR="${COMPONENT}-${VERSION}.tar.gz"
+          cp "$SOURCE_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_TAR}"
+
+          # Copy vendor tarball if present, renaming to match spec Source1:
+          # %{name}-%{version}-vendor.tar.gz (strip any artifact suffix).
+          if [ -d "/tmp/vendor/" ]; then
+            VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1 || true)
+            if [ -n "$VENDOR_TAR" ]; then
+              EXPECTED_VENDOR_TAR="${COMPONENT}-${VERSION}-vendor.tar.gz"
+              cp "$VENDOR_TAR" ~/rpmbuild/SOURCES/"${EXPECTED_VENDOR_TAR}"
+            fi
+          fi
+
+          # Extract source to get .spec.in
+          EXTRACT_DIR=$(mktemp -d)
+          tar -xzf "$SOURCE_TAR" -C "$EXTRACT_DIR"
+
+          # Find and process spec template
+          SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
+          if [ -n "$SPEC_IN" ]; then
+            SPEC_OUT="${SPEC_IN%.in}"
+            sed "s/@VERSION@/${VERSION}/g" "$SPEC_IN" > "$SPEC_OUT"
+            SPEC_FILE="$SPEC_OUT"
+          else
+            # Fallback: look for plain .spec
+            SPEC_FILE=$(find "$EXTRACT_DIR" -name "*.spec" | head -1)
+          fi
+
+          if [ -z "$SPEC_FILE" ]; then
+            echo "ERROR: No spec file found"
+            exit 1
+          fi
+
+          cp "$SPEC_FILE" ~/rpmbuild/SPECS/
+          echo "SPEC_BASENAME=$(basename "$SPEC_FILE")" >> $GITHUB_ENV
+
+      - name: Build RPM
+        run: |
+          rpmbuild -bb --nodeps \
+            --define "_topdir $HOME/rpmbuild" \
+            ~/rpmbuild/SPECS/${SPEC_BASENAME}
+
+      - name: Collect RPM artifacts
+        run: |
+          mkdir -p /tmp/rpm-output/
+
+          # Collect built RPMs (both arch-specific and noarch)
+          find ~/rpmbuild/RPMS/ -name "*.rpm" -exec cp {} /tmp/rpm-output/ \;
+
+          echo "Built RPMs:"
+          ls -la /tmp/rpm-output/
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.component }}-${{ matrix.arch }}${{ needs.resolve.outputs.artifact-suffix }}
+          path: /tmp/rpm-output/*.rpm
+          retention-days: ${{ needs.resolve.outputs.retention-days }}
+          if-no-files-found: error

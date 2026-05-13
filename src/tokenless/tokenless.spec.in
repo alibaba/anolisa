@@ -11,10 +11,11 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
-# Note: toon submodule requires rust >= 1.88 (darling, image, time crates)
-# cargo build for toon uses || true fallback in spec if Rust < 1.88
-BuildRequires:  cargo
-BuildRequires:  rust >= 1.86
+# NOTE: The following build tools are required but NOT declared as BuildRequires
+# because they are provided by the CI environment (GitHub Actions):
+#BuildRequires:  cargo
+#BuildRequires:  rust >= 1.86
+# If building outside CI, ensure these are installed manually.
 
 # Runtime dependencies
 Requires:       python3
@@ -43,7 +44,7 @@ Note: OpenClaw plugin is available under /usr/share/tokenless/adapters/.
 Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
 
 %prep
-%setup -q -n tokenless
+%setup -q
 
 # Clean any stale build artifacts from the tarball
 cargo clean --release
@@ -61,8 +62,8 @@ cargo build --release
 # Build rtk (command rewriting)
 cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
-# toon requires rust >= 1.88; use pre-built binary if cargo build fails
-cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
+# Build toon
+cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
 
 %install
 rm -rf %{buildroot}
