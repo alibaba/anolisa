@@ -233,15 +233,12 @@ impl DaemonState {
             .collect()
     }
 
-    /// Ensure BtrfsLoop backend is bootstrapped (idempotent, runs at most once).
+    /// Idempotently call the backend's bootstrap hook (runs at most once).
     pub async fn ensure_bootstrapped(&self) -> anyhow::Result<()> {
-        if self.backend.backend_type() != ws_ckpt_common::backend::BackendType::BtrfsLoop {
-            return Ok(());
-        }
         self.bootstrapped
             .get_or_try_init(|| async {
                 let config = self.config.read().unwrap().clone();
-                crate::bootstrap::bootstrap(&config).await.map(|_| ())
+                self.backend.bootstrap(&config).await
             })
             .await?;
         Ok(())
@@ -787,15 +784,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_bootstrapped_non_btrfs_loop_is_noop() {
-        // BtrfsBase backend should skip bootstrap entirely
+    async fn ensure_bootstrapped_btrfs_base_runs_default_bootstrap() {
+        // BtrfsBase bootstrap just creates data_root & snapshots dirs; must succeed on a writable mount point.
+        let tmp = tempfile::tempdir().unwrap();
         let backend: Arc<dyn StorageBackend> =
             Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
-                PathBuf::from("/tmp/test-btrfs-mount"),
+                tmp.path().to_path_buf(),
                 crate::backends::btrfs_base::BtrfsBaseScenario::InPlace,
             ));
         let state = DaemonState::new(test_config(), backend, test_state_dir());
-        // Should return Ok immediately without attempting any bootstrap
         state.ensure_bootstrapped().await.unwrap();
     }
 

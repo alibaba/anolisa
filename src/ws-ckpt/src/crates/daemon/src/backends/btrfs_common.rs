@@ -8,6 +8,46 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 use ws_ckpt_common::{ChangeType, DiffEntry};
 
+/// Ensure the current kernel can mount btrfs.
+///
+/// Checks `/proc/filesystems`; if absent, tries `modprobe btrfs` once and rechecks.
+/// Fails with an actionable message pointing at kernel-modules-extra / CONFIG_BTRFS_FS.
+pub async fn ensure_btrfs_support() -> Result<()> {
+    if proc_filesystems_has_btrfs().await? {
+        return Ok(());
+    }
+
+    // Best-effort modprobe; exit code is ignored, the recheck is authoritative.
+    let _ = Command::new("modprobe").arg("btrfs").status().await;
+
+    if proc_filesystems_has_btrfs().await? {
+        info!("Loaded btrfs kernel module");
+        return Ok(());
+    }
+
+    bail!(
+        "Kernel does not support btrfs (no entry in /proc/filesystems and \
+         `modprobe btrfs` did not register the module). Install the matching \
+         kernel-modules-extra package or rebuild the kernel with CONFIG_BTRFS_FS, \
+         then run `systemctl restart ws-ckpt`."
+    );
+}
+
+/// True if `btrfs` is listed in `/proc/filesystems`.
+async fn proc_filesystems_has_btrfs() -> Result<bool> {
+    let file = File::open("/proc/filesystems")
+        .await
+        .context("Failed to open /proc/filesystems")?;
+    let mut reader = BufReader::new(file).lines();
+    while let Some(line) = reader.next_line().await? {
+        // Line format: "<fstype>" or "nodev <fstype>"; fs name is always the last token.
+        if line.split_whitespace().last() == Some("btrfs") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Resolve a path that may be a symlink to its real (canonical) path.
 /// If the path is a symlink, it is resolved via `canonicalize`.
 /// If the path does not exist or is not a symlink, it is returned as-is.

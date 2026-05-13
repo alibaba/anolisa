@@ -84,11 +84,8 @@ async fn resolve_from_persisted(
             )
         })?;
 
-    // BtrfsLoop backend needs bootstrap to ensure it is mounted
+    // BtrfsLoop restore invariant: img must pre-exist. Missing img = data loss; fail loud.
     if backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop {
-        // Guard: in the restore path the img file MUST already exist.
-        // A missing img means data loss (bootstrap would silently create a
-        // fresh empty image); refuse to proceed and let the operator decide.
         let img_path = std::path::Path::new(&config.img_path);
         if !img_path.exists() {
             anyhow::bail!(
@@ -101,18 +98,11 @@ async fn resolve_from_persisted(
                 state_dir.join(ws_ckpt_common::STATE_FILE)
             );
         }
-        let _bootstrap_result = crate::bootstrap::bootstrap(config)
-            .await
-            .context("Failed to bootstrap BtrfsLoop during state recovery")?;
-    } else {
-        // Non-BtrfsLoop backend ensures directories exist
-        let dirs = [backend.data_root(), backend.snapshots_root()];
-        for dir in dirs {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .with_context(|| format!("Failed to ensure directory exists: {:?}", dir))?;
-        }
     }
+    backend
+        .bootstrap(config)
+        .await
+        .context("Failed to bootstrap backend during state recovery")?;
 
     Ok(Arc::new(
         DaemonState::rebuild_from_persisted(
@@ -144,20 +134,11 @@ async fn resolve_fresh(
         detect_result.method
     );
 
-    // BtrfsLoop bootstrap
-    if detect_result.backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop {
-        let _bootstrap_result = crate::bootstrap::bootstrap(config)
-            .await
-            .context("Failed to bootstrap BtrfsLoop on fresh install")?;
-    } else {
-        let backend = &detect_result.backend;
-        let dirs = [backend.data_root(), backend.snapshots_root()];
-        for dir in dirs {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .with_context(|| format!("Failed to ensure directory exists: {:?}", dir))?;
-        }
-    }
+    detect_result
+        .backend
+        .bootstrap(config)
+        .await
+        .context("Failed to bootstrap backend on fresh install")?;
 
     // Attempt to migrate old position index (synchronous call)
     let backend_ref = &detect_result.backend;

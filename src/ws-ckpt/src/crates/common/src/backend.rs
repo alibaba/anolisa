@@ -108,4 +108,9 @@ pub trait StorageBackend: Send + Sync {
 
     /// Get filesystem usage (total, used) in bytes
     async fn get_usage(&self) -> anyhow::Result<(u64, u64)>;
+
+    /// Prepare the backend for workspace operations.
+    async fn bootstrap(&self, _config: &crate::DaemonConfig) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

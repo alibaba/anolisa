@@ -1,6 +1,5 @@
 pub mod backend_detect;
 pub mod backends;
-pub mod bootstrap;
 pub mod btrfs_ops;
 pub mod dispatcher;
 pub mod fs_watcher;
@@ -12,6 +11,7 @@ pub mod seccomp;
 pub mod snapshot_mgr;
 mod startup;
 pub mod state;
+mod util;
 pub mod workspace_mgr;
 
 use std::path::PathBuf;
@@ -67,7 +67,7 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     }
 
     // 7. Re-establish symlinks lost during daemon restart
-    bootstrap::ensure_symlinks(&state).await;
+    util::ensure_symlinks(&state).await;
 
     // 8. Apply seccomp-bpf syscall filter (after bootstrap, before listener)
     if let Err(e) = seccomp::apply_seccomp_filter() {

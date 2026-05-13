@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::*;
-use ws_ckpt_common::{DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
+use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
 
 use super::btrfs_common;
 use btrfs_common::resolve_symlink_path;
@@ -492,5 +492,63 @@ impl StorageBackend for BtrfsBaseBackend {
 
     async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
         btrfs_common::get_filesystem_usage(&self.data_root).await
+    }
+
+    /// Ensure data_root and snapshots_dir exist on the already-mounted btrfs partition.
+    async fn bootstrap(&self, _config: &DaemonConfig) -> anyhow::Result<()> {
+        for dir in [&self.data_root, &self.snapshots_dir] {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .with_context(|| format!("Failed to ensure directory exists: {:?}", dir))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BtrfsBaseBackend, BtrfsBaseScenario};
+    use ws_ckpt_common::backend::StorageBackend;
+    use ws_ckpt_common::{CleanupRetention, DaemonConfig};
+
+    fn dummy_config() -> DaemonConfig {
+        DaemonConfig {
+            mount_path: std::path::PathBuf::from("/tmp/unused"),
+            socket_path: std::path::PathBuf::from("/tmp/unused.sock"),
+            log_level: "info".to_string(),
+            auto_cleanup: false,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+            auto_cleanup_interval_secs: 86_400,
+            health_check_interval_secs: 300,
+            backend_type: "btrfs-base".to_string(),
+            img_path: "/tmp/unused.img".to_string(),
+            img_size: 1,
+            img_max_percent: 1.0,
+            min_free_bytes: 0,
+            min_free_percent: 0.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_creates_data_root_and_snapshots_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+        let data_root = tmp.path().join("ws-ckpt-data");
+        let snapshots_dir = data_root.join(ws_ckpt_common::SNAPSHOTS_DIR);
+
+        backend.bootstrap(&dummy_config()).await.unwrap();
+
+        assert!(data_root.is_dir(), "data_root must be created");
+        assert!(snapshots_dir.is_dir(), "snapshots_dir must be created");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+
+        backend.bootstrap(&dummy_config()).await.unwrap();
+        // A second call on existing directories must succeed.
+        backend.bootstrap(&dummy_config()).await.unwrap();
     }
 }
