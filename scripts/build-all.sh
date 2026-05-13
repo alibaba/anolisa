@@ -13,7 +13,7 @@
 # Components (build order):
 #   cosh     copilot-shell      (Node.js / TypeScript)
 #   skills   os-skills          (Markdown skill definitions, no compilation)
-#   sec-core agent-sec-core     (Rust sandbox, Linux only)
+#   sec-core agent-sec-core     (Security CLI + sandbox + hooks)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
 #   tokenless tokenless         (Rust compression library, cross-platform)
 # ──────────────────────────────────────────────────────────────────
@@ -642,6 +642,8 @@ do_install_deps() {
     fi
 
     if want_component sec-core; then
+        install_node          # openclaw-plugin needs Node.js
+        install_build_tools   # gcc + make
         install_uv
     fi
 
@@ -702,26 +704,25 @@ build_skills() {
 }
 
 build_sec_core() {
-    step "Building agent-sec-core (linux-sandbox)"
+    step "Building agent-sec-core"
     local dir="$PROJECT_ROOT/src/agent-sec-core"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "cargo build --release (linux-sandbox) ..."
-    if [[ -f Makefile ]] && grep -q 'build-sandbox' Makefile; then
-        make build-sandbox
-    else
-        cd linux-sandbox && cargo build --release && cd ..
-    fi
+    # build-all = build-sandbox + build-cli + build-openclaw-plugin
+    info "make build-all ..."
+    make build-all
 
-    local bin="linux-sandbox/target/release/linux-sandbox"
-    if [[ -f "$bin" ]]; then
-        ARTIFACT_NAMES+=("agent-sec-core")
-        ARTIFACT_PATHS+=("src/agent-sec-core/$bin")
-        ok "agent-sec-core built successfully"
-    else
-        warn "Expected artifact $bin not found"
-    fi
+    # Track artifacts
+    local sandbox_bin="linux-sandbox/target/release/linux-sandbox"
+    local wheel
+    wheel=$(ls agent-sec-cli/target/wheels/agent_sec_cli-*.whl 2>/dev/null | head -1)
+    local plugin_entry="openclaw-plugin/dist/index.js"
+
+    [[ -f "$sandbox_bin" ]] && ARTIFACT_NAMES+=("linux-sandbox") && ARTIFACT_PATHS+=("src/agent-sec-core/$sandbox_bin")
+    [[ -n "$wheel" ]] && ARTIFACT_NAMES+=("agent-sec-cli") && ARTIFACT_PATHS+=("src/agent-sec-core/$wheel")
+    [[ -f "$plugin_entry" ]] && ARTIFACT_NAMES+=("openclaw-plugin") && ARTIFACT_PATHS+=("src/agent-sec-core/openclaw-plugin/dist/")
+    ok "agent-sec-core built successfully"
 }
 
 build_sight() {
@@ -814,9 +815,46 @@ install_sec_core() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "sudo make install-sandbox ..."
-    sudo make install-sandbox
-    ok "agent-sec-core (linux-sandbox) installed to /usr/local/bin/"
+    local venv_dir="/opt/agent-sec/venv"
+
+    # 1. Create isolated venv (uv auto-downloads Python 3.11.6 if needed)
+    info "Creating Python venv at $venv_dir ..."
+    sudo mkdir -p "$venv_dir"
+    sudo chown "$(id -u):$(id -g)" "$venv_dir"
+    uv venv --python "3.11.6" "$venv_dir"
+
+    # 2. Install deps from uv.lock into venv (uv sync understands [tool.uv.sources])
+    #    UV_PROJECT_ENVIRONMENT tells uv to use our venv instead of .venv
+    #    --no-install-project: only install deps, not the project itself
+    info "Installing agent-sec-cli dependencies (from uv.lock) ..."
+    (cd agent-sec-cli && UV_PROJECT_ENVIRONMENT="$venv_dir" uv sync --frozen --no-dev --no-install-project)
+
+    # 3. Install pre-built wheel into venv (no-deps since deps are already installed)
+    uv pip install --python "$venv_dir/bin/python" --no-deps \
+        agent-sec-cli/target/wheels/agent_sec_cli-*.whl
+
+    # 4. Symlink CLI command to /usr/local/bin/
+    sudo ln -sf "$venv_dir/bin/agent-sec-cli" /usr/local/bin/agent-sec-cli
+    ok "agent-sec-cli installed ($venv_dir + symlink to /usr/local/bin/)"
+
+    # 5. Install non-Python components (sandbox, hooks, plugin, skills)
+    info "Installing sandbox + hooks + plugin + skills ..."
+    sudo make install-cosh-hook install-openclaw-plugin install-skills install-tool
+    ok "cosh-hook + openclaw-plugin + skills installed"
+
+    # 6. Runtime dependencies
+    if ! cmd_exists bwrap; then
+        info "Installing runtime dependency: bubblewrap ..."
+        sudo $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
+    fi
+    if ! cmd_exists gpg && ! cmd_exists gpg2; then
+        info "Installing runtime dependency: gnupg2 ..."
+        sudo $PKG_INSTALL gnupg2 || warn "gnupg2 not installed (skill signature verification)"
+    fi
+    if ! cmd_exists jq; then
+        info "Installing runtime dependency: jq ..."
+        sudo $PKG_INSTALL jq || warn "jq not installed (openclaw-plugin deploy)"
+    fi
 }
 
 install_sight() {
@@ -906,7 +944,7 @@ $(echo -e "${BOLD}Examples:${NC}")
 $(echo -e "${BOLD}Components:${NC}")
   cosh     copilot-shell      Node.js / TypeScript AI terminal assistant       [default]
   skills   os-skills          Markdown skill definitions (deploy only)          [default]
-  sec-core agent-sec-core     Rust secure sandbox (Linux only)                  [default]
+  sec-core agent-sec-core     Security CLI + sandbox + hooks                    [default]
   sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
   tokenless tokenless         Rust token compression library (cross-platform)   [default]
 
