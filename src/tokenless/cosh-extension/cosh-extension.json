@@ -6,6 +6,7 @@
     "PreToolUse": [
       {
         "matcher": "",
+        "sequential": true,
         "hooks": [
           {
             "type": "command",
@@ -17,7 +18,7 @@
         ]
       },
       {
-        "matcher": "run_shell_command",
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
         "hooks": [
           {
             "type": "command",

@@ -1,4 +1,4 @@
-%define anolis_release 1
+%define anolis_release 2
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -14,7 +14,7 @@ Source0:        %{name}-%{version}.tar.gz
 # Note: toon submodule requires rust >= 1.88 (darling, image, time crates)
 # cargo build for toon uses || true fallback in spec if Rust < 1.88
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.86
+BuildRequires:  rust >= 1.88
 
 # Runtime dependencies
 Requires:       python3
