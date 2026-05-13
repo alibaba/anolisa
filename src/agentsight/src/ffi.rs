@@ -614,6 +614,8 @@ fn ffi_background_thread(
     // Event loop controlled by the external running flag.
     while running.load(Ordering::SeqCst) {
         if sight.try_process().is_none() {
+            // No event available — flush any timed-out pending GenAI events
+            sight.flush_expired_pending_genai();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }

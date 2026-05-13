@@ -123,9 +123,9 @@ impl AgentSight {
     pub fn new(mut config: AgentsightConfig) -> Result<Self> {
         config.apply_verbose();
 
-        // Load rules from config file if not provided via FFI/CLI
-        if config.cmdline_rules.is_empty() {
-            let path = config.resolve_config_path();
+        // Load rules from config file only when config_path is set (CLI --config)
+        // FFI users provide rules via API, no config file needed.
+        if let Some(path) = config.config_path.clone() {
             let load_result = if path.exists() {
                 config.load_from_file(&path)
             } else {
@@ -845,7 +845,7 @@ impl AgentSight {
 
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
-    fn flush_expired_pending_genai(&mut self) {
+    pub fn flush_expired_pending_genai(&mut self) {
         if self.pending_genai.is_empty() {
             return;
         }

@@ -86,6 +86,12 @@ impl AgentScanner {
             return false;
         }
         let cmdline = read_cmdline(&format!("/proc/{}/cmdline", pid));
+        // Fail-closed: if cmdline is empty (process already exited or unreadable),
+        // do NOT attach — deny rules cannot be evaluated reliably.
+        if cmdline.is_empty() {
+            log::debug!("on_dns_event: pid={} cmdline empty (process exited?), skipping attach", pid);
+            return false;
+        }
         !self.is_denied(&cmdline)
     }
 

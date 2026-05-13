@@ -6,19 +6,30 @@
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `TEST_HOST` | 测试机器 SSH 地址 | `root@<your-test-ip>` |
+| `TEST_HOST` | 测试机器地址 | `local` 或 `root@<your-test-ip>` |
+
+`TEST_HOST` 支持两种模式：
+
+- **`local`**: 在本机直接执行测试，无需 SSH
+- **SSH 地址**（如 `root@10.0.0.1`）：通过 SSH 连接远程机器执行测试
 
 ## 测试环境
 
-- **测试机器**: `$TEST_HOST`
+- **测试机器**: `$TEST_HOST`（`local` 为本机，否则为远程 SSH 地址）
 - **OS**: Alibaba Cloud Linux 3 (kernel 5.10.134, x86_64)
-- **部署方式**: 本地构建后 scp 上传
+- **部署方式**: `local` 时直接本地构建运行；远程时本地构建后 scp 上传
 - **二进制路径**: `/root/agentsight`
 
 ## 部署流程
 
-1. 本地构建: `cargo build --release`
-2. 上传到测试机: `scp target/release/agentsight $TEST_HOST:/root/agentsight`
+- **本地模式** (`TEST_HOST=local`):
+  1. 直接构建: `cargo build --release`
+  2. 二进制即 `target/release/agentsight`
+
+- **远程模式** (`TEST_HOST=<ssh-address>`):
+  1. 本地构建: `cargo build --release`
+  2. 上传到测试机: `scp target/release/agentsight $TEST_HOST:/root/agentsight`
+  3. 后续命令通过 `ssh $TEST_HOST` 执行
 
 ## 执行前准备
 
