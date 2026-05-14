@@ -44,6 +44,7 @@ jobs:
           session    sufficient   pam_permit.so
           EOF
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
       - name: Build and install
         run: ./scripts/build-all.sh --component sec-core
       - name: Verify CLI

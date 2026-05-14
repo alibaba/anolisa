@@ -17,7 +17,9 @@
 
 set -euo pipefail
 
-PLUGIN_DIR="${1:-/opt/agent-sec/openclaw-plugin}"
+# Default PLUGIN_DIR: resolve relative to this script's location (scripts/ -> parent)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="${1:-$(dirname "$SCRIPT_DIR")}"
 
 # Convert to absolute path if relative
 PLUGIN_DIR="$(cd "$PLUGIN_DIR" && pwd)"

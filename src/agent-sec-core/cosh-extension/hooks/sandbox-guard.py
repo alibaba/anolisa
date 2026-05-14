@@ -58,7 +58,7 @@ def _log_sandbox_event(action: str = "log-sandbox", **kwargs) -> None:
         pass
 
 
-LINUX_SANDBOX = "/usr/local/bin/linux-sandbox"
+LINUX_SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
 
 # 危险命令检测规则：(regex_pattern, reason_label)
 # 分为两类：

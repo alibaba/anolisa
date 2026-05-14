@@ -30,7 +30,7 @@ YELLOW = "\033[1;33m"
 BLUE = "\033[0;34m"
 NC = "\033[0m"
 
-SANDBOX = "/usr/local/bin/linux-sandbox"
+SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
 # 是否显示详细输出 (通过 -v 或 --verbose 参数启用)
 VERBOSE = False
 
@@ -275,7 +275,8 @@ def main():
     if not os.path.isfile(SANDBOX):
         print(f"{RED}错误: 找不到 {SANDBOX}{NC}")
         print(
-            "请先编译并安装: cargo build --release && sudo cp target/release/linux-sandbox /usr/local/bin/"
+            "请先编译并安装: cargo build --release && sudo cp target/release/linux-sandbox"
+            " 到 PATH 中的目录 (如 /usr/local/bin/ 或 ~/.local/bin/)"
         )
         sys.exit(1)
 

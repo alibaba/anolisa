@@ -815,34 +815,12 @@ install_sec_core() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    local venv_dir="/opt/agent-sec/venv"
+    # Install all components using user profile (no sudo, paths under ~/.local/)
+    info "make install-all INSTALL_PROFILE=user ..."
+    make install-all INSTALL_PROFILE=user
+    ok "agent-sec-core installed (user profile: ~/.local/ + ~/.copilot-shell/)"
 
-    # 1. Create isolated venv (uv auto-downloads Python 3.11.6 if needed)
-    info "Creating Python venv at $venv_dir ..."
-    sudo mkdir -p "$venv_dir"
-    sudo chown "$(id -u):$(id -g)" "$venv_dir"
-    uv venv --python "3.11.6" "$venv_dir"
-
-    # 2. Install deps from uv.lock into venv (uv sync understands [tool.uv.sources])
-    #    UV_PROJECT_ENVIRONMENT tells uv to use our venv instead of .venv
-    #    --no-install-project: only install deps, not the project itself
-    info "Installing agent-sec-cli dependencies (from uv.lock) ..."
-    (cd agent-sec-cli && UV_PROJECT_ENVIRONMENT="$venv_dir" uv sync --frozen --no-dev --no-install-project)
-
-    # 3. Install pre-built wheel into venv (no-deps since deps are already installed)
-    uv pip install --python "$venv_dir/bin/python" --no-deps \
-        agent-sec-cli/target/wheels/agent_sec_cli-*.whl
-
-    # 4. Symlink CLI command to /usr/local/bin/
-    sudo ln -sf "$venv_dir/bin/agent-sec-cli" /usr/local/bin/agent-sec-cli
-    ok "agent-sec-cli installed ($venv_dir + symlink to /usr/local/bin/)"
-
-    # 5. Install non-Python components (sandbox, hooks, plugin, skills)
-    info "Installing sandbox + hooks + plugin + skills ..."
-    sudo make install-cosh-hook install-openclaw-plugin install-skills install-tool
-    ok "cosh-hook + openclaw-plugin + skills installed"
-
-    # 6. Runtime dependencies
+    # Runtime dependencies (system packages, require sudo)
     if ! cmd_exists bwrap; then
         info "Installing runtime dependency: bubblewrap ..."
         sudo $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
