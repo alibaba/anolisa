@@ -182,19 +182,20 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
   }
 }
 
-function tryCompressToon(response: any): { toonText: string; savingsPct: number } | null {
+function tryCompressToon(response: any, sessionId?: string, toolCallId?: string): { toonText: string; savingsPct: number } | null {
   try {
     const input = JSON.stringify(response);
     const beforeChars = input.length;
-    const toonText = execFileSync(toonPath, ["-e"], {
+    const args = ["compress-toon", "--agent-id", "openclaw"];
+    if (sessionId) args.push("--session-id", sessionId);
+    if (toolCallId) args.push("--tool-use-id", toolCallId);
+    const toonText = execFileSync(tokenlessPath, args, {
       encoding: "utf-8",
       timeout: 3000,
       input,
     }).trim();
-    if (!toonText) return null;
-
-    // Only return if TOON actually reduced the content (different from input)
-    if (toonText === input) return null;
+    if (!toonText || toonText === input) return null;
+    if (toonText.length > beforeChars) return null;
 
     const afterChars = toonText.length;
     const savingsPct = beforeChars > 0 ? Math.round(((beforeChars - afterChars) / beforeChars) * 100) : 0;
@@ -363,18 +364,11 @@ export default {
         let toonText = "";
 
         if (toonCompressionEnabled && checkToon()) {
-          try {
-            const jsonInput = JSON.stringify(currentMessage);
-            const result = execFileSync(toonPath, ["-e"], {
-              encoding: "utf-8",
-              timeout: 3000,
-              input: jsonInput,
-            }).trim();
-            if (result) {
-              toonText = result;
-              usedToon = true;
-            }
-          } catch { /* TOON failed — fall back to response-compressed result */ }
+          const result = tryCompressToon(currentMessage, sessionId, toolCallId);
+          if (result) {
+            toonText = result.toonText;
+            usedToon = true;
+          }
         }
 
         // Nothing was compressed — pass through unchanged

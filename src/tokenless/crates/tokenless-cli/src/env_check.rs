@@ -310,12 +310,27 @@ fn extract_required_version(version: &str) -> &str {
 }
 
 /// Compare version strings (semver-like: major.minor.patch).
+/// Handles prefixed versions like "v22.1.0" and build suffixes like "1.2.3-rc1".
 fn version_ge(installed: &str, required: &str) -> bool {
-    let i_parts: Vec<u32> = installed
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let r_parts: Vec<u32> = required.split('.').filter_map(|s| s.parse().ok()).collect();
+    fn parse_ver(s: &str) -> Vec<u32> {
+        let cleaned = s
+            .trim()
+            .strip_prefix('v')
+            .or_else(|| s.trim().strip_prefix('V'))
+            .unwrap_or(s.trim());
+        cleaned
+            .split('.')
+            .filter_map(|seg| {
+                let num_part = seg
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("");
+                num_part.parse().ok()
+            })
+            .collect()
+    }
+    let i_parts = parse_ver(installed);
+    let r_parts = parse_ver(required);
 
     for i in 0..3 {
         let iv = i_parts.get(i).copied().unwrap_or(0);
@@ -784,7 +799,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
 }
 
 /// Find the spec file path.
-fn find_spec_path() -> PathBuf {
+fn find_spec_path() -> Result<PathBuf, String> {
     let home = super::get_home_dir();
     let candidates = [
         std::env::var("TOKENLESS_TOOL_READY_SPEC")
@@ -813,11 +828,18 @@ fn find_spec_path() -> PathBuf {
 
     for candidate in candidates.iter().flatten() {
         if candidate.exists() {
-            return candidate.clone();
+            return Ok(candidate.clone());
         }
     }
 
-    PathBuf::from(format!("{}/.tokenless/tool-ready-spec.json", home))
+    let candidate_list: Vec<String> = candidates
+        .iter()
+        .filter_map(|c| c.as_ref().map(|p| p.display().to_string()))
+        .collect();
+    Err(format!(
+        "No spec file found in any candidate path: {}",
+        candidate_list.join(", ")
+    ))
 }
 
 /// Build a JSON result for a single tool check.
@@ -866,7 +888,7 @@ pub fn run(
     checklist: bool,
     json: bool,
 ) -> Result<(), (String, i32)> {
-    let spec_path = find_spec_path();
+    let spec_path = find_spec_path().map_err(|e| (e, 1))?;
     let specs = load_spec(&spec_path).map_err(|e| (e, 1))?;
 
     if checklist {
@@ -1248,6 +1270,24 @@ mod tests {
     fn expand_path_absolute() {
         let expanded = expand_path("/etc/config.json");
         assert_eq!(expanded, "/etc/config.json");
+    }
+
+    #[test]
+    fn version_ge_prefixed_v() {
+        assert!(version_ge("v22.1.0", "16.0.0"));
+        assert!(version_ge("V22.1.0", "16.0.0"));
+    }
+
+    #[test]
+    fn version_ge_build_suffix() {
+        assert!(version_ge("1.2.3-rc1", "1.2.0"));
+        assert!(version_ge("1.2.3+build", "1.2.3"));
+    }
+
+    #[test]
+    fn version_ge_short_segments() {
+        assert!(version_ge("22.1", "16.0"));
+        assert!(!version_ge("1.0", "2.0"));
     }
 
     #[test]

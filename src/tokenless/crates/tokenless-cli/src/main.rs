@@ -221,7 +221,7 @@ fn run() -> Result<(), (String, i32)> {
                 session_id,
                 tool_use_id,
                 input,
-                after_compact,
+                output_text,
             );
         }
         Commands::CompressResponse {
@@ -261,7 +261,7 @@ fn run() -> Result<(), (String, i32)> {
                 session_id,
                 tool_use_id,
                 input,
-                after_compact,
+                output_text,
             );
         }
         Commands::Stats(stats_cmd) => {

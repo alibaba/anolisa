@@ -124,13 +124,25 @@ RECOMMENDED=$(normalize_deps "$(jq -c --arg key "$SPEC_KEY" '.[$key].recommended
 PERMISSIONS=$(jq -r --arg key "$SPEC_KEY" '.[$key].permissions[] // empty' "$SPEC_FILE" 2>/dev/null || echo '')
 
 # --- Version comparison helper ---
+# Handles prefixed versions (v22.1.0) and build suffixes (1.2.3-rc1)
 version_ge() {
   local installed="$1" required="$2"
+  # Strip common prefixes (v, V)
+  installed="${installed#v}"; installed="${installed#V}"
+  required="${required#v}"; required="${required#V}"
   local i_major i_minor i_patch r_major r_minor r_patch
   IFS='.' read -r i_major i_minor i_patch <<< "$installed"
+  # Strip build suffixes per segment
+  i_major="${i_major%%-*}"; i_minor="${i_minor%%-*}"; i_patch="${i_patch%%-*}"
   IFS='.' read -r r_major r_minor r_patch <<< "$required"
-  i_major=${i_major:-0}; i_minor=${i_minor:-0}; i_patch=${i_patch:-0}
-  r_major=${r_major:-0}; r_minor=${r_minor:-0}; r_patch=${r_patch:-0}
+  r_major="${r_major%%-*}"; r_minor="${r_minor%%-*}"; r_patch="${r_patch%%-*}"
+  # Extract only digits
+  i_major=$(echo "${i_major:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
+  i_minor=$(echo "${i_minor:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
+  i_patch=$(echo "${i_patch:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
+  r_major=$(echo "${r_major:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
+  r_minor=$(echo "${r_minor:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
+  r_patch=$(echo "${r_patch:-0}" | grep -oE '[0-9]+' | head -1 || echo 0)
   [ "$i_major" -gt "$r_major" ] && return 0
   [ "$i_major" -lt "$r_major" ] && return 1
   [ "$i_minor" -gt "$r_minor" ] && return 0
@@ -176,7 +188,7 @@ check_permissions() {
   for perm in $PERMISSIONS; do
     case "$perm" in
       file_read)   [ ! -r / ] && perm_missing="${perm_missing} file_read" ;;
-      file_write)  ! touch "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null && { rm -f "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null || true; } && perm_missing="${perm_missing} file_write" ;;
+      file_write)  touch "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null; rc=$?; rm -f "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null; [ $rc -ne 0 ] && perm_missing="${perm_missing} file_write" ;;
       exec_shell)  ! command -v bash &>/dev/null && perm_missing="${perm_missing} exec_shell" ;;
       docker_socket) [ ! -S /var/run/docker.sock ] && [ ! -S /run/docker.sock ] && perm_missing="${perm_missing} docker_socket" ;;
     esac
@@ -255,14 +267,44 @@ log_v "Phase 3 FIX: $missing_count missing deps, fix_script=$FIX_SCRIPT"
 
 if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; then
     FIX_OUTPUT=$(echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true)
+    hash -r 2>/dev/null || true
 
     # Re-scan to check if fix succeeded
     STILL_MISSING=""
+    HAS_REQUIRED_MISSING=false
     for i in $(seq 0 $((missing_count - 1))); do
         binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
         if ! command -v "$binary" &>/dev/null; then
             STILL_MISSING="${STILL_MISSING} ${binary}"
+            HAS_REQUIRED_MISSING=true
         fi
+    done
+
+    # Re-check version_low entries after fix
+    HAS_VERSION_LOW=false
+    for i in $(seq 0 $((req_count - 1))); do
+        dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
+        status=$(check_dep "$dep_json")
+        case "$status" in
+            version_low:*)
+                HAS_VERSION_LOW=true
+                ;;
+        esac
+    done
+
+    # Re-scan recommended deps after fix
+    RECOMMENDED_MISSING_LIST=""
+    missing_count_rec=0
+    for i in $(seq 0 $((rec_count - 1))); do
+        dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
+        status=$(check_dep "$dep_json")
+        case "$status" in
+            missing)
+                binary=$(echo "$dep_json" | jq -r '.binary')
+                RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
+                missing_count_rec=$((missing_count_rec + 1))
+                ;;
+        esac
     done
 
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
@@ -272,8 +314,8 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     # After fix, re-check readiness
     # If only recommended still missing but required OK → PARTIAL, don't block
     if ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
-        log_v "Phase 3 FIX: recommended deps partially installed, remaining: ${STILL_MISSING}"
-        DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${STILL_MISSING}. Core tool is functional."
+        log_v "Phase 3 FIX: recommended deps partially installed, remaining: ${RECOMMENDED_MISSING_LIST}"
+        DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${RECOMMENDED_MISSING_LIST}. Core tool is functional."
         jq -n --arg context "$DIAG_MSG" --arg msg "$DIAG_MSG" '{
           "systemMessage": $msg,
           "hookSpecificOutput": {

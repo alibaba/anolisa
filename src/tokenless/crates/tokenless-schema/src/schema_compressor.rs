@@ -2,6 +2,21 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 
+/// Find a valid UTF-8 char boundary at or before `pos`.
+/// Equivalent to `str::floor_char_boundary` (stabilized in 1.89).
+fn find_char_boundary(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    if s.is_char_boundary(pos) {
+        pos
+    } else {
+        let mut i = pos;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+}
+
 /// SchemaCompressor compresses OpenAI Function Calling schema
 /// by truncating descriptions, removing titles/examples, and applying
 /// smart compression to reduce token usage.
@@ -239,8 +254,11 @@ impl SchemaCompressor {
         }
 
         // Try to find a sentence boundary in the range [max_len*0.5, max_len]
-        let min_pos = (max_len as f64 * 0.5) as usize;
-        let search_range = &text[min_pos..max_len.min(text.len())];
+        // floor_char_boundary is unstable before 1.89; use inline fallback
+        let min_target = (max_len as f64 * 0.5) as usize;
+        let min_pos = find_char_boundary(&text, min_target);
+        let max_pos = find_char_boundary(&text, max_len.min(text.len()));
+        let search_range = &text[min_pos..max_pos];
 
         // Look for sentence endings: . 。 ！ ？
         let sentence_endings = ['.', '。', '！', '？'];
@@ -545,5 +563,14 @@ mod tests {
                 .get("title")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn truncate_description_cjk_no_panic() {
+        let compressor = SchemaCompressor::new();
+        let cjk = "中".repeat(100);
+        let result = compressor.truncate_description(&cjk, 256);
+        assert!(result.chars().all(|c| c == '中'));
+        assert!(result.len() <= 256);
     }
 }

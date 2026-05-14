@@ -132,7 +132,12 @@ _ENV_PATTERNS: list[tuple[list[str], str, str]] = [
 
 
 def _extract_missing_cmd(error_text: str) -> str:
-    """Extract the missing command name from 'command not found' messages."""
+    """Extract the missing command name from shell error messages."""
+    # bash: "bash: line 1: foo: command not found" or "foo: command not found"
+    m = re.search(r": (\S+): command not found", error_text)
+    if m:
+        return m.group(1)
+    # zsh: "command not found: foo"
     m = re.search(r"command not found: (\S+)", error_text)
     if m:
         return m.group(1)
@@ -273,27 +278,34 @@ def main() -> None:
         except Exception:
             pass  # Fall through to original
 
-    # 11. Step 2: TOON encoding (if compressed result is valid JSON)
+    # 11. Step 2: TOON encoding (via tokenless compress-toon for stats)
     toon_output = ""
     savings_label = ""
 
-    if toon_bin:
-        toon_parsed = _try_parse_json(compressed)
-        if toon_parsed is not None:
-            try:
-                proc = subprocess.run(
-                    [toon_bin, "-e"],
-                    input=compressed,
-                    capture_output=True, text=True, timeout=10,
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    toon_output = proc.stdout.strip()
+    if tokenless_bin and isinstance(_try_parse_json(compressed), (dict, list)):
+        cmd = [tokenless_bin, "compress-toon", "--agent-id", _AGENT_ID]
+        if session_id:
+            cmd.extend(["--session-id", session_id])
+        if tool_use_id:
+            cmd.extend(["--tool-use-id", tool_use_id])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=compressed,
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                toon_result = proc.stdout.strip()
+                # Skip if TOON didn't reduce size
+                if len(toon_result) < len(compressed):
+                    toon_output = toon_result
                     if used_resp_compression:
                         savings_label = "response compressed + TOON encoded"
                     else:
                         savings_label = "TOON encoded"
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     # Determine final label
     if not savings_label:
