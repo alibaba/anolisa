@@ -54,8 +54,9 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
     """Sole public entry point for all security capabilities.
 
     1. Builds a :class:`RequestContext` (auto ``trace_id``, ``timestamp``).
-    2. Calls ``pre_action`` (no-op under the single-event model).
-    3. Routes to the appropriate backend and calls ``execute(ctx, **kwargs)``.
+    2. Routes to the appropriate backend.
+    3. Calls ``pre_action`` (no-op under the single-event model), then
+       ``execute(ctx, **kwargs)``.
     4. Logs a single ``<action>`` completion event (post-hook) with
        ``result="succeeded"``, or logs the same event type with
        ``result="failed"`` on failure (on_error). Each event contains both
@@ -67,16 +68,17 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
     # TODO: inherit trace_id and session_id from parent context, if any
     ctx = RequestContext(action=action, caller=_detect_caller())
 
+    backend = router.get_backend(action)
+
     lifecycle.pre_action(ctx, kwargs)
 
     try:
-        backend = router.get_backend(action)
         result = backend.execute(ctx, **kwargs)
     except Exception as exc:
-        lifecycle.on_error(ctx, exc, kwargs)
+        lifecycle.on_error(ctx, exc, kwargs, backend)
         raise
 
-    lifecycle.post_action(ctx, result, kwargs)
+    lifecycle.post_action(ctx, result, kwargs, backend)
     return result
 
 

@@ -1,9 +1,9 @@
 """Lifecycle hooks — transparent pre/post/error logging via security_events."""
 
-import copy
 from typing import Any
 
 from agent_sec_cli.security_events import SecurityEvent, log_event
+from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
 
@@ -18,6 +18,7 @@ _ACTION_CATEGORY: dict[str, str] = {
     "summary": "summary",
     "code_scan": "code_scan",
     "prompt_scan": "prompt_scan",
+    "pii_scan": "pii_scan",
     "skill_ledger": "skill_ledger",
 }
 
@@ -44,7 +45,10 @@ def pre_action(ctx: RequestContext, kwargs: dict[str, Any]) -> None:
 
 
 def post_action(
-    ctx: RequestContext, result: ActionResult, kwargs: dict[str, Any]
+    ctx: RequestContext,
+    result: ActionResult,
+    kwargs: dict[str, Any],
+    backend: BaseBackend,
 ) -> None:
     """Log the single completion event after the backend completes.
 
@@ -52,10 +56,7 @@ def post_action(
     single event so the full request/response context is captured in one record.
     """
     try:
-        details: dict[str, Any] = {
-            "request": copy.deepcopy(kwargs),
-            "result": copy.deepcopy(result.data),
-        }
+        details = backend.build_event_details(result, kwargs)
         event = SecurityEvent(
             event_type=ctx.action,
             category=_category_for(ctx.action),
@@ -68,18 +69,19 @@ def post_action(
         pass
 
 
-def on_error(ctx: RequestContext, exception: Exception, kwargs: dict[str, Any]) -> None:
+def on_error(
+    ctx: RequestContext,
+    exception: Exception,
+    kwargs: dict[str, Any],
+    backend: BaseBackend,
+) -> None:
     """Log the single error event when the backend raises.
 
     Merges *kwargs* (request inputs) and error details into a single event so
     the full request context is captured alongside the failure.
     """
     try:
-        details: dict[str, Any] = {
-            "request": copy.deepcopy(kwargs),
-            "error": str(exception),
-            "error_type": type(exception).__name__,
-        }
+        details = backend.build_error_details(exception, kwargs)
         event = SecurityEvent(
             event_type=ctx.action,
             category=_category_for(ctx.action),

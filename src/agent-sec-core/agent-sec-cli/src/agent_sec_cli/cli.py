@@ -7,6 +7,7 @@ from typing import Any
 
 import typer
 from agent_sec_cli.observability.cli import app as observability_app
+from agent_sec_cli.pii_checker.cli import scanner_app as pii_scanner_app
 from agent_sec_cli.prompt_scanner.cli import scanner_app
 from agent_sec_cli.security_events import get_reader
 from agent_sec_cli.security_events.summary_formatter import format_summary
@@ -101,6 +102,8 @@ def _with_default_harden_args(args: list[str]) -> list[str]:
 
 # Register prompt scanner sub-command
 app.add_typer(scanner_app, name="scan-prompt")
+# Register PII scanner sub-command
+app.add_typer(pii_scanner_app, name="scan-pii")
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +136,7 @@ def log_sandbox(
         "--cwd",
         help="Current working directory",
     ),
-):
+) -> None:
     """Internal: Record sandbox prehook decision (called by sandbox-guard.py)."""
     result = invoke(
         "sandbox_prehook",
@@ -169,7 +172,7 @@ def harden(
         "--downstream-help",
         help="Show full `loongshield seharden` help and exit.",
     ),
-):
+) -> None:
     """Scan or reinforce the system against a security baseline."""
     if help_flag:
         typer.echo(_HARDEN_HELP_TEXT.rstrip())
@@ -197,7 +200,7 @@ def verify(
         "--skill",
         help="Path to specific skill for verification",
     ),
-):
+) -> None:
     """Skill integrity verification."""
     result = invoke("verify", skill=skill)
     if result.stdout:
@@ -413,7 +416,7 @@ def events(
             "Incompatible with --count, --count-by, --output."
         ),
     ),
-):
+) -> None:
     """Query security events from the local SQLite store."""
     # TODO: Support paging with limit and continue
 

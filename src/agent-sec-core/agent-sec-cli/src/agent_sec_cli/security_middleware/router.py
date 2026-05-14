@@ -9,6 +9,7 @@ from agent_sec_cli.security_middleware.backends.code_scan import CodeScanBackend
 from agent_sec_cli.security_middleware.backends.hardening import (
     HardeningBackend,
 )
+from agent_sec_cli.security_middleware.backends.pii_scan import PiiScanBackend
 from agent_sec_cli.security_middleware.backends.prompt_scan import (
     PromptScanBackend,
 )
@@ -29,6 +30,7 @@ _BACKEND_CLASSES: dict[str, type] = {
     "summary": SummaryBackend,
     "code_scan": CodeScanBackend,
     "prompt_scan": PromptScanBackend,
+    "pii_scan": PiiScanBackend,
     "skill_ledger": SkillLedgerBackend,
 }
 
