@@ -166,9 +166,39 @@ pub enum ErrorCode {
 
 // ── Snapshot types ──
 
+/// Serde for `SnapshotMeta.metadata`: passes `Value` through for JSON,
+/// encodes as `String` for bincode (which can't deserialize untagged enums).
+mod metadata_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(v: &Option<Value>, s: S) -> Result<S::Ok, S::Error> {
+        // Collapse `Some(Value::Null)` to `None` to match JSON round-trip.
+        let normalized = v.as_ref().filter(|val| !val.is_null());
+        if s.is_human_readable() {
+            normalized.serialize(s)
+        } else {
+            normalized.map(|val| val.to_string()).serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+        // No need to collapse `Some(Value::Null)` here: `serialize` already
+        // normalizes it on the way out, so the wire never carries a null value.
+        if d.is_human_readable() {
+            Option::<Value>::deserialize(d)
+        } else {
+            Option::<String>::deserialize(d)?
+                .map(|s| serde_json::from_str(&s).map_err(serde::de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SnapshotMeta {
     pub message: Option<String>,
+    #[serde(default, with = "metadata_serde")]
     pub metadata: Option<serde_json::Value>,
     pub pinned: bool,
     pub created_at: DateTime<Utc>,
@@ -1238,6 +1268,75 @@ mod tests {
         assert_eq!(deserialized.id, "abc123def456");
         assert_eq!(deserialized.meta.message.as_deref(), Some("test message"));
         assert!(!deserialized.meta.pinned);
+    }
+
+    /// bincode round-trip with a non-trivial `metadata` Value.
+    /// Regression: pre-fix, `Option<serde_json::Value>` would fail bincode
+    /// deserialize because Value requires `deserialize_any`.
+    #[test]
+    fn response_list_ok_with_metadata_bincode_round_trip() {
+        let metadata = serde_json::json!({"event": "init", "n": 42, "tags": ["a", "b"]});
+        let resp = Response::ListOk {
+            snapshots: vec![SnapshotEntry {
+                id: "abc".to_string(),
+                workspace: "/ws".to_string(),
+                meta: SnapshotMeta {
+                    message: Some("first".to_string()),
+                    metadata: Some(metadata.clone()),
+                    pinned: false,
+                    created_at: chrono::Utc::now(),
+                    missing: false,
+                },
+            }],
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::ListOk { snapshots } => {
+                assert_eq!(snapshots.len(), 1);
+                assert_eq!(snapshots[0].meta.metadata, Some(metadata));
+            }
+            _ => panic!("expected ListOk variant"),
+        }
+    }
+
+    /// `Some(Value::Null)` collapses to `None` on both JSON and bincode paths,
+    /// matching `Option<Value>`'s natural JSON round-trip behavior.
+    #[test]
+    fn snapshot_meta_metadata_null_collapses_to_none() {
+        let meta = SnapshotMeta {
+            message: None,
+            metadata: Some(serde_json::Value::Null),
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+        };
+        // JSON path
+        let json = serde_json::to_string(&meta).unwrap();
+        let from_json: SnapshotMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(from_json.metadata, None);
+        // bincode path
+        let bin = bincode::serialize(&meta).unwrap();
+        let from_bin: SnapshotMeta = bincode::deserialize(&bin).unwrap();
+        assert_eq!(from_bin.metadata, None);
+    }
+
+    /// JSON round-trip keeps `metadata` as a nested Value (not a quoted string).
+    /// Verifies the `is_human_readable() == true` path of `metadata_serde`.
+    #[test]
+    fn snapshot_meta_metadata_json_round_trip_keeps_nested_object() {
+        let metadata = serde_json::json!({"k": "v"});
+        let meta = SnapshotMeta {
+            message: None,
+            metadata: Some(metadata.clone()),
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+        };
+        let s = serde_json::to_string(&meta).unwrap();
+        // metadata is rendered as an object, not as an escaped string
+        assert!(s.contains(r#""metadata":{"k":"v"}"#), "got: {}", s);
+        let parsed: SnapshotMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed.metadata, Some(metadata));
     }
 
     #[test]
