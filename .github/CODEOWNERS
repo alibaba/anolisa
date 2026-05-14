@@ -21,7 +21,13 @@
 /src/copilot-shell/                     @kongche-jbw @samchu-zsl    # auto-label: component:cosh
 /src/agentsight/                        @chengshuyi                 # auto-label: component:sight
 /src/agent-sec-core/                    @edonyzpc @kid9             # auto-label: component:sec-core
-/src/agent-sec-core/linux-sandbox/      @yanrong-hsr                # auto-label: component:sec-core
+/src/agent-sec-core/agent-sec-cli/      @RemindD @edonyzpc                  # auto-label: component:sec-core
+/src/agent-sec-core/cosh-extension/     @yangdao479                 # auto-label: component:sec-core
+/src/agent-sec-core/linux-sandbox/      @haosanzi                   # auto-label: component:sec-core
+/src/agent-sec-core/openclaw-plugin/    @RemindD                    # auto-label: component:sec-core
+/src/agent-sec-core/skills/             @1570005763                 # auto-label: component:sec-core
+/src/agent-sec-core/Makefile             @yangdao479                 # auto-label: component:sec-core
+/src/agent-sec-core/*.spec.in            @yangdao479                 # auto-label: component:sec-core
 /src/os-skills/                         @Ziqi002                    # auto-label: component:skill
 /src/ws-ckpt/                           @Ziqi002                    # auto-label: component:ckpt
 /src/osbase/                            @casparant                  # auto-label: component:osbase
