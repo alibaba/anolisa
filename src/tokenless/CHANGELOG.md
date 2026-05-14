@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+- add schema migration for before_output/after_output columns
+- use official CLI for openclaw plugin and fix RPM install/uninstall
+- redesign tool-ready for 4-category spec model and fix env-check bugs
+
+## 0.3.1
+
+- add activation onCapabilities hook for openclaw plugin compatibility
+
 ## 0.3.0
 
 - add tool-ready 4-phase environment pre-check with cosh extension integration
