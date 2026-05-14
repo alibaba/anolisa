@@ -1242,8 +1242,8 @@ def test_hook_pass_status_silent(ws: Workspace):
     assert "reason" not in output, f"Expected silent allow, got reason: {output}"
 
 
-def test_hook_drifted_warns(ws: Workspace):
-    """Hook on a drifted skill → allow with warning."""
+def test_hook_drifted_requires_confirmation(ws: Workspace):
+    """Hook on a drifted skill → ask with warning reason."""
     skill = make_skill(ws.hook_skills_dir, "hook-drift", {"f.txt": "original"})
     env = ws.env()
     findings = write_findings_file(
@@ -1259,8 +1259,8 @@ def test_hook_drifted_warns(ws: Workspace):
         _make_cosh_event("hook-drift", str(ws.root)),
         env_extra=env,
     )
-    assert output["decision"] == "allow"
-    assert "reason" in output, f"Expected warning reason for drifted: {output}"
+    assert output["decision"] == "ask"
+    assert "reason" in output, f"Expected confirmation reason for drifted: {output}"
     assert (
         "drifted" in output["reason"].lower() or "changed" in output["reason"].lower()
     )
@@ -1314,14 +1314,14 @@ def test_full_pipeline_vetter_to_hook(ws: Workspace):
     # Modify file → drifted
     (skill / "app.py").write_text("print(2)\n")
 
-    # hook → allow with warning
+    # hook → ask with warning reason
     if HOOK_SCRIPT:
         output = _run_hook(
             _make_cosh_event("pipeline-full", str(ws.root)),
             env_extra=env,
         )
-        assert output["decision"] == "allow"
-        assert "reason" in output, f"Expected drift warning: {output}"
+        assert output["decision"] == "ask"
+        assert "reason" in output, f"Expected drift confirmation: {output}"
 
 
 # ── G14: Key rotation ────────────────────────────────────────────────────
@@ -1509,7 +1509,10 @@ def main():
                 "G12: hook pass → silent allow",
                 lambda: test_hook_pass_status_silent(ws),
             )
-            test("G12: hook drifted → warning", lambda: test_hook_drifted_warns(ws))
+            test(
+                "G12: hook drifted → ask",
+                lambda: test_hook_drifted_requires_confirmation(ws),
+            )
             test(
                 "G12: hook path traversal",
                 lambda: test_hook_path_traversal_rejected(ws),

@@ -17,9 +17,13 @@ Input schema::
         "cwd": "/path/to/project"
     }
 
-Output mapping (design doc §4 — warning-only, never block):
+Output mapping:
 
     status "pass"     → { "decision": "allow" }
+    status "none"     → { "decision": "ask", "reason": "⚠️ ..." }
+    status "drifted"  → { "decision": "ask", "reason": "⚠️ ..." }
+    status "deny"     → { "decision": "ask", "reason": "🚨 ..." }
+    status "tampered" → { "decision": "ask", "reason": "🚨 ..." }
     status otherwise  → { "decision": "allow", "reason": "⚠️ ..." }
 
 Copilot-shell settings.json configuration::
@@ -55,17 +59,27 @@ _TOOL_NAME = "skill"
 _CHECK_TIMEOUT = 5  # seconds for the CLI check call
 _INIT_TIMEOUT = 3  # seconds for key initialization
 
-# Warning messages per status (design doc §4)
-_WARNING_MESSAGES = {
+_ASK_STATUSES = frozenset({"none", "drifted", "deny", "tampered"})
+
+_STATUS_MESSAGES = {
     "warn": "\u26a0\ufe0f Skill '{name}' has low-risk findings \u2014 review recommended",
-    "drifted": "\u26a0\ufe0f Skill '{name}' content has changed since last scan",
-    "none": "\u26a0\ufe0f Skill '{name}' has not been security-scanned yet",
+    "drifted": (
+        "\u26a0\ufe0f Skill '{name}' content has changed since last scan"
+        " \u2014 confirm before using and run a fresh scan when possible"
+    ),
+    "none": (
+        "\u26a0\ufe0f Skill '{name}' has not been security-scanned yet"
+        " \u2014 confirm before using"
+    ),
     "error": "\u26a0\ufe0f Skill '{name}' check failed \u2014 invalid path or missing SKILL.md",
     "deny": (
         "\U0001f6a8 Skill '{name}' has high-risk findings"
-        " \u2014 immediate review recommended"
+        " \u2014 confirm only if you trust the skill and intend to review it"
     ),
-    "tampered": ("\U0001f6a8 Skill '{name}' metadata signature verification failed"),
+    "tampered": (
+        "\U0001f6a8 Skill '{name}' metadata signature verification failed"
+        " \u2014 confirm only if you trust the skill source"
+    ),
 }
 
 
@@ -80,6 +94,11 @@ def _allow() -> str:
 def _allow_with_reason(reason: str) -> str:
     """Return an allow decision with a warning reason for display."""
     return json.dumps({"decision": "allow", "reason": reason}, ensure_ascii=False)
+
+
+def _ask_with_reason(reason: str) -> str:
+    """Return an ask decision with a confirmation reason for display."""
+    return json.dumps({"decision": "ask", "reason": reason}, ensure_ascii=False)
 
 
 def _debug(message: str) -> None:
@@ -218,6 +237,7 @@ def _ensure_keys() -> None:
         subprocess.run(
             ["agent-sec-cli", "skill-ledger", "init-keys"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=_INIT_TIMEOUT,
         )
@@ -228,22 +248,26 @@ def _ensure_keys() -> None:
 def _format_cosh(check_result: dict, skill_name: str) -> str:
     """Convert a check-result dict into a cosh HookOutput JSON string.
 
-    Mapping (design doc §4 — warning-only, never block):
-        status == "pass"  → decision "allow" (silent)
-        status otherwise  → decision "allow" + warning reason
+    Mapping:
+        status == "pass"                         → decision "allow" (silent)
+        none / drifted / deny / tampered         → decision "ask" + reason
+        warn / error / unknown / other statuses  → decision "allow" + reason
     """
     status = check_result.get("status", "unknown")
 
     if status == "pass":
         return _allow()
 
-    template = _WARNING_MESSAGES.get(status)
+    template = _STATUS_MESSAGES.get(status)
     if template:
         reason = template.format(name=skill_name)
     else:
         reason = "\u26a0\ufe0f Skill '{}' has unknown status '{}'".format(
             skill_name, status
         )
+
+    if status in _ASK_STATUSES:
+        return _ask_with_reason(reason)
 
     return _allow_with_reason(reason)
 
@@ -323,6 +347,7 @@ def main() -> None:
         proc = subprocess.run(
             ["agent-sec-cli", "skill-ledger", "check", skill_dir],
             capture_output=True,
+            check=False,
             text=True,
             timeout=_CHECK_TIMEOUT,
         )

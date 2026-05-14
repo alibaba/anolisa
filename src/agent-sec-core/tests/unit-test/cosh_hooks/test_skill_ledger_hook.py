@@ -51,6 +51,7 @@ def _run_hook(input_data, *, env_override=None, return_stderr=False):
         [sys.executable, _COSH_HOOK],
         input=json.dumps(input_data) if isinstance(input_data, dict) else input_data,
         capture_output=True,
+        check=False,
         text=True,
         timeout=15,
         env=env,
@@ -363,14 +364,14 @@ class TestOutputMapping:
         )
         assert output == {"decision": "allow"}
 
-    def test_none_returns_warning(self, mock_cli_env):
-        """status=none → allow + 'not been security-scanned'."""
+    def test_none_requires_confirmation(self, mock_cli_env):
+        """status=none → ask + 'not been security-scanned'."""
         env = mock_cli_env["make_env"](json.dumps({"status": "none"}))
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
-        assert output["decision"] == "allow"
+        assert output["decision"] == "ask"
         assert "not been security-scanned" in output["reason"]
         assert "test-skill" in output["reason"]
 
@@ -384,34 +385,34 @@ class TestOutputMapping:
         assert output["decision"] == "allow"
         assert "low-risk" in output["reason"]
 
-    def test_deny_returns_warning(self, mock_cli_env):
-        """status=deny → allow + 'high-risk findings'."""
+    def test_deny_requires_confirmation(self, mock_cli_env):
+        """status=deny → ask + 'high-risk findings'."""
         env = mock_cli_env["make_env"](json.dumps({"status": "deny"}), rc=1)
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
-        assert output["decision"] == "allow"
+        assert output["decision"] == "ask"
         assert "high-risk" in output["reason"]
 
-    def test_drifted_returns_warning(self, mock_cli_env):
-        """status=drifted → allow + 'content has changed'."""
+    def test_drifted_requires_confirmation(self, mock_cli_env):
+        """status=drifted → ask + 'content has changed'."""
         env = mock_cli_env["make_env"](json.dumps({"status": "drifted"}), rc=1)
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
-        assert output["decision"] == "allow"
+        assert output["decision"] == "ask"
         assert "changed" in output["reason"]
 
-    def test_tampered_returns_warning(self, mock_cli_env):
-        """status=tampered → allow + 'signature verification failed'."""
+    def test_tampered_requires_confirmation(self, mock_cli_env):
+        """status=tampered → ask + 'signature verification failed'."""
         env = mock_cli_env["make_env"](json.dumps({"status": "tampered"}), rc=1)
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
-        assert output["decision"] == "allow"
+        assert output["decision"] == "ask"
         assert "signature verification failed" in output["reason"]
 
     def test_unknown_status_returns_warning(self, mock_cli_env):

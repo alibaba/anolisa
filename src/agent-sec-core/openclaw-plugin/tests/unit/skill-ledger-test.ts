@@ -5,6 +5,8 @@
 //       npm test
 
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
+import { _resetCliMock, _setCliMock } from "../../src/utils.js";
+import type { CliResult } from "../../src/utils.js";
 
 // ── Minimal test framework ──────────────────────────────────────────────────
 
@@ -48,7 +50,44 @@ function createMockApi() {
   return { api: api as any, hooks, logs };
 }
 
+// ── CLI mock helpers ───────────────────────────────────────────────────────
+
+let checkCallCount = 0;
+let lastCheckArgs: string[] | undefined;
+
+function mockSkillLedgerCheck(result: CliResult): void {
+  _setCliMock(async (args) => {
+    if (args[0] === "skill-ledger" && args[1] === "init-keys") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
+        stderr: "",
+      };
+    }
+
+    if (args[0] === "skill-ledger" && args[1] === "check") {
+      checkCallCount++;
+      lastCheckArgs = args;
+      return result;
+    }
+
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+}
+
+function mockSkillLedgerStatus(status: string, exitCode = 0): void {
+  mockSkillLedgerCheck({
+    exitCode,
+    stdout: JSON.stringify({ status }),
+    stderr: "",
+  });
+}
+
+process.on("exit", () => _resetCliMock());
+
 // ── Setup: register capability, extract handler ─────────────────────────────
+
+mockSkillLedgerStatus("pass");
 
 const { api, hooks, logs } = createMockApi();
 skillLedger.register(api);
@@ -66,6 +105,8 @@ function clearLogs(): void {
 /** Fire the handler with a given event and return { result, logs snapshot }. */
 async function fire(event: any, ctx: any = {}) {
   clearLogs();
+  checkCallCount = 0;
+  lastCheckArgs = undefined;
   const result = await hook.handler(event, ctx);
   return { result, logs: [...logs] };
 }
@@ -84,45 +125,45 @@ assert(hooks[0].priority === 80, "priority is 80");
 console.log("\n[2] Positive filtering (should match → CLI invoked)");
 
 {
-  const { result, logs } = await fire({
+  const { result } = await fire({
     toolName: "read",
     params: { file_path: "/home/user/.openclaw/skills/github/SKILL.md" },
   });
   assert(result === undefined, "absolute path → returns undefined (allow)");
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "absolute path → handler proceeds (logs produced)");
+  assert(checkCallCount === 1, "absolute path → CLI check invoked");
 }
 
 {
-  const { result, logs } = await fire({
+  const { result } = await fire({
     toolName: "read",
     params: { path: "/opt/skills/my-tool/SKILL.md" },
   });
   assert(result === undefined, "'path' param (alt name) → returns undefined");
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "'path' param → handler proceeds");
+  assert(checkCallCount === 1, "'path' param → CLI check invoked");
 }
 
 {
-  const { logs } = await fire({
+  await fire({
     toolName: "read",
     params: { file_path: "SKILL.md" },
   });
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "bare 'SKILL.md' → handler proceeds");
+  assert(checkCallCount === 1, "bare 'SKILL.md' → CLI check invoked");
 }
 
 {
-  const { logs } = await fire({
+  await fire({
     toolName: "read",
     params: { file_path: "  /skills/github/SKILL.md  " },
   });
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "whitespace-padded path → handler proceeds (trimmed)");
+  assert(checkCallCount === 1, "whitespace-padded path → CLI check invoked");
 }
 
 {
-  const { logs } = await fire({
+  await fire({
     toolName: "read",
     params: { file_path: "/deeply/nested/dir/structure/skill-name/SKILL.md" },
   });
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "deeply nested path → handler proceeds");
+  assert(checkCallCount === 1, "deeply nested path → CLI check invoked");
 }
 
 // ── 3. Negative filtering — events that MUST be skipped ─────────────────────
@@ -222,6 +263,7 @@ console.log("\n[3] Negative filtering (should skip → no logs)");
 console.log("\n[4] Fail-open (CLI unavailable → warn + allow)");
 
 {
+  mockSkillLedgerCheck({ exitCode: 1, stdout: "", stderr: "boom" });
   const { result, logs } = await fire({
     toolName: "read",
     params: { file_path: "/skills/test/SKILL.md" },
@@ -269,8 +311,9 @@ console.log("\n[5] Malformed event resilience");
 console.log("\n[6] Path param priority (file_path before path)");
 
 {
+  mockSkillLedgerStatus("pass");
   // When both file_path and path are present, file_path should win
-  const { logs } = await fire({
+  await fire({
     toolName: "read",
     params: {
       file_path: "/skills/alpha/SKILL.md",
@@ -279,7 +322,91 @@ console.log("\n[6] Path param priority (file_path before path)");
   });
   // Handler proceeds (we can't see which path was chosen from logs alone in CLI-error mode,
   // but the fact it proceeds confirms at least one matched)
-  assert(logs.some((l) => l.includes("[skill-ledger]")), "both params present → handler proceeds (file_path takes priority)");
+  assert(checkCallCount === 1, "both params present → handler proceeds");
+  assert(lastCheckArgs?.includes("/skills/alpha"), "both params present → file_path takes priority");
+}
+
+// ── 7. Status policy ────────────────────────────────────────────────────────
+console.log("\n[7] Status policy");
+
+{
+  mockSkillLedgerStatus("pass");
+  const { result, logs } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/pass/SKILL.md" },
+  });
+  assert(result === undefined, "pass → allow without approval");
+  assert(logs.length === 0, "pass → no user-visible log");
+}
+
+{
+  mockSkillLedgerStatus("warn");
+  const { result, logs } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/warn/SKILL.md" },
+  });
+  assert(result === undefined, "warn → allow with warning log");
+  assert(logs.some((l) => l.includes("low-risk")), "warn → low-risk warning");
+}
+
+{
+  mockSkillLedgerStatus("error", 1);
+  const { result, logs } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/error/SKILL.md" },
+  });
+  assert(result === undefined, "error → allow with warning log");
+  assert(logs.some((l) => l.includes("check failed")), "error → check-failed warning");
+}
+
+{
+  mockSkillLedgerStatus("mystery");
+  const { result, logs } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/mystery/SKILL.md" },
+  });
+  assert(result === undefined, "unknown status → allow with warning log");
+  assert(logs.some((l) => l.includes("unknown status 'mystery'")), "unknown status → unknown-status warning");
+}
+
+{
+  mockSkillLedgerStatus("none");
+  const { result } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/none/SKILL.md" },
+  });
+  assert(result?.requireApproval?.severity === "warning", "none → requireApproval warning");
+  assert(result.requireApproval.description.includes("not been security-scanned"), "none → explains unscanned status");
+}
+
+{
+  mockSkillLedgerStatus("drifted", 1);
+  const { result } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/drifted/SKILL.md" },
+  });
+  assert(result?.requireApproval?.severity === "warning", "drifted → requireApproval warning");
+  assert(result.requireApproval.description.includes("content has changed"), "drifted → explains changed content");
+}
+
+{
+  mockSkillLedgerStatus("deny", 1);
+  const { result } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/deny/SKILL.md" },
+  });
+  assert(result?.requireApproval?.severity === "critical", "deny → requireApproval critical");
+  assert(result.requireApproval.description.includes("high-risk findings"), "deny → explains high-risk findings");
+}
+
+{
+  mockSkillLedgerStatus("tampered", 1);
+  const { result } = await fire({
+    toolName: "read",
+    params: { file_path: "/skills/tampered/SKILL.md" },
+  });
+  assert(result?.requireApproval?.severity === "critical", "tampered → requireApproval critical");
+  assert(result.requireApproval.description.includes("signature verification failed"), "tampered → explains signature failure");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

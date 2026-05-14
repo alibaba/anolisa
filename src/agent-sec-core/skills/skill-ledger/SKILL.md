@@ -1,98 +1,127 @@
 ---
 name: skill-ledger
-description: Skill 安全扫描与完整性认证。检查运行环境并智能分诊目标 Skill（Phase 1 triage），执行安全审查（Phase 2 vetter），并通过密码学签名建立防篡改版本链（Phase 3 ledger）。支持单个 Skill 扫描、批量扫描、状态检查等多种模式。
+description: Skill 安全状态查看、快速扫描认证与可选深度扫描。支持用户主动查看或扫描单个/全部 Skill；当用户要求 agent 安装 Skill 且安装成功后，必须自动对最终本地目录执行快速扫描认证。
 ---
 
-# Skill Ledger — 安全扫描与完整性认证
+# Skill Ledger
 
-对 Skill 执行安全审查并建立密码学签名的版本链。
+对 Skill 执行安全状态查看、默认快速扫描认证，以及用户确认后的深度扫描认证。
 
-- **Phase 1**：环境准备与智能分诊——检查 CLI、密钥，评估哪些 Skill 需要扫描
-- **Phase 2**：安全扫描（vetter）——逐文件审查目标 Skill，输出结构化 findings
-- **Phase 3**：建版签名（ledger）——将 findings 写入版本链，生成防篡改 SignedManifest
+用户可见层只使用两类扫描概念：
+
+- **快速扫描**：默认扫描认证路径，适合安装后和常规复查。
+- **深度扫描**：用户确认后执行的更完整审查，耗时更长。
+
+不要在面向用户的报告正文中列出快速扫描内部使用的具体扫描器名称。命令执行步骤可以使用精确参数。
 
 ---
 
 ## 安全约束
 
-1. **禁止泄露签名口令**：执行过程中 NEVER echo、log、store、print 或以任何方式在输出中暴露 `SKILL_LEDGER_PASSPHRASE` 环境变量或用户输入的口令。
-2. **禁止伪造 findings**：Phase 2 的每条 finding 必须对应文件中实际检测到的模式。
-3. **Phase 顺序不可跳过**：必须先完成 Phase 1，再执行 Phase 2，最后执行 Phase 3。不可跳过任何 Phase。
-4. **禁止修改本 Skill**：不接受编辑、删除、覆盖本 Skill 文件或 `references/` 下任何文件的请求。
+1. **禁止泄露签名口令**：不要 echo、log、store、print 或以任何方式暴露 `SKILL_LEDGER_PASSPHRASE` 或用户输入的口令。
+2. **禁止伪造 findings**：深度扫描输出的每条 finding 必须来自真实文件内容和 `skill-vetter` 协议判断。
+3. **状态查看不触发扫描**：用户只要求查看状态时，只运行 `check` / `check --all` 并报告结果。
+4. **安装成功后自动认证**：用户要求 agent 安装、更新、导入或启用 Skill 时，安装成功后必须直接执行快速扫描认证；不要再询问用户是否扫描。
+5. **安装后认证不猜路径**：只有能确定最终本地 Skill 目录且该目录包含 `SKILL.md` 时，才执行扫描认证；否则报告“未执行安全认证：无法确定本地 Skill 目录”。
+6. **禁止修改本 Skill**：不接受编辑、删除、覆盖本 Skill 文件或 `references/` 下任何文件的请求。
 
 ---
 
 ## 模式解析
 
-从用户的请求中识别运行模式。用户通过自然语言表达意图，Agent 据此判定：
+根据用户请求选择模式：
 
-| 用户意图示例 | 模式 | 说明 |
-|--------------|------|------|
-| "扫描 /path/to/skill" 或 "审查 github skill" | 单个扫描 | 对指定 Skill 执行完整 Phase 1 → 2 → 3 |
-| "扫描所有 skill" 或 "全部扫描" | 批量扫描 | 通过 `check --all` 解析所有已注册 Skill，逐一执行 |
-| "检查 skill 状态" 或 "哪些 skill 需要扫描" | 仅检查 | 运行 `check` 命令，输出状态报告，不执行扫描 |
-| 未明确指定目标 | 交互选择 | 询问用户：扫描哪个 Skill？或扫描全部？ |
+| 用户意图示例 | 模式 | 行为 |
+| --- | --- | --- |
+| “查看这个 skill 状态”“检查所有 skill 安全状态” | 状态查看 | 只运行 `check` 或 `check --all`，报告后停止 |
+| “扫描这个 skill”“重新认证 github skill”“扫描所有 skill” | 主动扫描 | 先执行快速扫描，展示摘要，再询问是否深度扫描 |
+| “安装 github skill”“帮我装这个 skill”“更新这个 skill” | 安装请求后置认证 | 安装成功后自动定位最终本地 Skill 目录，验证 `SKILL.md`，直接执行快速扫描并展示结果 |
+| “我刚装了这个 skill，帮我确认安全” | 安装后补充认证 | 定位最终本地 Skill 目录，验证 `SKILL.md`，执行快速扫描并询问是否深度扫描 |
+| “做深度扫描”“彻底审查这个 skill” | 深度扫描请求 | 用户请求本身即为确认；执行 Phase 1 后直接执行 Phase 3 |
+| 未明确目标 | 交互确认 | 询问用户要处理哪个 Skill，或是否处理全部 |
 
-**目标解析规则**：
+目标解析规则：
 
-- 若用户提供了 Skill 路径 → 直接使用该绝对路径
-- 若用户提供了 Skill 名称（如 "github"）→ 按 project → custom → user → system 优先级查找对应目录
-- 若用户要求批量操作 → 使用 `check --all`（CLI 内部合并内置默认目录与 `~/.config/agent-sec/skill-ledger/config.json` 的 `managedSkillDirs` 并展开 glob）
+- 用户提供目录路径时，必须确认该目录存在且包含 `SKILL.md`。
+- 用户提供 `SKILL.md` 文件路径时，目标目录为其父目录。
+- 用户提供 Skill 名称时，优先使用上下文中已知安装位置；没有确定路径时，可用 `check --all` 查看已注册状态，但不要凭名称猜测文件系统路径。
+- 用户要求“所有 Skill”时，使用 CLI 的 `--all` 能力完成批量状态查看或快速扫描。
+- 深度扫描需要逐个本地目录执行；若无法把某个 Skill 解析到本地目录，报告该项未执行深度扫描。
 
 ---
 
-## Phase 1：环境准备与智能分诊
+## 统一报告格式
 
-### Step 1.1：自完整性检查
+状态查看、快速扫描、深度扫描、安装后认证的最终结果都必须使用同一类表格。单个 Skill 使用一行表格，多个 Skill 使用多行表格，这样用户在不同模式之间看到的结构一致。
 
-在扫描其他 Skill 前，先验证自身完整性：
+报告标题按场景选择：
 
-```bash
-agent-sec-cli skill-ledger check <本 Skill 目录的绝对路径>
+| 场景 | 标题 |
+| --- | --- |
+| 状态查看 | `[skill-ledger] 安全状态` |
+| 主动快速扫描 | `[skill-ledger] 快速扫描完成` |
+| 深度扫描 | `[skill-ledger] 深度扫描完成` |
+| 安装后自动认证 | `[skill-ledger] 安装后认证完成` |
+
+表格至少包含：
+
+- Skill 名称
+- 状态
+- 版本号
+- 状态指纹（`manifestHash` 前 7 位；签名无效时显示“无效”）
+- 文件数
+- deny / warn 数量
+- 摘要
+
+表格后可选区块：
+
+- `路径`：按 Skill 名称列出本地路径。不要把很长的本地路径塞进表格。
+- `关键发现`：按 Skill 名称展开 findings。单个 Skill 最多列出 5 条；多个 Skill 每个有风险的目标最多列出 3 条。
+- `未完成项`：列出因路径不可确定、缺少 `SKILL.md`、CLI 失败或 JSON 解析失败而没有完成认证的目标。
+- `结论`：汇总通过、需关注、未完成的数量，并说明下一步建议。
+
+示例：
+
+```text
+[skill-ledger] 快速扫描完成
+| Skill      | 状态    | 版本    | 指纹    | 文件数 | 发现             | 摘要             |
+| ---------- | ------- | ------- | ------- | ------ | ---------------- | ---------------- |
+| github     | pass    | v000003 | 7d4e9b0 | 8      | 0 deny, 0 warn   | 已认证           |
+| my-tool    | warn    | v000004 | c0b7e28 | 12     | 0 deny, 2 warn   | 需要关注         |
+| new-skill  | none    | v000001 | 3f8a1c2 | 5      | -                | 尚未完成认证     |
+| dev-helper | drifted | v000002 | a91c5f3 | 9      | -                | 文件已变更       |
+
+路径:
+- github: /path/to/github
+- my-tool: /path/to/my-tool
+
+关键发现:
+- my-tool: warn suspicious-network at fetch.py:58 — 网络访问需要确认用途
+- my-tool: warn obfuscated-code at utils.js:142 — 代码可读性异常
+
+结论: 1 个已通过，3 个需要关注。建议对 none / drifted / warn 状态执行快速扫描认证。
 ```
 
-- `status` 为 `pass` → 继续
-- `status` 为 `none` → 继续（skill-ledger 尚未被扫描过，属正常状态）
-- `status` 为 `warn` → 输出提示并继续（上次扫描存在低风险项，不阻断）：
+---
 
-```
-⚠️ [skill-ledger] 自身上次扫描存在低风险发现
-状态: warn
-建议：后续对 skill-ledger 自身重新执行扫描。
-```
+## Phase 1：环境准备与状态查看
 
-- `status` 为 `drifted`、`tampered` 或 `deny` → 输出告警并询问用户：
+### 1.1 CLI 可用性
 
-```
-🚨 [skill-ledger] 自身完整性异常
-状态: <status>
-原因:
-  drifted  — skill-ledger 文件已变更
-  tampered — manifest 签名校验失败，元数据可能被篡改
-  deny     — 上次扫描存在高危发现
-建议：确认 skill-ledger 文件来源可信后再继续。
-是否继续？(Y/N)
-```
-
-用户拒绝 → 停止。用户确认 → 继续（在输出中保留告警记录）。
-
-### Step 1.2：CLI 可用性
+先确认命令可用：
 
 ```bash
 agent-sec-cli skill-ledger --help
 ```
 
-若命令不可用，输出：
+若命令不可用，停止并报告：
 
-```
-[skill-ledger] Phase 1: [NOT_RUN]
-原因: agent-sec-cli skill-ledger 不可用。
+```text
+[skill-ledger] 未执行：agent-sec-cli skill-ledger 不可用。
 请确认 agent-sec-cli 已安装且版本包含 skill-ledger 子命令。
 ```
 
-停止，不继续后续 Phase。
-
-### Step 1.3：签名密钥
+### 1.2 签名密钥
 
 检查公钥文件是否存在：
 
@@ -100,290 +129,175 @@ agent-sec-cli skill-ledger --help
 ls ~/.local/share/agent-sec/skill-ledger/key.pub
 ```
 
-若不存在 → 首次初始化（默认无口令，减少交互）：
-
-```
-[skill-ledger] 未检测到签名密钥，正在自动初始化...
-```
-
-执行：
+若不存在，初始化密钥：
 
 ```bash
 agent-sec-cli skill-ledger init-keys
 ```
 
-> **设计说明**：Skill 驱动的首次初始化默认不设口令，以实现零交互自动化。不指定 `--passphrase` 时，CLI 不会读取环境变量或提示输入，始终生成无口令密钥。密钥安全性由文件系统权限保障（`key.enc` mode 0600）。用户后续可通过 `agent-sec-cli skill-ledger init-keys --force --passphrase` 重新生成带口令保护的密钥。
+初始化失败时停止。不要要求用户提供口令，除非用户明确要求使用带口令密钥。
 
-初始化成功后从 JSON 输出中提取 `fingerprint` 字段并继续。失败 → 停止。
+### 1.3 获取当前状态
 
-### Step 1.4：预扫描分诊
-
-根据模式解析（见上方模式解析表）确定目标并获取当前状态。所有元数据均从 `check` 命令的 JSON 输出中提取，无需读取任何文件。
-
-**单个模式**：
+单个 Skill：
 
 ```bash
-agent-sec-cli skill-ledger check <skill_dir>
+agent-sec-cli skill-ledger check <SKILL_DIR>
 ```
 
-输出为单个 JSON 对象，包含 `status`、`skillName`、`versionId`、`createdAt`、`updatedAt`、`fileCount`、`manifestHash` 等字段。
-
-**批量模式 / 交互模式**：
+所有 Skill：
 
 ```bash
 agent-sec-cli skill-ledger check --all
 ```
 
-输出为 `{"results": [...]}` JSON 数组，每个元素包含上述字段。CLI 内部自动从内置默认目录和 `config.json` 的 `managedSkillDirs` 解析所有已注册 Skill 目录。
+状态查看模式在输出安全状态报告后停止，不进入快速扫描或深度扫描。
 
-- 若为**交互模式**：将 `check --all` 结果展示给用户，由用户选择目标 Skill
-- 若结果为空，输出提示并停止
+状态含义：
 
-解析 JSON 输出，按状态分类：
-
-| 状态 | 符号 | 含义 | 处置 |
-|------|------|------|------|
-| `pass` | ✅ | 文件未变 + 签名有效 + 扫描通过 | 默认跳过 |
-| `none` | 🆕 | 从未经过安全扫描 | 需要扫描 |
-| `drifted` | 🔄 | **Skill 文件已变更**（fileHashes 不匹配）——无论签名状态如何 | 需要扫描 |
-| `warn` | ⚠️ | 文件未变 + 签名有效 + 上次扫描有低风险 | 建议重新扫描 |
-| `deny` | 🚨 | 文件未变 + 签名有效 + 上次扫描有高危项 | 建议重新扫描 |
-| `tampered` | 🔴 | **文件未变但 manifest 签名无效**——元数据可能被伪造（如篡改 scanStatus 绕过安全检查） | 必须重新扫描 |
-
-从 `check` 的 JSON 输出中直接提取版本号（`versionId`）、最近更新时间（`updatedAt`）、跟踪文件数（`fileCount`）、状态指纹（`manifestHash` 的前 7 位十六进制）。对 `warn`/`deny` 状态提取 `findings` 详情；对 `drifted` 状态提取变更文件清单（`added`/`removed`/`modified`）。
-
-#### 仅检查模式
-
-输出唯一的**安全状态报告**后停止，不进入 Phase 2。报告包含一张汇总表和一段安全结论：
-
-```
-[skill-ledger] 安全状态报告
-┌─────────────┬────────────┬──────────┬────────────┬─────────────────────┬────────┬──────────────────────┐
-│ Skill       │ 状态        │ 版本     │ 状态指纹    │ 最近更新时间         │ 文件数  │ 摘要                 │
-├─────────────┼────────────┼──────────┼────────────┼─────────────────────┼────────┼──────────────────────┤
-│ github      │ 🆕 none    │ v000001  │ 3f8a1c2    │ 2025-04-20T10:30:00Z│ 5      │ 从未扫描             │
-│ docker      │ ✅ pass    │ v000002  │ 7d4e9b0    │ 2025-04-19T08:15:00Z│ 8      │ 无风险发现            │
-│ my-tool     │ 🔄 drifted │ v000001  │ a91c5f3    │ 2025-04-18T14:00:00Z│ 3      │ +1 新增, ~1 修改      │
-│ dev-helper  │ ⚠️ warn    │ v000003  │ c0b7e28    │ 2025-04-17T09:00:00Z│ 12     │ 2 条 warn            │
-└─────────────┴────────────┴──────────┴────────────┴─────────────────────┴────────┴──────────────────────┘
-
-安全结论:
-  ✅ 安全通过: 1 (docker)
-  需关注: 3 — 1 从未扫描, 1 文件变更, 1 低风险
-
-  🔄 my-tool: SKILL.md 和 run.py 已修改, new-helper.sh 新增
-  ⚠️ dev-helper: obfuscated-code (utils.js:142), suspicious-network (fetch.py:58)
-
-  建议: 对非 pass 状态的 Skill 执行安全扫描以更新状态。
-```
-
-> **摘要列填充规则**：`none` → "从未扫描"；`pass` → "无风险发现"；`drifted` → 列出文件变更（如 "+N 新增, -N 删除, ~N 修改"）；`warn` → "N 条 warn"；`deny` → "N 条 deny, M 条 warn"；`tampered` → "签名校验失败"。
->
-> **状态指纹列**：取 `check` 输出中 `manifestHash`（SHA-256 十六进制）的前 7 位显示，唯一标识当前 manifest 状态。所有状态均显示指纹（`manifestHash` 在创建时即计算，无论是否已签名）；`none` 表示首次 check 自动创建的无签名基线 manifest；`drifted` 显示变更前最后一次认证的指纹；`tampered`（签名无效）→ "⚠️ 无效"。
->
-> **安全结论**中，仅对非 `pass`/`none` 状态的 Skill 展开详情：`drifted` 列出变更文件；`warn`/`deny` 列出具体 findings（规则 ID + 文件位置）；`deny` 以 🚨 标注并建议立即修复或禁用。
-
-#### 扫描模式
-
-基于分诊结果，列出待扫描数量与列表，询问用户确认（用户可选择跳过某些或强制加入 `pass` 状态的 Skill）。确认后进入 Phase 2。
+| 状态 | 含义 | 状态查看建议 |
+| --- | --- | --- |
+| `pass` | 文件未变，签名有效，扫描通过 | 可正常使用 |
+| `none` | 尚未完成安全认证 | 建议执行快速扫描 |
+| `drifted` | 文件内容与上次认证不一致 | 建议执行快速扫描 |
+| `warn` | 上次扫描存在低风险发现 | 建议查看 findings，必要时复扫 |
+| `deny` | 上次扫描存在高风险发现 | 建议修复或禁用后复扫 |
+| `tampered` | 元数据签名校验失败 | 建议确认来源并重新认证 |
+| `error` / `unknown` | 检查失败或状态不可识别 | 报告错误信息，避免猜测 |
 
 ---
 
-## Phase 2：安全扫描（vetter）
+## Phase 2：快速扫描认证
 
-对待扫描列表中的每个 Skill 执行安全审查。
+主动扫描和安装后认证必须先执行快速扫描。安装请求后置认证由“安装成功”隐式触发，不需要用户额外说“扫描”或“认证”。安装后认证即使当前状态是 `pass`，也不要跳过快速扫描，因为目标是为刚安装内容建立最新认证结果。
 
-### 扫描器调度
+若用户一开始明确要求深度扫描，不进入 Phase 2；执行 Phase 1 后直接进入 Phase 3。
 
-Phase 2 采用 **Scanner Registry 驱动**的扫描流程，支持横向扩展：
-
-1. 读取 `~/.config/agent-sec/skill-ledger/config.json` 的 `scanners[]` 配置
-2. 筛选 `type == "skill"` 的扫描器（CLI 无法直接调用的，需要 Agent 驱动）
-3. 对每个 `skill` 类型扫描器，加载对应的 `references/<scanner-name>-protocol.md` 协议文件
-4. 按协议执行扫描，生成 findings 文件
-
-> **v1 版本**：仅注册 `skill-vetter`（`type: "skill"`）。`builtin`/`cli`/`api` 类型扫描器由 `certify` 的自动调用模式处理（Phase 3），无需 Agent 驱动。
-
-### 对每个待扫描 Skill 执行
-
-#### 2.1 加载扫描协议
-
-当前版本加载：[references/skill-vetter-protocol.md](references/skill-vetter-protocol.md)
-
-将 `SKILL_DIR` 和 `SKILL_NAME`（目录名）传入扫描协议。
-
-#### 2.2 执行扫描
-
-按 `skill-vetter-protocol.md` 定义的四阶段框架执行：
-
-1. **Stage 1：来源验证** — 检查目录结构与元数据
-2. **Stage 2：强制代码审查** — 逐文件应用规则表
-3. **Stage 3：权限边界评估** — 比对声明能力与实际内容
-4. **Stage 4：风险分级与输出** — 汇总并写入 findings JSON
-
-#### 2.3 验证输出
-
-确认 findings 文件已写入：
+单个 Skill 快速扫描：
 
 ```bash
-cat /tmp/skill-vetter-findings-<SKILL_NAME>.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'findings: {len(d)}')"
+agent-sec-cli skill-ledger certify <SKILL_DIR> --scanners skill-code-scanner,cisco-static-scanner
 ```
 
-若文件不存在或 JSON 格式无效 → 标记该 Skill 为扫描失败，继续下一个。
+所有 Skill 快速扫描：
 
-#### 2.4 Phase 2 状态输出
-
-扫描过程中，每个 Skill 完成后输出单行进度（包含文件数与发现统计）：
-
-```
-[skill-ledger] Phase 2: 扫描 3 个 Skill...
-[skill-ledger] Phase 2: github — 完成 (5 文件, 0 deny, 0 warn)
-[skill-ledger] Phase 2: my-tool — 完成 (3 文件, 0 deny, 2 warn)
-[skill-ledger] Phase 2: dev-helper — 完成 (12 文件, 0 deny, 0 warn)
-[skill-ledger] Phase 2 完成: 成功 3 / 3
+```bash
+agent-sec-cli skill-ledger certify --all --scanners skill-code-scanner,cisco-static-scanner
 ```
 
-若某个 Skill 扫描失败：
+快速扫描完成后，重新读取状态用于摘要：
 
+```bash
+agent-sec-cli skill-ledger check <SKILL_DIR>
 ```
-[skill-ledger] Phase 2: <SKILL_NAME> — 失败 (<错误原因>)
+
+或：
+
+```bash
+agent-sec-cli skill-ledger check --all
 ```
 
-> **设计说明**：Phase 2 仅输出单行进度，不展示详细 findings 或汇总表。所有扫描结果统一在 Phase 3 完成后的最终报告中呈现，避免中间产出多张表格导致信息分散。
+### 快速扫描报告
 
-若全部失败 → 停止，不进入 Phase 3。
-若部分失败 → 询问用户是否继续对成功扫描的 Skill 执行 Phase 3。
+快速扫描完成后，按“统一报告格式”输出结果。主动扫描的标题使用 `[skill-ledger] 快速扫描完成`；安装后自动认证的标题使用 `[skill-ledger] 安装后认证完成`。报告中使用“快速扫描”称呼，不列出内部扫描器名称。
+
+摘要后必须询问用户是否执行深度扫描：
+
+```text
+是否执行深度扫描？这会让 Agent 按深度审查协议逐文件检查，耗时更长。
+```
+
+用户拒绝时结束流程，并说明：
+
+```text
+已完成快速扫描认证，未执行深度扫描。
+```
 
 ---
 
-## Phase 3：建版签名（ledger）
+## Phase 3：深度扫描认证
 
-**前置条件**：Phase 2 已完成，至少一个 Skill 有有效的 findings 文件。
+以下两种情况执行深度扫描：
 
-对每个成功扫描的 Skill 执行 `certify`，将 Agent 审查结果和确定性代码扫描结果合并到同一个 SignedManifest。
+- 用户一开始明确要求深度扫描：请求本身即为确认。执行 Phase 1 后直接执行 Phase 3，不需要先执行快速扫描，也不需要再次询问是否继续。
+- 快速扫描或安装后认证完成后，用户确认要继续深度扫描：在已有快速扫描报告之后执行 Phase 3。
 
-### 3.1 执行 certify
+### 3.1 加载深度扫描协议
 
-先写入 `skill-vetter` 的 Agent 审查结果：
+读取：[references/skill-vetter-protocol.md](references/skill-vetter-protocol.md)
+
+将目标目录作为 `SKILL_DIR`，目录名作为 `SKILL_NAME`，按协议逐文件审查。
+
+### 3.2 生成 findings
+
+将深度扫描 findings 写入临时 JSON 文件：
+
+```text
+/tmp/skill-vetter-findings-<SKILL_NAME>.json
+```
+
+文件内容必须是 JSON 数组。每条 finding 至少包含：
+
+- `severity`: `warn` 或 `deny`
+- `ruleId`
+- `file`
+- `line`（未知时可省略）
+- `message`
+- `evidence`（只放必要短证据，不泄露敏感内容）
+
+写入后验证 JSON 可解析。若无发现，写入空数组 `[]`。
+
+### 3.3 写入认证结果
+
+执行：
 
 ```bash
-agent-sec-cli skill-ledger certify <SKILL_DIR> \
-  --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json \
-  --scanner skill-vetter
+agent-sec-cli skill-ledger certify <SKILL_DIR> --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json --scanner skill-vetter
 ```
 
-再触发内置 `skill-code-scanner`，扫描 Skill 目录中的 Python/Shell 代码文件：
+完成后再次运行：
 
 ```bash
-agent-sec-cli skill-ledger certify <SKILL_DIR> \
-  --scanners skill-code-scanner
+agent-sec-cli skill-ledger check <SKILL_DIR>
 ```
 
-这两个 `certify` 调用可按任意顺序执行；manifest 按 scanner 名称合并 `scans[]` 条目。文件未变化时沿用同一个版本号，只替换或追加对应 scanner 的条目，并重新聚合 `scanStatus`。
-
-> 当 Scanner Registry 中有多个 `skill` 类型扫描器时，对每个扫描器分别调用 `certify --findings <对应 findings> --scanner <对应 scanner>`。`certify` 会自动合并同一 Skill 的多个 scanner 条目到 `scans[]` 数组。
-
-#### 口令处理
-
-若 `certify` 因口令错误失败（stderr 包含 `PassphraseError` 或 `wrong passphrase`），说明签名密钥受口令保护。按以下步骤处理：
-
-1. 告知用户：「签名密钥需要口令才能完成认证签名。建议将口令设置为环境变量以避免反复输入：」
-
-```
-export SKILL_LEDGER_PASSPHRASE="<您的口令>"
-```
-
-2. 用户设置环境变量后，重试 `certify`。若用户直接提供口令而非设置环境变量，则通过内联环境变量传递：
-
-```bash
-SKILL_LEDGER_PASSPHRASE="<用户提供的口令>" agent-sec-cli skill-ledger certify <SKILL_DIR> \
-  --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json \
-  --scanner skill-vetter
-```
-
-3. 若再次失败，告知用户口令不正确并请求重试（最多 3 次）
-4. 3 次均失败 → 建议用户重新生成密钥（无口令模式，避免后续阻断）：
-
-```
-⚠️ 口令验证 3 次失败。建议重新生成签名密钥（无口令保护）：
-  agent-sec-cli skill-ledger init-keys --force
-```
-
-执行重新生成后，从 Phase 3.1 重新开始对该 Skill 执行 certify。
-
-> **安全提示**：口令仅通过 `SKILL_LEDGER_PASSPHRASE` 环境变量传递，**禁止**将口令写入命令行参数、日志或对话输出中。建议用户在 shell profile（如 `~/.bashrc`、`~/.zshrc`）中持久化该环境变量。
-
-### 3.2 解析输出
-
-`certify` 输出 JSON 到 stdout，解析关键字段：
-
-| 字段 | 说明 |
-|------|------|
-| `versionId` | 版本号，如 `v000001` |
-| `scanStatus` | 聚合状态：`pass` / `warn` / `deny` / `none` |
-| `newVersion` | 布尔值，文件变更时为 `true`，未变更时为 `false` |
-| `skillName` | Skill 名称（目录名） |
-| `createdAt` | 版本创建时间（ISO 8601 UTC） |
-| `updatedAt` | 最近更新时间（ISO 8601 UTC） |
-| `fileCount` | 跟踪文件数 |
-| `manifestHash` | 状态指纹（SHA-256），取前 7 位十六进制显示 |
-
-### 3.3 Phase 3 状态输出
-
-认证过程中，每个 Skill 完成后输出单行进度：
-
-```
-[skill-ledger] Phase 3: 认证 3 个 Skill...
-[skill-ledger] Phase 3: github — 认证完成 (v000001, pass)
-[skill-ledger] Phase 3: my-tool — 认证完成 (v000002, warn)
-[skill-ledger] Phase 3: dev-helper — 认证完成 (v000003, pass)
-```
-
-### 3.4 最终报告
-
-全部 Phase 完成后，输出唯一的**执行报告**（本次执行的最终交付物）。报告包含一张汇总表和一段安全结论，覆盖所有目标 Skill（含跳过的）以呈现完整视图：
-
-```
-[skill-ledger] 执行报告
-┌─────────────┬────────────┬──────────┬────────────┬─────────────────────┬────────┬──────────────────────┐
-│ Skill       │ 状态        │ 版本     │ 状态指纹    │ 最近更新时间         │ 文件数  │ 摘要                 │
-├─────────────┼────────────┼──────────┼────────────┼─────────────────────┼────────┼──────────────────────┤
-│ github      │ ✅ pass    │ v000001  │ 5e2d1a8    │ 2025-04-23T15:30:00Z│ 5      │ 无风险发现            │
-│ my-tool     │ ⚠️ warn   │ v000002  │ 9c3f7b1    │ 2025-04-23T15:31:00Z│ 3      │ 2 条 warn            │
-│ dev-helper  │ ✅ pass    │ v000003  │ 2a6e0d4    │ 2025-04-23T15:32:00Z│ 12     │ 无风险发现            │
-│ docker      │ ✅ pass    │ v000002  │ 7d4e9b0    │ 2025-04-19T08:15:00Z│ 8      │ 沿用上次结果          │
-└─────────────┴────────────┴──────────┴────────────┴─────────────────────┴────────┴──────────────────────┘
-
-安全结论:
-  ✅ pass: 3    ⚠️ warn: 1    总计: 4 个 Skill
-
-  ⚠️ my-tool — 存在 2 条低风险发现:
-    • obfuscated-code — 超长单行代码 (lib/encoder.js:203)
-    • suspicious-network — 直连非标准端口 IP (net/client.py:88)
-
-  建议: 审查上述发现，修复后重新扫描可将状态更新为 pass。
-```
-
-> **安全结论**中，仅对非 `pass` 状态的 Skill 展开 findings 详情（规则 ID + 描述 + 文件位置）。`deny` 状态以 🚨 标注并建议立即修复或禁用；`warn` 状态以 ⚠️ 标注并建议审查。跳过的 Skill（如上例 docker）在摘要列标记 "沿用上次结果"。
->
-> **摘要列填充规则**（与安全状态报告一致）：`pass` → "无风险发现"；`warn` → "N 条 warn"；`deny` → "N 条 deny, M 条 warn"；跳过 → "沿用上次结果"。
+按“统一报告格式”输出最终安全报告，标题使用 `[skill-ledger] 深度扫描完成`。若本轮是显式深度扫描请求，结论中说明已完成深度扫描认证；若本轮是在快速扫描或安装后认证之后继续的深度扫描，结论中说明快速扫描和深度扫描均已完成。
 
 ---
 
-## 错误处理
+## 安装后认证
 
-| 场景 | 处置 |
-|------|------|
-| CLI 命令返回非零退出码 | 输出 stderr 内容，标记该 Skill 为失败，继续处理下一个 |
-| findings 文件 JSON 解析失败 | 标记为扫描失败，不执行 certify |
-| certify 签名失败（口令错误） | 按 Phase 3「口令处理」流程：建议用户设置 `SKILL_LEDGER_PASSPHRASE` 环境变量后重试（最多 3 次）；3 次均失败则建议 `init-keys --force` 重新生成无口令密钥 |
-| 目标目录不存在 | 跳过该 Skill，告警 |
-| 批量模式 `check --all` 返回空结果 | 引导用户创建配置或切换为单个模式 |
+安装后认证是安装请求的内建后续步骤，而不是一个需要用户主动再次触发的独立功能。
+
+触发条件：
+
+- 用户要求 agent 安装、更新、导入或启用某个 Skill。
+- agent 已经成功把 Skill 写入或启用到本地可用位置。
+
+满足触发条件后，必须立即执行以下流程；不要先问用户是否需要安全扫描：
+
+1. 定位最终本地 Skill 目录。
+2. 确认目录存在且包含 `SKILL.md`。
+3. 若无法确认目录或缺少 `SKILL.md`，不要扫描，报告：
+
+```text
+未执行安全认证：无法确定本地 Skill 目录。
+```
+
+4. 若目录有效，执行 Phase 1 的环境准备，然后直接执行 Phase 2 快速扫描。
+5. 快速扫描结束后，按“统一报告格式”输出 `[skill-ledger] 安装后认证完成` 报告。
+6. 报告后再询问用户是否执行 Phase 3 深度扫描；若用户确认，深度扫描完成后也按“统一报告格式”输出 `[skill-ledger] 深度扫描完成` 报告。
+
+不要在代码层面为安装动作增加强制触发。该要求由本 Skill 指令约束 agent 行为。
 
 ---
 
-## 附加资源
+## 报告规则
 
-- 扫描协议: [references/skill-vetter-protocol.md](references/skill-vetter-protocol.md)
-- 设计文档: Skill 安全技术方案（skill-ledger）
-- CLI 子命令: `agent-sec-cli skill-ledger --help`
+- 用户报告只使用“状态查看”“快速扫描”“深度扫描”这些概念。
+- 不在用户报告正文中列出快速扫描内部扫描器名称。
+- 安装请求完成后，不要只报告“安装成功”；必须继续给出快速扫描认证结果，或说明认证未执行的具体原因。
+- 不输出长篇原始 JSON；只摘取状态、版本、路径、计数和关键 findings。
+- 对 `none` 和 `drifted`，提示需要用户确认后使用，并建议完成快速扫描认证。
+- 对 `deny` 和 `tampered`，用更强烈语气说明风险，但不要擅自删除或修改 Skill。
+- CLI 失败、JSON 解析失败、路径不可确定时，明确说明未完成哪一步以及原因。

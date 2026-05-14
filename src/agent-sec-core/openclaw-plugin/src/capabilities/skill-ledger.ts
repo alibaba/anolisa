@@ -28,15 +28,23 @@ const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 // ---------------------------------------------------------------------------
-// Warning messages — per-status, design doc §4
+// Status messages and confirmation policy
 // ---------------------------------------------------------------------------
 
 const WARNING_MESSAGES: Record<string, (name: string) => string> = {
   warn: (n) => `⚠️ Skill '${n}' has low-risk findings — review recommended`,
-  drifted: (n) => `⚠️ Skill '${n}' content has changed since last scan`,
-  none: (n) => `⚠️ Skill '${n}' has not been security-scanned yet`,
-  deny: (n) => `🚨 Skill '${n}' has high-risk findings — immediate review recommended`,
-  tampered: (n) => `🚨 Skill '${n}' metadata signature verification failed`,
+  drifted: (n) => `⚠️ Skill '${n}' content has changed since last scan — confirm before using and run a fresh scan when possible`,
+  none: (n) => `⚠️ Skill '${n}' has not been security-scanned yet — confirm before using`,
+  error: (n) => `⚠️ Skill '${n}' check failed — invalid path or missing SKILL.md`,
+  deny: (n) => `🚨 Skill '${n}' has high-risk findings — confirm only if you trust the skill and intend to review it`,
+  tampered: (n) => `🚨 Skill '${n}' metadata signature verification failed — confirm only if you trust the skill source`,
+};
+
+const CONFIRMATION_SEVERITY: Record<string, "warning" | "critical"> = {
+  none: "warning",
+  drifted: "warning",
+  deny: "critical",
+  tampered: "critical",
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +97,16 @@ function extractSkillPath(
 /** Resolve skill_dir from the matched SKILL.md path. */
 function resolveSkillDir(skillMdPath: string): string {
   return resolve(dirname(skillMdPath));
+}
+
+function formatSkillLedgerMessage(status: string, skillName: string): string {
+  const warnFn = WARNING_MESSAGES[status];
+  if (warnFn) return warnFn(skillName);
+  return `⚠️ Skill '${skillName}' has unknown status '${status}'`;
+}
+
+function confirmationSeverity(status: string): "warning" | "critical" | undefined {
+  return CONFIRMATION_SEVERITY[status];
 }
 
 // ---------------------------------------------------------------------------
@@ -167,24 +185,28 @@ export const skillLedger: SecurityCapability = {
 
         const status = checkResult.status ?? "unknown";
 
-        // Emit warning for non-pass statuses
+        // Emit warnings for non-pass statuses and require confirmation for
+        // unscanned, changed, high-risk, or tampered skills.
         if (status === "pass") {
-          api.logger.info(`[skill-ledger] ✅ pass — '${skillName}'`);
+          return undefined;
         } else {
-          const warnFn = WARNING_MESSAGES[status];
-          if (warnFn) {
-            api.logger.warn(`[skill-ledger] ${warnFn(skillName)}`);
-          } else {
-            api.logger.warn(`[skill-ledger] unknown status '${status}' for '${skillName}'`);
+          const message = formatSkillLedgerMessage(status, skillName);
+          api.logger.warn(`[skill-ledger] ${message}`);
+
+          const severity = confirmationSeverity(status);
+          if (severity) {
+            return {
+              requireApproval: {
+                title: "Skill Ledger Security Check",
+                description: message,
+                severity,
+              },
+            };
           }
         }
 
-        // Always allow — warning only, never block.
-        //
-        // TODO: When non-pass, display a user-visible warning while still
-        // allowing execution (matching the cosh hook's "allow + reason"
-        // semantics).  Use `requireApproval` with `severity: "warning"` to
-        // surface the message, similar to code-scan's warn path.
+        // For warn/error/unknown states, log and allow. Fail-open behavior for
+        // CLI/runtime failures remains handled by the catch/parse branches.
         return undefined;
       } catch (err) {
         // Fail-open: uncaught errors must never block tool calls
