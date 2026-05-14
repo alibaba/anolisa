@@ -1,5 +1,6 @@
 """Abstract base class for all security middleware backends."""
 
+import copy
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -14,3 +15,22 @@ class BaseBackend(ABC):
     def execute(self, ctx: RequestContext, **kwargs: Any) -> ActionResult:
         """Execute the backend action and return a unified ActionResult."""
         pass
+
+    def build_event_details(
+        self, result: ActionResult, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build success audit details for the lifecycle event."""
+        return {
+            "request": copy.deepcopy(kwargs),
+            "result": copy.deepcopy(result.data),
+        }
+
+    def build_error_details(
+        self, exception: Exception, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build failure audit details for the lifecycle event."""
+        return {
+            "request": copy.deepcopy(kwargs),
+            "error": str(exception),
+            "error_type": type(exception).__name__,
+        }

@@ -1487,3 +1487,40 @@ class TestSkillLedgerMixed:
         harden_pos = output.index("--- Hardening ---")
         ledger_pos = output.index("--- Skill Ledger ---")
         assert harden_pos < ledger_pos
+
+
+# ---------------------------------------------------------------------------
+# Test: pii_scan summary
+# ---------------------------------------------------------------------------
+
+
+class TestPiiScanSummary:
+    def test_pii_scan_section_and_deny_posture(self):
+        events = [
+            _make_event(
+                event_type="pii_scan",
+                category="pii_scan",
+                result="succeeded",
+                details={
+                    "request": {"source": "tool_output", "text_length": 32},
+                    "result": {
+                        "ok": True,
+                        "verdict": "deny",
+                        "summary": {
+                            "total": 1,
+                            "by_type": {"api_key": 1},
+                            "by_category": {"credential": 1},
+                            "by_severity": {"deny": 1},
+                        },
+                        "findings": [],
+                    },
+                },
+            )
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert "System Status: Needs attention" in output
+        assert "--- PII Scan ---" in output
+        assert "Verdict breakdown: deny: 1" in output
+        assert "Finding types: api_key: 1" in output

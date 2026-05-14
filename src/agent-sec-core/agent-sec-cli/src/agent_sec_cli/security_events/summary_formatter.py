@@ -42,6 +42,7 @@ def format_summary(events: list[SecurityEvent], time_label: str) -> str:
     code_scan_events = by_category.get("code_scan", [])
     sandbox_events = by_category.get("sandbox", [])
     prompt_scan_events = by_category.get("prompt_scan", [])
+    pii_scan_events = by_category.get("pii_scan", [])
     skill_ledger_events = by_category.get("skill_ledger", [])
 
     if harden_events:
@@ -54,6 +55,8 @@ def format_summary(events: list[SecurityEvent], time_label: str) -> str:
         sections.append(_summarize_sandbox(sandbox_events))
     if prompt_scan_events:
         sections.append(_summarize_prompt_scan(prompt_scan_events))
+    if pii_scan_events:
+        sections.append(_summarize_pii_scan(pii_scan_events))
     if skill_ledger_events:
         sections.append(_summarize_skill_ledger(skill_ledger_events))
 
@@ -67,6 +70,7 @@ def format_summary(events: list[SecurityEvent], time_label: str) -> str:
         harden_events,
         asset_events,
         prompt_scan_events,
+        pii_scan_events,
         ledger_statuses,
         time_label,
     )
@@ -349,6 +353,42 @@ def _summarize_prompt_scan(events: list[SecurityEvent]) -> str:
     return "\n".join(lines)
 
 
+def _summarize_pii_scan(events: list[SecurityEvent]) -> str:
+    """Summarize pii_scan category events."""
+    lines = ["--- PII Scan ---"]
+
+    ok_count = 0
+    verdict_counts: dict[str, int] = defaultdict(int)
+    type_counts: dict[str, int] = defaultdict(int)
+
+    for e in events:
+        if e.result == "succeeded":
+            ok_count += 1
+            result = _get_result(e)
+            verdict_counts[result.get("verdict", "unknown")] += 1
+            summary = result.get("summary", {})
+            by_type = summary.get("by_type", {}) if isinstance(summary, dict) else {}
+            if isinstance(by_type, dict):
+                for pii_type, count in by_type.items():
+                    if isinstance(count, int):
+                        type_counts[str(pii_type)] += count
+
+    fail_count = len(events) - ok_count
+    lines.append(
+        f"  Scans performed: {len(events)} (succeeded: {ok_count}, failed: {fail_count})"
+    )
+
+    if verdict_counts:
+        parts = [f"{v}: {c}" for v, c in sorted(verdict_counts.items())]
+        lines.append(f"  Verdict breakdown: {', '.join(parts)}")
+
+    if type_counts:
+        parts = [f"{t}: {c}" for t, c in sorted(type_counts.items())]
+        lines.append(f"  Finding types: {', '.join(parts)}")
+
+    return "\n".join(lines)
+
+
 def _summarize_skill_ledger(events: list[SecurityEvent]) -> str:
     """Summarize skill_ledger category events.
 
@@ -473,6 +513,7 @@ def _compute_posture(
     hardening_events: list[SecurityEvent],
     verify_events: list[SecurityEvent],
     prompt_scan_events: list[SecurityEvent],
+    pii_scan_events: list[SecurityEvent],
     ledger_statuses: dict[str, int],
     time_label: str,
 ) -> str:
@@ -513,6 +554,14 @@ def _compute_posture(
 
     # --- Prompt Scan (any DENY verdict) ---
     for e in prompt_scan_events:
+        if e.result == "succeeded":
+            result = _get_result(e)
+            if result.get("verdict") == "deny":
+                needs_attention = True
+                break
+
+    # --- PII Scan (any DENY verdict) ---
+    for e in pii_scan_events:
         if e.result == "succeeded":
             result = _get_result(e)
             if result.get("verdict") == "deny":

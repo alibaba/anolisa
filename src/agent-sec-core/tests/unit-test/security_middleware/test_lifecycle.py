@@ -1,8 +1,11 @@
 """Unit tests for security_middleware.lifecycle — pre/post/error hooks."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
+from agent_sec_cli.security_middleware.backends.base import BaseBackend
+from agent_sec_cli.security_middleware.backends.pii_scan import PiiScanBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.lifecycle import (
     _category_for,
@@ -11,6 +14,11 @@ from agent_sec_cli.security_middleware.lifecycle import (
     pre_action,
 )
 from agent_sec_cli.security_middleware.result import ActionResult
+
+
+class DummyBackend(BaseBackend):
+    def execute(self, ctx: RequestContext, **kwargs: Any) -> ActionResult:
+        return ActionResult(success=True, data={})
 
 
 class TestCategoryMapping(unittest.TestCase):
@@ -25,6 +33,9 @@ class TestCategoryMapping(unittest.TestCase):
 
     def test_summary_maps_to_summary(self):
         self.assertEqual(_category_for("summary"), "summary")
+
+    def test_pii_scan_maps_to_pii_scan(self):
+        self.assertEqual(_category_for("pii_scan"), "pii_scan")
 
     def test_unknown_action_falls_back_to_action_name(self):
         self.assertEqual(_category_for("custom_thing"), "custom_thing")
@@ -43,7 +54,7 @@ class TestPostAction(unittest.TestCase):
     def test_post_action_logs_event(self, mock_log):
         ctx = RequestContext(action="harden", trace_id="t-123")
         result = ActionResult(success=True, data={"passed": 5})
-        post_action(ctx, result, {"mode": "scan"})
+        post_action(ctx, result, {"mode": "scan"}, DummyBackend())
 
         mock_log.assert_called_once()
         event = mock_log.call_args[0][0]
@@ -53,13 +64,61 @@ class TestPostAction(unittest.TestCase):
         self.assertIn("request", event.details)
         self.assertIn("result", event.details)
 
+    @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
+    def test_pii_scan_event_redacts_request_and_result(self, mock_log):
+        ctx = RequestContext(action="pii_scan", trace_id="t-pii")
+        result = ActionResult(
+            success=True,
+            data={
+                "ok": True,
+                "verdict": "deny",
+                "summary": {"total": 1},
+                "findings": [
+                    {
+                        "type": "api_key",
+                        "category": "credential",
+                        "severity": "deny",
+                        "confidence": 0.99,
+                        "evidence_redacted": "sk-a...[REDACTED]...7890",
+                        "span": {"start": 8, "end": 40},
+                        "metadata": {"field": "api_key"},
+                        "raw_evidence": "sk-abcdefghijklmnopqrstuvwxyz7890",
+                    }
+                ],
+                "redacted_text": "api_key=sk-a...[REDACTED]...7890",
+                "elapsed_ms": 1,
+            },
+        )
+        post_action(
+            ctx,
+            result,
+            {
+                "text": "api_key=sk-abcdefghijklmnopqrstuvwxyz7890",
+                "source": "manual",
+                "raw_evidence": True,
+            },
+            PiiScanBackend(),
+        )
+
+        event = mock_log.call_args[0][0]
+        details = event.details
+        self.assertNotIn("text", details["request"])
+        self.assertEqual(details["request"]["source"], "manual")
+        self.assertIn("text_sha256", details["request"])
+        self.assertNotIn("redacted_text", details["result"])
+        self.assertNotIn("raw_evidence", details["result"]["findings"][0])
+        self.assertNotIn(
+            "sk-abcdefghijklmnopqrstuvwxyz7890",
+            str(details),
+        )
+
 
 class TestOnError(unittest.TestCase):
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_on_error_logs_event(self, mock_log):
         ctx = RequestContext(action="verify", trace_id="t-456")
         exc = RuntimeError("test error")
-        on_error(ctx, exc, {"skill": "/path"})
+        on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
 
         mock_log.assert_called_once()
         event = mock_log.call_args[0][0]
@@ -69,6 +128,21 @@ class TestOnError(unittest.TestCase):
         self.assertIn("error", event.details)
         self.assertEqual(event.details["error"], "test error")
         self.assertEqual(event.details["error_type"], "RuntimeError")
+
+    @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
+    def test_pii_scan_error_redacts_request(self, mock_log):
+        ctx = RequestContext(action="pii_scan", trace_id="t-pii-error")
+        exc = RuntimeError("boom")
+        on_error(
+            ctx,
+            exc,
+            {"text": "alice@example.com", "source": "user_input"},
+            PiiScanBackend(),
+        )
+
+        event = mock_log.call_args[0][0]
+        self.assertNotIn("text", event.details["request"])
+        self.assertNotIn("alice@example.com", str(event.details))
 
 
 if __name__ == "__main__":
