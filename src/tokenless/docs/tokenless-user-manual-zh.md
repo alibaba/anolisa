@@ -52,8 +52,8 @@
 
 | 集成方式 | 命令重写 | 响应压缩 | Schema 压缩 |
 |---------|---------|---------|------------|
-| OpenClaw 插件 | ✅ | ✅ | ⏳ (受限于 OpenClaw hook 系统) |
-| Copilot Shell Hook | ✅ | ✅ | ⏳ (等待协议扩展) |
+| OpenClaw 插件 | ✅ | ✅ | ✅ |
+| Copilot Shell Hook | ✅ | ✅ | ✅ |
 
 ### 1.3 架构概览
 
@@ -62,12 +62,10 @@ Token-Less/
 ├── crates/tokenless-schema/   # 核心库：SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI 二进制：tokenless 命令
 ├── crates/tokenless-stats/    # 统计记录库（SQLite）
-├── openclaw/                  # OpenClaw 插件（TypeScript）
-├── hooks/copilot-shell/       # Copilot Shell Hooks
+├── adapters/tokenless/        # FHS 适配器包（manifest, common, cosh, openclaw）
 ├── third_party/rtk/           # RTK 子模块（命令重写引擎）
 ├── third_party/toon/          # TOON 子模块（二进制 JSON 编解码器）
 ├── Makefile                   # 统一构建系统
-├── scripts/install.sh         # 一键安装脚本
 └── docs/                      # 文档
 ```
 
@@ -248,7 +246,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 RPM 包安装后会自动执行以下配置：
 
 1. **二进制文件**：安装到 `/usr/bin/tokenless` 和 `/usr/bin/rtk`
-2. **Hook 脚本**：RPM 安装到 `/usr/share/tokenless/adapters/cosh/`，源码安装到 `~/.local/share/tokenless/adapters/cosh/`
+2. **Hook 脚本**：RPM 安装到 `/usr/share/anolisa/adapters/tokenless/common/hooks/`，源码安装到 `~/.local/share/anolisa/adapters/tokenless/common/hooks/`
 3. **OpenClaw 插件**：自动检测并配置（如果已安装 OpenClaw）
 4. **Copilot Shell**：自动检测并配置（如果已安装 Copilot Shell）
 
@@ -261,7 +259,7 @@ which tokenless
 tokenless --version
 
 # 检查 Hook 脚本（RPM 安装位置）
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 
 # 检查 OpenClaw 插件配置
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
@@ -281,23 +279,14 @@ make setup
 ### 4.3 方法三：使用安装脚本
 
 ```bash
-# 自动检测安装源并配置
-./scripts/install.sh
+# 完整安装：构建 + 安装 + 所有适配器
+make setup
 
-# 强制源码安装
-./scripts/install.sh --source
+# 仅安装 OpenClaw 插件（需要 openclaw CLI）
+make openclaw-install
 
-# RPM 安装后的手动配置
-./scripts/install.sh --install
-
-# 卸载清理
-./scripts/install.sh --uninstall
-
-# 仅手动配置 OpenClaw 插件
-./scripts/install.sh --openclaw
-
-# 仅手动配置 copilot-shell hooks
-./scripts/install.sh --cosh
+# 仅安装 copilot-shell hooks
+make cosh-install
 ```
 
 ### 4.4 方法四：分步安装
@@ -332,10 +321,10 @@ make install BIN_DIR=/usr/local/bin
 make openclaw-install
 
 # 自定义插件路径
-make openclaw-install OPENCLAW_DIR=/usr/share/tokenless/adapters/openclaw
+make openclaw-install OPENCLAW_DIR=/usr/share/anolisa/adapters/tokenless/openclaw
 
 # 手动安装
-cp -r openclaw/ /usr/share/tokenless/adapters/openclaw/
+cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/openclaw/
 ```
 
 #### 4.4.4 部署 Copilot Shell Hook
@@ -345,9 +334,9 @@ cp -r openclaw/ /usr/share/tokenless/adapters/openclaw/
 make copilot-shell-install
 
 # 手动安装
-mkdir -p ~/.local/share/tokenless/adapters/cosh
-cp hooks/copilot-shell/tokenless-*.sh ~/.local/share/tokenless/adapters/cosh/
-chmod +x ~/.local/share/tokenless/adapters/cosh/tokenless-*.sh
+mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
+cp adapters/tokenless/common/hooks/*_hook.py ~/.local/share/anolisa/adapters/tokenless/common/hooks/
+chmod +x ~/.local/share/anolisa/adapters/tokenless/common/hooks/*_hook.py
 ```
 
 ---
@@ -418,15 +407,11 @@ RPM 包安装后，安装脚本会自动检测并配置已安装的平台。
 
 #### 5.2.2 手动触发配置
 
-如果 RPM 安装后需要重新配置，运行：
+如果 RPM 安装后需要配置 OpenClaw 插件，运行：
 
 ```bash
-# 完整自动检测和配置
-/usr/share/tokenless/scripts/install.sh --install
-
-# 或仅配置单个平台
-/usr/share/tokenless/scripts/install.sh --cosh      # 仅 copilot-shell hooks
-/usr/share/tokenless/scripts/install.sh --openclaw  # 仅 OpenClaw 插件
+# 安装 OpenClaw 插件（需要 openclaw CLI）
+/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
 ```
 
 #### 5.2.3 验证自动配置
@@ -441,7 +426,7 @@ cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
 # 应包含 PreToolUse, PostToolUse, BeforeModel
 
 # 检查 Hook 脚本
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 ```
 
 ### 5.3 Copilot Shell 配置
@@ -452,14 +437,14 @@ ls -la /usr/share/tokenless/adapters/cosh/
 
 | 安装方式 | Hook 脚本位置 |
 |---------|--------------|
-| RPM 安装 | `/usr/share/tokenless/adapters/cosh/` |
-| 源码安装 | `~/.local/share/tokenless/adapters/cosh/` |
+| RPM 安装 | `/usr/share/anolisa/adapters/tokenless/common/hooks/` |
+| 源码安装 | `~/.local/share/anolisa/adapters/tokenless/common/hooks/` |
 
 | 脚本 | 功能 | Hook 事件 |
 |------|------|----------|
-| `tokenless-rewrite.sh` | 命令重写 | PreToolUse |
-| `tokenless-compress-response.sh` | 响应压缩 + TOON 压缩流水线 | PostToolUse |
-| `tokenless-compress-schema.sh` | Schema 压缩 | BeforeModel |
+| `rewrite_hook.py` | 命令重写 | PreToolUse |
+| `compress_response_hook.py` | 响应压缩 + TOON 压缩流水线 | PostToolUse |
+| `compress_schema_hook.py` | Schema 压缩 | BeforeModel |
 
 #### 5.3.2 配置 settings.json
 
@@ -475,7 +460,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -487,7 +472,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -499,7 +484,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -520,7 +505,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -532,7 +517,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -544,7 +529,7 @@ ls -la /usr/share/tokenless/adapters/cosh/
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -653,7 +638,7 @@ INPUT="{\"tool_name\":\"run_shell_command\",\"tool_response\":${MOCK_RESPONSE}}"
 
 echo "=== 原始响应大小：${#INPUT} 字节 ==="
 
-RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/tokenless-compress-response.sh 2>/dev/null)
+RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/compress_response_hook.py 2>/dev/null)
 
 echo "=== 结果 ==="
 echo "$RESULT" | jq '.'
@@ -708,16 +693,16 @@ grep "firePostToolUseEvent\|PostToolUse.*completed" ~/.copilot-shell/debug/*.log
 
 ```bash
 # 测试命令重写（源码目录）
-echo '{"tool_input":{"command":"cargo test"}}' | bash hooks/copilot-shell/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash adapters/tokenless/common/hooks/rewrite_hook.py
 
 # 测试响应压缩（源码目录）
-echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash hooks/copilot-shell/tokenless-compress-response.sh
+echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash adapters/tokenless/common/hooks/compress_response_hook.py
 
 # 测试 Schema 压缩（源码目录）
-echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash hooks/copilot-shell/tokenless-compress-schema.sh
+echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash adapters/tokenless/common/hooks/compress_schema_hook.py
 
 # 测试已安装的 Hook（RPM 安装）
-echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py
 ```
 
 ### 6.2 测试 CLI
@@ -757,10 +742,10 @@ tokenless --version
 rtk --version
 
 # 检查 Hook 脚本（RPM 安装）
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 
 # 检查 Hook 脚本（源码安装）
-ls -la ~/.local/share/tokenless/adapters/cosh/
+ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
 ```
 
 ---
@@ -841,11 +826,14 @@ jq --version
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
 | 统计记录器（SQLite） | `crates/tokenless-stats/src/recorder.rs` |
 | 统计记录类型 | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw 插件 | `openclaw/index.ts` |
-| OpenClaw 插件配置 | `openclaw/openclaw.plugin.json` |
-| Copilot Hook — 命令重写 | `hooks/copilot-shell/tokenless-rewrite.sh` |
-| Copilot Hook — 响应压缩 | `hooks/copilot-shell/tokenless-compress-response.sh` |
-| Copilot Hook — Schema 压缩 | `hooks/copilot-shell/tokenless-compress-schema.sh` |
+| OpenClaw 插件 | `adapters/tokenless/openclaw/index.ts` |
+| OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
+| Copilot Hook — 命令重写 | `adapters/tokenless/common/hooks/rewrite_hook.py` |
+| Copilot Hook — 响应压缩 | `adapters/tokenless/common/hooks/compress_response_hook.py` |
+| Copilot Hook — Schema 压缩 | `adapters/tokenless/common/hooks/compress_schema_hook.py` |
+| Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
+| 工具依赖 spec | `adapters/tokenless/common/tool-ready-spec.json` |
+| 自动修复脚本 | `adapters/tokenless/common/tokenless-env-fix.sh` |
 | TOON 编解码器（子模块） | `third_party/toon/` |
 | 统计数据库（默认） | `~/.tokenless/stats.db` |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |

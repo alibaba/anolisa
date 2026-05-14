@@ -669,8 +669,28 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
 /// Auto-fix missing dependencies via tokenless-env-fix.sh.
 fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let home = super::get_home_dir();
-    let fix_script = std::env::var("TOKENLESS_ENV_FIX_SCRIPT")
-        .unwrap_or_else(|_| format!("{}/.tokenless/tokenless-env-fix.sh", home));
+    let fix_script_env = std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok();
+    let fix_script_candidates = [
+        fix_script_env,
+        Some(format!("{}/.tokenless/tokenless-env-fix.sh", home)),
+        Some(format!(
+            "{}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh",
+            home
+        )),
+        Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".to_string()),
+        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
+        Some(format!(
+            "{}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh",
+            home
+        )),
+        Some("/usr/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".to_string()),
+    ];
+    let fix_script = fix_script_candidates
+        .iter()
+        .flatten()
+        .find(|p| std::path::Path::new(p).exists())
+        .cloned()
+        .unwrap_or_else(|| format!("{}/.tokenless/tokenless-env-fix.sh", home));
 
     // Build JSON array of missing deps
     let deps_json: Vec<Value> = missing_deps
@@ -774,8 +794,20 @@ fn find_spec_path() -> PathBuf {
             "{}/.tokenless/tool-ready-spec.json",
             home
         ))),
+        Some(PathBuf::from(format!(
+            "{}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
+            home
+        ))),
         Some(PathBuf::from(
-            "/usr/share/tokenless/core/env-check/tool-ready-spec.json",
+            "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
+        )),
+        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
+        Some(PathBuf::from(format!(
+            "{}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json",
+            home
+        ))),
+        Some(PathBuf::from(
+            "/usr/share/anolisa/adapters/tokenless/tool-ready-spec.json",
         )),
     ];
 
@@ -1054,7 +1086,7 @@ mod tests {
             "npm_name": "rtk-npm",
             "use_npx": true,
             "fallback": [
-                {"method": "symlink", "binary": "rtk", "source": "/usr/share/tokenless/bin/rtk"}
+                {"method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk"}
             ]
         }));
         assert_eq!(dep.binary, "rtk");
@@ -1068,7 +1100,7 @@ mod tests {
         assert_eq!(dep.fallback[0].method, "symlink");
         assert_eq!(
             dep.fallback[0].source.as_deref(),
-            Some("/usr/share/tokenless/bin/rtk")
+            Some("/usr/libexec/anolisa/tokenless/rtk")
         );
     }
 

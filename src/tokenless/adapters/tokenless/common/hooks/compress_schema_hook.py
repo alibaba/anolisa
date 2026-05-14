@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Cosh hook for schema compression.
+"""Tokenless schema compression hook.
 
-Reads a cosh BeforeModel JSON from stdin, extracts the tools array,
+Reads a BeforeModel JSON from stdin, extracts the tools array,
 invokes ``tokenless compress-schema --batch`` via subprocess, and
-writes a cosh HookOutput JSON to stdout.
+writes a HookOutput JSON to stdout.
 
 Hook point: **BeforeModel**
 
-This script is intentionally self-contained — it does NOT import any
-tokenless package.  All it needs is the standard library and the
-tokenless binary on $PATH.
+The agent ID is read from the TOKENLESS_AGENT_ID environment variable
+(set by the install action script).
 """
 
 import json
@@ -20,7 +19,7 @@ import sys
 
 # -- constants ---------------------------------------------------------------
 
-_AGENT_ID = "copilot-shell"
+_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 
 
 # -- helpers -----------------------------------------------------------------

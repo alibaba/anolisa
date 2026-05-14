@@ -11,6 +11,6 @@
     "rtk": ">=0.28.0",
     "tokenless": ">=0.1.0"
   },
-  "files": ["index.js", "openclaw.plugin.json", "README.md"],
+  "files": ["index.js", "openclaw.plugin.json"],
   "license": "MIT"
 }

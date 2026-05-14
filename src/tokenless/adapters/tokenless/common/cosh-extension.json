@@ -1,6 +1,6 @@
 {
   "name": "tokenless",
-  "version": "0.1.0",
+  "version": "0.3.2",
   "contextFileName": "COPILOT.md",
   "hooks": {
     "PreToolUse": [
@@ -13,7 +13,8 @@
             "name": "tokenless-tool-ready",
             "description": "Pre-checks tool environment readiness, auto-fixes, and provides skip-retry guidance",
             "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
-            "timeout": 10000
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
       },
@@ -25,7 +26,8 @@
             "name": "tokenless-rewrite",
             "description": "Rewrites shell commands via rtk for token savings",
             "command": "python3 ${extensionPath}/hooks/rewrite_hook.py",
-            "timeout": 5000
+            "timeout": 5000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
       }
@@ -38,7 +40,8 @@
             "name": "tokenless-compress-response",
             "description": "Compresses tool responses and encodes to TOON format",
             "command": "python3 ${extensionPath}/hooks/compress_response_hook.py",
-            "timeout": 10000
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
       }
@@ -51,7 +54,8 @@
             "name": "tokenless-compress-schema",
             "description": "Compresses tool schema definitions for token savings",
             "command": "python3 ${extensionPath}/hooks/compress_schema_hook.py",
-            "timeout": 10000
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
       }

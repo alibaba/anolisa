@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tokenless-hook-version: 9
-# Token-Less copilot-shell hook — Tool Ready environment pre-check.
+# Token-Less Tool Ready environment pre-check.
 #
 # Hook event: PreToolUse (matcher: "" — matches all tools)
 # Requires: jq
@@ -21,15 +21,17 @@ log_v() { [ -n "$VERBOSE" ] && echo "[tokenless tool-ready] $1" >&2 || true; }
 # --- Dependency check (fail-open) ---
 if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 
-# --- Resolve paths (search shared core location first, then local fallbacks) ---
+# --- Resolve paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SPEC_FILE=""
 for candidate in \
     "${TOKENLESS_TOOL_READY_SPEC:-}" \
+    "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
+    "$HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
+    "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
     "$HOME/.tokenless/tool-ready-spec.json" \
-    "/usr/share/tokenless/core/env-check/tool-ready-spec.json" \
-    "${SCRIPT_DIR}/tool-ready-spec.json"; do
+    "${SCRIPT_DIR}/../tool-ready-spec.json"; do
     if [ -n "$candidate" ] && [ -f "$candidate" ]; then
         SPEC_FILE="$candidate"
         break
@@ -39,9 +41,11 @@ done
 FIX_SCRIPT=""
 for candidate in \
     "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
+    "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
+    "$HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
+    "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "$HOME/.tokenless/tokenless-env-fix.sh" \
-    "/usr/share/tokenless/core/env-check/tokenless-env-fix.sh" \
-    "${SCRIPT_DIR}/tokenless-env-fix.sh"; do
+    "${SCRIPT_DIR}/../tokenless-env-fix.sh"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
         FIX_SCRIPT="$candidate"
         break
@@ -54,7 +58,6 @@ INPUT=$(cat || { exit 0; })
 # ============================================================================
 # Phase 1: LOOKUP — Find tool in config dictionary
 # ============================================================================
-# 如果 toolready 字典没有配置，查找不到对应 tool，则正常跳过，继续。
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo '')
 log_v "Phase 1 LOOKUP: tool_name=$TOOL_NAME"
@@ -99,21 +102,19 @@ log_v "Phase 1: $TOOL_NAME → $SPEC_KEY found in spec dict"
 # ============================================================================
 # Phase 2: CHECK — Scan system readiness
 # ============================================================================
-# 去 toolready 配置字典里查找工具 ready 的检查方法，检查系统是否已经 ready。
-# 如果已经 ready，则继续（静默退出）。
 
 # --- Normalize deps to object format ---
 # Supports both string ("jq") and object ({binary:"jq",...}) formats.
-# String defaults: manager="apt", package=binary name.
+# String defaults: manager="rpm" (auto-detects yum/dnf/apt/apk at runtime).
 # Handles version constraints: "rtk>=0.35" → {binary:"rtk", version:">=0.35", ...}
 
 normalize_deps() {
   local array="$1"
   echo "$array" | jq -c '[.[] | if type == "string" then
     (if (test(">=") or test("[^<]<[^=]") or test("=")) then
-      {binary: (capture("^(?<b>[^>=<]+)") | .b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)") | .b), manager: "apt"}
+      {binary: (capture("^(?<b>[^>=<]+)") | .b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)") | .b), manager: "rpm"}
     else
-      {binary: ., package: ., manager: "apt"}
+      {binary: ., package: ., manager: "rpm"}
     end)
   else . end]' 2>/dev/null || echo '[]'
 }
@@ -247,7 +248,6 @@ fi
 # ============================================================================
 # Phase 3: FIX — Auto-install missing dependencies
 # ============================================================================
-# 如果没有 ready，则进一步依据配置字典里的安装配置方法进行工具安装。
 
 missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
 
@@ -266,7 +266,6 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     done
 
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
-        # All missing deps installed successfully
         exit 0
     fi
 
@@ -274,9 +273,9 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     # If only recommended still missing but required OK → PARTIAL, don't block
     if ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
         log_v "Phase 3 FIX: recommended deps partially installed, remaining: ${STILL_MISSING}"
-        # Still missing some recommended → inform Agent but don't block
         DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${STILL_MISSING}. Core tool is functional."
-        jq -n --arg context "$DIAG_MSG" '{
+        jq -n --arg context "$DIAG_MSG" --arg msg "$DIAG_MSG" '{
+          "systemMessage": $msg,
           "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "additionalContext": $context
@@ -289,13 +288,13 @@ fi
 # ============================================================================
 # Phase 4: FEEDBACK — Tool not available, inform the Agent
 # ============================================================================
-# 如果安装失败，则向 Agent 反馈工具不可用。
 
 # PARTIAL (no fix script available): inform Agent but don't block
 if $IS_PARTIAL && ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
     DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps missing:${RECOMMENDED_MISSING_LIST}. Core tool is functional, extended deps may be unavailable."
     log_v "Phase 4 FEEDBACK: $TOOL_NAME → PARTIAL → injecting additionalContext (non-blocking)"
-    jq -n --arg context "$DIAG_MSG" '{
+    jq -n --arg context "$DIAG_MSG" --arg msg "$DIAG_MSG" '{
+      "systemMessage": $msg,
       "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "additionalContext": $context
@@ -305,14 +304,12 @@ if $IS_PARTIAL && ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_M
 fi
 
 # NOT_READY: required deps or permissions missing → block with "Skip retry"
-# Collect human-readable missing list
 MISSING_LIST=""
 for i in $(seq 0 $((missing_count - 1))); do
     binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
     MISSING_LIST="${MISSING_LIST} ${binary}"
 done
 
-# Build diagnostic message
 DIAG_PARTS=""
 [ -n "$MISSING_LIST" ]  && DIAG_PARTS="${DIAG_PARTS} missing:${MISSING_LIST};"
 $HAS_VERSION_LOW       && DIAG_PARTS="${DIAG_PARTS} version too low;"
@@ -321,10 +318,11 @@ $HAS_VERSION_LOW       && DIAG_PARTS="${DIAG_PARTS} version too low;"
 DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: NOT_READY (${DIAG_PARTS})"
 DIAG_MSG="${DIAG_MSG} Skip retry — environment issue, not logic error."
 
-log_v "Phase 4 FEEDBACK: $TOOL_NAME → NOT_READY → injecting additionalContext"
+log_v "Phase 4 FEEDBACK: $TOOL_NAME → NOT_READY → blocking with decision:block"
 
-# Output hook response via jq
-jq -n --arg context "$DIAG_MSG" '{
+jq -n --arg context "$DIAG_MSG" --arg reason "$DIAG_MSG" '{
+  "decision": "block",
+  "reason": $reason,
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "additionalContext": $context

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Cosh hook for standalone TOON encoding.
+"""Tokenless standalone TOON encoding hook.
 
-Reads a cosh PostToolUse JSON from stdin, encodes the tool response
-to TOON format via ``tokenless compress-toon``, and writes a cosh
+Reads a PostToolUse JSON from stdin, encodes the tool response
+to TOON format via ``tokenless compress-toon``, and writes a
 HookOutput JSON to stdout.
 
 This is a standalone TOON-only hook for users who want pure TOON
@@ -11,9 +11,8 @@ encoding without response compression.  The combined pipeline
 
 Hook point: **PostToolUse**
 
-This script is intentionally self-contained — it does NOT import any
-tokenless package.  All it needs is the standard library and the
-tokenless/toon binaries on $PATH.
+The agent ID is read from the TOKENLESS_AGENT_ID environment variable
+(set by the install action script).
 """
 
 import json
@@ -24,10 +23,10 @@ import sys
 
 # -- constants ---------------------------------------------------------------
 
-_AGENT_ID = "copilot-shell"
+_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_LEN = 200
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOON_FALLBACK = "/usr/libexec/tokenless/toon"
+_TOON_FALLBACK = "/usr/libexec/anolisa/tokenless/toon"
 
 
 # -- helpers -----------------------------------------------------------------

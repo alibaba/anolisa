@@ -52,8 +52,8 @@
 
 | Integration | Command Rewriting | Response Compression | Schema Compression |
 |-------------|-------------------|---------------------|-------------------|
-| OpenClaw Plugin | ✅ | ✅ | ⏳ (Limited by OpenClaw hook system) |
-| Copilot Shell Hook | ✅ | ✅ | ⏳ (Waiting for protocol extension) |
+| OpenClaw Plugin | ✅ | ✅ | ✅ |
+| Copilot Shell Hook | ✅ | ✅ | ✅ |
 
 ### 1.3 Architecture Overview
 
@@ -62,12 +62,10 @@ Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: tokenless command
 ├── crates/tokenless-stats/    # Stats recording library (SQLite)
-├── openclaw/                  # OpenClaw plugin (TypeScript)
-├── hooks/copilot-shell/       # Copilot Shell Hooks
+├── adapters/tokenless/        # FHS adapter bundle (manifest, common, cosh, openclaw)
 ├── third_party/rtk/           # RTK submodule (command rewriting engine)
 ├── third_party/toon/          # TOON submodule (binary JSON codec)
 ├── Makefile                   # Unified build system
-├── scripts/install.sh         # One-step installation script
 └── docs/                      # Documentation
 ```
 
@@ -248,7 +246,7 @@ sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
 After RPM installation, the following configurations are performed automatically:
 
 1. **Binaries**: Installed to `/usr/bin/tokenless` and `/usr/bin/rtk`
-2. **Hook Scripts**: RPM installs to `/usr/share/tokenless/adapters/cosh/`, source installs to `~/.local/share/tokenless/adapters/cosh/`
+2. **Hook Scripts**: RPM installs to `/usr/share/anolisa/adapters/tokenless/common/hooks/`, source installs to `~/.local/share/anolisa/adapters/tokenless/common/hooks/`
 3. **OpenClaw Plugin**: Auto-detected and configured (if OpenClaw is installed)
 4. **Copilot Shell**: Auto-detected and configured (if Copilot Shell is installed)
 
@@ -261,7 +259,7 @@ which tokenless
 tokenless --version
 
 # Check hook scripts (RPM installation path)
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 
 # Check OpenClaw plugin configuration
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
@@ -281,23 +279,14 @@ make setup
 ### 4.3 Method 3: Installation Script
 
 ```bash
-# Auto-detect installation source and configure
-./scripts/install.sh
+# Full setup: build + install + all adapters
+make setup
 
-# Force source installation
-./scripts/install.sh --source
+# Install OpenClaw plugin only (requires openclaw CLI)
+make openclaw-install
 
-# Manual configuration after RPM installation
-./scripts/install.sh --install
-
-# Uninstall cleanup
-./scripts/install.sh --uninstall
-
-# Manual OpenClaw plugin setup only
-./scripts/install.sh --openclaw
-
-# Manual copilot-shell hooks setup only
-./scripts/install.sh --cosh
+# Install copilot-shell hooks only
+make cosh-install
 ```
 
 ### 4.4 Method 4: Step-by-Step Installation
@@ -332,10 +321,10 @@ make install BIN_DIR=/usr/local/bin
 make openclaw-install
 
 # Custom plugin path
-make openclaw-install OPENCLAW_DIR=/usr/share/tokenless/adapters/openclaw
+make adapter-install
 
 # Manual installation
-cp -r openclaw/ /usr/share/tokenless/adapters/openclaw/
+cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/openclaw/
 ```
 
 #### 4.4.4 Deploy Copilot Shell Hook
@@ -345,9 +334,9 @@ cp -r openclaw/ /usr/share/tokenless/adapters/openclaw/
 make copilot-shell-install
 
 # Manual installation
-mkdir -p ~/.local/share/tokenless/adapters/cosh
-cp hooks/copilot-shell/tokenless-*.sh ~/.local/share/tokenless/adapters/cosh/
-chmod +x ~/.local/share/tokenless/adapters/cosh/tokenless-*.sh
+mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
+cp adapters/tokenless/common/hooks/*_hook.py ~/.local/share/anolisa/adapters/tokenless/common/hooks/
+chmod +x ~/.local/share/anolisa/adapters/tokenless/common/hooks/*_hook.py
 ```
 
 ---
@@ -418,15 +407,11 @@ After RPM installation, the installation script automatically detects and config
 
 #### 5.2.2 Manual Configuration Trigger
 
-If reconfiguration is needed after RPM installation, run:
+If OpenClaw plugin installation is needed after RPM installation, run:
 
 ```bash
-# Full auto-detection and configuration
-/usr/share/tokenless/scripts/install.sh --install
-
-# Or configure individual platforms only
-/usr/share/tokenless/scripts/install.sh --cosh      # copilot-shell hooks only
-/usr/share/tokenless/scripts/install.sh --openclaw  # OpenClaw plugin only
+# Install OpenClaw plugin (requires openclaw CLI)
+/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
 ```
 
 #### 5.2.3 Verify Auto-Configuration
@@ -441,7 +426,7 @@ cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
 # Should contain PreToolUse, PostToolUse, BeforeModel
 
 # Check hook scripts
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 ```
 
 ### 5.3 Copilot Shell Configuration
@@ -452,14 +437,14 @@ Hook script locations depend on the installation method:
 
 | Installation Method | Hook Script Location |
 |---------------------|---------------------|
-| RPM Installation | `/usr/share/tokenless/adapters/cosh/` |
-| Source Installation | `~/.local/share/tokenless/adapters/cosh/` |
+| RPM Installation | `/usr/share/anolisa/adapters/tokenless/common/hooks/` |
+| Source Installation | `~/.local/share/anolisa/adapters/tokenless/common/hooks/` |
 
 | Script | Function | Hook Event |
 |--------|----------|------------|
-| `tokenless-rewrite.sh` | Command rewriting | PreToolUse |
-| `tokenless-compress-response.sh` | Response + TOON compression pipeline | PostToolUse |
-| `tokenless-compress-schema.sh` | Schema compression | BeforeModel |
+| `rewrite_hook.py` | Command rewriting | PreToolUse |
+| `compress_response_hook.py` | Response + TOON compression pipeline | PostToolUse |
+| `compress_schema_hook.py` | Schema compression | BeforeModel |
 
 #### 5.3.2 Configure settings.json
 
@@ -475,7 +460,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -487,7 +472,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -499,7 +484,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -520,7 +505,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-rewrite.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
             "name": "tokenless-rewrite",
             "timeout": 5000
           }
@@ -532,7 +517,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-response.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
             "name": "tokenless-compress-response",
             "timeout": 10000
           }
@@ -544,7 +529,7 @@ Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "~/.local/share/tokenless/adapters/cosh/tokenless-compress-schema.sh",
+            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
             "name": "tokenless-compress-schema",
             "timeout": 10000
           }
@@ -653,7 +638,7 @@ INPUT="{\"tool_name\":\"run_shell_command\",\"tool_response\":${MOCK_RESPONSE}}"
 
 echo "=== Original response size: ${#INPUT} bytes ==="
 
-RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/tokenless-compress-response.sh 2>/dev/null)
+RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/compress_response_hook.py 2>/dev/null)
 
 echo "=== Result ==="
 echo "$RESULT" | jq '.'
@@ -708,16 +693,16 @@ grep "firePostToolUseEvent\|PostToolUse.*completed" ~/.copilot-shell/debug/*.log
 
 ```bash
 # Test command rewriting (source directory)
-echo '{"tool_input":{"command":"cargo test"}}' | bash hooks/copilot-shell/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | bash adapters/tokenless/common/hooks/rewrite_hook.py
 
 # Test response compression (source directory)
-echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash hooks/copilot-shell/tokenless-compress-response.sh
+echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash adapters/tokenless/common/hooks/compress_response_hook.py
 
 # Test schema compression (source directory)
-echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash hooks/copilot-shell/tokenless-compress-schema.sh
+echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash adapters/tokenless/common/hooks/compress_schema_hook.py
 
 # Test installed hook (RPM installation)
-echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/tokenless/adapters/cosh/tokenless-rewrite.sh
+echo '{"tool_input":{"command":"cargo test"}}' | python3 /usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py
 ```
 
 ### 6.2 CLI Testing
@@ -757,10 +742,10 @@ tokenless --version
 rtk --version
 
 # Check hook scripts (RPM installation)
-ls -la /usr/share/tokenless/adapters/cosh/
+ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
 
 # Check hook scripts (Source installation)
-ls -la ~/.local/share/tokenless/adapters/cosh/
+ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
 ```
 
 ---
@@ -841,11 +826,14 @@ jq --version
 | CLI subcommand | `crates/tokenless-cli/src/main.rs` |
 | Stats recorder (SQLite) | `crates/tokenless-stats/src/recorder.rs` |
 | Stats record types | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw plugin | `openclaw/index.ts` |
-| OpenClaw plugin config | `openclaw/openclaw.plugin.json` |
-| Copilot Hook — rewrite | `hooks/copilot-shell/tokenless-rewrite.sh` |
-| Copilot Hook — compress response | `hooks/copilot-shell/tokenless-compress-response.sh` |
-| Copilot Hook — compress schema | `hooks/copilot-shell/tokenless-compress-schema.sh` |
+| OpenClaw plugin | `adapters/tokenless/openclaw/index.ts` |
+| OpenClaw plugin config | `adapters/tokenless/openclaw/openclaw.plugin.json` |
+| Copilot Hook — rewrite | `adapters/tokenless/common/hooks/rewrite_hook.py` |
+| Copilot Hook — compress response | `adapters/tokenless/common/hooks/compress_response_hook.py` |
+| Copilot Hook — compress schema | `adapters/tokenless/common/hooks/compress_schema_hook.py` |
+| Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
+| Tool dependency spec | `adapters/tokenless/common/tool-ready-spec.json` |
+| Auto-fix script | `adapters/tokenless/common/tokenless-env-fix.sh` |
 | TOON codec (submodule) | `third_party/toon/` |
 | Stats database (default) | `~/.tokenless/stats.db` |
 | Integration tests | `crates/tokenless-schema/tests/integration_test.rs` |

@@ -6,7 +6,7 @@
 # Usage:
 #   tokenless-env-fix.sh fix '<json_dep_spec>'           # Fix single dep (JSON object)
 #   tokenless-env-fix.sh fix-all '<json_array>'           # Fix multiple deps (JSON array)
-#   tokenless-env-fix.sh fix-simple <binary> [manager]    # Fix by name (defaults to apt)
+#   tokenless-env-fix.sh fix-simple <binary> [manager]    # Fix by name (defaults to detected manager)
 #   tokenless-env-fix.sh check                            # List all auto-fixable deps from spec
 #
 # Fix results are logged to ~/.tokenless/env-fix.log
@@ -24,10 +24,10 @@ SPEC_FILE="${SCRIPT_DIR}/tool-ready-spec.json"
 
 # Detect system package manager by underlying mechanism (rpm/dpkg/apk),
 # then pick the best frontend within that family.
-# Priority: rpm-based > dpkg-based > apk-based.
+# Priority: rpm-based (Alinux) > dpkg-based > apk-based.
 PACKAGE_MANAGER="rpm"
 if command -v rpm &>/dev/null; then
-  # rpm-based system: prefer dnf (modern), then yum (legacy)
+  # rpm-based system (Alinux): prefer dnf (modern), then yum (legacy)
   if command -v dnf &>/dev/null; then
     PACKAGE_MANAGER="dnf"
   else
@@ -90,7 +90,7 @@ normalize_dep() {
 
 install_via_system() {
   local package="$1"
-  # Try detected system manager first, then others as fallback (rpm > apt > apk)
+  # Try detected system manager first, then others as fallback (Alinux dnf/yum > apt > apk)
   case "$PACKAGE_MANAGER" in
     dnf)  $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
     yum)  $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
@@ -111,15 +111,29 @@ install_via_pip() {
   command -v pip3 &>/dev/null && pip_cmd="pip3" || { command -v pip &>/dev/null && pip_cmd="pip"; }
   if [ -z "$pip_cmd" ]; then return 1; fi
 
-  # Stage 1: default mirror (Alinux internal mirror on this platform)
-  $pip_cmd install "$pip_name" 2>/dev/null && return 0
+  # Stage 1: default mirror
+  $pip_cmd install "$pip_name" 2>/dev/null
+  hash -r
+  if command -v "$package" &>/dev/null; then return 0; fi
 
-  # Stage 2: purge cache and retry (stale cache can cause hash mismatch)
+  # pip reported success but binary missing (stale metadata) — uninstall + reinstall
+  $pip_cmd uninstall -y "$pip_name" 2>/dev/null || true
+  $pip_cmd install "$pip_name" 2>/dev/null
+  hash -r
+  if command -v "$package" &>/dev/null; then return 0; fi
+
+  # Stage 2: purge cache and retry
   $pip_cmd cache purge 2>/dev/null
-  $pip_cmd install --no-cache-dir "$pip_name" 2>/dev/null && return 0
+  $pip_cmd uninstall -y "$pip_name" 2>/dev/null || true
+  $pip_cmd install --no-cache-dir "$pip_name" 2>/dev/null
+  hash -r
+  if command -v "$package" &>/dev/null; then return 0; fi
 
   # Stage 3: fallback to official PyPI (mirror may be broken/sync-lag)
-  $pip_cmd install --no-cache-dir --index-url https://pypi.org/simple/ "$pip_name" 2>/dev/null && return 0
+  $pip_cmd uninstall -y "$pip_name" 2>/dev/null || true
+  $pip_cmd install --no-cache-dir --index-url https://pypi.org/simple/ "$pip_name" 2>/dev/null
+  hash -r
+  if command -v "$package" &>/dev/null; then return 0; fi
 
   return 1
 }
@@ -288,7 +302,7 @@ fix_dep() {
     npx)     install_via_npx "$package" && primary_ok=true ;;
     cargo)   install_via_cargo "$package" && primary_ok=true ;;
     symlink) local src; src=$(echo "$dep_json" | jq -r '.source // empty'); install_via_symlink "$binary" "$src" && primary_ok=true ;;
-    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // "/usr/share/tokenless/bin"'); install_via_path "$pdir" && primary_ok=true ;;
+    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // "/usr/libexec/anolisa/tokenless"'); install_via_path "$pdir" && primary_ok=true ;;
     dir)     local dpath; dpath=$(echo "$dep_json" | jq -r '.source // empty'); install_via_dir "$dpath" && primary_ok=true ;;
     curl_pipe_sh) [ -n "$url" ] && install_via_curl_pipe_sh "$url" "$args" && primary_ok=true ;;
     *)
@@ -334,7 +348,7 @@ fix_dep() {
         cargo)   [ -n "$fb_package" ] && install_via_cargo "$fb_package" && fb_ok=true ;;
         cargo_build) [ -n "$fb_manifest" ] && install_via_cargo_build "$fb_manifest" "$fb_binary" "$fb_features" && fb_ok=true ;;
         symlink) [ -n "$fb_source" ] && install_via_symlink "$fb_binary" "$fb_source" && fb_ok=true ;;
-        path)    install_via_path "${fb_source:-/usr/share/tokenless/bin}" && fb_ok=true ;;
+        path)    install_via_path "${fb_source:-/usr/libexec/anolisa/tokenless}" && fb_ok=true ;;
         dir)     [ -n "$fb_source" ] && install_via_dir "$fb_source" && fb_ok=true ;;
         curl_pipe_sh) [ -n "$fb_url" ] && install_via_curl_pipe_sh "$fb_url" "$fb_args" && fb_ok=true ;;
         *) echo "[tokenless-env-fix] ${binary}: unknown fallback method '${fb_method}'" ;;
@@ -400,6 +414,7 @@ case "${1:-}" in
     else
       # Simple name — normalize to object with optional manager
       manager="${3:-$PACKAGE_MANAGER}"
+      dep_json
       dep_json=$(jq -n --arg bn "$2" --arg pk "$2" --arg mgr "$manager" '{binary:$bn, package:$pk, manager:$mgr}')
       fix_dep "$dep_json"
     fi
@@ -439,13 +454,14 @@ case "${1:-}" in
   check)
     if [ ! -f "$SPEC_FILE" ]; then
       echo "[tokenless-env-fix] spec file not found: $SPEC_FILE"
-      echo "Supported managers: apt, rpm, pip, uv, npm, npx, cargo, cargo_build, symlink, path, dir, curl_pipe_sh"
+      echo "Supported managers: rpm, apt, pip, uv, npm, npx, cargo, cargo_build, symlink, path, dir, curl_pipe_sh"
       exit 0
     fi
     echo "Auto-fixable dependencies (from spec):"
     # Collect all dep entries across all tools
-    all_deps=$(jq -c --arg mgr "$PACKAGE_MANAGER" '[del(."_comment") | to_entries[] | .value | (.required // []) + (.recommended // []) | .[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' "$SPEC_FILE" 2>/dev/null || echo '[]')
+    all_deps=$(jq -c --arg mgr "$PACKAGE_MANAGER" '[del(."_comment") | to_entries[] | select(.key != "_meta") | .value | (.required // []) + (.recommended // []) | .[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' "$SPEC_FILE" 2>/dev/null || echo '[]')
     count=$(echo "$all_deps" | jq 'length' 2>/dev/null || echo 0)
+    dep_json="" binary="" package="" manager="" fb_count=""
     for i in $(seq 0 $((count - 1))); do
       dep_json=$(echo "$all_deps" | jq -c ".[$i]")
       binary=$(echo "$dep_json" | jq -r '.binary')
@@ -455,8 +471,9 @@ case "${1:-}" in
       echo "  ${binary} — ${manager} (package: ${package}, fallbacks: ${fb_count})"
     done
     echo ""
+    echo "Detected system package manager: $PACKAGE_MANAGER"
     echo "Supported managers:"
-    echo "  rpm       — system package manager (auto-detect: yum/dnf/apt/apk, current: $PACKAGE_MANAGER)"
+    echo "  rpm       — system package manager (auto-detect: dnf/yum for Alinux, apt for Debian, apk for Alpine; current: $PACKAGE_MANAGER)"
     echo "  apt       — apt-get (Debian/Ubuntu)"
     echo "  pip       — pip / pip3"
     echo "  uv        — uv tool install / uv pip install"

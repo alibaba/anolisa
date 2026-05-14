@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Cosh hook for response compression with optional TOON encoding.
+"""Tokenless response compression hook with optional TOON encoding.
 
-Reads a cosh PostToolUse JSON from stdin, compresses the tool response
+Reads a PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
 format via ``toon -e`` for additional token savings.
 
@@ -14,9 +14,9 @@ Pipeline: Env Attribution → Response Compression → TOON Encoding
 
 Hook point: **PostToolUse**
 
-This script is intentionally self-contained — it does NOT import any
-tokenless package.  All it needs is the standard library and the
-tokenless/toon binaries on $PATH.
+The agent ID is read from the TOKENLESS_AGENT_ID environment variable
+(set by the install action script).  Fallback paths follow the ANOLISA
+FHS spec: /usr/bin/tokenless, /usr/libexec/anolisa/tokenless/toon.
 """
 
 import json
@@ -28,7 +28,7 @@ import sys
 
 # -- constants ---------------------------------------------------------------
 
-_AGENT_ID = "copilot-shell"
+_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_LEN = 200
 
 # Tools that return content the agent explicitly requested — must not compress.
@@ -38,7 +38,7 @@ _SKIP_TOOLS = {
 }
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOON_FALLBACK = "/usr/libexec/tokenless/toon"
+_TOON_FALLBACK = "/usr/libexec/anolisa/tokenless/toon"
 
 
 # -- helpers -----------------------------------------------------------------

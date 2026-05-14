@@ -266,9 +266,9 @@ curl -s https://api.example.com/data | tokenless compress-response
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
 | 统计记录器（SQLite WAL） | `crates/tokenless-stats/src/recorder.rs` |
 | 统计记录类型及操作枚举 | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw 插件 | `openclaw/index.ts`（第 161-186 行） |
-| OpenClaw 插件配置 | `openclaw/openclaw.plugin.json` |
-| copilot-shell hook（响应+TOON 流水线） | `hooks/copilot-shell/tokenless-compress-response.sh` |
+| OpenClaw 插件 | `adapters/tokenless/openclaw/index.ts` |
+| OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
+| copilot-shell hook（响应+TOON 流水线） | `adapters/tokenless/common/hooks/compress_response_hook.py` |
 | TOON 编解码器（子模块） | `third_party/toon/` |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |

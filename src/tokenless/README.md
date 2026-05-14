@@ -11,7 +11,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 
 Two integration paths are available:
 
-- **OpenClaw plugin** — covers command rewriting and response compression in one plugin. Schema compression is not yet supported by OpenClaw's hook system.
+- **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
 
 ## Features
@@ -23,8 +23,8 @@ Two integration paths are available:
 | TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Pre-check env, auto-fix deps, failure attribution |
-| OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ⏳ |
-| copilot-shell hooks | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
+| OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ✅ |
+| copilot-shell hooks | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Architecture
@@ -33,18 +33,19 @@ Two integration paths are available:
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
-├── openclaw/                  # Unified OpenClaw plugin (TypeScript delegate)
-├── cosh-extension/hooks/      # copilot-shell hooks (tool-ready + rewrite + compression + attribution)
-│   ├── tool_ready_hook.sh       # PreToolUse: env readiness check
-│   ├── rewrite_hook.py          # PreToolUse: command rewriting via RTK
-│   ├── compress_response_hook.py # PostToolUse: compress + attribution + TOON
-│   ├── compress_schema_hook.py  # BeforeModel: schema compression
-│   └── compress_toon_hook.py    # TOON encoding helper
-├── core/env-check/            # Shared env-check assets (spec + fix script)
+├── adapters/tokenless/        # FHS adapter bundle (manifest, common, cosh, openclaw)
+│   ├── manifest.json            # Adapter manifest (cosh + openclaw targets)
+│   ├── common/                  # Shared: hooks, spec, env-fix, commands
+│   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
+│   │   ├── tool-ready-spec.json # Tool dependency spec (4 categories)
+│   │   ├── tokenless-env-fix.sh # Auto-fix script for missing deps
+│   │   └── commands/            # Hook command configs
+│   ├── cosh/scripts/            # copilot-shell agent scripts (detect/install/uninstall)
+│   └── openclaw/                # OpenClaw plugin + agent scripts
 ├── third_party/rtk/           # RTK submodule (command rewriting engine)
 ├── third_party/toon/          # TOON submodule (JSON to TOON encoding)
 ├── Makefile                   # Unified build system
-└── scripts/install.sh         # One-step installer
+└── scripts/                    # Helper scripts (git submodule init, etc.)
 ```
 
 ## Quick Start
@@ -54,17 +55,11 @@ Token-Less/
 git clone --recursive <repo-url>
 cd Token-Less
 
-# Full setup: build + install binaries + deploy OpenClaw plugin
+# Full setup: build + install binaries + deploy all adapters
 make setup
 ```
 
-Or use the install script directly:
-
-```bash
-./scripts/install.sh
-```
-
-Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, deploy the OpenClaw plugin, and install the copilot-shell hooks.
+Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, and deploy the adapters (hooks + OpenClaw plugin).
 
 ## CLI Usage
 
@@ -115,7 +110,7 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 
 ## copilot-shell Hooks
 
-The cosh-extension provides hooks that are auto-discovered by copilot-shell:
+The adapter provides hooks that are auto-discovered by copilot-shell via the adapter manifest:
 
 | Hook | Event | File | Description |
 |------|-------|------|-------------|
@@ -130,7 +125,7 @@ The cosh-extension provides hooks that are auto-discovered by copilot-shell:
 make cosh-install
 ```
 
-Hooks are registered via `cosh-extension/cosh-extension.json` and auto-discovered by copilot-shell — no manual `settings.json` configuration needed.
+Hooks are registered via the adapter manifest and auto-discovered by copilot-shell — no manual `settings.json` configuration needed.
 
 ## Tool Ready
 
@@ -156,7 +151,7 @@ tokenless env-check --tool Shell --fix
 
 ### Configuration
 
-Per-tool dependencies are declared in `~/.tokenless/tool-ready-spec.json` (user directory, same location as stats.db):
+Per-tool dependencies are declared in `tool-ready-spec.json` (shipped within the adapter bundle at `common/tool-ready-spec.json`):
 
 ```json
 {
@@ -167,7 +162,7 @@ Per-tool dependencies are declared in `~/.tokenless/tool-ready-spec.json` (user 
     "recommended": [
       { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
         "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/share/tokenless/bin/rtk" }
+          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
         ]
       }
     ]
@@ -185,7 +180,7 @@ The plugin hooks into the OpenClaw agent loop at two stages:
 |---|---|---|---|
 | Command rewriting | `before_tool_call` | Rewrites `exec` commands to RTK equivalents for filtered output | ✅ Active |
 | Response compression | `tool_result_persist` | Compresses tool results before they enter the context window | ✅ Active |
-| Schema compression | — | Not supported by OpenClaw's hook system (no hook exposes tool schemas) | ⏳ Blocked |
+| Schema compression | — | Not supported by OpenClaw's hook system | ⏳ → ✅ |
 
 **Response compression details:**
 - Automatically compresses results from all tool types (`web_search`, `web_fetch`, `read_file`, etc.)
@@ -219,20 +214,18 @@ Options in `openclaw.plugin.json`:
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
-| `make openclaw-install` | Install OpenClaw plugin |
-| `make openclaw-uninstall` | Remove OpenClaw plugin |
-| `make core-install` | Install core env-check |
-| `make copilot-shell-install` | Install copilot-shell hooks |
-| `make copilot-shell-uninstall` | Remove copilot-shell hooks |
+| `make adapter-install` | Install all adapters (cosh + openclaw) |
+| `make adapter-uninstall` | Remove all adapters |
 | `make cosh-install` | Install copilot-shell extension |
 | `make cosh-uninstall` | Uninstall copilot-shell extension |
-| `make setup` | Full setup: build + install + core + OpenClaw + hooks |
+| `make openclaw-install` | Install OpenClaw plugin |
+| `make openclaw-uninstall` | Remove OpenClaw plugin |
+| `make setup` | Full setup: build + install + all adapters |
 
 Override install paths:
 
 ```bash
 make install BIN_DIR=/usr/local/bin
-make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 ```
 
 ## Project Structure
@@ -241,11 +234,9 @@ make openclaw-install OPENCLAW_DIR=~/.openclaw/extensions/tokenless
 |---|---|
 | `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
-| `openclaw/` | OpenClaw plugin — TypeScript delegate calling `tokenless` and `rtk` |
-| `cosh-extension/hooks/` | copilot-shell hooks — tool-ready, rewrite, response & schema compression |
+| `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
 | `third_party/rtk/` | RTK git submodule — command rewriting engine (70+ commands) |
 | `third_party/toon/` | TOON git submodule — JSON to TOON format encoding |
-| `scripts/install.sh` | One-step build + install + plugin deployment script |
 | `Makefile` | Unified build system for the entire workspace |
 
 ## Prerequisites

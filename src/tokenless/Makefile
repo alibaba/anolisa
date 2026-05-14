@@ -1,17 +1,18 @@
 # Token-Less Unified Build System
 # Builds tokenless (schema/response compression), rtk (command rewriting), and toon (JSON encoding)
 
-SHARE_DIR ?= $(HOME)/.local/share/tokenless
+SHARE_DIR ?= $(HOME)/.local/share/anolisa/adapters/tokenless
 BIN_DIR ?= $(HOME)/.local/bin
-OPENCLAW_DIR ?= $(SHARE_DIR)/adapters/openclaw
-COSH_EXTENSION_DIR ?= $(HOME)/.copilot-shell/extensions/tokenless
-CORE_ENV_CHECK_DIR ?= $(HOME)/.tokenless
+LIB_DIR ?= $(HOME)/.local/lib/anolisa/tokenless
+ADAPTER_DIR := adapters/tokenless
 RTK_DIR := third_party/rtk
 TOON_DIR := third_party/toon
 
 .PHONY: build build-tokenless build-rtk build-toon install test lint clean \
+        adapter-install adapter-uninstall adapter-scan \
+        cosh-install cosh-uninstall \
         openclaw-install openclaw-uninstall \
-        cosh-install cosh-uninstall core-install setup help \
+        setup help \
         test-hooks
 
 # Default target
@@ -32,14 +33,34 @@ build-toon:
 	@echo "==> Building toon..."
 	cargo build --release --manifest-path $(TOON_DIR)/Cargo.toml --features cli
 
-# Install binaries
+# Install binaries + adapter resources per FHS spec
 install: build
-	@echo "==> Installing binaries to $(BIN_DIR)..."
-	@mkdir -p $(BIN_DIR)
+	@echo "==> Installing binaries..."
+	@mkdir -p $(BIN_DIR) $(LIB_DIR)
 	cp target/release/tokenless $(BIN_DIR)/
-	cp $(RTK_DIR)/target/release/rtk $(BIN_DIR)/
-	cp $(TOON_DIR)/target/release/toon $(BIN_DIR)/
-	@echo "==> Installed tokenless, rtk, and toon to $(BIN_DIR)"
+	cp $(RTK_DIR)/target/release/rtk $(LIB_DIR)/
+	cp $(TOON_DIR)/target/release/toon $(LIB_DIR)/
+	ln -sf $(LIB_DIR)/rtk $(BIN_DIR)/rtk
+	ln -sf $(LIB_DIR)/toon $(BIN_DIR)/toon
+	@echo "==> Installed tokenless to $(BIN_DIR), rtk/toon to $(LIB_DIR) (symlinked to $(BIN_DIR))"
+	@echo "==> Installing adapter resources to $(SHARE_DIR)..."
+	@mkdir -p $(SHARE_DIR)/common/hooks $(SHARE_DIR)/common/commands \
+	           $(SHARE_DIR)/cosh/scripts $(SHARE_DIR)/openclaw/scripts
+	cp $(ADAPTER_DIR)/manifest.json $(SHARE_DIR)/
+	cp $(ADAPTER_DIR)/common/tool-ready-spec.json $(SHARE_DIR)/common/
+	cp $(ADAPTER_DIR)/common/tokenless-env-fix.sh $(SHARE_DIR)/common/
+	cp $(ADAPTER_DIR)/common/hooks/*.py $(SHARE_DIR)/common/hooks/
+	cp $(ADAPTER_DIR)/common/hooks/*.sh $(SHARE_DIR)/common/hooks/
+	cp $(ADAPTER_DIR)/common/commands/*.toml $(SHARE_DIR)/common/commands/
+	cp $(ADAPTER_DIR)/cosh/scripts/detect.sh $(SHARE_DIR)/cosh/scripts/
+	cp $(ADAPTER_DIR)/cosh/scripts/install.sh $(SHARE_DIR)/cosh/scripts/
+	cp $(ADAPTER_DIR)/cosh/scripts/uninstall.sh $(SHARE_DIR)/cosh/scripts/
+	cp $(ADAPTER_DIR)/openclaw/scripts/detect.sh $(SHARE_DIR)/openclaw/scripts/
+	cp $(ADAPTER_DIR)/openclaw/scripts/install.sh $(SHARE_DIR)/openclaw/scripts/
+	cp $(ADAPTER_DIR)/openclaw/scripts/uninstall.sh $(SHARE_DIR)/openclaw/scripts/
+	cp $(ADAPTER_DIR)/openclaw/openclaw.plugin.json $(SHARE_DIR)/openclaw/
+	cp $(ADAPTER_DIR)/openclaw/package.json $(SHARE_DIR)/openclaw/
+	@echo "==> Adapter resources installed to $(SHARE_DIR)"
 
 # Run tests
 test: test-tokenless test-rtk test-toon test-hooks
@@ -87,87 +108,62 @@ dist: clean
 	    -C .. tokenless
 	@echo "==> Tarball: ../tokenless-0.1.0.tar.gz"
 
-# OpenClaw plugin management
-openclaw-install:
-	@echo "==> Installing OpenClaw plugin..."
-	@mkdir -p $(OPENCLAW_DIR)
-	cp openclaw/index.ts $(OPENCLAW_DIR)/
-	cp openclaw/openclaw.plugin.json $(OPENCLAW_DIR)/
-	@# Strip TypeScript type annotations to produce a plain JS file
-	@if command -v npx >/dev/null 2>&1; then \
-		npx --yes esbuild openclaw/index.ts --bundle --platform=node --format=esm --outfile=$(OPENCLAW_DIR)/index.js 2>/dev/null \
-		&& echo "==> Compiled index.ts -> index.js (esbuild)" \
-		|| (sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' openclaw/index.ts > $(OPENCLAW_DIR)/index.js \
-		&& echo "==> Compiled index.ts -> index.js (sed fallback)"); \
-	else \
-		sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' openclaw/index.ts > $(OPENCLAW_DIR)/index.js \
-		&& echo "==> Compiled index.ts -> index.js (sed fallback)"; \
-	fi
-	@# Configure plugins.allow in OpenClaw config
-	@OPENCLAW_CONFIG=$(HOME)/.openclaw/openclaw.json; \
-	if [ -f "$$OPENCLAW_CONFIG" ] && command -v python3 >/dev/null 2>&1; then \
-		python3 -c "\
-import json, sys; \
-cfg=json.load(open('$$OPENCLAW_CONFIG')); \
-p=cfg.setdefault('plugins',{}); \
-a=set(p.get('allow',[])); \
-a.add('tokenless-openclaw'); \
-p['allow']=sorted(a); \
-json.dump(cfg,open('$$OPENCLAW_CONFIG','w'),indent=2)" \
-		&& echo "==> Added tokenless-openclaw to plugins.allow"; \
-	fi
-	@echo "==> OpenClaw plugin installed to $(OPENCLAW_DIR)"
-	@echo "    Run 'openclaw gateway restart' to activate"
+# Adapter management — invokes detect/install/uninstall action scripts per the
+# ANOLISA FHS adapter spec.  Environment variables point to installed FHS paths.
+ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
+              ANOLISA_ADAPTER_DIR=$(SHARE_DIR) \
+              ANOLISA_COMPONENT=tokenless \
+              ANOLISA_VERSION=0.3.2
 
-openclaw-uninstall:
-	@echo "==> Uninstalling OpenClaw plugin..."
-	rm -rf $(OPENCLAW_DIR)
-	@echo "==> OpenClaw plugin removed"
+adapter-install: cosh-install openclaw-install
 
-# core env-check installation (shared across all agents)
-core-install:
-	@echo "==> Installing core env-check..."
-	@mkdir -p $(CORE_ENV_CHECK_DIR)
-	cp core/env-check/tool-ready-spec.json $(CORE_ENV_CHECK_DIR)/
-	cp core/env-check/tokenless-env-fix.sh $(CORE_ENV_CHECK_DIR)/
-	chmod +x $(CORE_ENV_CHECK_DIR)/tokenless-env-fix.sh
-	@echo "==> Core env-check installed to $(CORE_ENV_CHECK_DIR)"
+adapter-uninstall: cosh-uninstall openclaw-uninstall
 
-# copilot-shell extension management (developer convenience — copies to auto-discovery path)
+adapter-scan:
+	@echo "=== Tokenless Adapter Manifest ==="
+	@python3 -c "import json; m=json.load(open('$(SHARE_DIR)/manifest.json')); print(f\"  component: {m['component']} v{m['version']}\"); [print(f\"  {t:12s} {c['compatibleVersions']:12s} \" + (', '.join(f'{len(v)} {k}' for k,v in c.get('capabilities',{}).items()) or 'no caps')) for t,c in m['targets'].items()]"
+
+# --- copilot-shell (cosh) ---
+
 cosh-install:
-	@echo "==> Installing copilot-shell extension to auto-discovery path..."
-	@rm -rf $(COSH_EXTENSION_DIR) 2>/dev/null || true
-	@mkdir -p $(COSH_EXTENSION_DIR)
-	cp -r cosh-extension/hooks $(COSH_EXTENSION_DIR)/
-	cp -r cosh-extension/commands $(COSH_EXTENSION_DIR)/
-	cp cosh-extension/cosh-extension.json $(COSH_EXTENSION_DIR)/
-	cp cosh-extension/COPILOT.md $(COSH_EXTENSION_DIR)/
-	cp cosh-extension/README.md $(COSH_EXTENSION_DIR)/
-	chmod +x $(COSH_EXTENSION_DIR)/hooks/*.py $(COSH_EXTENSION_DIR)/hooks/*.sh
-	@echo "==> copilot-shell extension installed to $(COSH_EXTENSION_DIR)"
-	@echo "    copilot-shell auto-discovers extensions from this path"
+	@echo "==> Installing tokenless cosh extension..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=cosh bash $(SHARE_DIR)/cosh/scripts/install.sh
 
 cosh-uninstall:
-	@echo "==> Removing copilot-shell extension from auto-discovery path..."
-	rm -rf $(COSH_EXTENSION_DIR)
-	@echo "==> copilot-shell extension removed"
+	@echo "==> Uninstalling tokenless cosh extension..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=cosh bash $(SHARE_DIR)/cosh/scripts/uninstall.sh
 
-# One-step setup: build + install + core + openclaw plugin + hooks
-setup: install core-install openclaw-install cosh-install
+# --- OpenClaw ---
+
+openclaw-install:
+	@echo "==> Installing tokenless OpenClaw plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/detect.sh
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/install.sh
+
+openclaw-uninstall:
+	@echo "==> Uninstalling tokenless OpenClaw plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=openclaw bash $(SHARE_DIR)/openclaw/scripts/uninstall.sh
+
+# One-step setup: build + install + all adapters
+setup: install adapter-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
-	@echo "  - tokenless: $(BIN_DIR)/tokenless"
-	@echo "  - rtk:       $(BIN_DIR)/rtk"
-	@echo "  - toon:      $(BIN_DIR)/toon"
-	@echo "  - OpenClaw:  $(OPENCLAW_DIR)/"
-	@echo "  - Cosh Ext:  $(COSH_EXTENSION_DIR)/"
 	@echo "============================================"
+	@echo "  Binaries (FHS):"
+	@echo "    tokenless -> $(BIN_DIR)/tokenless"
+	@echo "    rtk       -> $(LIB_DIR)/rtk -> $(BIN_DIR)/rtk"
+	@echo "    toon      -> $(LIB_DIR)/toon -> $(BIN_DIR)/toon"
+	@echo "  Adapter (FHS):"
+	@echo "    $(SHARE_DIR)/"
+	@echo "  Registered:"
+	@echo "    cosh, openclaw"
 	@echo ""
-	@echo "Verify installation:"
+	@echo "Verify:"
 	@echo "  tokenless --version"
 	@echo "  rtk --version"
 	@echo "  toon --version"
+	@echo "  make adapter-scan"
 
 # Help
 help:
@@ -178,22 +174,22 @@ help:
 	@echo "  build-tokenless   Build tokenless only"
 	@echo "  build-rtk         Build rtk only"
 	@echo "  build-toon        Build toon only"
-	@echo "  install           Install binaries to BIN_DIR (default: ~/.local/bin)"
+	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  test              Run all tests"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
-	@echo "  openclaw-install  Install OpenClaw plugin"
-	@echo "  openclaw-uninstall Remove OpenClaw plugin"
-	@echo "  core-install      Install core env-check"
-	@echo "  cosh-install         Install copilot-shell extension"
-	@echo "  cosh-uninstall       Uninstall copilot-shell extension"
-	@echo "  setup             Full setup: build + install + core + openclaw + cosh extension"
+	@echo "  adapter-scan      List registered adapter capabilities"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw)"
+	@echo "  adapter-uninstall Unregister all adapters"
+	@echo "  cosh-install      Register copilot-shell extension"
+	@echo "  cosh-uninstall    Unregister copilot-shell extension"
+	@echo "  openclaw-install  Register OpenClaw plugin"
+	@echo "  openclaw-uninstall Unregister OpenClaw plugin"
+	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
-	@echo "  SHARE_DIR         Data install root (default: ~/.local/share/tokenless)"
-	@echo "  BIN_DIR           Binary install path (default: ~/.local/bin)"
-	@echo "  OPENCLAW_DIR      OpenClaw plugin path (default: ~/.local/share/tokenless/adapters/openclaw)"
-	@echo "  CORE_ENV_CHECK_DIR  Core env-check path (default: ~/.tokenless)"
-	@echo "  COSH_EXTENSION_DIR  Cosh extension install path (default: ~/.copilot-shell/extensions/tokenless)"
+	@echo "  BIN_DIR    User commands (default: ~/.local/bin)"
+	@echo "  LIB_DIR    Helper binaries (default: ~/.local/lib/anolisa/tokenless)"
+	@echo "  SHARE_DIR  Adapter resources (default: ~/.local/share/anolisa/adapters/tokenless)"

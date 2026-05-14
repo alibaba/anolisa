@@ -67,7 +67,7 @@ else
 fi
 
 # 检查 copilot-shell hook
-if [ -x /usr/share/tokenless/adapters/cosh/tokenless-compress-toon.sh ]; then
+if [ -x /usr/share/anolisa/adapters/tokenless/common/hooks/tokenless-compress-toon.sh ]; then
     pass "COSH TOON hook 已安装且可执行"
 else
     fail "COSH TOON hook 缺失或不可执行"
@@ -235,7 +235,7 @@ fi
 # ========== 场景 2: COSH (copilot-shell) ==========
 section "场景 2: COSH (copilot-shell) Hooks"
 
-HOOK_DIR=/usr/share/tokenless/adapters/cosh
+HOOK_DIR=/usr/share/anolisa/adapters/tokenless/common/hooks
 
 scenario "2.1 独立 TOON Hook — 直接 JSON 对象"
 

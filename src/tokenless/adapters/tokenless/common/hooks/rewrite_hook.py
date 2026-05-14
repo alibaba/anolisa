@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Cosh hook for command rewriting via rtk.
+"""Tokenless command rewriting hook via rtk.
 
-Reads a cosh PreToolUse JSON from stdin, extracts the shell command,
-invokes ``rtk rewrite`` via subprocess, and writes a cosh HookOutput
+Reads a PreToolUse JSON from stdin, extracts the shell command,
+invokes ``rtk rewrite`` via subprocess, and writes a HookOutput
 JSON to stdout.
 
 Hook point: **PreToolUse** — matcher: ``Shell``
 
-This script is intentionally self-contained — it does NOT import any
-tokenless package.  All it needs is the standard library and the
-rtk/tokenless binaries on $PATH.
+The agent ID is read from the TOKENLESS_AGENT_ID environment variable
+(set by the install action script).  Fallback paths follow the ANOLISA
+FHS spec: /usr/libexec/anolisa/tokenless/rtk.
 """
 
 import json
@@ -22,8 +22,8 @@ import sys
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_RTK_FALLBACK = "/usr/libexec/tokenless/rtk"
-_AGENT_ID = "copilot-shell"
+_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
+_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 
 _CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
 _CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
@@ -118,9 +118,6 @@ def main() -> None:
     # Write context file so rtk (run as command proxy later) can recover
     # agent/session/tool IDs even though it won't inherit hook env vars.
     # rtk's resolve_tokenless_context() reads this as a fallback.
-    # The file persists across multiple rtk processes within one tool-call
-    # cycle, and is overwritten by the next hook invocation so stale
-    # context does not leak to unrelated commands.
     _write_context(_AGENT_ID, session_id, tool_use_id)
 
     try:

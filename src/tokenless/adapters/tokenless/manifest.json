@@ -1,0 +1,30 @@
+{
+  "component": "tokenless",
+  "version": "0.3.2",
+  "targets": {
+    "cosh": {
+      "compatibleVersions": "*",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "compress-schema"
+        ],
+        "commands": ["tokenless-stats"]
+      }
+    },
+    "openclaw": {
+      "compatibleVersions": ">=5.0.0",
+      "capabilities": {
+        "plugins": ["tokenless-openclaw"]
+      },
+      "actions": {
+        "detect":    "openclaw/scripts/detect.sh",
+        "install":   "openclaw/scripts/install.sh",
+        "uninstall": "openclaw/scripts/uninstall.sh"
+      }
+    }
+  }
+}

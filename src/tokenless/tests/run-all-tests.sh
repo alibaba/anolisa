@@ -292,9 +292,24 @@ test_toon_compression() {
 test_tool_ready() {
     log_section "Test 6: Tool Ready (env-check + fix + attribution)"
 
-    SPEC_FILE="$HOME/.tokenless/tool-ready-spec.json"
-    FIX_SCRIPT="$HOME/.tokenless/tokenless-env-fix.sh"
-    HOOK_DIR="/usr/share/anolisa/extensions/tokenless/hooks"
+    # FHS path fallback chain for spec and env-fix script
+    local SPEC_FILE=""
+    for p in \
+        "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
+        "$HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
+        "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
+        "$HOME/.tokenless/tool-ready-spec.json"; do
+        if [ -f "$p" ]; then SPEC_FILE="$p"; break; fi
+    done
+    local FIX_SCRIPT=""
+    for p in \
+        "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
+        "$HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
+        "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
+        "$HOME/.tokenless/tokenless-env-fix.sh"; do
+        if [ -f "$p" ] && [ -x "$p" ]; then FIX_SCRIPT="$p"; break; fi
+    done
+    HOOK_DIR="/usr/share/anolisa/adapters/tokenless/common/hooks"
     READY_SCRIPT="$HOOK_DIR/tool_ready_hook.sh"
     COMPRESS_SCRIPT="$HOOK_DIR/compress_response_hook.py"
 
@@ -437,7 +452,7 @@ test_tool_ready() {
     # 6.16 env-fix script: fallback chain (rtk)
     # ==========================================
     log_info "Test 6.16: env-fix fallback chain (rtk already available)"
-    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"tokenless","manager":"rpm","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/libexec/tokenless/rtk"},{"method":"cargo","binary":"rtk","package":"rtk"}]}' 2>&1)
+    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"tokenless","manager":"rpm","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/libexec/anolisa/tokenless/rtk"},{"method":"cargo","binary":"rtk","package":"rtk"}]}' 2>&1)
     assert_contains "$fb_out" "already available" "env-fix fallback: rtk already available via rpm"
 
     # ==========================================

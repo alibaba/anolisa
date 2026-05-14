@@ -12,7 +12,7 @@
  *      response and TOON compression are enabled, they run sequentially:
  *      Response Compression strips noise → TOON eliminates JSON format overhead.
  *
- * Stats are recorded automatically by tokenless compress-response / compress-schema.
+ * Stats are recorded automatically by tokenless compress-response.
  * Context passing uses environment variables (TOKENLESS_AGENT_ID,
  * TOKENLESS_SESSION_ID, TOKENLESS_TOOL_USE_ID) which are inherited by
  * child processes and read by RTK's stats patch.
@@ -36,12 +36,13 @@ let toonAvailable: boolean | null = null;
 
 // Resolved absolute paths — set by check*() functions so subprocess calls
 // use the correct path even when the binary is not on PATH (e.g. RPM installs
-// that place rtk/toon in /usr/libexec/tokenless/).
+// that place rtk/toon in /usr/libexec/anolisa/tokenless/).
 let rtkPath: string = "rtk";
 let tokenlessPath: string = "tokenless";
 let toonPath: string = "toon";
 
-const LIBEXEC_FALLBACK = "/usr/libexec/tokenless";
+const LIBEXEC_FALLBACK = "/usr/libexec/anolisa/tokenless";
+const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
 
 // Check both existence and execute permission (mirrors shell `-x` test).
 function isExecutable(path: string): boolean {
@@ -96,15 +97,15 @@ function checkTokenless(): boolean {
     if (result && result !== "") {
       tokenlessPath = result;
       tokenlessAvailable = true;
-    } else if (isExecutable(`${LIBEXEC_FALLBACK}/tokenless`)) {
-      tokenlessPath = `${LIBEXEC_FALLBACK}/tokenless`;
+    } else if (isExecutable(TOKENLESS_FALLBACK)) {
+      tokenlessPath = TOKENLESS_FALLBACK;
       tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
     }
   } catch {
-    if (isExecutable(`${LIBEXEC_FALLBACK}/tokenless`)) {
-      tokenlessPath = `${LIBEXEC_FALLBACK}/tokenless`;
+    if (isExecutable(TOKENLESS_FALLBACK)) {
+      tokenlessPath = TOKENLESS_FALLBACK;
       tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
@@ -241,7 +242,7 @@ export default {
   id: "tokenless-openclaw",
   name: "Token-Less",
   version: "1.0.0",
-  description: "Unified RTK command rewriting + schema/response/TOON compression + Tool Ready",
+  description: "Unified RTK command rewriting + response/TOON compression + Tool Ready",
   register(api: any) {
   const pluginConfig = api.config ?? {};
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
