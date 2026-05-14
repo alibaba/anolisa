@@ -280,8 +280,10 @@ impl SslSniff {
                             attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
                         }
                         None => {
-                            // Fall back to symbol-based attach (works for some builds).
-                            attach_openssl(&mut self.skel, &path, -1)
+                            log::warn!(
+                                "[attach_process] pid={pid}: BoringSSL byte-pattern detection failed for {path}, skipping"
+                            );
+                            continue;
                         }
                     }
                 }
@@ -414,7 +416,28 @@ fn find_pattern(haystack: &[u8], pattern: &[u8]) -> Option<usize> {
     haystack.windows(pattern.len()).position(|w| w == pattern)
 }
 
+/// Find all occurrences of `pattern` in `haystack`.
+fn find_all_patterns(haystack: &[u8], pattern: &[u8]) -> Vec<usize> {
+    if pattern.is_empty() || pattern.len() > haystack.len() {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while pos + pattern.len() <= haystack.len() {
+        if let Some(off) = find_pattern(&haystack[pos..], pattern) {
+            results.push(pos + off);
+            pos += off + 1;
+        } else {
+            break;
+        }
+    }
+    results
+}
+
 fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
+    // BoringSSL function prologue byte patterns (x86_64).
+    // These are stable across versions because they represent the fixed
+    // parameter-saving and state-setup logic of the POSIX SSL API.
     const HANDSHAKE_PAT: &[u8] = &[
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
         0xec, 0x28, 0x49, 0x89, 0xfc, 0x48, 0x8b, 0x47, 0x30,
@@ -427,50 +450,84 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
         0xec, 0x18, 0x41, 0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x89, 0xfb,
     ];
-    const READ_HANDSHAKE_DELTA: usize = 0x6F0;
-    const WRITE_READ_DELTA: usize = 0xCA0;
+    // Maximum distance between SSL_read and SSL_write in the same compilation unit.
+    const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
     let verbose = config::verbose();
 
     let data = fs::read(path).ok()?;
 
-    let read_off = find_pattern(&data, READ_PAT).or_else(|| {
+    // --- SSL_read: expect unique match ---
+    let read_matches = find_all_patterns(&data, READ_PAT);
+    if read_matches.is_empty() {
         if verbose {
-            eprintln!("BoringSSL: SSL_read pattern not found");
+            eprintln!("BoringSSL: SSL_read pattern not found in {path}");
         }
-        None
-    })?;
-
-    let hs_off = if read_off >= READ_HANDSHAKE_DELTA {
-        let exp = read_off - READ_HANDSHAKE_DELTA;
-        if data[exp..].starts_with(HANDSHAKE_PAT) {
-            Some(exp)
-        } else {
-            find_pattern(&data, HANDSHAKE_PAT)
-        }
-    } else {
-        find_pattern(&data, HANDSHAKE_PAT)
+        return None;
     }
-    .or_else(|| {
-        if verbose {
-            eprintln!("BoringSSL: SSL_do_handshake pattern not found");
-        }
-        None
-    })?;
-
-    let exp_wr = read_off + WRITE_READ_DELTA;
-    let wr_off = if exp_wr + WRITE_PAT.len() <= data.len() && data[exp_wr..].starts_with(WRITE_PAT)
-    {
-        Some(exp_wr)
+    let read_off = if read_matches.len() == 1 {
+        read_matches[0]
     } else {
-        let end = (read_off + 0x10000).min(data.len());
-        find_pattern(&data[read_off..end], WRITE_PAT).map(|o| read_off + o)
-    }
-    .or_else(|| {
         if verbose {
-            eprintln!("BoringSSL: SSL_write pattern not found near SSL_read");
+            eprintln!(
+                "BoringSSL: SSL_read pattern has {} matches, expected 1",
+                read_matches.len()
+            );
         }
-        None
-    })?;
+        return None;
+    };
+
+    // --- SSL_do_handshake: expect unique match ---
+    let hs_matches = find_all_patterns(&data, HANDSHAKE_PAT);
+    if hs_matches.is_empty() {
+        if verbose {
+            eprintln!("BoringSSL: SSL_do_handshake pattern not found in {path}");
+        }
+        return None;
+    }
+    // Pick the match closest to (and before) SSL_read.
+    let hs_off = if hs_matches.len() == 1 {
+        hs_matches[0]
+    } else {
+        // Multiple matches: choose the one closest before read_off.
+        match hs_matches.iter().filter(|&&o| o < read_off).last() {
+            Some(&o) => o,
+            None => {
+                if verbose {
+                    eprintln!(
+                        "BoringSSL: SSL_do_handshake has {} matches, none before SSL_read",
+                        hs_matches.len()
+                    );
+                }
+                return None;
+            }
+        }
+    };
+
+    // --- SSL_write: adjacency verification ---
+    let write_matches = find_all_patterns(&data, WRITE_PAT);
+    if write_matches.is_empty() {
+        if verbose {
+            eprintln!("BoringSSL: SSL_write pattern not found in {path}");
+        }
+        return None;
+    }
+    // Pick the first match after SSL_read within ADJACENCY_THRESHOLD.
+    let wr_off = write_matches
+        .iter()
+        .filter(|&&o| o > read_off && o - read_off < ADJACENCY_THRESHOLD)
+        .copied()
+        .next()
+        .or_else(|| {
+            if verbose {
+                eprintln!(
+                    "BoringSSL: SSL_write has {} matches but none within {}B after SSL_read ({:#x})",
+                    write_matches.len(),
+                    ADJACENCY_THRESHOLD,
+                    read_off
+                );
+            }
+            None
+        })?;
 
     log::debug!("BoringSSL detected in {path}:");
     log::debug!("  SSL_do_handshake: {hs_off:#x}");
@@ -501,7 +558,10 @@ enum SslLibKind {
 
 /// Classify a mapped file path into an `SslLibKind`, if it is an SSL library.
 fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
-    let name = Path::new(path).file_name()?.to_string_lossy();
+    // Strip " (deleted)" suffix that the kernel appends when the backing file
+    // has been unlinked while the process is still running.
+    let raw_path = path.strip_suffix(" (deleted)").unwrap_or(path);
+    let name = Path::new(raw_path).file_name()?.to_string_lossy();
     if name.starts_with("libssl.so") || name.starts_with("libssl-") {
         return Some(SslLibKind::OpenSsl);
     }
@@ -523,6 +583,7 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
             | "chromium"
             | "google-chrome"
             | "google-chrome-stable"
+            | "claude.exe"
     ) {
         return Some(SslLibKind::Boring);
     }
@@ -562,7 +623,14 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
         }
         if let Some(kind) = classify_ssl_lib(&path_str) {
             seen_inodes.insert(inode);
-            let path_str = format!("/proc/{pid}/root{}", path_str);
+            // When the backing file has been unlinked (" (deleted)" in maps),
+            // the filesystem path no longer exists.  Fall back to /proc/<pid>/exe
+            // which the kernel keeps accessible as long as the process is alive.
+            let path_str = if path_str.ends_with(" (deleted)") {
+                format!("/proc/{pid}/exe")
+            } else {
+                format!("/proc/{pid}/root{}", path_str)
+            };
             results.push((path_str, inode, kind));
         }
     }
@@ -589,12 +657,6 @@ fn make_sym_opts(sym: &str, retprobe: bool) -> UprobeOpts {
     o
 }
 
-fn make_off_opts(retprobe: bool) -> UprobeOpts {
-    let mut o = UprobeOpts::default();
-    o.retprobe = retprobe;
-    o
-}
-
 macro_rules! up {
     ($prog:expr, $pid:expr, $path:expr, $sym:expr) => {
         $prog
@@ -612,14 +674,14 @@ macro_rules! ur {
 macro_rules! up_off {
     ($prog:expr, $pid:expr, $path:expr, $off:expr) => {
         $prog
-            .attach_uprobe_with_opts($pid, $path, $off, make_off_opts(false))
+            .attach_uprobe(false, $pid, $path, $off)
             .with_context(|| format!("uprobe offset {:#x}@{}", $off, $path))
     };
 }
 macro_rules! ur_off {
     ($prog:expr, $pid:expr, $path:expr, $off:expr) => {
         $prog
-            .attach_uprobe_with_opts($pid, $path, $off, make_off_opts(true))
+            .attach_uprobe(true, $pid, $path, $off)
             .with_context(|| format!("uretprobe offset {:#x}@{}", $off, $path))
     };
 }

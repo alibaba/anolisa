@@ -11,7 +11,8 @@
       {"rule": ["*node*", "*copilot-shell*"], "agent_name": "Cosh"},
       {"rule": ["*openclaw-gatewa*"], "agent_name": "OpenClaw"},
       {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
-      {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"}
+      {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
+      {"rule": ["claude*"], "agent_name": "Claude"}
     ]
   }
 }
