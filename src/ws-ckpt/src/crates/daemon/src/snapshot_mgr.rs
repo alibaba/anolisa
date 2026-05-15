@@ -244,9 +244,14 @@ pub async fn diff_snapshots(
 
     let ws = arc.read().await;
 
-    // Resolve from
-    let from_id = resolve_snapshot_id(&ws.index, from)?;
-    let to_id = resolve_snapshot_id(&ws.index, to)?;
+    let from_id = match resolve_snapshot_id(&ws.index, from) {
+        Ok(id) => id,
+        Err(e) => return Ok(snapshot_resolve_error_response(from, e)),
+    };
+    let to_id = match resolve_snapshot_id(&ws.index, to) {
+        Ok(id) => id,
+        Err(e) => return Ok(snapshot_resolve_error_response(to, e)),
+    };
 
     let changes = state.backend.diff(&ws.ws_id, &from_id, &to_id).await?;
 
@@ -254,16 +259,28 @@ pub async fn diff_snapshots(
 }
 
 /// Resolve a snapshot reference (ID or prefix) to its ID.
+///
+/// Returns `ResolveError` directly so callers can map it to a user-facing
+/// `Response::Error { code: SnapshotNotFound, .. }` rather than bubbling up
+/// as an opaque `InternalError` via the dispatcher's anyhow fallback.
 fn resolve_snapshot_id(
     index: &ws_ckpt_common::SnapshotIndex,
     reference: &str,
-) -> anyhow::Result<String> {
-    match index.resolve_by_prefix(reference) {
-        Ok((id, _)) => Ok(id.clone()),
-        Err(ResolveError::NotFound) => anyhow::bail!("snapshot not found: {}", reference),
-        Err(ResolveError::Ambiguous(n)) => {
-            anyhow::bail!("ambiguous snapshot prefix '{}': {} matches", reference, n)
+) -> Result<String, ResolveError> {
+    index.resolve_by_prefix(reference).map(|(id, _)| id.clone())
+}
+
+/// Build a `SnapshotNotFound` response from a `ResolveError`.
+fn snapshot_resolve_error_response(reference: &str, err: ResolveError) -> Response {
+    let message = match err {
+        ResolveError::NotFound => format!("snapshot not found: {}", reference),
+        ResolveError::Ambiguous(n) => {
+            format!("ambiguous snapshot prefix '{}': {} matches", reference, n)
         }
+    };
+    Response::Error {
+        code: ErrorCode::SnapshotNotFound,
+        message,
     }
 }
 
@@ -797,6 +814,60 @@ mod tests {
     fn resolve_snapshot_id_not_found() {
         let index = SnapshotIndex::new(PathBuf::from("/ws"));
         let result = resolve_snapshot_id(&index, "nonexistent");
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ResolveError::NotFound);
+    }
+
+    #[test]
+    fn resolve_snapshot_id_ambiguous_prefix() {
+        let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+        index
+            .snapshots
+            .insert("abcd111".to_string(), make_snapshot_meta(false));
+        index
+            .snapshots
+            .insert("abcd222".to_string(), make_snapshot_meta(false));
+        assert_eq!(
+            resolve_snapshot_id(&index, "abcd").unwrap_err(),
+            ResolveError::Ambiguous(2)
+        );
+    }
+
+    /// Regression: user-input errors on `diff` must surface as
+    /// `SnapshotNotFound`, not as `InternalError` via the dispatcher fallback.
+    #[tokio::test]
+    async fn diff_snapshots_missing_id_returns_snapshot_not_found() {
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
+        index
+            .snapshots
+            .insert("real-id".to_string(), make_snapshot_meta(false));
+        state.register_workspace("ws-diff".to_string(), PathBuf::from("/home/user/ws"), index);
+
+        let resp = diff_snapshots(&state, "ws-diff", "does-not-exist", "real-id")
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("does-not-exist"), "got: {}", message);
+            }
+            other => panic!("expected SnapshotNotFound, got: {:?}", other),
+        }
+
+        // Also covers the `to`-side branch.
+        let resp = diff_snapshots(&state, "ws-diff", "real-id", "missing-to")
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("missing-to"), "got: {}", message);
+            }
+            other => panic!("expected SnapshotNotFound, got: {:?}", other),
+        }
     }
 }
