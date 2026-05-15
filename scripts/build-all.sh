@@ -4,18 +4,21 @@
 #
 # Usage:
 #   ./scripts/build-all.sh                                    # install deps + build + install (default)
-#   ./scripts/build-all.sh --no-install                       # install deps + build, skip system install
+#   ./scripts/build-all.sh --no-install                       # install deps + build, skip installation
 #   ./scripts/build-all.sh --ignore-deps                      # build + install, skip dep install
 #   ./scripts/build-all.sh --deps-only                        # install deps only
 #   ./scripts/build-all.sh --component cosh                   # deps + build + install copilot-shell only
+#   ./scripts/build-all.sh --uninstall                        # uninstall all components
+#   ./scripts/build-all.sh --uninstall --component cosh       # uninstall copilot-shell only
 #   ./scripts/build-all.sh --help
 #
 # Components (build order):
 #   cosh     copilot-shell      (Node.js / TypeScript)
 #   skills   os-skills          (Markdown skill definitions, no compilation)
-#   sec-core agent-sec-core     (Security CLI + sandbox + hooks)
-#   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
+#   sec-core agent-sec-core     (Rust sandbox, Linux only)
 #   tokenless tokenless         (Rust compression library, cross-platform)
+#   ws-ckpt  ws-ckpt           (Rust workspace checkpoint daemon)
+#   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -40,12 +43,41 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DEPS=true
 DEPS_ONLY=false
 DO_INSTALL=true
-COMPONENTS=()        # empty = all
+DO_UNINSTALL=false
+DRY_RUN=false
+INSTALL_MODE="user"
+COMPONENTS=()
 
-# ─── artifact tracking ───
+SYSTEM_PREFIX="/usr"
+SYSTEM_BIN_DIR="/usr/local/bin"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+INSTALL_PREFIX="$HOME/.local"
+INSTALL_BIN_DIR="$INSTALL_PREFIX/bin"
+USER_BIN_DIR="$INSTALL_PREFIX/bin"
+USER_LIB_DIR="$INSTALL_PREFIX/lib"
+USER_LIBEXEC_DIR="$INSTALL_PREFIX/libexec"
+USER_SHARE_DIR="$INSTALL_PREFIX/share"
+USER_DOC_DIR="$INSTALL_PREFIX/share/doc"
+USER_EXTENSIONS_DIR="$USER_SHARE_DIR/anolisa/extensions"
 
-ARTIFACT_NAMES=()
-ARTIFACT_PATHS=()
+USER_COSH_DIR="$HOME/.copilot-shell"
+USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
+USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
+
+SEC_CORE_BIN_DIR="$SYSTEM_BIN_DIR"
+SEC_CORE_LIB_DIR="/usr/lib/anolisa/sec-core"
+SEC_CORE_VENV_DIR="$SEC_CORE_LIB_DIR/venv"
+SEC_CORE_WHEEL_DIR="$SEC_CORE_LIB_DIR/wheels"
+SEC_CORE_OPENCLAW_PLUGIN_DIR="$SEC_CORE_LIB_DIR/openclaw-plugin"
+SEC_CORE_SKILL_DIR="/usr/share/anolisa/skills"
+SEC_CORE_EXTENSION_DIR="/usr/share/anolisa/extensions/agent-sec-core"
+SEC_CORE_ADAPTER_DIR="/usr/share/anolisa/adapters/sec-core"
+SEC_CORE_RUST_TOOLCHAIN="1.93.0"
+
+# ─── output / staging ───
+
+OUTPUT_DIR="$PROJECT_ROOT/target"
+LOG_FILE="$OUTPUT_DIR/build.log"
 
 # ─── helpers ───
 
@@ -69,6 +101,311 @@ ver_gte() {
 }
 
 die() { err "$@"; exit 1; }
+
+as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+run_cmd() {
+    if $DRY_RUN; then
+        echo "DRY-RUN: $*"
+    else
+        "$@"
+    fi
+}
+
+component_target_dir() {
+    echo "$OUTPUT_DIR/$1"
+}
+
+component_install_root() {
+    echo "$(component_target_dir "$1")/install-root"
+}
+
+stage_component_make_install() {
+    local component="$1" dir="$2"; shift 2
+    local stage_root
+    stage_root="$(component_target_dir "$component")"
+
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    rm -rf "$stage_root"
+    mkdir -p "$stage_root"
+
+    cd "$dir"
+    run_logged "stage ${component} -> target/${component}" \
+        make install DESTDIR="$stage_root" INSTALL_PROFILE=system \
+            PREFIX="" BINDIR="/bin" "$@"
+}
+
+system_staged_install() {
+    local component="$1" stage_root="$2"
+    [[ -d "$stage_root" ]] || die "Staged install root not found: $stage_root"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: cp -a $stage_root/. /"
+    else
+        info "Installing ${component} from ${stage_root} to / ..."
+        as_root cp -a "$stage_root/." /
+    fi
+}
+
+run_component_make_install() {
+    local component="$1" dir="$2"; shift 2
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        local stage_root
+        stage_root="$(component_install_root "$component")"
+        rm -rf "$stage_root"
+        mkdir -p "$stage_root"
+        run_logged "stage system install ${component} -> target/${component}/install-root" \
+            make install DESTDIR="$stage_root" INSTALL_PROFILE=system \
+                PREFIX="$SYSTEM_PREFIX" BINDIR="$SYSTEM_BIN_DIR" \
+                SERVICE_BINDIR="$SYSTEM_BIN_DIR" "$@"
+        system_staged_install "$component" "$stage_root"
+    else
+        run_logged "make install (${component})" \
+            make install INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" "$@"
+    fi
+}
+
+run_component_make_uninstall() {
+    local component="$1" dir="$2"; shift 2
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        run_logged "make uninstall (${component})" \
+            as_root make uninstall INSTALL_PROFILE=system \
+                PREFIX="$SYSTEM_PREFIX" BINDIR="$SYSTEM_BIN_DIR" \
+                SERVICE_BINDIR="$SYSTEM_BIN_DIR" "$@"
+    else
+        run_logged "make uninstall (${component})" \
+            make uninstall INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" "$@"
+    fi
+}
+
+sec_core_cmd() {
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        as_root "$@"
+    else
+        "$@"
+    fi
+}
+
+copy_tree() {
+    local src="$1" dst="$2"
+    [[ -d "$src" ]] || die "Directory not found: $src"
+    mkdir -p "$dst"
+    cp -rp "$src/." "$dst/"
+}
+
+copy_file() {
+    local src="$1" dst="$2" mode="${3:-0644}"
+    [[ -f "$src" ]] || die "File not found: $src"
+    mkdir -p "$(dirname "$dst")"
+    install -p -m "$mode" "$src" "$dst"
+}
+
+stage_skill_dirs() {
+    local src_root="$1" dst_root="$2" skill_dir skill_name
+    [[ -d "$src_root" ]] || die "Directory not found: $src_root"
+    mkdir -p "$dst_root"
+    while IFS= read -r skill_file; do
+        skill_dir="$(dirname "$skill_file")"
+        skill_name="$(basename "$skill_dir")"
+        mkdir -p "$dst_root/$skill_name"
+        cp -rp "$skill_dir/." "$dst_root/$skill_name/"
+    done < <(find "$src_root" -name "SKILL.md" -type f | sort)
+}
+
+install_skill_dirs_flat() {
+    local src_root="$1" dst_root="$2" skill_dir skill_name
+    [[ -d "$src_root" ]] || die "Directory not found: $src_root"
+    sec_core_cmd install -d -m 0755 "$dst_root"
+    while IFS= read -r skill_file; do
+        skill_dir="$(dirname "$skill_file")"
+        skill_name="$(basename "$skill_dir")"
+        sec_core_cmd rm -rf "$dst_root/$skill_name"
+        sec_core_cmd install -d -m 0755 "$dst_root/$skill_name"
+        sec_core_cmd cp -rp "$skill_dir/." "$dst_root/$skill_name/"
+    done < <(find "$src_root" -name "SKILL.md" -type f | sort)
+}
+
+remove_skill_dirs_flat() {
+    local src_root="$1" dst_root="$2" skill_dir skill_name
+    [[ -d "$src_root" ]] || return 0
+    while IFS= read -r skill_file; do
+        skill_dir="$(dirname "$skill_file")"
+        skill_name="$(basename "$skill_dir")"
+        sec_core_cmd rm -rf "$dst_root/$skill_name"
+    done < <(find "$src_root" -name "SKILL.md" -type f | sort)
+}
+
+stage_adapter_manifest() {
+    local comp="$1" src="$2"
+    [[ -f "$src" ]] || return 0
+    copy_file "$src" "$(component_target_dir "$comp")/share/anolisa/adapters/$comp/manifest.json" 0644
+    copy_file "$src" "$(component_target_dir "$comp")/adapter-manifest.json" 0644
+}
+
+# Run a command, redirect all output (stdout+stderr) to LOG_FILE.
+# Shows an animated spinner on the same line while the command runs,
+# then replaces it with ok / FAILED.
+run_logged() {
+    local desc="$1"; shift
+
+    mkdir -p "$(dirname "$LOG_FILE")"
+    "$@" >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+
+    local spin='-\|/' i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r    ${DIM}%-52s${NC}  ${CYAN}%s${NC}" "$desc" "${spin:$((i % 4)):1}"
+        i=$((i + 1))
+        sleep 0.1
+    done
+
+    local rc=0
+    wait "$pid" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        printf "\r    ${DIM}%-52s${NC}  ${GREEN}ok${NC}\n" "$desc"
+    else
+        printf "\r    ${DIM}%-52s${NC}  ${RED}FAILED${NC}\n" "$desc"
+        warn "Failed: $*"
+        info "Full output: $LOG_FILE"
+        return $rc
+    fi
+}
+
+run_logged_timeout() {
+    local seconds="$1"; shift
+    local desc="$1"; shift
+
+    if cmd_exists timeout; then
+        run_logged "$desc" timeout "$seconds" "$@"
+    else
+        run_logged "$desc" "$@"
+    fi
+}
+
+ensure_user_mode() {
+    case "$INSTALL_MODE" in
+        user)
+            INSTALL_PREFIX="$HOME/.local"
+            INSTALL_BIN_DIR="$INSTALL_PREFIX/bin"
+            ;;
+        system)
+            INSTALL_PREFIX="$SYSTEM_PREFIX"
+            INSTALL_BIN_DIR="$SYSTEM_BIN_DIR"
+            ;;
+        *)
+            die "Invalid install mode: $INSTALL_MODE"
+            ;;
+    esac
+
+    USER_BIN_DIR="$INSTALL_PREFIX/bin"
+    USER_LIB_DIR="$INSTALL_PREFIX/lib"
+    USER_LIBEXEC_DIR="$INSTALL_PREFIX/libexec"
+    USER_SHARE_DIR="$INSTALL_PREFIX/share"
+    USER_DOC_DIR="$INSTALL_PREFIX/share/doc"
+    USER_EXTENSIONS_DIR="$USER_SHARE_DIR/anolisa/extensions"
+
+    USER_COSH_DIR="$HOME/.copilot-shell"
+    USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
+    USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
+
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        SEC_CORE_BIN_DIR="$SYSTEM_BIN_DIR"
+        SEC_CORE_LIB_DIR="/usr/lib/anolisa/sec-core"
+        SEC_CORE_SKILL_DIR="/usr/share/anolisa/skills"
+        SEC_CORE_EXTENSION_DIR="/usr/share/anolisa/extensions/agent-sec-core"
+        SEC_CORE_ADAPTER_DIR="/usr/share/anolisa/adapters/sec-core"
+    else
+        SEC_CORE_BIN_DIR="$USER_BIN_DIR"
+        SEC_CORE_LIB_DIR="$USER_LIB_DIR/anolisa/sec-core"
+        SEC_CORE_SKILL_DIR="$USER_COSH_SKILLS_DIR"
+        SEC_CORE_EXTENSION_DIR="$USER_COSH_EXTENSIONS_DIR/agent-sec-core"
+        SEC_CORE_ADAPTER_DIR="$USER_SHARE_DIR/anolisa/adapters/sec-core"
+    fi
+    SEC_CORE_VENV_DIR="$SEC_CORE_LIB_DIR/venv"
+    SEC_CORE_WHEEL_DIR="$SEC_CORE_LIB_DIR/wheels"
+    SEC_CORE_OPENCLAW_PLUGIN_DIR="$SEC_CORE_LIB_DIR/openclaw-plugin"
+}
+
+system_service_dir() {
+    if [[ -d /usr/lib/systemd/system || "$INSTALL_MODE" == "system" ]]; then
+        echo "/usr/lib/systemd/system"
+    else
+        echo "/etc/systemd/system"
+    fi
+}
+
+systemd_is_available() {
+    cmd_exists systemctl && [[ -d /run/systemd/system ]]
+}
+
+refresh_systemd_service() {
+    local service="$1"
+
+    [[ "$INSTALL_MODE" == "system" ]] || return 0
+    if ! systemd_is_available; then
+        warn "systemd is not active; installed ${service} but skipped enable/restart"
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: systemctl daemon-reload"
+        echo "DRY-RUN: systemctl enable $service"
+        echo "DRY-RUN: systemctl restart $service"
+        return 0
+    fi
+
+    as_root systemctl daemon-reload || warn "systemctl daemon-reload failed"
+    as_root systemctl enable "$service" || warn "systemctl enable $service failed"
+    as_root systemctl restart "$service" || warn "systemctl restart $service failed"
+}
+
+stop_systemd_service() {
+    local service="$1"
+
+    [[ "$INSTALL_MODE" == "system" ]] || return 0
+    if ! systemd_is_available; then
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: systemctl stop $service"
+        echo "DRY-RUN: systemctl disable $service"
+        echo "DRY-RUN: systemctl daemon-reload"
+        return 0
+    fi
+
+    as_root systemctl stop "$service" 2>/dev/null || true
+    as_root systemctl disable "$service" 2>/dev/null || true
+    as_root systemctl daemon-reload || warn "systemctl daemon-reload failed"
+}
+
+stop_systemd_service_for_install() {
+    local service="$1"
+
+    [[ "$INSTALL_MODE" == "system" ]] || return 0
+    if ! systemd_is_available; then
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: systemctl stop $service"
+        return 0
+    fi
+
+    as_root systemctl stop "$service" 2>/dev/null || true
+}
 
 # ─── distro detection ───
 
@@ -106,12 +443,12 @@ detect_distro() {
 
 # Default components (sight is excluded — it is optional and provides audit
 # capabilities only; use --component sight to include it explicitly).
-DEFAULT_COMPONENTS=(cosh skills sec-core tokenless)
+DEFAULT_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt)
+ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt sight)
 
 want_component() {
     local c="$1"
     if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
-        # No explicit --component flags: use default list
         local d
         for d in "${DEFAULT_COMPONENTS[@]}"; do
             if [[ "$d" == "$c" ]]; then return 0; fi
@@ -158,13 +495,8 @@ install_node() {
     step "Node.js (for copilot-shell)"
     local REQUIRED="20.0.0"
 
-    # Package name mapping — extend as needed for distros with non-standard names
     local node_pkg="nodejs" npm_pkg="npm"
-    # case "$DISTRO_ID" in
-    #     some_distro) node_pkg="nodejs20"; npm_pkg="" ;;
-    # esac
 
-    # -- helper: check current node meets requirement --
     _node_ver_ok() {
         cmd_exists node || return 1
         local v
@@ -172,7 +504,6 @@ install_node() {
         [[ -n "$v" ]] && ver_gte "$v" "$REQUIRED"
     }
 
-    # -- helper: source nvm into current shell --
     _source_nvm() {
         export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
         # shellcheck source=/dev/null
@@ -181,13 +512,11 @@ install_node() {
 
     _configure_npm_mirror
 
-    # 1. Already installed and version OK?
     if _node_ver_ok; then
         ok "Node.js $(node -v) already installed, skipping"
         return 0
     fi
 
-    # 2. Try system package manager (rpm / deb)
     local repo_ver
     repo_ver=$(query_repo_ver "$node_pkg")
     if [[ -n "$repo_ver" ]] && ver_gte "$repo_ver" "$REQUIRED"; then
@@ -203,48 +532,80 @@ install_node() {
         info "Repository $node_pkg${repo_ver:+ $repo_ver} does not meet >= $REQUIRED"
     fi
 
-    # 3. Fallback: install via nvm
     info "Installing Node.js via nvm ..."
 
-    # Ensure shell rc file exists (nvm installer appends to it)
     if [[ "${SHELL}" == */zsh ]]; then touch "$HOME/.zshrc"; else touch "$HOME/.bashrc"; fi
 
-    # Source nvm if already present but not loaded
     if ! cmd_exists nvm; then _source_nvm; fi
 
-    # Install nvm itself if still not available
     if ! cmd_exists nvm; then
         info "Installing nvm ..."
+        local NVM_VERSION="v0.40.3"
+        export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+        # Disable interactive git prompts so clone fails fast instead of hanging
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_ASKPASS=/bin/true
         local _nvm_script
-        _nvm_script=$(mktemp /tmp/nvm-install-XXXXXX.sh)
-        curl -fsSL --connect-timeout 15 --max-time 60 \
-            https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
-            -o "$_nvm_script" 2>/dev/null || true
-        [[ -s "$_nvm_script" ]] && bash "$_nvm_script" 2>/dev/null || true
-        rm -f "$_nvm_script"
-        _source_nvm
-        if ! cmd_exists nvm; then
-            warn "GitHub unreachable or timed out, trying Gitee mirror ..."
+
+        # Probe GitHub reachability (the official install.sh internally runs
+        # `git clone github.com`, which hangs indefinitely when GitHub is
+        # blocked — so we only try it when GitHub is actually reachable).
+        local _github_ok=false
+        if curl -sSf --connect-timeout 5 --max-time 10 \
+                -o /dev/null https://github.com 2>/dev/null; then
+            _github_ok=true
+        fi
+
+        if $_github_ok; then
             _nvm_script=$(mktemp /tmp/nvm-install-XXXXXX.sh)
-            curl -fsSL --connect-timeout 15 --max-time 60 \
-                https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh \
+            curl -fsSL --connect-timeout 10 --max-time 30 \
+                "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" \
                 -o "$_nvm_script" 2>/dev/null || true
             [[ -s "$_nvm_script" ]] && bash "$_nvm_script" 2>/dev/null || true
             rm -f "$_nvm_script"
+            _source_nvm
+        else
+            info "GitHub not reachable, skipping official installer"
+        fi
+
+        if ! cmd_exists nvm; then
+            warn "Cloning nvm from Gitee mirror ..."
+            if [[ -d "$NVM_DIR" && ! -s "$NVM_DIR/nvm.sh" ]]; then
+                rm -rf "$NVM_DIR"
+            fi
+            if [[ ! -d "$NVM_DIR" ]]; then
+                git clone --depth=1 --branch "$NVM_VERSION" \
+                    https://gitee.com/mirrors/nvm.git "$NVM_DIR" 2>/dev/null \
+                    || git clone https://gitee.com/mirrors/nvm.git "$NVM_DIR" 2>/dev/null || true
+                if [[ -d "$NVM_DIR/.git" ]]; then
+                    (cd "$NVM_DIR" && \
+                        git checkout "$NVM_VERSION" 2>/dev/null \
+                        || git checkout "$(git describe --abbrev=0 --tags --match "v[0-9]*" 2>/dev/null)" 2>/dev/null \
+                        || true)
+                fi
+            fi
+            local _rc="$HOME/.bashrc"
+            [[ "${SHELL}" == */zsh ]] && _rc="$HOME/.zshrc"
+            if [[ -s "$NVM_DIR/nvm.sh" ]] && ! grep -q 'NVM_DIR' "$_rc" 2>/dev/null; then
+                {
+                    echo ''
+                    echo 'export NVM_DIR="$HOME/.nvm"'
+                    echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
+                    echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'
+                } >> "$_rc"
+            fi
             _source_nvm
         fi
     fi
     cmd_exists nvm || die "Failed to install nvm"
 
-    # Install Node.js 20 (NVM_NODEJS_ORG_MIRROR already set by _configure_npm_mirror)
-    nvm install 20
-    nvm use 20
+    nvm install 20 || die "nvm install 20 failed; check network or mirror settings"
 
-    _configure_npm_mirror  # npm is now available — configure registry
+    _configure_npm_mirror
 
-    # Final check
     if _node_ver_ok; then
         ok "Node.js $(node -v), npm $(npm -v)"
+        info "nvm was sourced for this session; open a new terminal (or run: source ~/.bashrc) to persist"
     else
         die "Failed to install Node.js >= $REQUIRED"
     fi
@@ -274,20 +635,17 @@ install_build_tools() {
 }
 
 install_rust() {
-    step "Rust (for agent-sec-core, agentsight, tokenless)"
+    step "Rust (for agent-sec-core, agentsight, tokenless, ws-ckpt)"
     local REQUIRED="1.91.0"
 
-    # Package name mapping (DEB uses "rustc"/"cargo", RPM uses "rust"/"cargo")
     local rust_pkg="rust" cargo_pkg="cargo"
     if [[ "$PKG_BASE" == "deb" ]]; then rust_pkg="rustc"; fi
 
-    # -- helper: source cargo env --
     _source_cargo() {
         # shellcheck source=/dev/null
         if [[ -f "$HOME/.cargo/env" ]]; then source "$HOME/.cargo/env"; fi
     }
 
-    # -- helper: check current rust meets requirement --
     _rust_ver_ok() {
         cmd_exists rustc && cmd_exists cargo || return 1
         local v
@@ -295,20 +653,31 @@ install_rust() {
         [[ -n "$v" ]] && ver_gte "$v" "$REQUIRED"
     }
 
-    # Source cargo env (rustup installs to ~/.cargo)
     _source_cargo
-    _configure_cargo_mirror  # Configure mirror upfront (idempotent)
+    _configure_cargo_mirror
 
-    # 1. Already installed and version OK?
     if _rust_ver_ok; then
         ok "Rust $(extract_ver "$(rustc --version)") already installed, skipping"
         return 0
     fi
 
-    # If rustc exists but too old and rustup is available, try updating first
+    # If rustc exists but too old and rustup is available, try updating first.
+    # Use a stable-channel mirror only for this command; the global
+    # RUSTUP_DIST_SERVER remains selected for sec-core's pinned Rust toolchain.
     if cmd_exists rustup; then
         info "Updating via rustup ..."
-        rustup update stable
+        local stable_picked stable_dist stable_update_root
+        stable_picked=$(_pick_rustup_stable_mirror 2>/dev/null || echo "")
+        if [[ -n "$stable_picked" ]]; then
+            stable_dist="${stable_picked%%|*}"
+            stable_update_root="${stable_picked##*|}"
+            info "Rust stable channel mirror: ${stable_dist}"
+            RUSTUP_DIST_SERVER="$stable_dist" \
+                RUSTUP_UPDATE_ROOT="$stable_update_root" \
+                rustup update stable || warn "rustup update stable failed; continuing with other Rust install methods"
+        else
+            rustup update stable || warn "rustup update stable failed; continuing with other Rust install methods"
+        fi
         _source_cargo
         if _rust_ver_ok; then
             ok "Rust updated to $(extract_ver "$(rustc --version)") via rustup"
@@ -316,7 +685,6 @@ install_rust() {
         fi
     fi
 
-    # 2. Try system package manager
     local repo_ver=""
     repo_ver=$(query_repo_ver "$rust_pkg")
 
@@ -356,7 +724,7 @@ install_rust() {
 
         if _rust_ver_ok; then
             ok "Rust $(extract_ver "$(rustc --version)") installed via package manager"
-            info "Note: agent-sec-core pins Rust 1.93.0 via rust-toolchain.toml; rustup will auto-download if needed"
+            info "Note: agent-sec-core pins Rust ${SEC_CORE_RUST_TOOLCHAIN} via rust-toolchain.toml; rustup will auto-download if needed"
             return 0
         fi
         warn "Package manager install did not satisfy version requirement"
@@ -364,7 +732,6 @@ install_rust() {
         info "Repository ${rust_pkg}${repo_ver:+ $repo_ver} does not meet >= $REQUIRED"
     fi
 
-    # 3. Fallback: install via rustup
     info "Installing Rust via rustup ..."
     sudo $PKG_INSTALL gcc make 2>/dev/null || true
 
@@ -406,7 +773,6 @@ install_rust() {
         _source_cargo
     fi
 
-    # Final check
     if _rust_ver_ok; then
         ok "Rust $(extract_ver "$(rustc --version)"), cargo $(extract_ver "$(cargo --version)")"
     else
@@ -415,43 +781,155 @@ install_rust() {
 }
 
 _configure_npm_mirror() {
-    # 1. NVM_NODEJS_ORG_MIRROR — used by nvm to download Node.js binaries
     if [[ -z "${NVM_NODEJS_ORG_MIRROR:-}" ]]; then
         export NVM_NODEJS_ORG_MIRROR="https://npmmirror.com/mirrors/node/"
     fi
+    export npm_config_registry="${npm_config_registry:-$NPM_REGISTRY}"
+    export npm_config_replace_registry_host="${npm_config_replace_registry_host:-always}"
 
-    # 2. npm registry — used by npm install for package downloads
     if ! cmd_exists npm; then return 0; fi
     local current
     current=$(npm config get registry 2>/dev/null || echo "")
-    # Already using npmmirror → skip
-    if [[ "$current" == "https://registry.npmmirror.com/" ]]; then return 0; fi
-    # User has custom (non-default) registry → skip
+    if [[ "$current" == "$NPM_REGISTRY" || "$current" == "$NPM_REGISTRY/" ]]; then return 0; fi
     if [[ -n "$current" && "$current" != "https://registry.npmjs.org/" ]]; then
-        info "Existing npm registry config found ($current), skipping mirror setup"
+        info "Using npm registry for this build: $current"
         return 0
     fi
-    npm config set registry https://registry.npmmirror.com/
-    ok "npm registry mirror configured: https://registry.npmmirror.com/"
+    npm config set registry "$NPM_REGISTRY"
+    ok "npm registry mirror configured: $NPM_REGISTRY"
+}
+
+# Probe candidate rustup dist mirrors and pick the first reachable one.
+# Returns the chosen base URL via stdout, or empty string on failure.
+_rustup_host_triple() {
+    if cmd_exists rustc; then
+        rustc -vV 2>/dev/null | awk '/^host:/ { print $2; exit }'
+        return 0
+    fi
+
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+        x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+        *) echo "x86_64-unknown-linux-gnu" ;;
+    esac
+}
+
+_rustup_probe_path() {
+    local host
+    host="$(_rustup_host_triple)"
+    echo "dist/rust-${SEC_CORE_RUST_TOOLCHAIN}-${host}.tar.gz.sha256"
+}
+
+_rustup_channel_path() {
+    echo "dist/channel-rust-${SEC_CORE_RUST_TOOLCHAIN}.toml"
+}
+
+_rustup_dist_has_toolchain() {
+    local base="$1"
+    local toolchain_path="$2"
+    local channel_path
+    channel_path="$(_rustup_channel_path)"
+
+    curl -sSfL --connect-timeout 3 --max-time 6 -o /dev/null \
+        "$base/$channel_path" 2>/dev/null || return 1
+    curl -sSfL --connect-timeout 3 --max-time 6 -o /dev/null \
+        "$base/$toolchain_path" 2>/dev/null
+}
+
+_pick_rustup_mirror() {
+    local candidates=(
+        "https://rsproxy.cn|https://rsproxy.cn/rustup"
+        "https://mirror.sjtu.edu.cn/rust-static|https://mirror.sjtu.edu.cn/rust-static/rustup"
+        "https://mirrors.ustc.edu.cn/rust-static|https://mirrors.ustc.edu.cn/rust-static/rustup"
+        "https://static.rust-lang.org|https://static.rust-lang.org/rustup"
+    )
+    # Probe both the versioned channel manifest and a real toolchain tarball
+    # checksum. Some mirrors expose only one of them while rustup needs both.
+    local probe_path
+    probe_path="$(_rustup_probe_path)"
+    local entry base
+    for entry in "${candidates[@]}"; do
+        base="${entry%%|*}"
+        if _rustup_dist_has_toolchain "$base" "$probe_path"; then
+            echo "$entry"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_rustup_stable_dist_available() {
+    local base="$1"
+
+    curl -sSfL --connect-timeout 3 --max-time 6 -o /dev/null \
+        "$base/dist/channel-rust-stable.toml.sha256" 2>/dev/null
+}
+
+_pick_rustup_stable_mirror() {
+    local candidates=(
+        "https://mirrors.tuna.tsinghua.edu.cn/rustup|https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup"
+        "https://rsproxy.cn|https://rsproxy.cn/rustup"
+        "https://mirrors.ustc.edu.cn/rust-static|https://mirrors.ustc.edu.cn/rust-static/rustup"
+        "https://mirror.sjtu.edu.cn/rust-static|https://mirror.sjtu.edu.cn/rust-static/rustup"
+        "https://static.rust-lang.org|https://static.rust-lang.org/rustup"
+    )
+    local entry base
+    for entry in "${candidates[@]}"; do
+        base="${entry%%|*}"
+        if _rustup_stable_dist_available "$base"; then
+            echo "$entry"
+            return 0
+        fi
+    done
+    return 1
 }
 
 _configure_cargo_mirror() {
-    # Detect network: Aliyun internal (ECS VPC) vs public internet
     local _aliyun_internal=false
     if curl -sSf --connect-timeout 3 http://mirrors.cloud.aliyuncs.com/ &>/dev/null; then
         _aliyun_internal=true
     fi
 
-    # ── 1. Rustup toolchain distribution mirror ──
     # Ensures rustup downloads from a reachable mirror (e.g. when
     # rust-toolchain.toml triggers an auto-install of a pinned version).
-    if [[ -z "${RUSTUP_DIST_SERVER:-}" ]]; then
-        export RUSTUP_DIST_SERVER="https://rsproxy.cn"
-        export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
-        info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
+    # This is CRITICAL: when cargo build encounters rust-toolchain.toml,
+    # rustup silently downloads the pinned toolchain (7+ components, ~300MB)
+    # from the configured dist server — defaulting to static.rust-lang.org,
+    # which is effectively unreachable from China and causes long hangs.
+    local picked dist update_root probe_path
+    probe_path="$(_rustup_probe_path)"
+    if [[ -n "${RUSTUP_DIST_SERVER:-}" ]]; then
+        if _rustup_dist_has_toolchain "$RUSTUP_DIST_SERVER" "$probe_path"; then
+            info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
+        else
+            warn "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER} cannot serve Rust ${SEC_CORE_RUST_TOOLCHAIN}; selecting fallback mirror"
+            picked=$(_pick_rustup_mirror 2>/dev/null || echo "")
+            if [[ -n "$picked" ]]; then
+                dist="${picked%%|*}"
+                update_root="${picked##*|}"
+                export RUSTUP_DIST_SERVER="$dist"
+                export RUSTUP_UPDATE_ROOT="$update_root"
+                info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
+            else
+                warn "No fallback rustup mirror verified for ${SEC_CORE_RUST_TOOLCHAIN}"
+            fi
+        fi
+    else
+        picked=$(_pick_rustup_mirror 2>/dev/null || echo "")
+        if [[ -n "$picked" ]]; then
+            dist="${picked%%|*}"
+            update_root="${picked##*|}"
+            export RUSTUP_DIST_SERVER="$dist"
+            export RUSTUP_UPDATE_ROOT="$update_root"
+            info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
+        else
+            # No mirror reachable — fall back to rsproxy.cn and let rustup surface any error
+            export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+            export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+            warn "No rustup mirror reachable; falling back to ${RUSTUP_DIST_SERVER}"
+        fi
     fi
 
-    # ── 2. crates.io registry mirror ──
     local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
     local cargo_config="$cargo_home/config.toml"
     local cargo_config_legacy="$cargo_home/config"
@@ -475,26 +953,120 @@ _configure_cargo_mirror() {
     fi
 
     mkdir -p "$cargo_home"
-    cat >> "$cargo_config" <<EOF
+    if ! grep -q '\[source\.crates-io\]' "$cargo_config" 2>/dev/null; then
+        cat >> "$cargo_config" <<EOF
 
 [source.crates-io]
 replace-with = 'aliyun'
 [source.aliyun]
 registry = "$mirror_url"
 EOF
+    fi
     ok "crates.io mirror configured in $cargo_config"
+}
+
+_configure_git_mirror() {
+    # Configure a reachable GitHub mirror for git operations when
+    # github.com is blocked (e.g. ECS instances in China).
+    # IMPORTANT: we write to --global (not --local) so that git-clone processes
+    # spawned by "git submodule update --init" also inherit the insteadOf rule.
+    local repo_dir="${1:-.}"
+
+    if curl -sSf --connect-timeout 3 --max-time 6 -o /dev/null https://github.com 2>/dev/null; then
+        return 0
+    fi
+
+    local existing
+    existing=$(git config --global --get-regexp 'url\..*insteadOf' 2>/dev/null | grep -i github | head -1 || true)
+    if [[ -n "$existing" ]]; then
+        info "Git insteadOf already configured: $existing"
+        return 0
+    fi
+
+    info "GitHub unreachable, probing mirrors ..."
+    local mirror_base mirror_full
+    local candidates=(
+        "https://gh-proxy.com"
+        "https://ghps.cc"
+        "https://mirror.ghproxy.com"
+        "https://ghproxy.com"
+        "https://gitclone.com"
+    )
+    local c
+    for c in "${candidates[@]}"; do
+        if curl -sSf --connect-timeout 3 --max-time 6 -o /dev/null "$c/" 2>/dev/null; then
+            mirror_base="${c}/"
+            mirror_full="${c}/https://github.com/"
+            break
+        fi
+    done
+
+    if [[ -z "${mirror_base:-}" ]]; then
+        warn "All GitHub mirrors unreachable; submodule clone may fail"
+        return 0
+    fi
+
+    git config --global "url.${mirror_full}.insteadOf" "https://github.com/"
+    ok "Git mirror (global): $mirror_base"
+}
+
+_configure_uv_mirror() {
+    # Configure mirrors for uv (and pip3 as fallback).
+    # uv respects these env vars and ~/.config/uv/uv.toml.
+    local aliyun_pypi="https://mirrors.aliyun.com/pypi/simple/"
+    local python_install_mirror="${UV_PYTHON_INSTALL_MIRROR:-https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone}"
+
+    export UV_INDEX_URL="$aliyun_pypi"
+    export UV_DEFAULT_INDEX="$aliyun_pypi"
+    export UV_PYTHON_INSTALL_MIRROR="$python_install_mirror"
+    export PIP_INDEX_URL="$aliyun_pypi"
+
+    local uv_cfg="$HOME/.config/uv/uv.toml"
+    if [[ ! -f "$uv_cfg" ]]; then
+        mkdir -p "$(dirname "$uv_cfg")"
+        cat > "$uv_cfg" <<EOF
+# uv configuration — managed by build-all.sh
+python-install-mirror = "$python_install_mirror"
+
+[[index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+EOF
+        ok "uv PyPI mirror configured: $aliyun_pypi"
+        ok "uv Python install mirror configured: $python_install_mirror"
+        return 0
+    fi
+
+    if ! grep -Eq '^[[:space:]]*python-install-mirror[[:space:]]*=' "$uv_cfg" 2>/dev/null; then
+        local tmp_cfg
+        tmp_cfg=$(mktemp)
+        {
+            echo "python-install-mirror = \"$python_install_mirror\""
+            echo ""
+            cat "$uv_cfg"
+        } > "$tmp_cfg" && mv "$tmp_cfg" "$uv_cfg"
+        ok "uv Python install mirror configured: $python_install_mirror"
+    fi
+
+    if ! grep -q 'mirrors.aliyun.com/pypi/simple/' "$uv_cfg" 2>/dev/null; then
+        cat >> "$uv_cfg" <<'EOF'
+
+[[index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+EOF
+        ok "uv PyPI mirror configured: $aliyun_pypi"
+    fi
 }
 
 install_uv() {
     step "uv (Python package manager, for agent-sec-core)"
 
-    # 1. Already installed?
     if cmd_exists uv; then
         ok "uv $(extract_ver "$(uv --version 2>/dev/null)") already installed, skipping"
         return 0
     fi
 
-    # 2. Try pip3 / pipx
     if cmd_exists pip3; then
         info "Trying: pip3 install uv ..."
         pip3 install uv 2>/dev/null || true
@@ -519,7 +1091,6 @@ install_uv() {
         fi
     fi
 
-    # 3. Fallback: upstream installer (astral.sh → GitHub)
     info "Installing uv via upstream installer ..."
     local _uv_script
     _uv_script=$(mktemp /tmp/uv-install-XXXXXX.sh)
@@ -547,7 +1118,6 @@ install_uv() {
         fi
     fi
 
-    # Final check
     if cmd_exists uv; then
         ok "uv $(extract_ver "$(uv --version 2>/dev/null)")"
     else
@@ -566,7 +1136,7 @@ check_ebpf_deps() {
     if ! cmd_exists llvm-config && ! cmd_exists llvm-config-*; then missing+=("llvm"); fi
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
-        local pkgs=("libbpf-devel" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "perl-IPC-Cmd")
+        local pkgs=("libbpf-devel" "libbpf-static" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "perl-IPC-Cmd" "perl-FindBin" "pkg-config")
         local pkg
         for pkg in "${pkgs[@]}"; do
             if ! rpm -q "$pkg" &>/dev/null; then
@@ -618,7 +1188,6 @@ check_ebpf_deps() {
         fi
     fi
 
-    # Kernel BTF check
     if [[ -f /sys/kernel/btf/vmlinux ]]; then
         ok "Kernel BTF support available"
     else
@@ -632,18 +1201,17 @@ do_install_deps() {
     step "Detecting system"
     detect_distro
 
-    if want_component cosh; then
+    if want_component cosh || want_component sec-core; then
         install_node
         install_build_tools
     fi
 
-    if want_component sec-core || want_component sight || want_component tokenless; then
+    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
         install_rust
     fi
 
     if want_component sec-core; then
-        install_node          # openclaw-plugin needs Node.js
-        install_build_tools   # gcc + make
+        _configure_uv_mirror
         install_uv
     fi
 
@@ -663,15 +1231,11 @@ build_cosh() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "make deps ..."
-    make deps
-
-    info "make build ..."
-    make build
+    run_logged "npm install (deps)" make deps
+    run_logged "esbuild + bundle" make build
 
     if [[ -f dist/cli.js ]]; then
-        ARTIFACT_NAMES+=("copilot-shell")
-        ARTIFACT_PATHS+=("src/copilot-shell/dist/cli.js")
+        stage_component_make_install "copilot-shell" "$dir"
         ok "copilot-shell built successfully"
     else
         warn "Expected artifact dist/cli.js not found"
@@ -679,7 +1243,7 @@ build_cosh() {
 }
 
 build_skills() {
-    step "Installing os-skills"
+    step "Preparing os-skills"
     local dir="$PROJECT_ROOT/src/os-skills"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
@@ -688,19 +1252,12 @@ build_skills() {
     count=$(find . -name "SKILL.md" 2>/dev/null | wc -l)
     count=$((count + 0)) # trim whitespace
 
-    info "Found ${count} skill definitions"
+    info "Found ${count} skill definitions (install step will deploy by mode)"
 
-    # Deploy to user-level skill path
-    local target="$HOME/.copilot-shell/skills"
-    mkdir -p "$target"
+    stage_component_make_install "os-skills" "$dir"
 
-    info "Copying skills to $target ..."
-    find . -name 'SKILL.md' -exec sh -c \
-        'cp -rp "$(dirname "$1")" "'"$target"'/"' _ {} \;
-
-    ARTIFACT_NAMES+=("os-skills")
-    ARTIFACT_PATHS+=("~/.copilot-shell/skills/ (${count} skills installed)")
-    ok "os-skills: ${count} skills deployed to $target"
+    stage_adapter_manifest "os-skills" "$PROJECT_ROOT/src/os-skills/adapter-manifest.json"
+    ok "os-skills staged to $(component_target_dir os-skills)"
 }
 
 build_sec_core() {
@@ -709,30 +1266,24 @@ build_sec_core() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    # build-all = build-sandbox + build-cli + build-openclaw-plugin
-    info "make build-all ..."
-    make build-all
+    local component_root build_dir
+    component_root="$(component_target_dir sec-core)"
+    build_dir="$component_root/build"
+    rm -rf "$component_root"
+    mkdir -p "$component_root"
 
-    # Track artifacts from BUILD_DIR (default: target)
-    local build_dir="target"
-    local sandbox_bin="$build_dir/linux-sandbox"
-    local wheel
-    wheel=$(ls "$build_dir"/wheels/agent_sec_cli-*.whl 2>/dev/null | head -1)
-    local plugin_entry="$build_dir/openclaw-plugin/dist/index.js"
+    info "make build-all (sandbox + CLI + sec-core assets) ..."
+    run_logged_timeout "${AGENT_SEC_BUILD_TIMEOUT:-1200}" \
+        "make build-all (agent-sec-core)" \
+        make build-all BUILD_DIR="$build_dir"
 
-    [[ -f "$sandbox_bin" ]] && ARTIFACT_NAMES+=("linux-sandbox") && ARTIFACT_PATHS+=("src/agent-sec-core/$sandbox_bin")
-    [[ -n "$wheel" ]] && ARTIFACT_NAMES+=("agent-sec-cli") && ARTIFACT_PATHS+=("src/agent-sec-core/$wheel")
-    [[ -f "$plugin_entry" ]] && ARTIFACT_NAMES+=("openclaw-plugin") && ARTIFACT_PATHS+=("src/agent-sec-core/$build_dir/openclaw-plugin/")
-
-    # Verify all expected artifacts exist
-    local missing=()
-    [[ -f "$sandbox_bin" ]] || missing+=("linux-sandbox")
-    [[ -n "$wheel" ]]       || missing+=("agent-sec-cli wheel")
-    [[ -f "$plugin_entry" ]] || missing+=("openclaw-plugin")
-    if (( ${#missing[@]} > 0 )); then
-        die "Build artifacts missing: ${missing[*]}"
+    local bin="$build_dir/linux-sandbox"
+    if [[ -f "$bin" ]]; then
+        stage_adapter_manifest "sec-core" "$PROJECT_ROOT/src/agent-sec-core/adapter-manifest.json"
+        ok "agent-sec-core built successfully"
+    else
+        warn "Expected artifact $bin not found"
     fi
-    ok "agent-sec-core built successfully"
 }
 
 build_sight() {
@@ -741,17 +1292,17 @@ build_sight() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    info "cargo build --release ..."
     if [[ -f Makefile ]] && grep -q 'build' Makefile; then
-        make build
+        stage_component_make_install "agentsight" "$dir" \
+            SERVICE_BINDIR="$SYSTEM_BIN_DIR" SETCAP=0 \
+            NPM_REGISTRY="$NPM_REGISTRY" NPM_REPLACE_REGISTRY_HOST=always
     else
-        cargo build --release
+        run_logged "cargo build (agentsight)" cargo build --release
+        copy_file target/release/agentsight "$(component_target_dir agentsight)/bin/agentsight" 0755
     fi
 
     local bin="target/release/agentsight"
-    if [[ -f "$bin" ]]; then
-        ARTIFACT_NAMES+=("agentsight")
-        ARTIFACT_PATHS+=("src/agentsight/$bin")
+    if [[ -f "$bin" || -f "$(component_target_dir agentsight)/bin/agentsight" ]]; then
         ok "agentsight built successfully"
     else
         warn "Expected artifact $bin not found"
@@ -764,45 +1315,87 @@ build_tokenless() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    # Initialize submodules if not already done
     if [ ! -d "third_party/rtk/.git" ]; then
         info "Initializing git submodules..."
-        git submodule update --init --recursive
+        _configure_git_mirror "$dir"
+        run_logged "git submodule update --init" git submodule update --init --recursive
     fi
 
-    info "cargo build --release --workspace ..."
-    if [[ -f Makefile ]] && grep -q 'build' Makefile; then
-        make build
-    else
-        # Build tokenless
-        cargo build --release --workspace
-        # Build rtk from submodule
-        cargo build --release --manifest-path third_party/rtk/Cargo.toml
-        # Build toon from submodule
-        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli
-    fi
+    info "make install (tokenless workspace) ..."
+    stage_component_make_install "tokenless" "$dir"
 
-    local bin="target/release/tokenless"
-    local rtk_bin="third_party/rtk/target/release/rtk"
-    local toon_bin="third_party/toon/target/release/toon"
+    local component_root bin rtk_bin toon_bin
+    component_root="$(component_target_dir tokenless)"
+    bin="$component_root/bin/tokenless"
+    rtk_bin="$component_root/libexec/anolisa/tokenless/rtk"
+    toon_bin="$component_root/libexec/anolisa/tokenless/toon"
     if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]] && [[ -f "$toon_bin" ]]; then
-        ARTIFACT_NAMES+=("tokenless" "rtk" "toon")
-        ARTIFACT_PATHS+=("src/tokenless/$bin" "src/tokenless/$rtk_bin" "src/tokenless/$toon_bin")
+        if [[ ! -d "$component_root/share/anolisa/adapters/tokenless" ]]; then
+            warn "tokenless adapter resources staged empty"
+        fi
+        if [[ ! -d "$component_root/share/anolisa/extensions/tokenless" ]]; then
+            warn "tokenless cosh extension staged empty"
+        fi
+        stage_adapter_manifest "tokenless" "$PROJECT_ROOT/src/tokenless/adapters/tokenless/manifest.json"
         ok "tokenless, rtk, and toon built successfully"
     else
-        [[ -f "$bin" ]] || warn "Expected artifact $bin not found"
+        [[ -f "$bin" ]]     || warn "Expected artifact $bin not found"
         [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
         [[ -f "$toon_bin" ]] || warn "Expected artifact $toon_bin not found"
     fi
 }
 
+build_wsckpt() {
+    step "Building ws-ckpt"
+    local dir="$PROJECT_ROOT/src/ws-ckpt"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    stage_component_make_install "ws-ckpt" "$dir"
+
+    local component_root bin
+    component_root="$(component_target_dir ws-ckpt)"
+    bin="$component_root/bin/ws-ckpt"
+    if [[ -f "$bin" ]]; then
+        stage_adapter_manifest "ws-ckpt" "$PROJECT_ROOT/src/ws-ckpt/adapter-manifest.json"
+        ok "ws-ckpt built successfully"
+    else
+        warn "Expected artifact $bin not found"
+    fi
+}
+
 do_build() {
-    # Fixed build order: cosh -> skills -> sec-core -> tokenless -> sight (sight only if explicitly requested)
-    if want_component cosh;     then build_cosh;     fi
-    if want_component skills;   then build_skills;   fi
-    if want_component sec-core; then build_sec_core; fi
+    # shellcheck source=/dev/null
+    [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+    # shellcheck source=/dev/null
+    [[ -s "$HOME/.nvm/nvm.sh" ]] && { export NVM_DIR="$HOME/.nvm"; source "$HOME/.nvm/nvm.sh"; }
+    export PATH="$HOME/.local/bin:$PATH"
+
+    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+        _configure_cargo_mirror
+    fi
+    if want_component cosh || want_component sec-core || want_component sight; then
+        _configure_npm_mirror
+    fi
+    if want_component sec-core; then
+        _configure_uv_mirror
+    fi
+    if want_component tokenless; then
+        _configure_git_mirror "$PROJECT_ROOT"
+    fi
+
+    rm -rf "$OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
+
+    : > "$LOG_FILE"
+    info "Build log → $LOG_FILE"
+
+    if want_component cosh;      then build_cosh;      fi
+    if want_component skills;    then build_skills;    fi
+    if want_component sec-core;  then build_sec_core;  fi
     if want_component tokenless; then build_tokenless; fi
-    if want_component sight;    then build_sight;    fi
+    if want_component ws-ckpt;   then build_wsckpt;    fi
+    if want_component sight;     then build_sight;     fi
 }
 
 # ─── install functions ───
@@ -810,95 +1403,297 @@ do_build() {
 install_cosh() {
     step "Installing copilot-shell"
     local dir="$PROJECT_ROOT/src/copilot-shell"
-    [[ -d "$dir" ]] || die "Directory not found: $dir"
-    cd "$dir"
+    run_component_make_install "copilot-shell" "$dir"
+    ok "copilot-shell installed to ${INSTALL_BIN_DIR}/{cosh,co,copilot}"
+}
 
-    # System-level install: PREFIX/bin/{cosh,co,copilot}
-    info "sudo make install PREFIX=/usr/local ..."
-    sudo make install PREFIX=/usr/local
-    ok "copilot-shell installed to /usr/local/bin/{cosh,co,copilot}"
+install_skills() {
+    step "Installing os-skills"
+    local dir="$PROJECT_ROOT/src/os-skills"
+    run_component_make_install "os-skills" "$dir"
+    local skills_dir="/usr/share/anolisa/skills"
+    [[ "$INSTALL_MODE" == "user" ]] && skills_dir="$USER_COSH_SKILLS_DIR"
+    ok "os-skills installed to ${skills_dir}"
+}
+
+install_sec_core_runtime_deps() {
+    if cmd_exists bwrap && { cmd_exists gpg || cmd_exists gpg2; } && cmd_exists jq; then
+        return 0
+    fi
+
+    if [[ "$INSTALL_MODE" != "system" ]]; then
+        cmd_exists bwrap || warn "bubblewrap not found; linux-sandbox may not run until it is installed."
+        if ! cmd_exists gpg && ! cmd_exists gpg2; then
+            warn "gpg/gpg2 not found; skill signature setup will need GnuPG."
+        fi
+        cmd_exists jq || warn "jq not found; sec-core helper scripts may need jq."
+        return 0
+    fi
+
+    if [[ -z "$PKG_INSTALL" ]]; then
+        detect_distro
+    fi
+
+    if ! cmd_exists bwrap; then
+        info "Installing runtime dependency: bubblewrap ..."
+        as_root $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
+    fi
+    if ! cmd_exists gpg && ! cmd_exists gpg2; then
+        local gpg_pkg="gnupg2"
+        [[ "$PKG_BASE" == "deb" ]] && gpg_pkg="gnupg"
+        info "Installing runtime dependency: ${gpg_pkg} ..."
+        as_root $PKG_INSTALL "$gpg_pkg" || warn "${gpg_pkg} not installed (skill signature verification)"
+    fi
+    if ! cmd_exists jq; then
+        info "Installing runtime dependency: jq ..."
+        as_root $PKG_INSTALL jq || warn "jq not installed (sec-core helper/signing dependency)"
+    fi
 }
 
 install_sec_core() {
     step "Installing agent-sec-core"
+
+    local staged build_dir
+    staged="$(component_target_dir sec-core)"
+    build_dir="$staged/build"
+
     local dir="$PROJECT_ROOT/src/agent-sec-core"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
-    cd "$dir"
 
-    # Install all components using user profile (no sudo, paths under ~/.local/)
-    info "make install-all INSTALL_PROFILE=user ..."
-    make install-all INSTALL_PROFILE=user
-    ok "agent-sec-core installed (user profile: ~/.local/ + ~/.copilot-shell/)"
+    [[ -d "$build_dir" ]] || die "Build directory not found: $build_dir"
+    [[ -f "$build_dir/linux-sandbox" ]] || die "Built linux-sandbox not found: $build_dir/linux-sandbox"
+    [[ -d "$build_dir/cosh-extension" ]] || die "Built cosh extension not found: $build_dir/cosh-extension"
+    [[ -d "$build_dir/openclaw-plugin" ]] || die "Built OpenClaw plugin not found: $build_dir/openclaw-plugin"
+    [[ -d "$build_dir/skills" ]] || die "Built sec-core skills not found: $build_dir/skills"
+    find "$build_dir/wheels" -maxdepth 1 -name 'agent_sec_cli-*.whl' -type f | grep -q . || \
+        die "Built agent-sec-cli wheel not found under $build_dir/wheels"
+    cmd_exists uv || die "uv not found; install dependencies first or run without --ignore-deps"
 
-    # Runtime dependencies (system packages, require sudo)
-    if ! cmd_exists bwrap; then
-        info "Installing runtime dependency: bubblewrap ..."
-        sudo $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
+    _configure_uv_mirror
+
+    if $DRY_RUN; then
+        local dry_prefix="$INSTALL_PREFIX"
+        [[ "$INSTALL_MODE" == "system" ]] && dry_prefix="$SYSTEM_PREFIX"
+        local make_args=(
+            -C "$dir" install
+            "BUILD_DIR=$build_dir"
+            "PREFIX=$dry_prefix"
+            "BINDIR=$SEC_CORE_BIN_DIR"
+            "LIBDIR=$SEC_CORE_LIB_DIR"
+            "VENV_DIR=$SEC_CORE_VENV_DIR"
+            "SKILLDIR=$SEC_CORE_SKILL_DIR"
+            "EXTENSIONDIR=$SEC_CORE_EXTENSION_DIR"
+            "OPENCLAW_PLUGIN_DIR=$SEC_CORE_OPENCLAW_PLUGIN_DIR"
+        )
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            make_args=("INSTALL_PROFILE=system" "${make_args[@]}")
+            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make ${make_args[*]}"
+        else
+            make_args=("INSTALL_PROFILE=user" "${make_args[@]}")
+            echo "DRY-RUN: make ${make_args[*]}"
+        fi
+        echo "DRY-RUN: install sec-core adapter manifest -> $SEC_CORE_ADAPTER_DIR/manifest.json"
+        echo "DRY-RUN: check/install sec-core runtime dependencies"
+        ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
+        return 0
     fi
-    if ! cmd_exists gpg && ! cmd_exists gpg2; then
-        info "Installing runtime dependency: gnupg2 ..."
-        sudo $PKG_INSTALL gnupg2 || warn "gnupg2 not installed (skill signature verification)"
+
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        run_logged "make install (agent-sec-core)" \
+            as_root env PATH="$PATH" \
+                UV_PYTHON_INSTALL_MIRROR="${UV_PYTHON_INSTALL_MIRROR:-}" \
+                make -C "$dir" install BUILD_DIR="$build_dir" \
+                INSTALL_PROFILE=system PREFIX="$SYSTEM_PREFIX" \
+                BINDIR="$SYSTEM_BIN_DIR" LIBDIR="$SEC_CORE_LIB_DIR" \
+                VENV_DIR="$SEC_CORE_VENV_DIR" \
+                SKILLDIR="$SEC_CORE_SKILL_DIR" \
+                EXTENSIONDIR="$SEC_CORE_EXTENSION_DIR" \
+                OPENCLAW_PLUGIN_DIR="$SEC_CORE_OPENCLAW_PLUGIN_DIR"
+    else
+        run_logged "make install (agent-sec-core)" \
+            make -C "$dir" install BUILD_DIR="$build_dir" \
+                INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" \
+                BINDIR="$SEC_CORE_BIN_DIR" LIBDIR="$SEC_CORE_LIB_DIR" \
+                VENV_DIR="$SEC_CORE_VENV_DIR" \
+                SKILLDIR="$SEC_CORE_SKILL_DIR" \
+                EXTENSIONDIR="$SEC_CORE_EXTENSION_DIR" \
+                OPENCLAW_PLUGIN_DIR="$SEC_CORE_OPENCLAW_PLUGIN_DIR"
     fi
-    if ! cmd_exists jq; then
-        info "Installing runtime dependency: jq ..."
-        sudo $PKG_INSTALL jq || warn "jq not installed (openclaw-plugin deploy)"
+
+    sec_core_cmd install -d -m 0755 "$SEC_CORE_ADAPTER_DIR"
+    sec_core_cmd install -p -m 0644 \
+        "$PROJECT_ROOT/src/agent-sec-core/adapter-manifest.json" \
+        "$SEC_CORE_ADAPTER_DIR/manifest.json"
+
+    install_sec_core_runtime_deps
+
+    ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
+    if [[ "$INSTALL_MODE" != "system" ]]; then
+        info "Make sure $SEC_CORE_BIN_DIR is in PATH before starting integrations."
     fi
 }
 
 install_sight() {
     step "Installing agentsight"
     local dir="$PROJECT_ROOT/src/agentsight"
-    [[ -d "$dir" ]] || die "Directory not found: $dir"
-    cd "$dir"
-
-    info "sudo make install ..."
-    sudo make install
-    ok "agentsight installed to /usr/local/bin/"
+    local setcap_arg="SETCAP=0"
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        setcap_arg="SETCAP=0"
+        stop_systemd_service_for_install agentsight.service
+    fi
+    run_component_make_install "agentsight" "$dir" "$setcap_arg"
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        if cmd_exists setcap; then
+            run_cmd as_root setcap cap_bpf,cap_perfmon=ep "$INSTALL_BIN_DIR/agentsight" || \
+                warn "setcap failed; agentsight trace may need sudo"
+        else
+            warn "setcap not found; agentsight trace may need sudo"
+        fi
+        refresh_systemd_service agentsight.service
+    else
+        warn "agentsight user install skips systemd/setcap; trace/audit may need sudo or manual setcap."
+    fi
+    ok "agentsight installed to ${INSTALL_BIN_DIR}/agentsight"
 }
 
 install_tokenless() {
     step "Installing tokenless"
     local dir="$PROJECT_ROOT/src/tokenless"
-    [[ -d "$dir" ]] || die "Directory not found: $dir"
-    cd "$dir"
-
-    info "Installing tokenless, rtk, and toon..."
-    if [[ -f Makefile ]] && grep -q 'install' Makefile; then
-        make install
-    else
-        # Install all three binaries to user-local path
-        install -d -m 0755 "$HOME/.local/bin"
-        install -p -m 0755 target/release/tokenless "$HOME/.local/bin/"
-        install -p -m 0755 third_party/rtk/target/release/rtk "$HOME/.local/bin/"
-        install -p -m 0755 third_party/toon/target/release/toon "$HOME/.local/bin/"
-    fi
-    ok "tokenless, rtk, and toon installed to $HOME/.local/bin/"
+    run_component_make_install "tokenless" "$dir"
+    ok "tokenless installed to ${INSTALL_BIN_DIR}/"
 }
 
-do_install() {
-    step "Installing components"
-    if want_component cosh;     then install_cosh;     fi
-    # skills are deployed during build, no separate install needed
-    if want_component sec-core; then install_sec_core; fi
-    if want_component sight;    then install_sight;    fi
-    if want_component tokenless; then install_tokenless; fi
-}
+install_wsckpt_runtime_deps() {
+    [[ "$INSTALL_MODE" == "system" ]] || return 0
 
-print_artifacts() {
-    step "Artifacts"
-
-    if [[ ${#ARTIFACT_NAMES[@]} -eq 0 ]]; then
-        warn "No artifacts produced"
+    if cmd_exists mkfs.btrfs; then
         return 0
     fi
 
-    local i
-    for (( i=0; i<${#ARTIFACT_NAMES[@]}; i++ )); do
-        echo -e "  ${GREEN}${ARTIFACT_NAMES[$i]}${NC}  ->  ${ARTIFACT_PATHS[$i]}"
-    done
+    if [[ -z "$PKG_INSTALL" ]]; then
+        detect_distro
+    fi
 
-    echo ""
-    info "Paths are relative to: $PROJECT_ROOT"
+    info "Installing runtime dependency: btrfs-progs ..."
+    as_root $PKG_INSTALL btrfs-progs || \
+        warn "btrfs-progs not installed; ws-ckpt btrfs-loop backend may not start"
+}
+
+install_wsckpt() {
+    step "Installing ws-ckpt"
+    local dir="$PROJECT_ROOT/src/ws-ckpt"
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        stop_systemd_service_for_install ws-ckpt.service
+    fi
+    run_component_make_install "ws-ckpt" "$dir"
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        install_wsckpt_runtime_deps
+        refresh_systemd_service ws-ckpt.service
+    else
+        info "Skipping ws-ckpt systemd service in user mode; use --system for service management."
+    fi
+    ok "ws-ckpt installed to ${INSTALL_BIN_DIR}/"
+}
+
+do_install() {
+    step "Installing components (mode=${INSTALL_MODE})"
+    if want_component cosh;      then install_cosh;      fi
+    if want_component skills;    then install_skills;    fi
+    if want_component sec-core;  then install_sec_core;  fi
+    if want_component tokenless; then install_tokenless; fi
+    if want_component ws-ckpt;   then install_wsckpt;    fi
+    if want_component sight;     then install_sight;     fi
+}
+
+# ─── uninstall functions ───
+
+uninstall_cosh() {
+    step "Uninstalling copilot-shell"
+    local dir="$PROJECT_ROOT/src/copilot-shell"
+    run_component_make_uninstall "copilot-shell" "$dir" || true
+    ok "copilot-shell uninstalled"
+}
+
+uninstall_skills() {
+    step "Uninstalling os-skills"
+    local dir="$PROJECT_ROOT/src/os-skills"
+    run_component_make_uninstall "os-skills" "$dir" || true
+    ok "os-skills uninstalled"
+}
+
+uninstall_sec_core() {
+    step "Uninstalling agent-sec-core"
+    sec_core_cmd rm -f \
+        "$SEC_CORE_BIN_DIR/linux-sandbox" \
+        "$SEC_CORE_BIN_DIR/agent-sec-cli"
+    remove_skill_dirs_flat "$PROJECT_ROOT/src/agent-sec-core/skills" "$SEC_CORE_SKILL_DIR"
+    sec_core_cmd rm -rf \
+        "$SEC_CORE_LIB_DIR" \
+        "$SEC_CORE_EXTENSION_DIR" \
+        "$SEC_CORE_ADAPTER_DIR"
+    ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
+}
+
+uninstall_sight() {
+    step "Uninstalling agentsight"
+    stop_systemd_service agentsight.service
+    local dir="$PROJECT_ROOT/src/agentsight"
+    run_component_make_uninstall "agentsight" "$dir" || true
+    ok "agentsight uninstalled"
+}
+
+uninstall_tokenless() {
+    step "Uninstalling tokenless"
+    local dir="$PROJECT_ROOT/src/tokenless"
+    run_component_make_uninstall "tokenless" "$dir" || true
+    ok "tokenless, rtk, and toon uninstalled"
+}
+
+uninstall_wsckpt() {
+    step "Uninstalling ws-ckpt"
+    stop_systemd_service ws-ckpt.service
+    local dir="$PROJECT_ROOT/src/ws-ckpt"
+    run_component_make_uninstall "ws-ckpt" "$dir" || true
+    ok "ws-ckpt uninstalled"
+}
+
+do_uninstall() {
+    step "Uninstalling components"
+    if want_component cosh;      then uninstall_cosh;      fi
+    if want_component skills;    then uninstall_skills;    fi
+    if want_component sec-core;  then uninstall_sec_core;  fi
+    if want_component tokenless; then uninstall_tokenless; fi
+    if want_component ws-ckpt;   then uninstall_wsckpt;    fi
+    if want_component sight;     then uninstall_sight;     fi
+
+    if [[ -d "$USER_EXTENSIONS_DIR" ]] && [[ -z "$(ls -A "$USER_EXTENSIONS_DIR" 2>/dev/null)" ]]; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            as_root rm -rf "$USER_EXTENSIONS_DIR"
+        else
+            rm -rf "$USER_EXTENSIONS_DIR"
+        fi
+        info "Removed empty $USER_EXTENSIONS_DIR"
+    fi
+}
+
+print_output_summary() {
+    step "Output"
+
+    if [[ ! -d "$OUTPUT_DIR" ]]; then
+        warn "No target/ directory found"
+        return 0
+    fi
+
+    local total
+    total=$(find "$OUTPUT_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    info "$total files staged → $OUTPUT_DIR"
+
+    local component_dir component_files
+    for component_dir in "$OUTPUT_DIR"/*; do
+        [[ -d "$component_dir" ]] || continue
+        component_files=$(find "$component_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+        info "  $(basename "$component_dir"): ${component_files} files → $component_dir"
+    done
 }
 
 # ─── usage ───
@@ -911,38 +1706,56 @@ $(echo -e "${BOLD}Usage:${NC}")
   $0 [OPTIONS]
 
 $(echo -e "${BOLD}Options:${NC}")
-  --no-install            Skip installing built components to system paths
-  --ignore-deps           Skip dependency installation
-  --deps-only             Install dependencies only, do not build
-  --component <name>      Build specific component (can be repeated).
-                          Valid names: cosh, skills, sec-core, sight, tokenless
-                          Default (no --component): cosh, skills, sec-core, tokenless
-                          (sight is optional and must be explicitly requested)
-  -h, --help              Show this help
+    --no-install            Skip installing built components
+    --install-mode <mode>   Install mode: user or system (default: user)
+    --usr, --system         Use system install mode (required for sec-core install)
+    --ignore-deps           Skip dependency installation
+    --deps-only             Install dependencies only, do not build
+    --uninstall             Remove installed files (skips build; combine with --component to target one)
+    --dry-run               Print actions without changing files or systemd state
+    --all                   Include optional components such as sight
+    --component <name>      Build/uninstall specific component (can be repeated).
+                                                    Valid names: cosh, skills, sec-core, sight, tokenless, ws-ckpt
+                                                    Default (no --component): cosh, skills, sec-core, tokenless, ws-ckpt
+                                                    (sight is optional; use --all or --component sight)
+    -h, --help              Show this help
 
 $(echo -e "${BOLD}Examples:${NC}")
-  $0                                             # Install deps + build + install to system
-  $0 --no-install                                # Install deps + build (skip system install)
-  $0 --ignore-deps                               # Build + install (skip dep install)
-  $0 --deps-only                                 # Install deps only
-  $0 --component cosh                            # Install deps + build + install copilot-shell
-  $0 --ignore-deps --component sec-core --component sight
-                                                 # Build + install sec-core and sight (no dep install)
+    $0                                             # Install deps + build + install to user paths
+    $0 --install-mode user                         # Explicit user install mode
+    $0 --no-install                                # Install deps + build (skip installation)
+    $0 --ignore-deps                               # Build + install (skip dep install)
+    $0 --deps-only                                 # Install deps only
+    $0 --all                                       # Build + install default components and agentsight
+    $0 --component cosh                            # Install deps + build + install copilot-shell
+    $0 --no-install                                # Build target/ staging only
+    $0 --component sec-core                          # Build + install sec-core to user paths
+    $0 --system --component sec-core                 # Build + install sec-core to FHS system paths
+    $0 --ignore-deps --component sec-core            # Build + install sec-core to user paths (no dep install)
+    $0 --uninstall                                 # Uninstall all default components
+    $0 --uninstall --component cosh                # Uninstall copilot-shell only
+    $0 --uninstall --component tokenless --component ws-ckpt
+                                                     # Uninstall tokenless and ws-ckpt
 
 $(echo -e "${BOLD}Components:${NC}")
   cosh     copilot-shell      Node.js / TypeScript AI terminal assistant       [default]
-  skills   os-skills          Markdown skill definitions (deploy only)          [default]
+  skills   os-skills          Markdown skill definitions                         [default]
   sec-core agent-sec-core     Security CLI + sandbox + hooks                    [default]
-  sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
   tokenless tokenless         Rust token compression library (cross-platform)   [default]
+  ws-ckpt  ws-ckpt           Rust workspace checkpoint daemon                   [default]
+  sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
 
 $(echo -e "${BOLD}What this script does:${NC}")
   1. Detects installed toolchains and queries system repositories for available versions
   2. Installs via system package manager (dnf/yum/apt) when repository versions meet requirements
   3. Falls back to upstream installers (nvm, rustup, uv) when system packages don't suffice
-  4. Builds default components in order: cosh -> skills -> sec-core -> tokenless
-     (sight is optional — add --component sight to include it)
-  5. Installs components to system paths (use --no-install to skip)
+  4. Builds default components in order: cosh -> skills -> sec-core -> tokenless -> ws-ckpt
+     (sight is optional — add --all or --component sight to include it)
+  5. Installs components to the selected profile layout
+         - prefix: ${INSTALL_PREFIX}
+         - binaries: ${INSTALL_BIN_DIR}
+         - shared extensions: ${USER_EXTENSIONS_DIR}
+         - docs (component-native): ${USER_DOC_DIR}
   6. Reports artifact locations at the end
 
 $(echo -e "${BOLD}Note:${NC}")
@@ -965,18 +1778,42 @@ parse_args() {
                 INSTALL_DEPS=false
                 shift
                 ;;
+            --install-mode)
+                [[ -n "${2:-}" ]] || die "--install-mode requires a value: user|system"
+                case "$2" in
+                    user|system) INSTALL_MODE="$2" ;;
+                    *) die "Invalid --install-mode: $2. Valid: user, system" ;;
+                esac
+                shift 2
+                ;;
+            --usr|--system)
+                INSTALL_MODE="system"
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
             --deps-only)
                 DEPS_ONLY=true
                 INSTALL_DEPS=true
                 shift
                 ;;
+            --all)
+                COMPONENTS=("${ALL_COMPONENTS[@]}")
+                shift
+                ;;
             --component)
-                [[ -n "${2:-}" ]] || die "--component requires a value (cosh, skills, sec-core, sight, tokenless)"
+                [[ -n "${2:-}" ]] || die "--component requires a value (cosh, skills, sec-core, sight, tokenless, ws-ckpt)"
                 case "$2" in
-                    cosh|skills|sec-core|sight|tokenless) COMPONENTS+=("$2") ;;
-                    *) die "Unknown component: $2. Valid: cosh, skills, sec-core, sight, tokenless" ;;
+                    cosh|skills|sec-core|sight|tokenless|ws-ckpt) COMPONENTS+=("$2") ;;
+                    *) die "Unknown component: $2. Valid: cosh, skills, sec-core, sight, tokenless, ws-ckpt" ;;
                 esac
                 shift 2
+                ;;
+            --uninstall)
+                DO_UNINSTALL=true
+                shift
                 ;;
             -h|--help)
                 usage
@@ -987,7 +1824,6 @@ parse_args() {
         esac
     done
 
-    # --deps-only implies INSTALL_DEPS regardless of --ignore-deps
     if $DEPS_ONLY; then
         INSTALL_DEPS=true
     fi
@@ -997,27 +1833,32 @@ parse_args() {
 
 main() {
     parse_args "$@"
+    ensure_user_mode
 
     echo -e "${BOLD}ANOLISA Build Script${NC}"
     echo -e "${DIM}Project root: ${PROJECT_ROOT}${NC}"
+    echo -e "${DIM}Mode: ${INSTALL_MODE}${NC}"
 
-    # 1. Install dependencies if requested
+    if $DO_UNINSTALL; then
+        do_uninstall
+        echo ""
+        ok "Done"
+        exit 0
+    fi
+
     if $INSTALL_DEPS; then
         do_install_deps
     fi
 
-    # 2. Deps-only mode stops here
     if $DEPS_ONLY; then
         echo ""
         info "Deps-only mode, skipping build."
         exit 0
     fi
 
-    # 3. Build
     do_build
-    print_artifacts
+    print_output_summary
 
-    # 4. Install to system paths if requested
     if $DO_INSTALL; then
         do_install
     fi

@@ -17,6 +17,7 @@ venv/
 
 # Build artifacts
 rpmbuild/
+# target/ is already covered by **/target/ (Rust rule above)
 *.o
 *.a
 *.so
