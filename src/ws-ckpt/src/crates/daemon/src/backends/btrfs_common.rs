@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -214,18 +214,17 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
     Ok(entries)
 }
 
-/// Parse the output of `btrfs receive --dump` into clean, deduplicated DiffEntry items.
+/// Parse `btrfs receive --dump` output into deduplicated DiffEntry items.
 ///
-/// Processing phases:
-/// 1. Detect snapshot prefix (e.g. `./msg1-step1/`) and build rename map
-///    to resolve btrfs-internal temporary inode references (e.g. `o261-118-0`)
-///    to their real file paths.
-/// 2. Walk operations, resolve paths, and deduplicate so that each real path
-///    appears at most once with the most significant change type.
+/// Phase 1 collects: snapshot prefix, temp→real rename map, link pairs,
+/// unlinks. A `link new dest=old` paired with `unlink old` encodes an `mv`
+/// (btrfs send emits no `rename` line for cross-snapshot mv).
+/// Phase 2 emits entries with precedence dedup (Renamed > Added > Deleted > Modified).
 fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
-    // ── Phase 1: detect snapshot prefix + build rename map ──
     let mut snapshot_prefix = String::new();
     let mut rename_map: HashMap<String, String> = HashMap::new();
+    let mut link_pairs: Vec<(String, String)> = Vec::new();
+    let mut unlinked: HashSet<String> = HashSet::new();
 
     for line in output.lines() {
         let line = line.trim();
@@ -233,24 +232,35 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("snapshot") {
-            // "snapshot  ./msg1-step1  uuid=... transid=..."
             if let Some(name) = rest.split_whitespace().next() {
                 snapshot_prefix = format!("{}/", name);
             }
         } else if let Some(rest) = line.strip_prefix("rename") {
-            // "rename  ./snap/old_path  dest=./snap/new_path"
-            let rest = rest.trim();
-            if let Some(dest_pos) = rest.find("dest=") {
-                let src = first_token(&rest[..dest_pos]);
-                let dst = first_token(&rest[dest_pos + 5..]);
-                let src = strip_snap_prefix(&src, &snapshot_prefix);
-                let dst = strip_snap_prefix(&dst, &snapshot_prefix);
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
                 rename_map.insert(src, dst);
             }
+        } else if let Some(rest) = line.strip_prefix("link") {
+            if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix) {
+                link_pairs.push((new_real, dest_path));
+            }
+        } else if let Some(rest) = line.strip_prefix("unlink") {
+            unlinked.insert(strip_snap_prefix(&first_token(rest), &snapshot_prefix));
         }
     }
 
-    // ── Phase 2: process operations with dedup (preserve first-seen order) ──
+    // mv detection: a `link new dest=old` paired with `unlink old` folds into
+    // a single Renamed and the matching Deleted is suppressed. Each old path
+    // can pair with at most one link — additional links to the same old path
+    // fall through to real-hardlink (Added) handling in Phase 2.
+    let mut mv_renames: HashMap<String, String> = HashMap::new();
+    let mut suppressed_unlinks: HashSet<String> = HashSet::new();
+    for (new_real, dest_path) in &link_pairs {
+        if unlinked.contains(dest_path) && !suppressed_unlinks.contains(dest_path) {
+            mv_renames.insert(new_real.clone(), dest_path.clone());
+            suppressed_unlinks.insert(dest_path.clone());
+        }
+    }
+
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut entries: Vec<DiffEntry> = Vec::new();
 
@@ -261,24 +271,53 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
         }
 
         if let Some(rest) = line.strip_prefix("mkfile") {
-            let raw = first_token(rest);
-            let path = strip_snap_prefix(&raw, &snapshot_prefix);
-            let resolved = rename_map.get(&path).cloned().unwrap_or(path);
-            insert_dedup(&mut seen, &mut entries, resolved, ChangeType::Added, None);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            insert_dedup(&mut seen, &mut entries, path, ChangeType::Added, None);
         } else if let Some(rest) = line.strip_prefix("mkdir") {
-            let raw = first_token(rest);
-            let path = strip_snap_prefix(&raw, &snapshot_prefix);
-            let resolved = rename_map.get(&path).cloned().unwrap_or(path);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
             insert_dedup(
                 &mut seen,
                 &mut entries,
-                resolved,
+                path,
                 ChangeType::Added,
                 Some("directory".to_string()),
             );
+        } else if let Some(rest) = line.strip_prefix("symlink") {
+            // First token is the new symlink path (often a temp inode renamed
+            // later); `dest=` is the link target string and isn't used.
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            insert_dedup(
+                &mut seen,
+                &mut entries,
+                path,
+                ChangeType::Added,
+                Some("symlink".to_string()),
+            );
+        } else if let Some(rest) = line.strip_prefix("link") {
+            if let Some((new_real, _)) = parse_dest_pair(rest, &snapshot_prefix) {
+                if let Some(old) = mv_renames.get(&new_real).cloned() {
+                    insert_dedup(
+                        &mut seen,
+                        &mut entries,
+                        new_real.clone(),
+                        ChangeType::Renamed,
+                        Some(format!("{} → {}", old, new_real)),
+                    );
+                } else {
+                    insert_dedup(
+                        &mut seen,
+                        &mut entries,
+                        new_real,
+                        ChangeType::Added,
+                        Some("hardlink".to_string()),
+                    );
+                }
+            }
         } else if let Some(rest) = line.strip_prefix("unlink") {
             let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
-            insert_dedup(&mut seen, &mut entries, path, ChangeType::Deleted, None);
+            if !suppressed_unlinks.contains(&path) {
+                insert_dedup(&mut seen, &mut entries, path, ChangeType::Deleted, None);
+            }
         } else if let Some(rest) = line.strip_prefix("rmdir") {
             let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
             insert_dedup(
@@ -289,12 +328,8 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 Some("directory".to_string()),
             );
         } else if let Some(rest) = line.strip_prefix("rename") {
-            // Only emit user-facing Renamed for real renames; temp→real are
-            // silently resolved via the rename_map built in Phase 1.
-            let rest = rest.trim();
-            if let Some(dest_pos) = rest.find("dest=") {
-                let src = strip_snap_prefix(&first_token(&rest[..dest_pos]), &snapshot_prefix);
-                let dst = strip_snap_prefix(&first_token(&rest[dest_pos + 5..]), &snapshot_prefix);
+            // temp→real renames are folded via rename_map; only emit the rest.
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
                 if !is_btrfs_temp_ref(&src) {
                     insert_dedup(
                         &mut seen,
@@ -307,15 +342,8 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             }
         } else if let Some(rest) = line.strip_prefix("update_extent") {
             // `btrfs send --no-data` emits update_extent instead of write.
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
-            let resolved = rename_map.get(&path).cloned().unwrap_or(path);
-            insert_dedup(
-                &mut seen,
-                &mut entries,
-                resolved,
-                ChangeType::Modified,
-                None,
-            );
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("write") {
             let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
@@ -323,14 +351,32 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         }
-        // Silently skip metadata-only ops: snapshot, utimes, chown, chmod,
-        // set_xattr, remove_xattr, clone, link, etc.
+        // Skip metadata-only ops: utimes, chown, chmod, set_xattr, remove_xattr, clone.
     }
 
     entries
 }
 
-/// Insert a DiffEntry, deduplicating by path (first occurrence wins).
+/// Strip the snapshot prefix from the first token of `rest`, then resolve
+/// through `rename_map` (temp → real) when applicable.
+fn resolve_path(rest: &str, snapshot_prefix: &str, rename_map: &HashMap<String, String>) -> String {
+    let path = strip_snap_prefix(&first_token(rest), snapshot_prefix);
+    rename_map.get(&path).cloned().unwrap_or(path)
+}
+
+/// Parse a `<src>  dest=<dst>` line tail into `(src, dst)`, both with the
+/// snapshot prefix stripped. `dest=` for `link`/mvs may carry a bare relative
+/// path (no prefix), which `strip_snap_prefix` no-ops cleanly.
+fn parse_dest_pair(rest: &str, snapshot_prefix: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+    let dest_pos = rest.find("dest=")?;
+    let src = strip_snap_prefix(&first_token(&rest[..dest_pos]), snapshot_prefix);
+    let dst = strip_snap_prefix(&first_token(&rest[dest_pos + 5..]), snapshot_prefix);
+    Some((src, dst))
+}
+
+/// Insert a DiffEntry, dedup'd by path. Higher-precedence change_type wins
+/// on conflict (see `change_precedence`).
 fn insert_dedup(
     seen: &mut HashMap<String, usize>,
     entries: &mut Vec<DiffEntry>,
@@ -341,13 +387,31 @@ fn insert_dedup(
     if path.is_empty() {
         return;
     }
-    if !seen.contains_key(&path) {
+    if let Some(&idx) = seen.get(&path) {
+        if change_precedence(&change_type) > change_precedence(&entries[idx].change_type) {
+            // Replace both fields together: keeping the old `detail` (e.g.
+            // `"directory"` from a prior `rmdir`) when a `mkfile` reuses the
+            // path leaks misleading metadata into the new entry.
+            entries[idx].change_type = change_type;
+            entries[idx].detail = detail;
+        }
+    } else {
         seen.insert(path.clone(), entries.len());
         entries.push(DiffEntry {
             path,
             change_type,
             detail,
         });
+    }
+}
+
+/// Renamed > Added > Deleted > Modified.
+fn change_precedence(c: &ChangeType) -> u8 {
+    match c {
+        ChangeType::Renamed => 4,
+        ChangeType::Added => 3,
+        ChangeType::Deleted => 2,
+        ChangeType::Modified => 1,
     }
 }
 
@@ -770,6 +834,109 @@ mod tests {
         let output = "mkfile  new.txt\nchown  foo.txt\nxattr  bar.txt\n";
         let entries = parse_btrfs_diff_output(output);
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+    }
+
+    // mkfile temp + rename temp→foo.txt + update_extent foo.txt → Added wins.
+    #[test]
+    fn parse_btrfs_diff_output_added_file_with_temp_rename() {
+        let output = "snapshot  ./snap_a_ro  uuid=abc transid=1\n\
+                      mkfile          ./snap_a_ro/o257-34321-0\n\
+                      rename          ./snap_a_ro/o257-34321-0  dest=./snap_a_ro/foo.txt\n\
+                      update_extent   ./snap_a_ro/foo.txt  offset=0 len=6\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "foo.txt");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+    }
+
+    // symlink temp + rename temp→mylink → Added(mylink, "symlink").
+    #[test]
+    fn parse_btrfs_diff_output_symlink_with_temp_rename() {
+        let output = "snapshot  ./snap_a_ro  uuid=abc transid=1\n\
+                      symlink         ./snap_a_ro/o258-34321-0  dest=/etc/passwd\n\
+                      rename          ./snap_a_ro/o258-34321-0  dest=./snap_a_ro/mylink\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "mylink");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+        assert_eq!(entries[0].detail.as_deref(), Some("symlink"));
+    }
+
+    // link new dest=existing where existing is NOT unlinked → real hardlink.
+    #[test]
+    fn parse_btrfs_diff_output_real_hardlink_emits_added() {
+        let output = "snapshot  ./snap_a_ro  uuid=abc transid=1\n\
+                      mkfile          ./snap_a_ro/o259-34321-0\n\
+                      rename          ./snap_a_ro/o259-34321-0  dest=./snap_a_ro/target.txt\n\
+                      link            ./snap_a_ro/hardlink_to_target  dest=target.txt\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 2, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "target.txt");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+        assert_eq!(entries[1].path, "hardlink_to_target");
+        assert_eq!(entries[1].change_type, ChangeType::Added);
+        assert_eq!(entries[1].detail.as_deref(), Some("hardlink"));
+    }
+
+    // mv foo.txt → bar.txt: link bar dest=foo + unlink foo → single Renamed,
+    // Deleted(foo) suppressed.
+    #[test]
+    fn parse_btrfs_diff_output_mv_emits_renamed_and_drops_deleted() {
+        let output = "snapshot  ./snap_b_ro  uuid=abc transid=2\n\
+                      link            ./snap_b_ro/bar.txt  dest=foo.txt\n\
+                      unlink          ./snap_b_ro/foo.txt\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "bar.txt");
+        assert_eq!(entries[0].change_type, ChangeType::Renamed);
+        assert_eq!(entries[0].detail.as_deref(), Some("foo.txt → bar.txt"));
+    }
+
+    // rmdir foo + mkfile foo: Added wins over Deleted, and the old "directory"
+    // detail must NOT leak into the new file entry.
+    #[test]
+    fn parse_btrfs_diff_output_replace_clears_stale_detail() {
+        let output = "snapshot  ./snap  uuid=abc transid=1\n\
+                      rmdir   ./snap/foo\n\
+                      mkfile  ./snap/o100-1-0\n\
+                      rename  ./snap/o100-1-0  dest=./snap/foo\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "foo");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+        assert_eq!(entries[0].detail, None, "stale 'directory' detail leaked");
+    }
+
+    // Two `link X dest=foo` plus one `unlink foo`: only the first link is
+    // treated as the mv rename; the second is a real hardlink Added.
+    #[test]
+    fn parse_btrfs_diff_output_multi_link_to_same_old_path() {
+        let output = "snapshot  ./snap  uuid=abc transid=1\n\
+                      link    ./snap/bar  dest=foo\n\
+                      link    ./snap/baz  dest=foo\n\
+                      unlink  ./snap/foo\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 2, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "bar");
+        assert_eq!(entries[0].change_type, ChangeType::Renamed);
+        assert_eq!(entries[0].detail.as_deref(), Some("foo → bar"));
+        assert_eq!(entries[1].path, "baz");
+        assert_eq!(entries[1].change_type, ChangeType::Added);
+        assert_eq!(entries[1].detail.as_deref(), Some("hardlink"));
+    }
+
+    // PB-004: update_extent before mkfile (both resolve to same real path);
+    // Added must win over the earlier-seen Modified via precedence dedup.
+    #[test]
+    fn parse_btrfs_diff_output_added_wins_over_modified_when_extent_first() {
+        let output = "snapshot  ./snap  uuid=abc transid=1\n\
+                      update_extent   ./snap/foo.txt  offset=0 len=6\n\
+                      mkfile          ./snap/o100-1-0\n\
+                      rename          ./snap/o100-1-0  dest=./snap/foo.txt\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
     }
 
