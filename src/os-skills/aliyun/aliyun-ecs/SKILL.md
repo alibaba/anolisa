@@ -1,7 +1,7 @@
 ---
 name: aliyun-ecs
 version: 1.0.0
-description: 通过aliyun命令行管理阿里云弹性计算服务(ECS)。用于查询或创建实例、启动/停止/重启实例、管理磁盘/快照/镜像/安全组/密钥对/弹性网卡、查询状态以及故障排查等工作流。
+description: "通过aliyun命令行管理阿里云弹性计算服务(ECS)。用于查询或创建实例、启动/停止/重启实例、管理磁盘/快照/镜像/安全组/密钥对/弹性网卡、查询状态以及故障排查等工作流。当用户提到阿里云、ECS、云服务器、弹性计算、aliyun CLI，或需要管理云实例、磁盘、快照、安全组等资源时使用。"
 layer: application
 lifecycle: operations
 ---
@@ -75,7 +75,9 @@ INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 | 启动实例 | `aliyun ecs StartInstance --InstanceId <实例ID>` |
 | 停止实例 | `aliyun ecs StopInstance --InstanceId <实例ID>` |
 | 重启实例 | `aliyun ecs RebootInstance --InstanceId <实例ID>` |
-| 释放实例 | `aliyun ecs DeleteInstance --InstanceId <实例ID>` |
+| 释放实例 | `aliyun ecs DeleteInstance --InstanceId <实例ID> --Force true` |
+
+> **破坏性操作验证**：执行 `DeleteInstance`、`StopInstance` 前，先用 `DescribeInstanceAttribute --InstanceId <实例ID>` 确认目标实例；执行后用 `DescribeInstances` 验证状态变更。
 
 ### 磁盘管理
 
@@ -88,6 +90,8 @@ INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 | 离线扩容磁盘 | `aliyun ecs ResizeDisk --DiskId <磁盘ID> --NewSize <新大小GB>` |
 | 在线扩容磁盘 | `aliyun ecs ResizeDisk --DiskId <磁盘ID> --NewSize <新大小GB> --Type online` |
 | 删除磁盘 | `aliyun ecs DeleteDisk --DiskId <磁盘ID>` |
+
+> **破坏性操作验证**：删除或卸载磁盘前，先用 `DescribeDisks --DiskId <磁盘ID>` 确认目标磁盘状态和挂载信息；删除后用 `DescribeDisks` 验证。
 
 ### 快照管理
 
@@ -219,45 +223,3 @@ aliyun ecs DescribeInstances --help
 aliyun ecs RunInstances --help
 ```
 
-## 常用API速查
-
-### 实例生命周期
-- `CreateInstance` - 创建实例
-- `RunInstances` - 批量创建实例
-- `StartInstance` - 启动实例
-- `StopInstance` - 停止实例
-- `RebootInstance` - 重启实例
-- `DeleteInstance` - 释放实例
-- `DescribeInstances` - 查询实例详情
-- `DescribeInstanceStatus` - 查询实例状态
-
-### 磁盘与存储
-- `CreateDisk` - 创建磁盘
-- `AttachDisk` - 挂载磁盘
-- `DetachDisk` - 卸载磁盘
-- `DeleteDisk` - 删除磁盘
-- `ResizeDisk` - 扩容磁盘
-- `DescribeDisks` - 查询磁盘列表
-
-### 快照与镜像
-- `CreateSnapshot` - 创建快照
-- `DeleteSnapshot` - 删除快照
-- `DescribeSnapshots` - 查询快照列表
-- `CreateImage` - 创建镜像
-- `DeleteImage` - 删除镜像
-- `DescribeImages` - 查询镜像列表
-
-### 网络与安全
-- `CreateSecurityGroup` - 创建安全组
-- `AuthorizeSecurityGroup` - 添加安全组入方向规则
-- `AuthorizeSecurityGroupEgress` - 添加安全组出方向规则
-- `DescribeSecurityGroups` - 查询安全组列表
-- `CreateNetworkInterface` - 创建弹性网卡
-- `AttachNetworkInterface` - 挂载弹性网卡
-
-### 密钥与访问
-- `CreateKeyPair` - 创建密钥对
-- `ImportKeyPair` - 导入密钥对
-- `AttachKeyPair` - 绑定密钥对
-- `DetachKeyPair` - 解绑密钥对
-- `DescribeKeyPairs` - 查询密钥对列表
