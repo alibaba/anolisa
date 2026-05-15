@@ -5,11 +5,17 @@
 
 # ── Variables ──
 DESTDIR  ?=
-PREFIX   ?= /usr/local
+INSTALL_PROFILE ?= system
+ifeq ($(INSTALL_PROFILE),user)
+PREFIX   ?= $(HOME)/.local
+BINDIR   ?= $(PREFIX)/bin
+else
+PREFIX   ?= /usr
+BINDIR   ?= /usr/local/bin
+endif
 LIBDIR    = $(PREFIX)/lib/copilot-shell
 DATADIR   = $(PREFIX)/share/copilot-shell
 DOCDIR    = $(PREFIX)/share/doc/copilot-shell
-BINDIR    = $(PREFIX)/bin
 
 # Platform detection for vendor binaries (maps to vendor/ripgrep/{ARCH}-{PLATFORM}/)
 UNAME_S  := $(shell uname -s)
@@ -48,8 +54,8 @@ clean:
 # ══════════════════════════════════════════════════════
 # Install / Uninstall
 # ══════════════════════════════════════════════════════
-# RPM build:   make install DESTDIR=%{buildroot} PREFIX=/usr
-# Direct:      make build && sudo make install
+# RPM build:   make install DESTDIR=%{buildroot} INSTALL_PROFILE=system PREFIX=/usr
+# User install: make build && make install INSTALL_PROFILE=user PREFIX=$(HOME)/.local
 
 install: dist/package.json
 	@echo "Installing copilot-shell to $(DESTDIR)$(LIBDIR) ..."
