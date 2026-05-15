@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1",
+  "component": "os-skills",
+  "version": "0.1.0",
+  "description": "General Agentic OS skill library for OpenClaw and related agent runtimes.",
+  "targets": {
+    "openclaw": {
+      "compatibleVersions": "",
+      "capabilities": {
+        "plugins": [],
+        "skills": [
+          "copaw-usage",
+          "install-claude-code",
+          "install-copaw",
+          "install-hermes",
+          "install-openclaw",
+          "setup-mcp",
+          "aliyun-ecs",
+          "github",
+          "kernel-dev",
+          "sysom-agentsight",
+          "sysom-diagnosis",
+          "clawhub-skill-mng",
+          "cosh-guide",
+          "humanizer",
+          "image-gen",
+          "pdf-reader",
+          "xlsx",
+          "alinux-cve-query",
+          "alinux-admin",
+          "backup-restore",
+          "regex-mastery",
+          "shell-scripting",
+          "storage-resize",
+          "upgrade-alinux-kernel"
+        ],
+        "commands": [],
+        "hooks": []
+      },
+      "actions": {}
+    }
+  },
+  "resources": {
+    "skills": {
+      "source": ".",
+      "stagePath": "target/os-skills/share/anolisa/skills",
+      "installPath": "/usr/share/anolisa/skills",
+      "openclawPath": "~/.openclaw/skills"
+    }
+  }
+}
