@@ -4,6 +4,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import agent_sec_cli.security_events.orm_store as orm_store
@@ -24,7 +25,67 @@ from agent_sec_cli.security_events.repositories import SecurityEventRepository
 from agent_sec_cli.security_events.schema import SecurityEvent
 from sqlalchemy import Index, Integer, Text, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
+
+
+class _SessionFactoryRaceStore(SqliteStore):
+    def enable_second_session_factory_read_race(self) -> None:
+        self._race_second_session_factory_read = True
+        self._session_factory_read_count = 0
+
+    def __getattribute__(self, name: str) -> object:
+        if name != "_session_factory":
+            return object.__getattribute__(self, name)
+
+        try:
+            race_enabled = object.__getattribute__(
+                self,
+                "_race_second_session_factory_read",
+            )
+        except AttributeError:
+            return object.__getattribute__(self, name)
+        if not race_enabled:
+            return object.__getattribute__(self, name)
+
+        read_count = object.__getattribute__(self, "_session_factory_read_count") + 1
+        object.__setattr__(self, "_session_factory_read_count", read_count)
+        if read_count == 2:
+            object.__setattr__(self, "_race_second_session_factory_read", False)
+            object.__setattr__(self, "_session_factory", None)
+        return object.__getattribute__(self, name)
+
+
+class _SchemaRepairRaceStore(SqliteStore):
+    def __init__(
+        self,
+        path: Path,
+        first_open_started: threading.Event,
+        allow_first_open_finish: threading.Event,
+        repair_flag_set: threading.Event,
+    ) -> None:
+        super().__init__(path)
+        self.first_open_started = first_open_started
+        self.allow_first_open_finish = allow_first_open_finish
+        self.repair_flag_set = repair_flag_set
+        self.open_force_values: list[bool] = []
+
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__setattr__(self, name, value)
+        if name == "_force_schema_convergence" and value is True:
+            try:
+                object.__getattribute__(self, "repair_flag_set").set()
+            except AttributeError:
+                pass
+
+    def _open_session_factory(self, db_identity: tuple[int, int] | None) -> None:
+        force_schema = self._force_schema_convergence
+        self.open_force_values.append(force_schema)
+        if len(self.open_force_values) == 1:
+            self.first_open_started.set()
+            assert self.allow_first_open_finish.wait(timeout=2)
+        self._db_identity = db_identity
+        self._session_factory = sessionmaker(expire_on_commit=False, future=True)
+        self._force_schema_convergence = False
 
 
 def test_sqlite_corruption_classification_uses_result_code(tmp_path: Path) -> None:
@@ -376,6 +437,57 @@ def test_security_event_prune_disposes_store_on_sqlalchemy_error(
     repository.prune(30)
 
     assert disposed
+
+
+def test_write_store_returns_checked_session_factory_if_cache_is_cleared(
+    tmp_path: Path,
+) -> None:
+    store = _SessionFactoryRaceStore(tmp_path / "events.db")
+    try:
+        cached_session_factory = store.session_factory()
+        assert cached_session_factory is not None
+
+        store.enable_second_session_factory_read_race()
+
+        assert store.session_factory() is cached_session_factory
+    finally:
+        store.close()
+
+
+def test_request_schema_repair_is_preserved_during_concurrent_open(
+    tmp_path: Path,
+) -> None:
+    first_open_started = threading.Event()
+    allow_first_open_finish = threading.Event()
+    repair_flag_set = threading.Event()
+    store = _SchemaRepairRaceStore(
+        tmp_path / "events.db",
+        first_open_started,
+        allow_first_open_finish,
+        repair_flag_set,
+    )
+    open_thread = threading.Thread(target=store.session_factory)
+    repair_thread = threading.Thread(target=store.request_schema_repair)
+    try:
+        open_thread.start()
+        assert first_open_started.wait(timeout=2)
+
+        repair_thread.start()
+        repair_flag_set.wait(timeout=0.2)
+        allow_first_open_finish.set()
+
+        open_thread.join(timeout=2)
+        repair_thread.join(timeout=2)
+        assert not open_thread.is_alive()
+        assert not repair_thread.is_alive()
+
+        assert store.session_factory() is not None
+        assert store.open_force_values == [False, True]
+    finally:
+        allow_first_open_finish.set()
+        open_thread.join(timeout=2)
+        repair_thread.join(timeout=2)
+        store.close()
 
 
 def test_readonly_store_does_not_create_missing_db(tmp_path: Path) -> None:

@@ -285,7 +285,7 @@ class SqliteStore:
         self.schema_version = schema_version
         self.schema_migrations = schema_migrations
         self._log_prefix = log_prefix
-        self._engine_lock = threading.Lock()
+        self._engine_lock = threading.RLock()
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
         self._db_identity: tuple[int, int] | None = None
@@ -309,33 +309,24 @@ class SqliteStore:
 
     def session_factory(self) -> sessionmaker[Session] | None:
         """Return a lazily initialized session factory."""
-        if self._disabled:
-            return None
-
-        if self.read_only:
-            db_identity = self._current_db_identity()
-            if db_identity is None:
-                with self._engine_lock:
-                    self.dispose()
-                return None
-            if self._has_current_session_factory(db_identity):
-                return self._session_factory
-        else:
-            db_identity = None
-            if self._session_factory is not None:
-                return self._session_factory
-
         with self._engine_lock:
+            if self._disabled:
+                return None
+
+            db_identity = None
             if self.read_only:
                 db_identity = self._current_db_identity()
                 if db_identity is None:
                     self.dispose()
                     return None
-                if self._has_current_session_factory(db_identity):
-                    return self._session_factory
+                session_factory = self._session_factory
+                if session_factory is not None and self._db_identity == db_identity:
+                    return session_factory
                 self.dispose()
-            elif self._session_factory is not None:
-                return self._session_factory
+            else:
+                session_factory = self._session_factory
+                if session_factory is not None:
+                    return session_factory
 
             try:
                 self._open_session_factory(db_identity)
@@ -364,18 +355,20 @@ class SqliteStore:
                 )
                 return None
 
-        return self._session_factory
+            session_factory = self._session_factory
+            return session_factory
 
     def dispose(self) -> None:
         """Dispose SQLAlchemy engine state and clear cached session state."""
-        if self._engine is not None:
-            try:
-                self._engine.dispose()
-            except Exception:  # noqa: BLE001
-                pass
-        self._engine = None
-        self._session_factory = None
-        self._db_identity = None
+        with self._engine_lock:
+            if self._engine is not None:
+                try:
+                    self._engine.dispose()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._engine = None
+            self._session_factory = None
+            self._db_identity = None
 
     def close(self) -> None:
         """Dispose cached SQLAlchemy connections."""
@@ -383,8 +376,9 @@ class SqliteStore:
 
     def request_schema_repair(self) -> None:
         """Force full schema convergence the next time this store opens."""
-        self._force_schema_convergence = True
-        self.dispose()
+        with self._engine_lock:
+            self._force_schema_convergence = True
+            self.dispose()
 
     def handle_corruption(self, exc: Exception) -> None:
         """Delete a corrupt expendable SQLite query index and clear state."""
@@ -458,15 +452,6 @@ class SqliteStore:
                 directory.chmod(0o700)
             except OSError:
                 pass
-
-    def _has_current_session_factory(self, db_identity: tuple[int, int]) -> bool:
-        """Return True when cached reader state matches the DB file identity.
-
-        Writers never call this path; they cache only by the presence of a
-        session factory.  ``None`` is therefore reserved for write-mode state
-        and is not treated as a real database identity.
-        """
-        return self._session_factory is not None and self._db_identity == db_identity
 
     def _current_db_identity(self) -> tuple[int, int] | None:
         try:
