@@ -558,14 +558,17 @@ export async function startAutoMemoryExtraction(
     );
 
     // Add chats and memory directories to workspace context so the extraction
-    // agent can read session files and write patches/skills via tools
+    // agent can read session files and write patches/skills via tools.
+    // Track each successfully added directory so cleanup removes only what we
+    // added, leaving any user-added directories (e.g. via /directory) intact.
     const workspaceContext = config.getWorkspaceContext();
-    let addedExtraDirs = false;
+    const extraDirs: string[] = [];
     try {
       workspaceContext.addDirectory(chatsDir);
+      extraDirs.push(chatsDir);
       await fs.mkdir(memoryDir, { recursive: true });
       workspaceContext.addDirectory(memoryDir);
-      addedExtraDirs = true;
+      extraDirs.push(memoryDir);
     } catch {
       debugLogger.warn(
         `Could not add chats/memory directories to workspace context`,
@@ -606,11 +609,16 @@ export async function startAutoMemoryExtraction(
       await subagent.runNonInteractive(context, abortController.signal);
     } finally {
       chatRecordingService?.removeExcludedPromptIdPrefix(excludePrefix);
-      // Remove the temporarily added directories
-      if (addedExtraDirs) {
-        workspaceContext.setDirectories(
-          workspaceContext.getInitialDirectories(),
-        );
+      // Remove only the directories we added; never touch directories that
+      // were already present or added by the user during this run.
+      for (const dir of extraDirs) {
+        try {
+          workspaceContext.removeDirectory(dir);
+        } catch (e) {
+          debugLogger.warn(
+            `Failed to remove auto-memory directory ${dir} from workspace context: ${e}`,
+          );
+        }
       }
     }
 

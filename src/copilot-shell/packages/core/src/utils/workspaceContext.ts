@@ -78,6 +78,19 @@ export class WorkspaceContext {
     this.notifyDirectoriesChanged();
   }
 
+  /**
+   * Removes a directory from the workspace.
+   * @param directory The directory path to remove (can be relative or absolute)
+   * @param basePath Optional base path for resolving relative paths (defaults to cwd)
+   */
+  removeDirectory(directory: string, basePath: string = process.cwd()): void {
+    const resolved = this.resolveAndValidateDir(directory, basePath);
+    if (!this.directories.delete(resolved)) {
+      return;
+    }
+    this.notifyDirectoriesChanged();
+  }
+
   private resolveAndValidateDir(
     directory: string,
     basePath: string = process.cwd(),

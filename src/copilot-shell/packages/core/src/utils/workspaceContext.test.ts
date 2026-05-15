@@ -97,6 +97,69 @@ describe('WorkspaceContext with real filesystem', () => {
     });
   });
 
+  describe('removing directories', () => {
+    it('should remove a previously added directory', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      workspaceContext.addDirectory(otherDir);
+      workspaceContext.removeDirectory(otherDir);
+
+      expect(workspaceContext.getDirectories()).toEqual([cwd]);
+    });
+
+    it('should leave initial directories intact', () => {
+      const workspaceContext = new WorkspaceContext(cwd, [otherDir]);
+      const extra = path.join(tempDir, 'extra');
+      fs.mkdirSync(extra, { recursive: true });
+      workspaceContext.addDirectory(extra);
+      workspaceContext.removeDirectory(extra);
+
+      expect(workspaceContext.getDirectories()).toEqual([cwd, otherDir]);
+    });
+
+    it('should be a no-op when the directory is not in the set', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      const listener = vi.fn();
+      workspaceContext.onDirectoriesChanged(listener);
+
+      workspaceContext.removeDirectory(otherDir);
+
+      expect(workspaceContext.getDirectories()).toEqual([cwd]);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('should resolve symlinks before removing', () => {
+      const realDir = path.join(tempDir, 'real');
+      fs.mkdirSync(realDir, { recursive: true });
+      const symlinkDir = path.join(tempDir, 'symlink-to-real');
+      fs.symlinkSync(realDir, symlinkDir, 'dir');
+      const workspaceContext = new WorkspaceContext(cwd);
+      workspaceContext.addDirectory(realDir);
+      workspaceContext.removeDirectory(symlinkDir);
+
+      expect(workspaceContext.getDirectories()).toEqual([cwd]);
+    });
+
+    it('should notify listeners when a removal mutates the set', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      workspaceContext.addDirectory(otherDir);
+      const listener = vi.fn();
+      workspaceContext.onDirectoriesChanged(listener);
+
+      workspaceContext.removeDirectory(otherDir);
+
+      expect(listener).toHaveBeenCalledOnce();
+    });
+
+    it('should throw for a non-existent path', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      const ghost = path.join(tempDir, 'never-existed');
+
+      expect(() => workspaceContext.removeDirectory(ghost)).toThrow(
+        /does not exist/,
+      );
+    });
+  });
+
   describe('path validation', () => {
     it('should accept paths within workspace directories', () => {
       const workspaceContext = new WorkspaceContext(cwd, [otherDir]);
