@@ -293,7 +293,7 @@ hermes-plugin/
 │       ├── __init__.py       # 能力清单
 │       └── code_scan.py      # Code Scanner 实现
 └── README.md                 # 开发指南
-tests/hermes-plugin/          # 单元测试（位于 agent-sec-core/tests/ 下）
+tests/unit-test/hermes-plugin/ # 单元测试（位于 agent-sec-core/tests/unit-test/ 下）
 ```
 
 ### 2. 导入规范
@@ -374,7 +374,7 @@ enable_block = false    # false=observe(仅日志), true=block(阻断)
 
 ```bash
 # 从 agent-sec-core 目录执行
-uv run --project agent-sec-cli pytest tests/hermes-plugin/ -v
+uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 ```
 
 ### 8. 部署
