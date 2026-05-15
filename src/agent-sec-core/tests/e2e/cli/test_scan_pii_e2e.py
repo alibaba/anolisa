@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +13,14 @@ _MODES = ("binary", "module")
 
 
 def _module_mode_available() -> bool:
-    try:
-        return find_spec("agent_sec_cli") is not None and (
-            find_spec("agent_sec_cli.cli") is not None
-        )
-    except ModuleNotFoundError:
-        return False
+    result = subprocess.run(
+        [sys.executable, "-c", "import agent_sec_cli.cli"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+    return result.returncode == 0
 
 
 def _command(mode: str) -> list[str]:
