@@ -45,6 +45,13 @@
             "command": "python3 ${extensionPath}/hooks/prompt_scanner_hook.py",
             "description": "Scans user prompts for prompt injection and jailbreak attempts.",
             "timeout": 10000
+          },
+          {
+            "type": "command",
+            "name": "pii-checker",
+            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "description": "Scans user prompts for PII and credentials.",
+            "timeout": 10000
           }
         ]
       }

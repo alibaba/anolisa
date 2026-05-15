@@ -14,6 +14,22 @@
         "type": "boolean",
         "default": false,
         "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+      },
+      "piiScanUserInput": {
+        "type": "boolean",
+        "default": true,
+        "description": "扫描本轮用户输入中的 PII 和凭据，并以非阻断 warning 提示"
+      },
+      "piiIncludeLowConfidence": {
+        "type": "boolean",
+        "default": false,
+        "description": "是否包含低置信度 PII findings"
+      },
+      "piiWarningTtlMs": {
+        "type": "number",
+        "default": 300000,
+        "minimum": 0,
+        "description": "PII warning 按 runId 暂存的 TTL，避免未发送回复时残留"
       }
 
     }
@@ -22,6 +38,18 @@
     "promptScanBlock": {
       "label": "Prompt 扫描拦截模式",
       "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
+    },
+    "piiScanUserInput": {
+      "label": "PII 用户输入扫描",
+      "description": "扫描本轮用户输入中的 PII 和凭据，并以非阻断 warning 提示"
+    },
+    "piiIncludeLowConfidence": {
+      "label": "PII 低置信度 findings",
+      "description": "展示低置信度 PII findings"
+    },
+    "piiWarningTtlMs": {
+      "label": "PII warning TTL",
+      "description": "PII warning 按 runId 暂存的最长时间，单位毫秒"
     }
 
   }

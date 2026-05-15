@@ -2,6 +2,7 @@
 import { testCapability } from "./test-harness.js";
 import { codeScan } from "../src/capabilities/code-scan.js";
 import { observability } from "../src/capabilities/observability.js";
+import { piiScan } from "../src/capabilities/pii-scan.js";
 import { promptScan } from "../src/capabilities/prompt-scan.js";
 import { skillLedger } from "../src/capabilities/skill-ledger.js";
 import { _setCliMock } from "../src/utils.js";
@@ -23,6 +24,17 @@ const mockEvents: Record<string, Record<string, unknown>> = {
     body: "hello world",
     senderId: "user-123",
     isGroup: false,
+  },
+  before_prompt_build: {
+    runId: "run-001",
+    sessionId: "session-001",
+    prompt: "hello world",
+    messages: [{ role: "user", content: "hello world" }],
+  },
+  message_sending: {
+    runId: "run-001",
+    sessionId: "session-001",
+    content: "Hello.",
   },
   llm_input: {
     runId: "run-001",
@@ -96,6 +108,12 @@ const mockCtx: Record<string, Record<string, unknown>> = {
   before_dispatch: {
     channelId: "telegram", sessionKey: "sk-001", senderId: "user-123",
   },
+  before_prompt_build: {
+    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+  },
+  message_sending: {
+    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+  },
   llm_input: {
     channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
   },
@@ -116,7 +134,7 @@ const mockCtx: Record<string, Record<string, unknown>> = {
   },
 };
 
-const caps = [codeScan, promptScan, observability];
+const caps = [codeScan, promptScan, piiScan, observability];
 
 if (!process.env.AGENT_SEC_LIVE) {
   _setCliMock(async (args) => {
@@ -124,6 +142,9 @@ if (!process.env.AGENT_SEC_LIVE) {
       return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
     }
     if (args[0] === "scan-prompt") {
+      return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
+    }
+    if (args[0] === "scan-pii") {
       return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
     }
     if (args[0] === "skill-ledger" && args[1] === "check") {
