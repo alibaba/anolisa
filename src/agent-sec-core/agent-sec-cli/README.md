@@ -110,7 +110,10 @@ agent-sec-cli observability schema
 ### Observability Records
 
 `agent-sec-cli observability record` accepts one JSON object from stdin and writes
-validated hook telemetry to the independent `observability.jsonl` stream.
+validated hook telemetry to the independent `observability.jsonl` stream plus an
+internal `observability.db` SQLite index. The SQLite index is an implementation
+detail for retention and future local reads; this command does not expose a
+public query API.
 
 Required wire fields:
 
@@ -264,14 +267,17 @@ ROTATION_COUNT = 5
 ### Observability
 
 Observability records use the same data directory resolver as security events,
-but write to a separate stream:
+but write to separate files:
 
 - default system path: `/var/log/agent-sec/observability.jsonl`
+- default SQLite index: `/var/log/agent-sec/observability.db`
 - user fallback: `~/.agent-sec-core/observability.jsonl`
+- user SQLite fallback: `~/.agent-sec-core/observability.db`
 - test/dev override: `AGENT_SEC_DATA_DIR=/path/to/dir`
 
-The observability stream uses its own JSONL file, lock file, rotation limit, and
-backup count; it does not write to `security-events.jsonl`.
+The observability stream uses its own JSONL file, lock file, SQLite database,
+rotation limit, backup count, and 7-day SQLite retention policy; it does not
+write to `security-events.jsonl` or `security-events.db`.
 
 ---
 

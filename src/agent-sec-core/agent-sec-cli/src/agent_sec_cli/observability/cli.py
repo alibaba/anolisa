@@ -5,12 +5,12 @@ import sys
 from typing import Any
 
 import typer
+from agent_sec_cli.observability import record_observability
 from agent_sec_cli.observability.schema import (
     ObservabilityRecord,
     observability_record_json_schema,
     validate_observability_record,
 )
-from agent_sec_cli.observability.writer_jsonl import get_writer
 from pydantic import ValidationError
 
 app = typer.Typer(help="Record observability metrics.")
@@ -75,7 +75,7 @@ def record(
         raise typer.Exit(code=1)
 
     try:
-        get_writer().write(record_payload)
+        record_observability(record_payload)
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"Error: failed to write observability record: {exc}", err=True)
         raise typer.Exit(code=1) from exc

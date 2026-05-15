@@ -282,10 +282,23 @@ def test_ensure_schema_if_needed_runs_full_schema_when_version_mismatch(
     called = False
     original_ensure_schema = orm_store.ensure_schema
 
-    def wrapped_ensure_schema(engine_arg, models=None):  # type: ignore[no-untyped-def]
+    def wrapped_ensure_schema(
+        engine_arg,
+        models=None,
+        *,
+        schema_version=orm_store._SCHEMA_VERSION,
+        schema_migrations=None,
+        log_prefix="[security_events]",
+    ):  # type: ignore[no-untyped-def]
         nonlocal called
         called = True
-        original_ensure_schema(engine_arg, models)
+        original_ensure_schema(
+            engine_arg,
+            models,
+            schema_version=schema_version,
+            schema_migrations=schema_migrations,
+            log_prefix=log_prefix,
+        )
 
     monkeypatch.setattr(orm_store, "ensure_schema", wrapped_ensure_schema)
 
@@ -392,6 +405,27 @@ def test_readonly_store_warns_without_migrating_unready_schema(
         }
     finally:
         conn.close()
+
+
+def test_sqlite_store_uses_custom_error_prefix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "observability.db"
+    conn = sqlite3.connect(db_path)
+    conn.close()
+
+    store = SqliteStore(
+        db_path,
+        read_only=True,
+        models=(SecurityEventRecord,),
+        log_prefix="[observability]",
+    )
+    try:
+        assert store.session_factory() is not None
+    finally:
+        store.close()
+
+    assert "[observability] sqlite schema not ready" in capsys.readouterr().err
 
 
 def test_store_corruption_cleanup_resets_state_and_allows_reinit(

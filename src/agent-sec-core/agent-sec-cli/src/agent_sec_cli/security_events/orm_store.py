@@ -4,8 +4,9 @@ import re
 import sqlite3
 import sys
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 from agent_sec_cli.security_events.orm_base import Base
 from sqlalchemy import create_engine, event, inspect, text
@@ -29,6 +30,7 @@ _SQLITE_SCHEMA_ERROR_MARKERS = (
 _IDENTIFIER_RE = re.compile(r"^[a-z_]+$")
 
 OrmModel = type[Base]
+SchemaMigration = Callable[[Connection, int, int, tuple[OrmModel, ...], str], None]
 _DEFAULT_MODELS: tuple[OrmModel, ...] = ()
 
 
@@ -55,7 +57,10 @@ def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
     )
 
     @event.listens_for(engine, "connect")
-    def _configure_connection(dbapi_connection, _connection_record) -> None:  # type: ignore[no-untyped-def]
+    def _configure_connection(
+        dbapi_connection: sqlite3.Connection,
+        _connection_record: Any,
+    ) -> None:
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA busy_timeout=200")
@@ -90,19 +95,25 @@ def _coerce_models(models: Iterable[OrmModel] | None) -> tuple[OrmModel, ...]:
     return _require_models(tuple(models) if models is not None else _DEFAULT_MODELS)
 
 
-def _warn_newer_schema_version(version: int) -> None:
+def _warn_newer_schema_version(
+    version: int,
+    supported_version: int,
+    log_prefix: str = "[security_events]",
+) -> None:
     print(
-        f"[security_events] sqlite schema version {version} is newer than "
-        f"this binary supports ({_SCHEMA_VERSION}); skipping schema migration",
+        f"{log_prefix} sqlite schema version {version} is newer than "
+        f"this binary supports ({supported_version}); skipping schema migration",
         file=sys.stderr,
     )
 
 
 def _schema_readiness(
-    conn: Connection, models: tuple[OrmModel, ...]
+    conn: Connection,
+    models: tuple[OrmModel, ...],
+    schema_version: int,
 ) -> tuple[int, list[str]]:
     version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
-    if version > _SCHEMA_VERSION:
+    if version > schema_version:
         return version, []
 
     inspector = inspect(conn)
@@ -118,18 +129,34 @@ def _schema_version(conn: Connection) -> int:
     return int(conn.execute(text("PRAGMA user_version")).scalar_one())
 
 
-def ensure_schema(engine: Engine, models: Iterable[OrmModel] | None = None) -> None:
+def ensure_schema(
+    engine: Engine,
+    models: Iterable[OrmModel] | None = None,
+    *,
+    schema_version: int = _SCHEMA_VERSION,
+    schema_migrations: SchemaMigration | None = None,
+    log_prefix: str = "[security_events]",
+) -> None:
     """Create model tables/indexes and apply convergent column migrations."""
     model_tuple = _coerce_models(models)
     with engine.connect() as conn:
         conn.execute(text("PRAGMA journal_mode=WAL"))
     with engine.begin() as conn:
         version = conn.execute(text("PRAGMA user_version")).scalar_one()
-        if version > _SCHEMA_VERSION:
-            _warn_newer_schema_version(int(version))
+        if version > schema_version:
+            _warn_newer_schema_version(int(version), schema_version, log_prefix)
             return
 
         conn.execute(text("PRAGMA auto_vacuum = INCREMENTAL"))
+        if version < schema_version and schema_migrations is not None:
+            schema_migrations(
+                conn,
+                int(version),
+                schema_version,
+                model_tuple,
+                log_prefix,
+            )
+
         for model in model_tuple:
             table = model.__table__
             conn.execute(CreateTable(table, if_not_exists=True))
@@ -150,8 +177,8 @@ def ensure_schema(engine: Engine, models: Iterable[OrmModel] | None = None) -> N
             for index in table.indexes:
                 conn.execute(CreateIndex(index, if_not_exists=True))
 
-        if version < _SCHEMA_VERSION:
-            conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
+        if version < schema_version:
+            conn.execute(text(f"PRAGMA user_version = {schema_version}"))
 
 
 def ensure_schema_if_needed(
@@ -159,35 +186,48 @@ def ensure_schema_if_needed(
     models: Iterable[OrmModel] | None = None,
     *,
     force: bool = False,
+    schema_version: int = _SCHEMA_VERSION,
+    schema_migrations: SchemaMigration | None = None,
+    log_prefix: str = "[security_events]",
 ) -> None:
     """Run full schema convergence only when version changes or repair is forced."""
     model_tuple = _coerce_models(models)
     with engine.connect() as conn:
         version = _schema_version(conn)
-        if version > _SCHEMA_VERSION:
-            _warn_newer_schema_version(int(version))
+        if version > schema_version:
+            _warn_newer_schema_version(int(version), schema_version, log_prefix)
             return
 
-        if version == _SCHEMA_VERSION and not force:
+        if version == schema_version and not force:
             return
 
-    ensure_schema(engine, model_tuple)
+    ensure_schema(
+        engine,
+        model_tuple,
+        schema_version=schema_version,
+        schema_migrations=schema_migrations,
+        log_prefix=log_prefix,
+    )
 
 
 def warn_readonly_schema_readiness(
-    engine: Engine, models: Iterable[OrmModel] | None = None
+    engine: Engine,
+    models: Iterable[OrmModel] | None = None,
+    *,
+    schema_version: int = _SCHEMA_VERSION,
+    log_prefix: str = "[security_events]",
 ) -> None:
     """Warn about read-only schema drift without creating or migrating anything."""
     model_tuple = _coerce_models(models)
     with engine.connect() as conn:
-        version, missing_tables = _schema_readiness(conn, model_tuple)
+        version, missing_tables = _schema_readiness(conn, model_tuple, schema_version)
 
-    if version > _SCHEMA_VERSION:
-        _warn_newer_schema_version(int(version))
-    elif version < _SCHEMA_VERSION or missing_tables:
+    if version > schema_version:
+        _warn_newer_schema_version(int(version), schema_version, log_prefix)
+    elif version < schema_version or missing_tables:
         print(
-            f"[security_events] sqlite schema not ready for read-only access: "
-            f"version={version}, expected={_SCHEMA_VERSION}, "
+            f"{log_prefix} sqlite schema not ready for read-only access: "
+            f"version={version}, expected={schema_version}, "
             f"missing_tables={missing_tables}",
             file=sys.stderr,
         )
@@ -235,10 +275,16 @@ class SqliteStore:
         *,
         read_only: bool = False,
         models: Iterable[OrmModel] | None = None,
+        schema_version: int = _SCHEMA_VERSION,
+        schema_migrations: SchemaMigration | None = None,
+        log_prefix: str = "[security_events]",
     ) -> None:
         self.path = normalize_sqlite_path(path)
         self.read_only = read_only
         self.models = _coerce_models(models)
+        self.schema_version = schema_version
+        self.schema_migrations = schema_migrations
+        self._log_prefix = log_prefix
         self._engine_lock = threading.Lock()
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
@@ -296,7 +342,7 @@ class SqliteStore:
             except DatabaseError as exc:
                 if self.read_only or not is_sqlite_corruption_error(exc):
                     print(
-                        f"[security_events] schema init failure: {exc}",
+                        f"{self._log_prefix} schema init failure: {exc}",
                         file=sys.stderr,
                     )
                     return None
@@ -307,13 +353,13 @@ class SqliteStore:
                     self._open_session_factory(None)
                 except (SQLAlchemyError, OSError) as rebuild_exc:
                     print(
-                        f"[security_events] corruption rebuild failed: {rebuild_exc}",
+                        f"{self._log_prefix} corruption rebuild failed: {rebuild_exc}",
                         file=sys.stderr,
                     )
                     return None
             except (SQLAlchemyError, OSError) as exc:
                 print(
-                    f"[security_events] schema init failure: {exc}",
+                    f"{self._log_prefix} schema init failure: {exc}",
                     file=sys.stderr,
                 )
                 return None
@@ -343,7 +389,7 @@ class SqliteStore:
     def handle_corruption(self, exc: Exception) -> None:
         """Delete a corrupt expendable SQLite query index and clear state."""
         print(
-            f"[security_events] corrupt DB detected, recreating: {exc}",
+            f"{self._log_prefix} corrupt DB detected, recreating: {exc}",
             file=sys.stderr,
         )
         self.dispose()
@@ -353,7 +399,7 @@ class SqliteStore:
         except OSError as delete_exc:
             self._disabled = True
             print(
-                f"[security_events] cannot delete corrupt db, "
+                f"{self._log_prefix} cannot delete corrupt db, "
                 f"writer disabled: {delete_exc}",
                 file=sys.stderr,
             )
@@ -366,12 +412,20 @@ class SqliteStore:
         engine = create_sqlite_engine(self.path, read_only=self.read_only)
         try:
             if self.read_only:
-                warn_readonly_schema_readiness(engine, self.models)
+                warn_readonly_schema_readiness(
+                    engine,
+                    self.models,
+                    schema_version=self.schema_version,
+                    log_prefix=self._log_prefix,
+                )
             else:
                 ensure_schema_if_needed(
                     engine,
                     self.models,
                     force=force_schema,
+                    schema_version=self.schema_version,
+                    schema_migrations=self.schema_migrations,
+                    log_prefix=self._log_prefix,
                 )
             self._engine = engine
             self._db_identity = db_identity
@@ -432,6 +486,7 @@ __all__ = [
     "is_sqlite_schema_error",
     "normalize_sqlite_path",
     "register_orm_models",
+    "SchemaMigration",
     "sqlite_database_files",
     "warn_readonly_schema_readiness",
 ]

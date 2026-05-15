@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import agent_sec_cli.observability.writer_jsonl as writer_jsonl
+import agent_sec_cli.observability as observability
 import pytest
 from agent_sec_cli.cli import app
 from agent_sec_cli.observability.metrics import HOOK_METRIC_ALLOWLIST
@@ -13,7 +13,8 @@ from typer.testing import CliRunner
 
 @pytest.fixture(autouse=True)
 def reset_observability_writer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(writer_jsonl, "_writer", None, raising=False)
+    monkeypatch.setattr(observability, "_writer", None, raising=False)
+    monkeypatch.setattr(observability, "_sqlite_writer", None, raising=False)
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
@@ -41,7 +42,7 @@ def _jsonl_records(path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def test_record_json_stdin_writes_observability_jsonl_only(tmp_path: Path) -> None:
+def test_record_json_stdin_writes_observability_stores_only(tmp_path: Path) -> None:
     runner = CliRunner()
 
     result = runner.invoke(
@@ -58,7 +59,9 @@ def test_record_json_stdin_writes_observability_jsonl_only(tmp_path: Path) -> No
     assert "schemaVersion" not in records[0]
     assert records[0]["hook"] == "before_agent_run"
     assert records[0]["metadata"]["sessionId"] == "session-123"
+    assert (tmp_path / "observability.db").exists()
     assert not (tmp_path / "security-events.jsonl").exists()
+    assert not (tmp_path / "security-events.db").exists()
 
 
 def test_record_accepts_before_llm_call_without_call_id(tmp_path: Path) -> None:
