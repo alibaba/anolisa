@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "1",
+  "component": "sec-core",
+  "version": "0.4.0",
+  "description": "Security protection, code scanning, prompt scanning, and secure skills for agent runtimes.",
+  "targets": {
+    "openclaw": {
+      "compatibleVersions": "",
+      "capabilities": {
+        "plugins": [
+          "agent-sec"
+        ],
+        "skills": [
+          "code-scanner",
+          "prompt-scanner",
+          "skill-ledger"
+        ],
+        "commands": [],
+        "hooks": [
+          "before_dispatch",
+          "before_tool_call"
+        ]
+      },
+      "actions": {
+        "install": "openclaw-plugin/scripts/deploy.sh openclaw-plugin"
+      }
+    }
+  },
+  "resources": {
+    "sandboxBinary": {
+      "source": "linux-sandbox/target/release/linux-sandbox",
+      "stagePath": "target/sec-core/bin/linux-sandbox",
+      "installPath": "/usr/local/bin/linux-sandbox"
+    },
+    "cliWheel": {
+      "source": "agent-sec-cli/target/wheels/agent_sec_cli-*.whl",
+      "stagePath": "target/sec-core/lib/anolisa/sec-core/wheels",
+      "installPath": "/usr/lib/anolisa/sec-core/wheels"
+    },
+    "openclawPlugin": {
+      "source": "openclaw-plugin",
+      "stagePath": "target/sec-core/lib/anolisa/sec-core/openclaw-plugin",
+      "installPath": "/usr/lib/anolisa/sec-core/openclaw-plugin",
+      "deployScript": "/usr/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh",
+      "openclawPath": "OpenClaw plugin registry"
+    },
+    "securitySkills": {
+      "source": "skills",
+      "stagePath": "target/sec-core/share/anolisa/skills",
+      "installPath": "/usr/share/anolisa/skills",
+      "openclawPath": "~/.openclaw/skills"
+    },
+    "coshExtension": {
+      "source": "cosh-extension",
+      "stagePath": "target/sec-core/share/anolisa/extensions/agent-sec-core",
+      "installPath": "/usr/share/anolisa/extensions/agent-sec-core"
+    }
+  }
+}
