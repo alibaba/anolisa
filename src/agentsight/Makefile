@@ -2,13 +2,22 @@
 # BUILD
 # =============================================================================
 
+LIBBPF_SYS_LIBRARY_PATH ?= $(shell pkg-config --variable=libdir libbpf 2>/dev/null || echo /usr/lib64:/usr/lib)
+NPM_REGISTRY ?= https://registry.npmmirror.com
+NPM_REPLACE_REGISTRY_HOST ?= always
+
 .PHONY: build
 build: ## Build agentsight binary
-	cargo build --release
+	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
+		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
+		cargo build --release
 
 .PHONY: build-frontend
 build-frontend: ## Build and embed frontend into frontend-dist/
-	cd dashboard && npm install && npm run build:embed
+	cd dashboard && npm install \
+		--registry="$(NPM_REGISTRY)" \
+		--replace-registry-host="$(NPM_REPLACE_REGISTRY_HOST)" \
+		&& npm run build:embed
 
 .PHONY: build-all
 build-all: build-frontend build ## Build frontend then Rust binary (with embedded UI)
@@ -22,13 +31,43 @@ example: build ## Build C FFI example (requires libagentsight)
 # INSTALL
 # =============================================================================
 
-PREFIX ?= /usr/local
+INSTALL_PROFILE ?= system
+DESTDIR ?=
+ifeq ($(INSTALL_PROFILE),user)
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+INSTALL_SYSTEMD ?= 0
+else
+PREFIX ?= /usr
+BINDIR ?= /usr/local/bin
+INSTALL_SYSTEMD ?= 1
+endif
+LIBDIR ?= $(PREFIX)/lib
+SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
+SERVICE_BINDIR ?= $(BINDIR)
+SETCAP ?= auto
 
-.PHONY: install
-install: ## Install agentsight binary and set BPF capabilities
-	install -d -m 0755 $(DESTDIR)$(PREFIX)/bin
-	install -p -m 0755 target/release/agentsight $(DESTDIR)$(PREFIX)/bin/
-	setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(PREFIX)/bin/agentsight
+.PHONY: install uninstall
+install: build-all ## Build and install agentsight binary and set BPF capabilities
+	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
+	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
+		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \
+	else \
+		echo "Skipping setcap for $(DESTDIR)$(BINDIR)/agentsight"; \
+	fi
+	@if [ "$(INSTALL_SYSTEMD)" = "1" ]; then \
+		install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR); \
+		install -p -m 0755 scripts/agentsight-start.sh $(DESTDIR)$(BINDIR)/agentsight-start; \
+		sed 's|/usr/local/bin/agentsight-start|$(SERVICE_BINDIR)/agentsight-start|g' \
+			scripts/agentsight.service > $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
+		chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
+	fi
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/agentsight
+	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
+	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
 
 .PHONY: help
 help: ## Show this help message
