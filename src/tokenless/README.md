@@ -257,7 +257,7 @@ plugins:
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
-| `make adapter-install` | Install all adapters (cosh + openclaw) |
+| `make adapter-install` | Install all adapters (cosh + openclaw + hermes) |
 | `make adapter-uninstall` | Remove all adapters |
 | `make cosh-install` | Install copilot-shell extension |
 | `make cosh-uninstall` | Uninstall copilot-shell extension |

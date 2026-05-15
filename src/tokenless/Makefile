@@ -1,14 +1,29 @@
 # Token-Less Unified Build System
 # Builds tokenless (schema/response compression), rtk (command rewriting), and toon (JSON encoding)
 
-SHARE_DIR ?= $(HOME)/.local/share/anolisa/adapters/tokenless
-BIN_DIR ?= $(HOME)/.local/bin
-LIB_DIR ?= $(HOME)/.local/lib/anolisa/tokenless
-ADAPTER_DIR := adapters/tokenless
+INSTALL_PROFILE ?= user
+DESTDIR ?=
+
+ifeq ($(INSTALL_PROFILE),user)
+PREFIX ?= $(HOME)/.local
+COSH_EXTENSION_DIR ?= $(HOME)/.copilot-shell/extensions/tokenless
+else
+PREFIX ?= /usr
+COSH_EXTENSION_DIR ?= $(PREFIX)/share/anolisa/extensions/tokenless
+endif
+
+BINDIR ?= $(PREFIX)/bin
+LIBEXECDIR ?= $(PREFIX)/libexec/anolisa/tokenless
+DATADIR ?= $(PREFIX)/share
+SHARE_DIR ?= $(DATADIR)/anolisa/adapters/tokenless
+BIN_DIR ?= $(BINDIR)
+LIB_DIR ?= $(LIBEXECDIR)
+ADAPTER_SRC_DIR := adapters/tokenless
 RTK_DIR := third_party/rtk
 TOON_DIR := third_party/toon
 
-.PHONY: build build-tokenless build-rtk build-toon install test lint clean \
+.PHONY: build build-tokenless build-rtk build-toon install uninstall test lint clean \
+        install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
         cosh-install cosh-uninstall \
         openclaw-install openclaw-uninstall \
@@ -34,40 +49,42 @@ build-toon:
 	@echo "==> Building toon..."
 	cargo build --release --manifest-path $(TOON_DIR)/Cargo.toml --features cli
 
-# Install binaries + adapter resources per FHS spec
-install: build
-	@echo "==> Installing binaries..."
-	@mkdir -p $(BIN_DIR) $(LIB_DIR)
-	cp target/release/tokenless $(BIN_DIR)/
-	cp $(RTK_DIR)/target/release/rtk $(LIB_DIR)/
-	cp $(TOON_DIR)/target/release/toon $(LIB_DIR)/
-	ln -sf $(LIB_DIR)/rtk $(BIN_DIR)/rtk
-	ln -sf $(LIB_DIR)/toon $(BIN_DIR)/toon
-	@echo "==> Installed tokenless to $(BIN_DIR), rtk/toon to $(LIB_DIR) (symlinked to $(BIN_DIR))"
-	@echo "==> Installing adapter resources to $(SHARE_DIR)..."
-	@mkdir -p $(SHARE_DIR)/common/hooks $(SHARE_DIR)/common/commands \
-	           $(SHARE_DIR)/cosh/scripts $(SHARE_DIR)/openclaw/scripts \
-	           $(SHARE_DIR)/hermes/scripts
-	cp $(ADAPTER_DIR)/manifest.json $(SHARE_DIR)/
-	cp $(ADAPTER_DIR)/common/tool-ready-spec.json $(SHARE_DIR)/common/
-	cp $(ADAPTER_DIR)/common/tokenless-env-fix.sh $(SHARE_DIR)/common/
-	cp $(ADAPTER_DIR)/common/hooks/*.py $(SHARE_DIR)/common/hooks/
-	cp $(ADAPTER_DIR)/common/hooks/*.sh $(SHARE_DIR)/common/hooks/
-	cp $(ADAPTER_DIR)/common/commands/*.toml $(SHARE_DIR)/common/commands/
-	cp $(ADAPTER_DIR)/cosh/scripts/detect.sh $(SHARE_DIR)/cosh/scripts/
-	cp $(ADAPTER_DIR)/cosh/scripts/install.sh $(SHARE_DIR)/cosh/scripts/
-	cp $(ADAPTER_DIR)/cosh/scripts/uninstall.sh $(SHARE_DIR)/cosh/scripts/
-	cp $(ADAPTER_DIR)/openclaw/scripts/detect.sh $(SHARE_DIR)/openclaw/scripts/
-	cp $(ADAPTER_DIR)/openclaw/scripts/install.sh $(SHARE_DIR)/openclaw/scripts/
-	cp $(ADAPTER_DIR)/openclaw/scripts/uninstall.sh $(SHARE_DIR)/openclaw/scripts/
-	cp $(ADAPTER_DIR)/openclaw/openclaw.plugin.json $(SHARE_DIR)/openclaw/
-	cp $(ADAPTER_DIR)/openclaw/package.json $(SHARE_DIR)/openclaw/
-	cp $(ADAPTER_DIR)/hermes/__init__.py $(SHARE_DIR)/hermes/
-	cp $(ADAPTER_DIR)/hermes/plugin.yaml $(SHARE_DIR)/hermes/
-	cp $(ADAPTER_DIR)/hermes/scripts/detect.sh $(SHARE_DIR)/hermes/scripts/
-	cp $(ADAPTER_DIR)/hermes/scripts/install.sh $(SHARE_DIR)/hermes/scripts/
-	cp $(ADAPTER_DIR)/hermes/scripts/uninstall.sh $(SHARE_DIR)/hermes/scripts/
-	@echo "==> Adapter resources installed to $(SHARE_DIR)"
+# Install binaries + adapter resources per FHS spec.
+install: build install-binaries install-helpers install-adapter-resources install-cosh-extension
+
+install-binaries:
+	@echo "==> Installing tokenless to $(DESTDIR)$(BINDIR)..."
+	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -p -m 0755 target/release/tokenless $(DESTDIR)$(BINDIR)/
+
+install-helpers:
+	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
+	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
+	install -p -m 0755 $(RTK_DIR)/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
+	install -p -m 0755 $(TOON_DIR)/target/release/toon $(DESTDIR)$(LIBEXECDIR)/
+
+install-adapter-resources:
+	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
+	rm -rf $(DESTDIR)$(SHARE_DIR)
+	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
+	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
+	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+
+install-cosh-extension:
+	@echo "==> Installing tokenless cosh extension to $(DESTDIR)$(COSH_EXTENSION_DIR)..."
+	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
+	install -d -m 0755 $(DESTDIR)$(COSH_EXTENSION_DIR)/hooks $(DESTDIR)$(COSH_EXTENSION_DIR)/commands
+	cp -pr $(ADAPTER_SRC_DIR)/common/hooks/. $(DESTDIR)$(COSH_EXTENSION_DIR)/hooks/
+	cp -pr $(ADAPTER_SRC_DIR)/common/commands/. $(DESTDIR)$(COSH_EXTENSION_DIR)/commands/
+	install -p -m 0644 $(ADAPTER_SRC_DIR)/common/cosh-extension.json $(DESTDIR)$(COSH_EXTENSION_DIR)/
+	find $(DESTDIR)$(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/tokenless
+	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
+	rm -f $(DESTDIR)$(LIBEXECDIR)/toon
+	rm -rf $(DESTDIR)$(SHARE_DIR)
+	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
 test: test-tokenless test-rtk test-toon test-hooks
@@ -134,11 +151,17 @@ adapter-scan:
 
 cosh-install:
 	@echo "==> Installing tokenless cosh extension..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=cosh bash $(SHARE_DIR)/cosh/scripts/install.sh
+	@rm -rf $(COSH_EXTENSION_DIR)
+	@install -d -m 0755 $(COSH_EXTENSION_DIR)/hooks $(COSH_EXTENSION_DIR)/commands
+	cp -pr $(SHARE_DIR)/common/hooks/. $(COSH_EXTENSION_DIR)/hooks/
+	cp -pr $(SHARE_DIR)/common/commands/. $(COSH_EXTENSION_DIR)/commands/
+	install -p -m 0644 $(SHARE_DIR)/common/cosh-extension.json $(COSH_EXTENSION_DIR)/
+	find $(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+	@echo "==> tokenless cosh extension installed to $(COSH_EXTENSION_DIR)"
 
 cosh-uninstall:
 	@echo "==> Uninstalling tokenless cosh extension..."
-	@$(ADAPTER_ENV) ANOLISA_TARGET=cosh bash $(SHARE_DIR)/cosh/scripts/uninstall.sh
+	rm -rf $(COSH_EXTENSION_DIR)
 
 # --- OpenClaw ---
 
@@ -164,7 +187,7 @@ hermes-uninstall:
 	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash $(HERMES_ADAPTER_DIR)/scripts/uninstall.sh
 
 # One-step setup: build + install + all adapters
-setup: install adapter-install hermes-install
+setup: install adapter-install
 	@echo ""
 	@echo "============================================"
 	@echo "  Token-Less setup complete!"
@@ -199,7 +222,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-install      Register copilot-shell extension"
 	@echo "  cosh-uninstall    Unregister copilot-shell extension"
@@ -211,6 +234,9 @@ help:
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
-	@echo "  BIN_DIR    User commands (default: ~/.local/bin)"
-	@echo "  LIB_DIR    Helper binaries (default: ~/.local/lib/anolisa/tokenless)"
-	@echo "  SHARE_DIR  Adapter resources (default: ~/.local/share/anolisa/adapters/tokenless)"
+	@echo "  INSTALL_PROFILE  user or system (default: user)"
+	@echo "  DESTDIR          Staging root for package builds"
+	@echo "  PREFIX           Install prefix (default: ~/.local or /usr)"
+	@echo "  BINDIR           Binary install path"
+	@echo "  LIBEXECDIR       Helper binary install path"
+	@echo "  SHARE_DIR        Adapter resources path"
