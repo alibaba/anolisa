@@ -120,6 +120,12 @@ def test_observability_sqlite_writer_only_writes_independent_sqlite_index(
                 "PRAGMA index_list(observability_events)"
             ).fetchall()
         }
+        session_run_index_columns = [
+            item[2]
+            for item in conn.execute(
+                "PRAGMA index_info(idx_observability_session_run_observed_at_epoch)"
+            ).fetchall()
+        ]
     finally:
         conn.close()
 
@@ -137,8 +143,14 @@ def test_observability_sqlite_writer_only_writes_independent_sqlite_index(
         "idx_observability_observed_at_epoch",
         "idx_observability_hook_observed_at_epoch",
         "idx_observability_session_observed_at_epoch",
-        "idx_observability_run_observed_at_epoch",
+        "idx_observability_session_run_observed_at_epoch",
     }.issubset(indexes)
+    assert "idx_observability_run_observed_at_epoch" not in indexes
+    assert session_run_index_columns == [
+        "session_id",
+        "run_id",
+        "observed_at_epoch",
+    ]
     assert _sqlite_user_version(tmp_path / "observability.db") == (
         OBSERVABILITY_SQLITE_SCHEMA_VERSION
     )

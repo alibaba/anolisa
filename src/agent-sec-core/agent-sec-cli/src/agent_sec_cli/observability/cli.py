@@ -94,4 +94,30 @@ def schema_command() -> None:
     )
 
 
+@app.command()
+def review() -> None:
+    """Open an interactive drill-down TUI over recorded observability events."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        typer.echo(
+            "Error: `observability review` requires an interactive terminal. ",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Lazy-import Textual so the hot `record` / `schema` paths don't pay its
+    # import cost.
+    from agent_sec_cli.observability.review import (  # noqa: PLC0415
+        ObservabilityReviewApp,
+    )
+    from agent_sec_cli.observability.sqlite_reader import (  # noqa: PLC0415
+        ObservabilityReader,
+    )
+
+    reader = ObservabilityReader()
+    try:
+        ObservabilityReviewApp(reader=reader).run()
+    finally:
+        reader.close()
+
+
 __all__ = ["app"]

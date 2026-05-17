@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import agent_sec_cli.observability as observability
+import agent_sec_cli.observability.cli as observability_cli
+import agent_sec_cli.observability.review as observability_review
+import agent_sec_cli.observability.sqlite_reader as observability_sqlite_reader
 import pytest
+import typer
 from agent_sec_cli.cli import app
 from agent_sec_cli.observability.metrics import HOOK_METRIC_ALLOWLIST
 from typer.testing import CliRunner
@@ -322,3 +326,81 @@ def test_record_requires_stdin_flag(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Error:" in result.output
+
+
+def test_review_rejects_non_interactive_stdio(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        observability_cli.review()
+
+    assert exc_info.value.exit_code == 2
+    assert "requires an interactive terminal" in capsys.readouterr().err
+
+
+def test_review_closes_reader_after_tui_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeReader:
+        def __init__(self) -> None:
+            events.append("reader-init")
+
+        def close(self) -> None:
+            events.append("reader-close")
+
+    class FakeReviewApp:
+        def __init__(self, reader: FakeReader) -> None:
+            events.append(f"app-init:{reader.__class__.__name__}")
+
+        def run(self) -> None:
+            events.append("app-run")
+
+    monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", FakeReader)
+    monkeypatch.setattr(observability_review, "ObservabilityReviewApp", FakeReviewApp)
+
+    observability_cli.review()
+
+    assert events == [
+        "reader-init",
+        "app-init:FakeReader",
+        "app-run",
+        "reader-close",
+    ]
+
+
+def test_review_closes_reader_when_tui_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeReader:
+        def close(self) -> None:
+            events.append("reader-close")
+
+    class FailingReviewApp:
+        def __init__(self, reader: FakeReader) -> None:
+            self._reader = reader
+
+        def run(self) -> None:
+            events.append("app-run")
+            raise RuntimeError("tui failed")
+
+    monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", FakeReader)
+    monkeypatch.setattr(
+        observability_review, "ObservabilityReviewApp", FailingReviewApp
+    )
+
+    with pytest.raises(RuntimeError, match="tui failed"):
+        observability_cli.review()
+
+    assert events == ["app-run", "reader-close"]

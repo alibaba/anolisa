@@ -19,7 +19,12 @@ class ObservabilityEventRecord(Base):
             "session_id",
             "observed_at_epoch",
         ),
-        Index("idx_observability_run_observed_at_epoch", "run_id", "observed_at_epoch"),
+        Index(
+            "idx_observability_session_run_observed_at_epoch",
+            "session_id",
+            "run_id",
+            "observed_at_epoch",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
