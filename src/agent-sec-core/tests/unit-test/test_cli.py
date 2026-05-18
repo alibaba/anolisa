@@ -163,6 +163,7 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertEqual(kwargs["text"], "alice@example.com")
         self.assertEqual(kwargs["source"], "manual")
         self.assertFalse(kwargs["raw_evidence"])
+        self.assertIsNone(kwargs["max_bytes"])
 
     @patch("agent_sec_cli.pii_checker.cli.invoke")
     def test_scan_pii_text_output(self, mock_invoke):
@@ -209,6 +210,36 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertIn("--source must be one of", result.output)
 
     @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_input_default_reads_full_file(self, mock_invoke):
+        mock_invoke.return_value = ActionResult(
+            success=True,
+            exit_code=0,
+            stdout='{"ok": true, "verdict": "warn"}',
+            data={
+                "ok": True,
+                "verdict": "warn",
+                "summary": {"total": 1},
+                "findings": [],
+            },
+        )
+
+        with self.runner.isolated_filesystem():
+            text = "备注🙂 alice@example.com"
+            Path("input.txt").write_text(text, encoding="utf-8")
+
+            result = self.runner.invoke(
+                app,
+                ["scan-pii", "--input", "input.txt"],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        _, kwargs = mock_invoke.call_args
+        self.assertEqual(kwargs["text"], text)
+        self.assertFalse(kwargs["input_truncated"])
+        self.assertEqual(kwargs["input_bytes_scanned"], len(text.encode("utf-8")))
+        self.assertIsNone(kwargs["max_bytes"])
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
     def test_scan_pii_input_reports_file_byte_limit(self, mock_invoke):
         mock_invoke.return_value = ActionResult(
             success=True,
@@ -242,6 +273,29 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertTrue(kwargs["input_truncated"])
         self.assertEqual(kwargs["input_bytes_scanned"], max_bytes)
         self.assertNotIn("\ufffd", kwargs["text"])
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_input_rejects_invalid_utf8(self, mock_invoke):
+        with self.runner.isolated_filesystem():
+            Path("input.txt").write_bytes(b"\xff")
+
+            result = self.runner.invoke(
+                app,
+                ["scan-pii", "--input", "input.txt"],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("--input must be valid UTF-8", result.output)
+        mock_invoke.assert_not_called()
+
+    def test_scan_pii_rejects_zero_max_bytes(self):
+        result = self.runner.invoke(
+            app,
+            ["scan-pii", "--text", "hello", "--max-bytes", "0"],
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("--max-bytes must be greater than zero", result.output)
 
 
 if __name__ == "__main__":

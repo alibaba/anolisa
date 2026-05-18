@@ -16,7 +16,6 @@ scanner_app = typer.Typer(
 
 _OUTPUT_FORMATS = {"json", "text"}
 _SOURCES = {"user_input", "tool_output", "manual", "unknown"}
-_DEFAULT_MAX_BYTES = 1_048_576
 _TEXT_OPTION = typer.Option(None, "--text", help="Text to scan.")
 _INPUT_OPTION = typer.Option(
     None,
@@ -59,25 +58,43 @@ _SOURCE_OPTION = typer.Option(
     ),
 )
 _MAX_BYTES_OPTION = typer.Option(
-    _DEFAULT_MAX_BYTES,
+    None,
     "--max-bytes",
-    help="Maximum bytes to scan before truncating input.",
+    help="Optional maximum bytes to scan before truncating input.",
 )
 
 
-def _read_limited_input(path: Path, max_bytes: int) -> tuple[str, bool, int]:
-    """Read at most max_bytes from a UTF-8 file before scanner-level limiting.
+def _decode_utf8_input(data: bytes, *, allow_partial_tail: bool = False) -> str:
+    """Decode UTF-8 input, optionally backing off a truncated final character."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if allow_partial_tail and exc.reason == "unexpected end of data":
+            return data[: exc.start].decode("utf-8")
+        raise
+
+
+def _read_limited_input(path: Path, max_bytes: int | None) -> tuple[str, bool, int]:
+    """Read a UTF-8 file, applying max_bytes only when explicitly provided.
 
     The returned byte count reflects file bytes read for scanning. When the CLI
     truncates a file, that truncation flag takes precedence over the scanner's
     string-level truncation result in the final summary.
     """
+    if max_bytes is None:
+        data = path.read_bytes()
+        return _decode_utf8_input(data), False, len(data)
+
     with path.open("rb") as handle:
         data = handle.read(max_bytes + 1)
     truncated = len(data) > max_bytes
     if truncated:
         data = data[:max_bytes]
-    return data.decode("utf-8", errors="ignore"), truncated, len(data)
+    return (
+        _decode_utf8_input(data, allow_partial_tail=truncated),
+        truncated,
+        len(data),
+    )
 
 
 def _format_text_output(data: dict[str, Any]) -> str:
@@ -124,7 +141,7 @@ def scan_pii(
     raw_evidence: bool = _RAW_EVIDENCE_OPTION,
     redact_output: bool = _REDACT_OUTPUT_OPTION,
     source: str = _SOURCE_OPTION,
-    max_bytes: int = _MAX_BYTES_OPTION,
+    max_bytes: int | None = _MAX_BYTES_OPTION,
 ) -> None:
     """Detect PII and credentials in text or a file."""
     if ctx.invoked_subcommand is not None:
@@ -138,7 +155,7 @@ def scan_pii(
             err=True,
         )
         raise typer.Exit(code=1)
-    if max_bytes <= 0:
+    if max_bytes is not None and max_bytes <= 0:
         typer.echo("Error: --max-bytes must be greater than zero.", err=True)
         raise typer.Exit(code=1)
     if (text is None and input_path is None) or (
@@ -151,9 +168,13 @@ def scan_pii(
     input_bytes_scanned = None
     scan_text = text or ""
     if input_path is not None:
-        scan_text, input_truncated, input_bytes_scanned = _read_limited_input(
-            input_path, max_bytes
-        )
+        try:
+            scan_text, input_truncated, input_bytes_scanned = _read_limited_input(
+                input_path, max_bytes
+            )
+        except UnicodeDecodeError as exc:
+            typer.echo(f"Error: --input must be valid UTF-8: {exc}.", err=True)
+            raise typer.Exit(code=1) from exc
 
     result = invoke(
         "pii_scan",

@@ -1,5 +1,6 @@
 """Unit tests for the PII scanner."""
 
+import pytest
 from agent_sec_cli.pii_checker.detectors.base import PiiCandidate
 from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES, PiiScanner
 
@@ -181,6 +182,11 @@ def test_max_bytes_truncates_input():
     assert result["verdict"] == "pass"
 
 
+def test_invalid_max_bytes_is_rejected():
+    with pytest.raises(ValueError, match="max_bytes must be greater than zero"):
+        PiiScanner().scan("alice@example.com", max_bytes=0)
+
+
 def test_multibyte_truncation_boundary_is_safe():
     max_bytes = len("备注".encode("utf-8")) + 1
     result = _scan("备注🙂 alice@example.com", max_bytes=max_bytes, redact_output=True)
@@ -189,6 +195,26 @@ def test_multibyte_truncation_boundary_is_safe():
     assert result["summary"]["bytes_scanned"] == max_bytes
     assert result["verdict"] == "pass"
     assert result["redacted_text"] == "备注"
+
+
+def test_large_input_over_default_limit_scans_tail_by_default():
+    email = "alice@company.cn"
+    text = f"{'x' * (DEFAULT_MAX_BYTES + 10)} {email}"
+    result = _scan(text)
+
+    assert result["summary"]["truncated"] is False
+    assert result["summary"]["bytes_scanned"] == len(text.encode("utf-8"))
+    assert "email" in _types(result)
+
+
+def test_explicit_default_limit_truncates_large_input_tail():
+    email = "alice@company.cn"
+    text = f"{'x' * (DEFAULT_MAX_BYTES + 10)} {email}"
+    result = _scan(text, max_bytes=DEFAULT_MAX_BYTES)
+
+    assert result["summary"]["truncated"] is True
+    assert result["summary"]["bytes_scanned"] == DEFAULT_MAX_BYTES
+    assert "email" not in _types(result)
 
 
 def test_large_input_near_default_limit_scans_tail():

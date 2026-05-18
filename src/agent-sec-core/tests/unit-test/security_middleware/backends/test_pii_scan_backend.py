@@ -2,6 +2,7 @@
 
 import json
 
+from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES
 from agent_sec_cli.security_middleware.backends.pii_scan import PiiScanBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 
@@ -32,6 +33,31 @@ def test_backend_redact_output():
     assert result.data["verdict"] == "deny"
     assert "redacted_text" in result.data
     assert "supersecretvalue12345" not in result.data["redacted_text"]
+
+
+def test_backend_defaults_to_unlimited_scan():
+    backend = PiiScanBackend()
+    email = "alice@company.cn"
+    text = f"{'x' * (DEFAULT_MAX_BYTES + 10)} {email}"
+    result = backend.execute(RequestContext(action="pii_scan"), text=text)
+
+    assert result.success is True
+    assert result.data["summary"]["truncated"] is False
+    assert result.data["summary"]["bytes_scanned"] == len(text.encode("utf-8"))
+    assert any(finding["type"] == "email" for finding in result.data["findings"])
+
+
+def test_backend_accepts_none_max_bytes():
+    backend = PiiScanBackend()
+    result = backend.execute(
+        RequestContext(action="pii_scan"),
+        text="email alice@company.cn",
+        max_bytes=None,
+    )
+
+    assert result.success is True
+    assert result.data["verdict"] == "warn"
+    assert result.data["summary"]["truncated"] is False
 
 
 def test_backend_rejects_invalid_max_bytes():
@@ -111,3 +137,21 @@ def test_backend_error_audit_details_omit_exception_text_with_input():
     assert sensitive not in details_text
     assert details["error"] == "pii_scan error details omitted from audit"
     assert details["error_type"] == "RuntimeError"
+
+
+def test_backend_audit_details_allow_null_max_bytes_without_input_text():
+    sensitive = "alice@example.com"
+    backend = PiiScanBackend()
+    result = backend.execute(
+        RequestContext(action="pii_scan"),
+        text=sensitive,
+        max_bytes=None,
+    )
+    details = backend.build_event_details(
+        result,
+        {"text": sensitive, "max_bytes": None},
+    )
+    details_text = json.dumps(details, ensure_ascii=False)
+
+    assert details["request"]["max_bytes"] is None
+    assert sensitive not in details_text

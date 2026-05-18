@@ -5,7 +5,7 @@ from typing import Any
 
 from agent_sec_cli.pii_checker import audit as pii_audit
 from agent_sec_cli.pii_checker.models import PiiScanResult, Verdict
-from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES, PiiScanner
+from agent_sec_cli.pii_checker.scanner import PiiScanner
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
@@ -51,15 +51,19 @@ class PiiScanBackend(BaseBackend):
         include_low_confidence = bool(kwargs.get("include_low_confidence", False))
         raw_evidence = bool(kwargs.get("raw_evidence", False))
         redact_output = bool(kwargs.get("redact_output", False))
-        try:
-            max_bytes = int(kwargs.get("max_bytes", DEFAULT_MAX_BYTES))
-        except (TypeError, ValueError) as exc:
-            return self._to_action_result(
-                _error_result(
-                    "pii_scan error: max_bytes must be an integer",
-                    error_type=type(exc).__name__,
+        max_bytes_arg = kwargs.get("max_bytes")
+        if max_bytes_arg is None:
+            max_bytes: int | None = None
+        else:
+            try:
+                max_bytes = int(max_bytes_arg)
+            except (TypeError, ValueError) as exc:
+                return self._to_action_result(
+                    _error_result(
+                        "pii_scan error: max_bytes must be an integer",
+                        error_type=type(exc).__name__,
+                    )
                 )
-            )
         input_truncated = bool(kwargs.get("input_truncated", False))
         input_bytes_scanned = kwargs.get("input_bytes_scanned")
         if input_bytes_scanned is not None:
@@ -68,7 +72,7 @@ class PiiScanBackend(BaseBackend):
             except (TypeError, ValueError):
                 input_bytes_scanned = None
 
-        if max_bytes <= 0:
+        if max_bytes is not None and max_bytes <= 0:
             return self._to_action_result(
                 _error_result(
                     "pii_scan error: max_bytes must be greater than zero",

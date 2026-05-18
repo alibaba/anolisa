@@ -20,12 +20,24 @@ ALLOWED_SOURCES = {"user_input", "tool_output", "manual", "unknown"}
 _MULTI_TYPE_OVERLAPS = {frozenset({"bearer_token", "jwt"})}
 
 
-def _limit_text(text: str, max_bytes: int) -> tuple[str, bool, int]:
-    """Limit text by encoded byte length."""
+def _decode_utf8_prefix(data: bytes) -> str:
+    """Decode bytes after backing off a partial UTF-8 character at the end."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if exc.reason != "unexpected end of data":
+            raise
+        return data[: exc.start].decode("utf-8")
+
+
+def _limit_text(text: str, max_bytes: int | None) -> tuple[str, bool, int]:
+    """Limit text by encoded byte length when a byte limit is configured."""
     encoded = text.encode("utf-8")
+    if max_bytes is None:
+        return text, False, len(encoded)
     if len(encoded) <= max_bytes:
         return text, False, len(encoded)
-    trimmed = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    trimmed = _decode_utf8_prefix(encoded[:max_bytes])
     return trimmed, True, max_bytes
 
 
@@ -70,11 +82,13 @@ class PiiScanner:
         include_low_confidence: bool = False,
         raw_evidence: bool = False,
         redact_output: bool = False,
-        max_bytes: int = DEFAULT_MAX_BYTES,
+        max_bytes: int | None = None,
     ) -> PiiScanResult:
         """Scan text and return a fixed-schema result."""
         started = time.perf_counter()
         normalized_source = source if source in ALLOWED_SOURCES else "unknown"
+        if max_bytes is not None and max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero")
         limited_text, truncated, bytes_scanned = _limit_text(text, max_bytes)
 
         candidates = self._detect(limited_text)
@@ -213,7 +227,7 @@ def scan_text(
     include_low_confidence: bool = False,
     raw_evidence: bool = False,
     redact_output: bool = False,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    max_bytes: int | None = None,
 ) -> PiiScanResult:
     """Convenience function for one-off scans."""
     return PiiScanner(detectors=detectors).scan(
