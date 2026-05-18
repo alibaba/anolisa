@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .helpers import compact_record, non_empty_string, now_iso
+from .helpers import non_empty_string, now_iso
 
 ZERO_RUN_ID = "00000000-0000-0000-0000-000000000000"
 
@@ -35,14 +35,13 @@ def _base_record(
 ) -> dict[str, Any] | None:
     if metadata is None:
         return None
-    clean_metrics = compact_record(metrics)
-    if not clean_metrics:
+    if not metrics:
         return None
     return {
         "hook": hook,
         "observedAt": observed_at,
         "metadata": metadata,
-        "metrics": clean_metrics,
+        "metrics": metrics,
     }
 
 

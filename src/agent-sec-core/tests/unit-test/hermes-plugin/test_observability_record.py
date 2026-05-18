@@ -164,6 +164,7 @@ def test_post_tool_call_builds_after_tool_record_without_result_size_stats():
         "result": {"stdout": "ok", "exit_code": 0},
         "duration_ms": 5,
         "exit_code": 0,
+        "error": None,
     }
     assert "result_size_bytes" not in record["metrics"]
     assert "status" not in record["metrics"]

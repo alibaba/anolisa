@@ -47,18 +47,47 @@ def test_get_hooks_define_registers_expected_hooks():
     }
 
 
-def test_hook_handlers_use_explicit_positional_contracts():
+def test_hook_handlers_use_explicit_contracts():
     cap = _make_capability()
 
-    for callback in (
-        cap._on_pre_llm_call,
-        cap._on_post_tool_call,
-        cap._on_post_llm_call,
-    ):
+    for callback in cap.get_hooks_define().values():
         signature = inspect.signature(callback)
         assert inspect.Parameter.VAR_POSITIONAL not in {
             parameter.kind for parameter in signature.parameters.values()
         }
+
+    pre_tool_signature = inspect.signature(cap._on_pre_tool_call)
+    assert (
+        pre_tool_signature.parameters["tool_name"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert pre_tool_signature.parameters["args"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    post_tool_signature = inspect.signature(cap._on_post_tool_call)
+    assert (
+        post_tool_signature.parameters["tool_name"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert post_tool_signature.parameters["args"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert (
+        post_tool_signature.parameters["result"].kind is inspect.Parameter.KEYWORD_ONLY
+    )
+
+    pre_llm_signature = inspect.signature(cap._on_pre_llm_call)
+    assert (
+        pre_llm_signature.parameters["messages"].kind
+        is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    )
+
+    post_llm_signature = inspect.signature(cap._on_post_llm_call)
+    assert (
+        post_llm_signature.parameters["messages"].kind
+        is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    )
+    assert (
+        post_llm_signature.parameters["response"].kind
+        is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    )
 
 
 def test_pre_llm_call_records_observability_payload_without_blocking_on_result():
@@ -108,7 +137,12 @@ def test_pre_llm_call_accepts_positional_messages():
     mock_record.assert_called_once()
     payload = mock_record.call_args.args[0]
     assert payload["hook"] == "before_agent_run"
-    assert payload["metrics"] == {"model_id": "gpt-test"}
+    assert payload["metrics"] == {
+        "prompt": None,
+        "user_input": None,
+        "model_id": "gpt-test",
+        "model_provider": None,
+    }
 
 
 def test_post_llm_call_accepts_positional_response():
@@ -131,7 +165,11 @@ def test_post_llm_call_accepts_positional_response():
     mock_record.assert_called_once()
     payload = mock_record.call_args.args[0]
     assert payload["hook"] == "after_agent_run"
-    assert payload["metrics"] == {"response": "done"}
+    assert payload["metrics"] == {
+        "response": "done",
+        "final_model_id": None,
+        "final_model_provider": None,
+    }
 
 
 def test_skips_cli_call_when_record_cannot_be_built():
@@ -144,7 +182,9 @@ def test_skips_cli_call_when_record_cannot_be_built():
         "src.capabilities.observability.record_hermes_observability"
     ) as mock_record:
         result = cap._on_pre_tool_call(
-            "terminal", {"command": "ls"}, session_id="session-1"
+            tool_name="terminal",
+            args={"command": "ls"},
+            session_id="session-1",
         )
 
     assert result is None
@@ -175,16 +215,16 @@ def test_capability_handlers_emit_all_registered_hook_types():
             api_duration=12.0,
         )
         cap._on_pre_tool_call(
-            "terminal",
-            {"command": "ls"},
+            tool_name="terminal",
+            args={"command": "ls"},
             session_id="session-1",
             task_id="task-1",
             tool_call_id="tool-1",
         )
         cap._on_post_tool_call(
-            "terminal",
-            {"command": "ls"},
-            {"stdout": "ok", "exit_code": 0},
+            tool_name="terminal",
+            args={"command": "ls"},
+            result={"stdout": "ok", "exit_code": 0},
             session_id="session-1",
             task_id="task-1",
             tool_call_id="tool-1",
@@ -205,6 +245,36 @@ def test_capability_handlers_emit_all_registered_hook_types():
         "after_tool_call",
         "after_agent_run",
     ]
+
+
+def test_post_tool_call_preserves_explicit_none_result():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        result = cap._on_post_tool_call(
+            tool_name="terminal",
+            args={"command": "true"},
+            result=None,
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+
+    assert result is None
+    mock_record.assert_called_once()
+    payload = mock_record.call_args.args[0]
+    assert payload["hook"] == "after_tool_call"
+    assert payload["metrics"] == {
+        "result": None,
+        "duration_ms": None,
+        "exit_code": None,
+        "error": None,
+    }
 
 
 def test_observability_is_exported_in_all_capabilities():
