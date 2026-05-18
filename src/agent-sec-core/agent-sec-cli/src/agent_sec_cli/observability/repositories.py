@@ -75,7 +75,7 @@ class ObservabilityEventRepository:
                     )
                 )
         except SQLAlchemyError:
-            pass
+            self._store.dispose()
 
     def checkpoint(self) -> None:
         """Run a best-effort WAL checkpoint on the current engine."""

@@ -2,11 +2,13 @@
 
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import agent_sec_cli.observability as observability
+import agent_sec_cli.observability.sqlite_writer as observability_sqlite_writer_module
 import agent_sec_cli.security_events.orm_store as orm_store
 import pytest
 from agent_sec_cli.observability import record_observability
@@ -201,6 +203,40 @@ def test_observability_sqlite_writer_prunes_on_close_not_write(
         conn.close()
 
     assert rows == [("fresh-session",)]
+
+
+def test_observability_sqlite_writer_closes_through_maintenance_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "observability.db"
+    writer = ObservabilitySqliteWriter(path=db_path)
+    writer.write(validate_observability_record(_payload()))
+    gated_paths: list[Path] = []
+
+    def fake_run_sqlite_maintenance_if_due(
+        db_path_arg: str | Path,
+        maintenance: Callable[[], None],
+        *,
+        interval_seconds: float = 0,
+        now: float | None = None,
+    ) -> bool:
+        gated_paths.append(Path(db_path_arg))
+        maintenance()
+        return True
+
+    monkeypatch.setattr(
+        observability_sqlite_writer_module,
+        "run_sqlite_maintenance_if_due",
+        fake_run_sqlite_maintenance_if_due,
+        raising=False,
+    )
+
+    writer.close()
+
+    assert gated_paths == [db_path.resolve()]
+    assert writer._engine is None
+    assert writer._session_factory is None
 
 
 def test_observability_sqlite_writer_uses_schema_version_fast_path(

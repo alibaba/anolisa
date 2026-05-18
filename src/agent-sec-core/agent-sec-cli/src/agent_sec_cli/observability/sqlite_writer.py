@@ -20,6 +20,9 @@ from agent_sec_cli.security_events.orm_store import (
     is_sqlite_corruption_error,
     is_sqlite_schema_error,
 )
+from agent_sec_cli.security_events.sqlite_maintenance import (
+    run_sqlite_maintenance_if_due,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -77,24 +80,18 @@ class ObservabilitySqliteWriter:
             self._store.dispose()
 
     def close(self) -> None:
-        """Best-effort WAL checkpoint and dispose pooled connections."""
+        """Best-effort gated prune/WAL checkpoint and dispose pooled connections."""
         if self._store.engine is None:
             return
+        try:
+            run_sqlite_maintenance_if_due(self._store.path, self._run_maintenance)
+        finally:
+            self._store.close()
+
+    def _run_maintenance(self) -> None:
+        """Run low-frequency SQLite maintenance for this writer."""
         self._repository.prune(self._max_age_days)
         self._repository.checkpoint()
-        self._store.close()
-
-    def _ensure_session_factory(self) -> sessionmaker[Session] | None:
-        """Return the lazily initialized session factory."""
-        return self._store.session_factory()
-
-    def _dispose_engine(self) -> None:
-        """Dispose SQLAlchemy engine state and clear session factory."""
-        self._store.dispose()
-
-    def _handle_corruption(self, exc: Exception) -> None:
-        """Delete a corrupt database and prepare for a fresh start."""
-        self._store.handle_corruption(exc)
 
 
 __all__ = ["ObservabilitySqliteWriter"]

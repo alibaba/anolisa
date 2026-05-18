@@ -355,6 +355,29 @@ def test_sqlite_store_reuses_session_factory_across_repositories(
         store.close()
 
 
+def test_security_event_prune_disposes_store_on_sqlalchemy_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingSessionFactory:
+        def begin(self):
+            raise SQLAlchemyError("prune failed")
+
+    store = SqliteStore(tmp_path / "events.db")
+    repository = SecurityEventRepository(store)
+    disposed = False
+
+    def fake_dispose() -> None:
+        nonlocal disposed
+        disposed = True
+
+    monkeypatch.setattr(store, "session_factory", lambda: FailingSessionFactory())
+    monkeypatch.setattr(store, "dispose", fake_dispose)
+
+    repository.prune(30)
+
+    assert disposed
+
+
 def test_readonly_store_does_not_create_missing_db(tmp_path: Path) -> None:
     missing_db = tmp_path / "missing.db"
     store = SqliteStore(missing_db, read_only=True)

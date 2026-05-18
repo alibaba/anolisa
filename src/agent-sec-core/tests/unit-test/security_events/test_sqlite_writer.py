@@ -7,12 +7,14 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import agent_sec_cli.security_events.sqlite_writer as sqlite_writer_module
 import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
@@ -491,6 +493,62 @@ class TestSqliteEventWriter:
         assert writer._engine is None
         assert writer._session_factory is None
 
+    def test_close_runs_prune_and_checkpoint_through_maintenance_gate(
+        self,
+        db_path: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(_make_event())
+        gated_paths: list[Path] = []
+
+        def fake_run_sqlite_maintenance_if_due(
+            db_path_arg: str | Path,
+            maintenance: Callable[[], None],
+            *,
+            interval_seconds: float = 0,
+            now: float | None = None,
+        ) -> bool:
+            gated_paths.append(Path(db_path_arg))
+            maintenance()
+            return True
+
+        monkeypatch.setattr(
+            sqlite_writer_module,
+            "run_sqlite_maintenance_if_due",
+            fake_run_sqlite_maintenance_if_due,
+            raising=False,
+        )
+
+        writer.close()
+
+        assert gated_paths == [Path(db_path).resolve()]
+        assert writer._engine is None
+        assert writer._session_factory is None
+
+    def test_close_skips_repeated_maintenance_for_same_db_path(
+        self,
+        db_path: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        first_writer = SqliteEventWriter(path=db_path)
+        first_writer.write(_make_event())
+        first_writer.close()
+
+        second_writer = SqliteEventWriter(path=db_path)
+        second_writer.write(_make_event(event_type="second_event"))
+
+        def fail_if_maintenance_runs() -> None:
+            raise AssertionError("maintenance should be skipped while marker is fresh")
+
+        monkeypatch.setattr(
+            second_writer,
+            "_run_maintenance",
+            fail_if_maintenance_runs,
+        )
+
+        second_writer.close()
+
     def test_disabled_after_delete_failure(self, db_path: str) -> None:
         writer = SqliteEventWriter(path=db_path)
         writer.write(_make_event())
@@ -511,18 +569,6 @@ class TestSqliteEventWriter:
 
         # Subsequent writes should be no-ops
         writer2.write(_make_event())
-
-    def test_store_helpers_delegate_to_store(self, db_path: str) -> None:
-        writer = SqliteEventWriter(path=db_path)
-        writer.write(_make_event())
-        assert writer._engine is not None
-        assert writer._session_factory is not None
-        assert writer._ensure_session_factory() is writer._session_factory
-        assert not writer._disabled
-
-        writer._dispose_engine()
-        assert writer._engine is None
-        assert writer._session_factory is None
 
     def test_write_retries_after_corruption_error(
         self, db_path: str, monkeypatch: pytest.MonkeyPatch
