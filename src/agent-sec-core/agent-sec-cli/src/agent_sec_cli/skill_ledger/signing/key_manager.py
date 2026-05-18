@@ -91,7 +91,7 @@ def archive_current_public_key() -> Path | None:
 
     The archived file is named ``<sha256-fingerprint>.pub`` so that
     :func:`load_keyring_public_keys` can find it during signature
-    verification after a key rotation (``init-keys --force``).
+    verification after a key rotation (``init --force-keys``).
 
     Returns the keyring path written, or ``None`` if no public key exists
     to archive.

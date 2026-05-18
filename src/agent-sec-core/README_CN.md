@@ -247,24 +247,25 @@ agent-sec-cli verify
 
 | 命令 | 说明 |
 |------|------|
-| `init-keys` | 生成 Ed25519 签名密钥对 |
+| `init` | 初始化密钥，并为已覆盖 Skill 执行快速扫描 |
+| `scan <dir>` | 执行内置快速扫描并签名写入 manifest |
 | `check <dir>` | 检测 Skill 文件是否漂移或被篡改 |
-| `certify <dir>` | 运行扫描器、签名并封存清单 |
+| `certify <dir> --findings <file>` | 导入外部扫描结果并签名写入 manifest |
 | `status` | 系统级健康概览（密钥、配置、聚合完整性） |
 | `audit <dir>` | 查看版本历史与签名链 |
-| `check --all` / `certify --all` | 对所有已注册 Skill 目录批量执行 |
+| `check --all` / `scan --all` | 对所有已注册 Skill 目录批量执行 |
 
 ### 快速示例
 
 ```bash
-# 生成签名密钥（一次性）
-agent-sec-cli skill-ledger init-keys
+# 初始化密钥并为已覆盖 Skill 建立 baseline
+agent-sec-cli skill-ledger init
 
 # 检查完整性（首次运行自动创建无签名基线）
 agent-sec-cli skill-ledger check /path/to/skill
 
-# 审查通过后认证
-agent-sec-cli skill-ledger certify /path/to/skill
+# 快速扫描并签名
+agent-sec-cli skill-ledger scan /path/to/skill
 
 # 系统健康概览
 agent-sec-cli skill-ledger status

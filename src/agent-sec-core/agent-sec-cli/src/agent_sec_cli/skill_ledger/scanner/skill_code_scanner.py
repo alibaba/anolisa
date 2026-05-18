@@ -12,8 +12,9 @@ from agent_sec_cli.code_scanner.models import (
     Verdict,
 )
 from agent_sec_cli.code_scanner.scanner import scan
+from agent_sec_cli.skill_ledger.scanner.names import CODE_SCANNER_NAME
 
-SCANNER_NAME = "skill-code-scanner"
+SCANNER_NAME = CODE_SCANNER_NAME
 SCANNER_VERSION = AGENT_SEC_VERSION
 
 _ERROR_RULE = "code-scanner-error"

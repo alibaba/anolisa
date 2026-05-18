@@ -13,11 +13,11 @@ class SkillLedgerError(Exception):
 
 
 class KeyNotFoundError(SkillLedgerError):
-    """Signing key files do not exist (run ``init-keys`` first)."""
+    """Signing key files do not exist (run ``init`` first)."""
 
     def __init__(self, path: str) -> None:
         super().__init__(
-            f"Signing key not found: {path}. Run 'agent-sec-cli skill-ledger init-keys' first."
+            f"Signing key not found: {path}. Run 'agent-sec-cli skill-ledger init --no-baseline' first."
         )
         self.path = path
 

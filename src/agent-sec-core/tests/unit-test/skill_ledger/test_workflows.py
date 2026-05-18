@@ -21,7 +21,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_sec_cli.skill_ledger.core.auditor import audit
-from agent_sec_cli.skill_ledger.core.certifier import certify
+from agent_sec_cli.skill_ledger.core.certifier import certify, scan_skill
 from agent_sec_cli.skill_ledger.core.checker import check, check_batch
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
@@ -381,6 +381,33 @@ class TestCertifyWorkflow(SkillDirTestCase):
             data = json.load(f)
         self.assertEqual(len(data["scans"]), 1)
 
+    def test_scan_entry_merge_canonicalizes_legacy_scanner_names(self):
+        """Legacy scanner ids are replaced by canonical scanner entries."""
+        from agent_sec_cli.skill_ledger.core.certifier import _merge_scan_entries
+        from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
+        from agent_sec_cli.skill_ledger.models.scan import ScanEntry
+
+        manifest = SignedManifest(
+            skillName="test-skill",
+            fileHashes={},
+            scans=[
+                ScanEntry(scanner="skill-code-scanner", status="warn"),
+                ScanEntry(scanner="cisco-static-scanner", status="pass"),
+            ],
+        )
+        incoming = [
+            ScanEntry(scanner="code-scanner", status="pass"),
+            ScanEntry(scanner="static-scanner", status="pass"),
+        ]
+
+        _merge_scan_entries(manifest, incoming)
+
+        self.assertEqual(
+            [scan.scanner for scan in manifest.scans],
+            ["code-scanner", "static-scanner"],
+        )
+        self.assertEqual(manifest.scanStatus, "pass")
+
     def test_deny_finding_produces_deny_status(self):
         findings_path = self._write_findings(
             [
@@ -391,11 +418,11 @@ class TestCertifyWorkflow(SkillDirTestCase):
         result = certify(self.skill_dir, self.backend, findings_path=findings_path)
         self.assertEqual(result["scanStatus"], "deny")
 
-    def test_auto_invoke_mode_no_crash(self):
-        """Certify without --findings runs default built-in scanners."""
+    def test_scan_mode_no_crash(self):
+        """Scan runs default built-in scanners."""
         # First create a manifest
         check(self.skill_dir, self.backend)
-        result = certify(self.skill_dir, self.backend)
+        result = scan_skill(self.skill_dir, self.backend)
         self.assertIn("versionId", result)
         self.assertEqual(result["scanStatus"], "pass")
 
@@ -403,10 +430,10 @@ class TestCertifyWorkflow(SkillDirTestCase):
         with open(latest, "r") as f:
             data = json.load(f)
         scans = {scan["scanner"]: scan for scan in data["scans"]}
-        self.assertIn("skill-code-scanner", scans)
-        self.assertIn("cisco-static-scanner", scans)
-        self.assertEqual(scans["skill-code-scanner"]["status"], "pass")
-        self.assertEqual(scans["cisco-static-scanner"]["status"], "pass")
+        self.assertIn("code-scanner", scans)
+        self.assertIn("static-scanner", scans)
+        self.assertEqual(scans["code-scanner"]["status"], "pass")
+        self.assertEqual(scans["static-scanner"]["status"], "pass")
 
     def test_builtin_scanner_failure_is_reported_without_manifest_update(self):
         with patch(
@@ -415,9 +442,9 @@ class TestCertifyWorkflow(SkillDirTestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "cisco-static-scanner.*invalid bundled rules",
+                "static-scanner.*invalid bundled rules",
             ):
-                certify(self.skill_dir, self.backend)
+                scan_skill(self.skill_dir, self.backend)
 
         latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
         self.assertFalse(os.path.exists(latest))

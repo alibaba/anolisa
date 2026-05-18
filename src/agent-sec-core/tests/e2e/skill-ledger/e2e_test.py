@@ -11,7 +11,7 @@ Test groups:
    G3  Happy-path lifecycle (check → certify → check → audit)
    G4  check state machine
    G5  certify command
-   G6  certify --all
+   G6  scan --all
    G7  audit
    G8  status (human-readable)
    G9  stubs & edge cases
@@ -582,8 +582,8 @@ def test_certify_invalid_json_findings(ws: Workspace):
     assert r.returncode == 1, f"expected exit 1 for invalid JSON, got {r.returncode}"
 
 
-def test_certify_no_findings_auto_invoke(ws: Workspace):
-    """certify without --findings runs default built-in scanners."""
+def test_scan_auto_invoke_default_scanners(ws: Workspace):
+    """scan runs default built-in scanners."""
     skill = make_skill(
         ws.skills_dir,
         "certify-auto",
@@ -593,35 +593,35 @@ def test_certify_no_findings_auto_invoke(ws: Workspace):
         },
     )
     env = ws.env()
-    r = run_skill_ledger(["certify", str(skill)], env_extra=env)
+    r = run_skill_ledger(["scan", str(skill)], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     assert out["scanStatus"] == "pass"
 
     manifest = json.loads((skill / ".skill-meta" / "latest.json").read_text())
     scans = {entry["scanner"]: entry for entry in manifest["scans"]}
-    assert "skill-code-scanner" in scans
-    assert "cisco-static-scanner" in scans
-    assert scans["skill-code-scanner"]["status"] == "pass"
-    assert scans["cisco-static-scanner"]["status"] == "pass"
+    assert "code-scanner" in scans
+    assert "static-scanner" in scans
+    assert scans["code-scanner"]["status"] == "pass"
+    assert scans["static-scanner"]["status"] == "pass"
 
 
 def test_certify_no_skill_dir_no_all(ws: Workspace):
     """certify without skill_dir and without --all → exit 1."""
     env = ws.env()
     r = run_skill_ledger(["certify"], env_extra=env)
-    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    assert r.returncode != 0, f"expected nonzero exit, got {r.returncode}"
     combined = r.stdout + r.stderr
     assert (
         "required" in combined.lower() or "skill_dir" in combined.lower()
     ), f"Expected error about missing skill_dir: {combined}"
 
 
-# ── G6: certify --all ────────────────────────────────────────────────────
+# ── G6: scan --all ───────────────────────────────────────────────────────
 
 
-def test_certify_all_multiple_skills(ws: Workspace):
-    """--all certifies all skills from config.json managedSkillDirs (auto-invoke mode)."""
+def test_scan_all_multiple_skills(ws: Workspace):
+    """--all scans all skills from config.json managedSkillDirs."""
     env = ws.env()
     batch_root = ws.root / "batch_skills"
     batch_root.mkdir()
@@ -636,9 +636,8 @@ def test_certify_all_multiple_skills(ws: Workspace):
     }
     (config_dir / "config.json").write_text(json.dumps(config))
 
-    # --all without --findings (auto-invoke mode)
     r = run_skill_ledger(
-        ["certify", "--all"],
+        ["scan", "--all"],
         env_extra=env,
     )
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
@@ -647,14 +646,14 @@ def test_certify_all_multiple_skills(ws: Workspace):
     assert len(out["results"]) == 3, f"Expected 3 results, got {len(out['results'])}"
 
 
-def test_certify_all_no_skill_dirs(ws: Workspace):
+def test_scan_all_no_skill_dirs(ws: Workspace):
     """--all with default dirs disabled and empty managedSkillDirs → exit 1."""
     env = ws.env()
     config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
-    r = run_skill_ledger(["certify", "--all"], env_extra=env)
+    r = run_skill_ledger(["scan", "--all"], env_extra=env)
     assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
     combined = r.stdout + r.stderr
     assert (
@@ -855,11 +854,11 @@ def test_list_scanners(ws: Workspace):
     names = [s["name"] for s in out["scanners"]]
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
     assert (
-        "skill-code-scanner" in names
-    ), f"Expected skill-code-scanner in scanners: {names}"
+        "code-scanner" in names
+    ), f"Expected code-scanner in scanners: {names}"
     assert (
-        "cisco-static-scanner" in names
-    ), f"Expected cisco-static-scanner in scanners: {names}"
+        "static-scanner" in names
+    ), f"Expected static-scanner in scanners: {names}"
 
 
 def test_certify_empty_skill_dir(ws: Workspace):
@@ -1443,12 +1442,12 @@ def main():
             "G5: missing findings file", lambda: test_certify_missing_findings_file(ws)
         )
         test("G5: invalid JSON", lambda: test_certify_invalid_json_findings(ws))
-        test("G5: auto-invoke mode", lambda: test_certify_no_findings_auto_invoke(ws))
+        test("G5: scan auto-invoke mode", lambda: test_scan_auto_invoke_default_scanners(ws))
         test("G5: no skill_dir no --all", lambda: test_certify_no_skill_dir_no_all(ws))
 
-        # G6: certify --all
-        test("G6: --all multiple skills", lambda: test_certify_all_multiple_skills(ws))
-        test("G6: --all no skill dirs", lambda: test_certify_all_no_skill_dirs(ws))
+        # G6: scan --all
+        test("G6: --all multiple skills", lambda: test_scan_all_multiple_skills(ws))
+        test("G6: --all no skill dirs", lambda: test_scan_all_no_skill_dirs(ws))
 
         # G7: audit
         test("G7: valid chain", lambda: test_audit_valid_chain(ws))

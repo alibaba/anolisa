@@ -57,7 +57,7 @@ let lastCheckArgs: string[] | undefined;
 
 function mockSkillLedgerCheck(result: CliResult): void {
   _setCliMock(async (args) => {
-    if (args[0] === "skill-ledger" && args[1] === "init-keys") {
+    if (args[0] === "skill-ledger" && args[1] === "init" && args[2] === "--no-baseline") {
       return {
         exitCode: 0,
         stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),

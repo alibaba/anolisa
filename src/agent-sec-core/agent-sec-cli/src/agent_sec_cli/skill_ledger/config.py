@@ -7,6 +7,11 @@ from typing import Any
 
 from agent_sec_cli.skill_ledger.errors import ConfigError
 from agent_sec_cli.skill_ledger.paths import get_config_dir
+from agent_sec_cli.skill_ledger.scanner.names import (
+    CODE_SCANNER_NAME,
+    STATIC_SCANNER_NAME,
+    canonicalize_scanner_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +36,14 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "description": "LLM-driven 4-phase skill audit",
         },
         {
-            "name": "skill-code-scanner",
+            "name": CODE_SCANNER_NAME,
             "type": "builtin",
             "parser": "findings-array",
             "enabled": True,
             "description": "Scan Skill code files via code-scanner",
         },
         {
-            "name": "cisco-static-scanner",
+            "name": STATIC_SCANNER_NAME,
             "type": "builtin",
             "parser": "findings-array",
             "enabled": True,
@@ -82,11 +87,13 @@ def _deep_merge_config(
             by_name: dict[str, dict[str, Any]] = {}
             for s in defaults.get("scanners", []):
                 if isinstance(s, dict) and "name" in s:
-                    by_name[s["name"]] = s
+                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    by_name[canonical] = {**s, "name": canonical}
             # User entries override by name
             for s in user_val:
                 if isinstance(s, dict) and "name" in s:
-                    by_name[s["name"]] = s
+                    canonical = canonicalize_scanner_name(str(s["name"]))
+                    by_name[canonical] = {**s, "name": canonical}
             merged["scanners"] = list(by_name.values())
         elif key == "parsers" and isinstance(user_val, dict):
             merged_parsers = dict(defaults.get("parsers", {}))

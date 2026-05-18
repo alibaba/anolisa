@@ -661,11 +661,11 @@ def _compute_suggestions(
             ),
             (
                 "drifted",
-                "agent-sec-cli skill-ledger certify <dir>  Re-certify drifted skills",
+                "agent-sec-cli skill-ledger scan <dir>     Re-scan drifted skills",
             ),
             (
                 "none",
-                "agent-sec-cli skill-ledger certify <dir>  Certify unchecked skills",
+                "agent-sec-cli skill-ledger scan <dir>     Scan unchecked skills",
             ),
         ]
         for status_key, hint in _LEDGER_HINTS:

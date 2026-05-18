@@ -296,11 +296,11 @@ class TestSkillDirResolution:
 
 # A tiny script that pretends to be agent-sec-cli.
 # It reads _MOCK_CHECK_OUTPUT env var and prints it to stdout.
-# For "init-keys", it's a no-op.
+# For "init --no-baseline", it's a no-op.
 _MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
     import os, sys
-    # init-keys → silent success
-    if len(sys.argv) >= 3 and sys.argv[2] == "init-keys":
+    # init --no-baseline → silent success
+    if len(sys.argv) >= 4 and sys.argv[2] == "init" and sys.argv[3] == "--no-baseline":
         sys.exit(0)
     # check → return canned output from env
     output = os.environ.get("_MOCK_CHECK_OUTPUT", "")

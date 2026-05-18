@@ -419,14 +419,14 @@ class TestSkillCodeScannerAdapter(unittest.TestCase):
 
 
 class TestAutoInvokeSkillCodeScanner(unittest.TestCase):
-    """Auto-invoke dispatch for the built-in skill-code-scanner adapter."""
+    """Auto-invoke dispatch for the built-in code-scanner adapter."""
 
     def _registry(self) -> ScannerRegistry:
         return ScannerRegistry.from_config(
             {
                 "scanners": [
                     {
-                        "name": "skill-code-scanner",
+                        "name": "code-scanner",
                         "type": "builtin",
                         "parser": "findings-array",
                         "enabled": True,
@@ -447,7 +447,7 @@ class TestAutoInvokeSkillCodeScanner(unittest.TestCase):
             entries = _auto_invoke_scanners(tmp, self._registry())
 
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0].scanner, "skill-code-scanner")
+        self.assertEqual(entries[0].scanner, "code-scanner")
         self.assertEqual(entries[0].version, SKILL_CODE_SCANNER_VERSION)
         self.assertEqual(entries[0].status, "pass")
         self.assertEqual(entries[0].findings, [])

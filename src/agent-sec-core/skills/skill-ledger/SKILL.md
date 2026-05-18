@@ -132,7 +132,7 @@ ls ~/.local/share/agent-sec/skill-ledger/key.pub
 若不存在，初始化密钥：
 
 ```bash
-agent-sec-cli skill-ledger init-keys
+agent-sec-cli skill-ledger init --no-baseline
 ```
 
 初始化失败时停止。不要要求用户提供口令，除非用户明确要求使用带口令密钥。
@@ -176,13 +176,13 @@ agent-sec-cli skill-ledger check --all
 单个 Skill 快速扫描：
 
 ```bash
-agent-sec-cli skill-ledger certify <SKILL_DIR> --scanners skill-code-scanner,cisco-static-scanner
+agent-sec-cli skill-ledger scan <SKILL_DIR>
 ```
 
 所有 Skill 快速扫描：
 
 ```bash
-agent-sec-cli skill-ledger certify --all --scanners skill-code-scanner,cisco-static-scanner
+agent-sec-cli skill-ledger scan --all
 ```
 
 快速扫描完成后，重新读取状态用于摘要：
@@ -252,7 +252,7 @@ agent-sec-cli skill-ledger check --all
 执行：
 
 ```bash
-agent-sec-cli skill-ledger certify <SKILL_DIR> --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json --scanner skill-vetter
+agent-sec-cli skill-ledger certify <SKILL_DIR> --findings /tmp/skill-vetter-findings-<SKILL_NAME>.json --scanner skill-vetter --delete-findings
 ```
 
 完成后再次运行：

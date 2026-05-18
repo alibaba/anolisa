@@ -9,6 +9,7 @@ from agent_sec_cli.skill_ledger.scanner.builtins.cisco_static.scanner import (
     SCANNER_VERSION,
     scan_skill,
 )
+from agent_sec_cli.skill_ledger.scanner.names import canonicalize_scanner_name
 
 
 @dataclass(frozen=True)
@@ -30,12 +31,13 @@ def run_builtin_scanner(
     options: dict[str, Any] | None = None,
 ) -> BuiltinScanResult:
     """Run a built-in scanner by registry name."""
-    if scanner_name == SCANNER_NAME:
+    canonical_name = canonicalize_scanner_name(scanner_name)
+    if canonical_name == SCANNER_NAME:
         try:
             findings = scan_skill(skill_dir, options=options)
         except Exception as exc:
             raise BuiltinScannerError(
-                f"Built-in scanner {scanner_name!r} failed to initialize or run: {exc}"
+                f"Built-in scanner {canonical_name!r} failed to initialize or run: {exc}"
             ) from exc
         return BuiltinScanResult(
             scanner=SCANNER_NAME,

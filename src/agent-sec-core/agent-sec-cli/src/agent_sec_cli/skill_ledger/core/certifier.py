@@ -1,17 +1,9 @@
-"""Certify command — three-phase manifest creation and scan-result signing.
+"""Scan and certify workflows for signed skill-ledger manifests.
 
-Implements ``agent-sec-cli skill-ledger certify`` with two input modes:
-
-- **External findings mode** (``--findings``): read a findings file produced
-  by an external scanner (e.g. skill-vetter via Agent).
-- **Auto-invoke mode** (no ``--findings``): auto-invoke registered non-``skill``
-  scanners from the registry, including built-in scanners.
-
-Three execution phases:
-
-1. **Consistency** — ensure manifest exists and matches current files.
-2. **Collect**    — obtain scan results (external file or auto-invoke).
-3. **Update**     — normalise findings, merge scans[], aggregate, re-sign.
+``scan`` runs built-in scanners and records their results. ``certify`` imports
+findings produced elsewhere, primarily by the Agent-driven skill-vetter flow.
+Both paths share the same manifest update, aggregation, signing, and persistence
+logic.
 """
 
 import json
@@ -27,11 +19,12 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
 from agent_sec_cli.skill_ledger.core.version_chain import (
     create_snapshot,
     get_previous_signature,
+    list_version_ids,
     load_latest_manifest,
     next_version_id,
     save_manifest,
 )
-from agent_sec_cli.skill_ledger.errors import FindingsFileError
+from agent_sec_cli.skill_ledger.errors import FindingsFileError, SignatureInvalidError
 from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.models.manifest import (
     ManifestSignature,
@@ -45,6 +38,10 @@ from agent_sec_cli.skill_ledger.scanner import skill_code_scanner
 from agent_sec_cli.skill_ledger.scanner.builtins.dispatcher import (
     run_builtin_scanner,
 )
+from agent_sec_cli.skill_ledger.scanner.names import (
+    DEFAULT_BUILTIN_SCANNERS,
+    canonicalize_scanner_name,
+)
 from agent_sec_cli.skill_ledger.scanner.parsers import parse_findings
 from agent_sec_cli.skill_ledger.scanner.registry import (
     ScannerInfo,
@@ -54,6 +51,16 @@ from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
 
 logger = logging.getLogger(__name__)
+
+_ManifestState = str  # missing | trusted | unsigned | drifted | tampered
+
+
+def _remember_skill_dir_best_effort(skill_dir: str) -> None:
+    """Append unknown skill dirs to managedSkillDirs without failing the command."""
+    try:
+        remember_skill_dir(Path(skill_dir))
+    except Exception:
+        logger.debug("auto-remember failed for %s, continuing", skill_dir, exc_info=True)
 
 
 def _sign_manifest(manifest: SignedManifest, backend: SigningBackend) -> SignedManifest:
@@ -93,17 +100,10 @@ def _load_findings(findings_path: str) -> list[dict[str, Any]]:
 
 
 def _determine_scan_status(findings: list[NormalizedFinding]) -> str:
-    """Derive the scan status from a list of normalised findings.
-
-    - Any finding with ``level == "deny"``     → ``"deny"``
-    - Any finding with ``level == "warn"``     → ``"warn"``
-    - Otherwise                                → ``"pass"``
-    """
-    has_deny = any(f.level == "deny" for f in findings)
-    if has_deny:
+    """Derive the per-scanner status from normalised findings."""
+    if any(f.level == "deny" for f in findings):
         return "deny"
-    has_warn = any(f.level == "warn" for f in findings)
-    if has_warn:
+    if any(f.level == "warn" for f in findings):
         return "warn"
     return "pass"
 
@@ -115,7 +115,7 @@ def _build_scan_entry(
 ) -> ScanEntry:
     """Construct a :class:`ScanEntry` from normalised findings."""
     return ScanEntry(
-        scanner=scanner,
+        scanner=canonicalize_scanner_name(scanner),
         version=scanner_version or "unknown",
         status=_determine_scan_status(normalized),
         findings=[f.to_findings_dict() for f in normalized],
@@ -128,23 +128,15 @@ def _resolve_parser_and_normalise(
     scanner_name: str,
     registry: ScannerRegistry,
 ) -> list[NormalizedFinding]:
-    """Look up the parser for *scanner_name* and normalise raw findings.
-
-    Falls back to ``findings-array`` if the scanner is not registered
-    (backward-compatible).
-    """
-    parser_info = registry.get_parser_for_scanner(scanner_name)
+    """Look up the parser for *scanner_name* and normalise raw findings."""
+    canonical_name = canonicalize_scanner_name(scanner_name)
+    parser_info = registry.get_parser_for_scanner(canonical_name)
     if parser_info is None:
         logger.debug(
             "Scanner %r not in registry; falling back to findings-array parser",
-            scanner_name,
+            canonical_name,
         )
     return parse_findings(raw_findings, parser_info)
-
-
-# ------------------------------------------------------------------
-# Auto-invoke mode
-# ------------------------------------------------------------------
 
 
 def _auto_invoke_scanners(
@@ -152,12 +144,10 @@ def _auto_invoke_scanners(
     registry: ScannerRegistry,
     scanner_names: list[str] | None = None,
 ) -> list[ScanEntry]:
-    """Invoke registered non-``skill`` scanners and collect results.
-
-    Built-in scanners run in-process. Other non-skill adapter types are
-    currently skipped until their adapters are implemented.
-    """
-    invocable = registry.list_invocable_scanners(names=scanner_names)
+    """Invoke registered non-``skill`` scanners and collect results."""
+    invocable = registry.list_invocable_scanners(
+        names=scanner_names or DEFAULT_BUILTIN_SCANNERS
+    )
 
     if not invocable:
         logger.info("No auto-invocable scanners registered; skipping auto-invoke")
@@ -238,9 +228,269 @@ def _is_skill_code_scanner(scanner_info: ScannerInfo) -> bool:
     )
 
 
-# ------------------------------------------------------------------
-# Main certify workflow
-# ------------------------------------------------------------------
+def _safe_load_latest_manifest(skill_dir: str) -> tuple[SignedManifest | None, bool]:
+    """Load latest.json, returning ``(None, True)`` when it is corrupted."""
+    try:
+        return load_latest_manifest(skill_dir), False
+    except (json.JSONDecodeError, ValueError):
+        return None, True
+
+
+def _classify_manifest(
+    manifest: SignedManifest | None,
+    current_hashes: dict[str, str],
+    backend: SigningBackend,
+    *,
+    corrupted: bool = False,
+) -> _ManifestState:
+    """Classify the existing manifest before a write-oriented operation."""
+    if corrupted:
+        return "tampered"
+    if manifest is None:
+        return "missing"
+    if not diff_file_hashes(manifest.fileHashes, current_hashes)["match"]:
+        return "drifted"
+    expected_hash = manifest.compute_manifest_hash()
+    if manifest.manifestHash != expected_hash:
+        return "tampered"
+    if manifest.signature is None:
+        return "unsigned"
+    try:
+        backend.verify(
+            manifest.manifestHash.encode("utf-8"),
+            manifest.signature.value,
+            manifest.signature.keyFingerprint,
+        )
+    except SignatureInvalidError:
+        return "tampered"
+    return "trusted"
+
+
+def _previous_version_id(skill_dir: str, manifest: SignedManifest | None) -> str | None:
+    """Return the best available previous version id for a new manifest."""
+    if manifest is not None:
+        return manifest.versionId
+    existing = list_version_ids(skill_dir)
+    return existing[-1] if existing else None
+
+
+def _previous_signature(skill_dir: str, manifest: SignedManifest | None) -> str | None:
+    """Return the best available previous signature for a new manifest."""
+    if manifest is not None and manifest.signature is not None:
+        return manifest.signature.value
+    return get_previous_signature(skill_dir)
+
+
+def _new_manifest(
+    skill_dir: str,
+    current_hashes: dict[str, str],
+    previous_manifest: SignedManifest | None,
+) -> SignedManifest:
+    """Create a new unsigned manifest object for the current skill contents."""
+    skill_name = Path(skill_dir).name
+    return SignedManifest(
+        versionId=next_version_id(skill_dir),
+        previousVersionId=_previous_version_id(skill_dir, previous_manifest),
+        skillName=skill_name,
+        fileHashes=current_hashes,
+        scanStatus="none",
+        previousManifestSignature=_previous_signature(skill_dir, previous_manifest),
+    )
+
+
+def _prepare_manifest_for_update(
+    skill_dir: str,
+    current_hashes: dict[str, str],
+    backend: SigningBackend,
+) -> tuple[SignedManifest, _ManifestState, bool]:
+    """Return a manifest ready to receive scan entries.
+
+    Missing, drifted, or tampered manifests create a new version. Unsigned
+    baselines are reused and signed in-place.
+    """
+    loaded, corrupted = _safe_load_latest_manifest(skill_dir)
+    state = _classify_manifest(loaded, current_hashes, backend, corrupted=corrupted)
+    if state in {"missing", "drifted", "tampered"}:
+        manifest = _new_manifest(skill_dir, current_hashes, loaded)
+        return manifest, state, True
+    if loaded is None:
+        # Defensive fallback; state should be "missing" above.
+        manifest = _new_manifest(skill_dir, current_hashes, None)
+        return manifest, "missing", True
+    return loaded, state, False
+
+
+def _canonical_scan_name_set(scans: list[ScanEntry]) -> set[str]:
+    return {canonicalize_scanner_name(scan.scanner) for scan in scans}
+
+
+def _merge_scan_entries(
+    manifest: SignedManifest,
+    scan_entries: list[ScanEntry],
+) -> None:
+    """Replace existing scanner entries with incoming entries and canonical names."""
+    incoming = {canonicalize_scanner_name(entry.scanner) for entry in scan_entries}
+    merged: list[ScanEntry] = []
+    seen: set[str] = set()
+
+    for existing in manifest.scans:
+        canonical = canonicalize_scanner_name(existing.scanner)
+        if canonical in incoming or canonical in seen:
+            continue
+        existing.scanner = canonical
+        merged.append(existing)
+        seen.add(canonical)
+
+    for entry in scan_entries:
+        entry.scanner = canonicalize_scanner_name(entry.scanner)
+        if entry.scanner in seen:
+            continue
+        merged.append(entry)
+        seen.add(entry.scanner)
+
+    manifest.scans = merged
+    manifest.scanStatus = aggregate_scan_status(manifest.scans)
+
+
+def _persist_manifest_update(
+    skill_dir: str,
+    manifest: SignedManifest,
+    scan_entries: list[ScanEntry],
+    backend: SigningBackend,
+    *,
+    new_version_created: bool = False,
+) -> None:
+    """Merge scan entries, sign the manifest, and save latest/version JSON."""
+    if new_version_created:
+        create_snapshot(skill_dir, manifest.versionId)
+    _merge_scan_entries(manifest, scan_entries)
+    manifest.updatedAt = utc_now_iso()
+    _sign_manifest(manifest, backend)
+    save_manifest(skill_dir, manifest, write_version=True)
+
+
+def _result_payload(
+    manifest: SignedManifest,
+    *,
+    skill_dir: str,
+    new_version_created: bool,
+    scanners_run: list[str],
+    skipped_scanners: list[str] | None = None,
+    status: str = "scanned",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "status": status,
+        "versionId": manifest.versionId,
+        "scanStatus": manifest.scanStatus,
+        "newVersion": new_version_created,
+        "skillName": Path(skill_dir).name,
+        "createdAt": manifest.createdAt,
+        "updatedAt": manifest.updatedAt,
+        "fileCount": len(manifest.fileHashes),
+        "manifestHash": manifest.manifestHash,
+        "scannersRun": scanners_run,
+    }
+    if skipped_scanners is not None:
+        data["skippedScanners"] = skipped_scanners
+    if extra:
+        data.update(extra)
+    return data
+
+
+def scan_skill(
+    skill_dir: str,
+    backend: SigningBackend,
+    scanner_names: list[str] | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Run built-in scanners as needed and record signed scan results."""
+    validate_skill_dir(skill_dir)
+    _remember_skill_dir_best_effort(skill_dir)
+
+    current_hashes = compute_file_hashes(skill_dir)
+    registry = ScannerRegistry.from_config()
+    requested = [
+        canonicalize_scanner_name(name)
+        for name in (scanner_names or DEFAULT_BUILTIN_SCANNERS)
+    ]
+
+    manifest, state, new_version_created = _prepare_manifest_for_update(
+        skill_dir, current_hashes, backend
+    )
+
+    if force or state in {"missing", "unsigned", "drifted", "tampered"}:
+        scanners_to_run = requested
+    else:
+        existing = _canonical_scan_name_set(manifest.scans)
+        scanners_to_run = [name for name in requested if name not in existing]
+
+    if not scanners_to_run:
+        return _result_payload(
+            manifest,
+            skill_dir=skill_dir,
+            new_version_created=False,
+            scanners_run=[],
+            skipped_scanners=requested,
+            status="noop",
+        )
+
+    scan_entries = _auto_invoke_scanners(skill_dir, registry, scanners_to_run)
+    if not scan_entries:
+        return _result_payload(
+            manifest,
+            skill_dir=skill_dir,
+            new_version_created=False,
+            scanners_run=[],
+            skipped_scanners=scanners_to_run,
+            status="noop",
+        )
+
+    _persist_manifest_update(
+        skill_dir,
+        manifest,
+        scan_entries,
+        backend,
+        new_version_created=new_version_created,
+    )
+    return _result_payload(
+        manifest,
+        skill_dir=skill_dir,
+        new_version_created=new_version_created,
+        scanners_run=[entry.scanner for entry in scan_entries],
+        skipped_scanners=[name for name in requested if name not in scanners_to_run],
+    )
+
+
+def scan_batch(
+    skill_dirs: list[Path],
+    backend: SigningBackend,
+    scanner_names: list[str] | None = None,
+    *,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Run ``scan`` over multiple skill directories."""
+    results: list[dict[str, Any]] = []
+    for skill_dir in skill_dirs:
+        try:
+            results.append(
+                scan_skill(
+                    str(skill_dir),
+                    backend,
+                    scanner_names=scanner_names,
+                    force=force,
+                )
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "skillName": skill_dir.name,
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+    return results
 
 
 def certify(
@@ -249,95 +499,53 @@ def certify(
     findings_path: str | None = None,
     scanner: str = "skill-vetter",
     scanner_version: str | None = None,
-    scanner_names: list[str] | None = None,
+    *,
+    delete_findings: bool = False,
 ) -> dict[str, Any]:
-    """Execute the full certify workflow for a single skill directory.
-
-    Two input modes:
-
-    - *findings_path* provided → **external findings mode**: read the file,
-      normalise via parser, build a single ScanEntry.
-    - *findings_path* is ``None`` → **auto-invoke mode**: invoke all
-      registered non-``skill`` scanners and collect results.
-
-    Returns a JSON-serialisable result dict.
-    """
-    # Validate skill directory before any work
-    validate_skill_dir(skill_dir)
-
-    # Auto-remember: append to managedSkillDirs if not already covered (best-effort)
-    try:
-        remember_skill_dir(Path(skill_dir))
-    except Exception:
-        logger.debug(
-            "auto-remember failed for %s, continuing", skill_dir, exc_info=True
+    """Import external scanner findings and record them in a signed manifest."""
+    if findings_path is None:
+        raise FindingsFileError(
+            "<missing>",
+            "--findings is required for certify; use 'skill-ledger scan' for built-in scanners",
         )
 
-    skill_name = Path(skill_dir).name
+    validate_skill_dir(skill_dir)
+    _remember_skill_dir_best_effort(skill_dir)
+
     current_hashes = compute_file_hashes(skill_dir)
     registry = ScannerRegistry.from_config()
+    manifest, _state, new_version_created = _prepare_manifest_for_update(
+        skill_dir, current_hashes, backend
+    )
 
-    # ── Phase 1: Ensure manifest consistency ──
-    manifest = load_latest_manifest(skill_dir)
-    new_version_created = False
+    raw_findings = _load_findings(findings_path)
+    normalized = _resolve_parser_and_normalise(raw_findings, scanner, registry)
+    scan_entry = _build_scan_entry(normalized, scanner, scanner_version)
 
-    if (
-        manifest is None
-        or not diff_file_hashes(manifest.fileHashes, current_hashes)["match"]
-    ):
-        vid = next_version_id(skill_dir)
-        prev_sig = get_previous_signature(skill_dir)
-        prev_vid = manifest.versionId if manifest is not None else None
+    _persist_manifest_update(
+        skill_dir,
+        manifest,
+        [scan_entry],
+        backend,
+        new_version_created=new_version_created,
+    )
 
-        manifest = SignedManifest(
-            versionId=vid,
-            previousVersionId=prev_vid,
-            skillName=skill_name,
-            fileHashes=current_hashes,
-            scanStatus="none",
-            previousManifestSignature=prev_sig,
-        )
-        new_version_created = True
-        create_snapshot(skill_dir, vid)
+    delete_result: dict[str, Any] = {}
+    if delete_findings:
+        try:
+            Path(findings_path).unlink()
+            delete_result["findingsDeleted"] = True
+        except OSError as exc:
+            delete_result["findingsDeleted"] = False
+            delete_result["findingsDeleteError"] = str(exc)
 
-    # ── Phase 2: Collect scan results ──
-    scan_entries: list[ScanEntry] = []
-
-    if findings_path is not None:
-        # External findings mode
-        raw_findings = _load_findings(findings_path)
-        normalized = _resolve_parser_and_normalise(raw_findings, scanner, registry)
-        scan_entries.append(_build_scan_entry(normalized, scanner, scanner_version))
-    else:
-        # Auto-invoke mode
-        scan_entries = _auto_invoke_scanners(skill_dir, registry, scanner_names)
-
-    # ── Phase 3: Update manifest and sign ──
-    if scan_entries:
-        for entry in scan_entries:
-            # Merge: replace existing entry for same scanner, or append
-            manifest.scans = [s for s in manifest.scans if s.scanner != entry.scanner]
-            manifest.scans.append(entry)
-
-        manifest.scanStatus = aggregate_scan_status(manifest.scans)
-
-    # Short-circuit: nothing changed — avoid re-signing and overwriting
-    # Otherwise re-sign and persist (manifestHash recomputed each time)
-    if scan_entries or new_version_created:
-        manifest.updatedAt = utc_now_iso()
-        _sign_manifest(manifest, backend)
-        save_manifest(skill_dir, manifest, write_version=True)
-
-    return {
-        "versionId": manifest.versionId,
-        "scanStatus": manifest.scanStatus,
-        "newVersion": new_version_created,
-        "skillName": skill_name,
-        "createdAt": manifest.createdAt,
-        "updatedAt": manifest.updatedAt,
-        "fileCount": len(manifest.fileHashes),
-        "manifestHash": manifest.manifestHash,
-    }
+    return _result_payload(
+        manifest,
+        skill_dir=skill_dir,
+        new_version_created=new_version_created,
+        scanners_run=[scan_entry.scanner],
+        extra=delete_result,
+    )
 
 
 def certify_batch(
@@ -346,28 +554,20 @@ def certify_batch(
     findings_path: str | None = None,
     scanner: str = "skill-vetter",
     scanner_version: str | None = None,
-    scanner_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Certify multiple skill directories (``--all`` mode).
-
-    Designed for auto-invoke mode (no external findings).  The CLI layer
-    rejects ``--all`` combined with ``--findings`` because findings are
-    inherently per-skill.
-
-    Returns a list of per-skill result dicts.
-    """
+    """Compatibility helper for callers that still import certify_batch."""
     results: list[dict[str, Any]] = []
     for skill_dir in skill_dirs:
         try:
-            result = certify(
-                str(skill_dir),
-                backend,
-                findings_path=findings_path,
-                scanner=scanner,
-                scanner_version=scanner_version,
-                scanner_names=scanner_names,
+            results.append(
+                certify(
+                    str(skill_dir),
+                    backend,
+                    findings_path=findings_path,
+                    scanner=scanner,
+                    scanner_version=scanner_version,
+                )
             )
-            results.append(result)
         except Exception as exc:
             results.append(
                 {

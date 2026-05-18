@@ -247,24 +247,25 @@ Ed25519-based integrity ledger for skill directories. Tracks file hashes, versio
 
 | Command | Description |
 |---------|-------------|
-| `init-keys` | Generate Ed25519 signing keypair |
+| `init` | Initialize keys and quick-scan covered skills |
+| `scan <dir>` | Run built-in quick scanners and sign the manifest |
 | `check <dir>` | Detect drift / tampering against the manifest |
-| `certify <dir>` | Run scanner, sign, and seal the manifest |
+| `certify <dir> --findings <file>` | Import external scanner findings and sign the manifest |
 | `status` | System-wide health overview (keys, config, aggregate integrity) |
 | `audit <dir>` | Show version history and signature chain |
-| `check --all` / `certify --all` | Batch mode across all registered skill dirs |
+| `check --all` / `scan --all` | Batch mode across all registered skill dirs |
 
 ### Quick Example
 
 ```bash
-# Generate signing keys (one-time)
-agent-sec-cli skill-ledger init-keys
+# Initialize keys and baseline covered skills
+agent-sec-cli skill-ledger init
 
 # Check integrity (creates unsigned baseline on first run)
 agent-sec-cli skill-ledger check /path/to/skill
 
-# Certify after review
-agent-sec-cli skill-ledger certify /path/to/skill
+# Quick scan and sign
+agent-sec-cli skill-ledger scan /path/to/skill
 
 # System health overview
 agent-sec-cli skill-ledger status

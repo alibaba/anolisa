@@ -127,16 +127,16 @@ export const skillLedger: SecurityCapability = {
       ensureKeysPromise = (async () => {
         if (keysExist()) return;
 
-        api.logger.info("[skill-ledger] signing keys not found — running init-keys");
+        api.logger.info("[skill-ledger] signing keys not found — running init --no-baseline");
         const result = await callAgentSecCli(
-          ["skill-ledger", "init-keys"],
+          ["skill-ledger", "init", "--no-baseline"],
           { timeout: DEFAULT_TIMEOUT_MS },
         );
 
         if (result.exitCode === 0) {
           api.logger.info("[skill-ledger] signing keys initialized successfully");
         } else if (!keysExist()) {
-          api.logger.warn(`[skill-ledger] init-keys failed: ${result.stderr}`);
+          api.logger.warn(`[skill-ledger] init --no-baseline failed: ${result.stderr}`);
           ensureKeysPromise = null; // allow retry on next call
         }
       })().catch(() => {

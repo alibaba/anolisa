@@ -45,12 +45,31 @@ class TestDefaultConfig(unittest.TestCase):
     def test_default_scanners_present(self):
         scanners = {entry["name"]: entry for entry in _DEFAULT_CONFIG["scanners"]}
         self.assertIn("skill-vetter", scanners)
-        self.assertIn("skill-code-scanner", scanners)
-        self.assertIn("cisco-static-scanner", scanners)
-        self.assertEqual(scanners["skill-code-scanner"]["type"], "builtin")
-        self.assertEqual(scanners["cisco-static-scanner"]["type"], "builtin")
-        self.assertTrue(scanners["skill-code-scanner"]["enabled"])
-        self.assertTrue(scanners["cisco-static-scanner"]["enabled"])
+        self.assertIn("code-scanner", scanners)
+        self.assertIn("static-scanner", scanners)
+        self.assertEqual(scanners["code-scanner"]["type"], "builtin")
+        self.assertEqual(scanners["static-scanner"]["type"], "builtin")
+        self.assertTrue(scanners["code-scanner"]["enabled"])
+        self.assertTrue(scanners["static-scanner"]["enabled"])
+
+    def test_legacy_scanner_config_names_merge_into_canonical_defaults(self):
+        merged = _deep_merge_config(
+            _DEFAULT_CONFIG,
+            {
+                "scanners": [
+                    {
+                        "name": "cisco-static-scanner",
+                        "type": "builtin",
+                        "parser": "findings-array",
+                        "enabled": False,
+                    }
+                ]
+            },
+        )
+        scanners = {entry["name"]: entry for entry in merged["scanners"]}
+        self.assertIn("static-scanner", scanners)
+        self.assertNotIn("cisco-static-scanner", scanners)
+        self.assertFalse(scanners["static-scanner"]["enabled"])
 
 
 class TestConfigMerge(unittest.TestCase):

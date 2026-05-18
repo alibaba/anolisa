@@ -116,7 +116,7 @@ class NativeEd25519Backend(SigningBackend):
         return "ed25519"
 
     # ------------------------------------------------------------------
-    # Key generation (used by init-keys)
+    # Key generation (used by init and init-keys)
     # ------------------------------------------------------------------
 
     def generate_keys(self, passphrase: str | None = None) -> dict[str, str]:
@@ -146,7 +146,7 @@ class NativeEd25519Backend(SigningBackend):
             logger.warning(
                 "Private key is stored WITHOUT passphrase encryption. "
                 "Key file security relies on filesystem permissions (mode 0600). "
-                "Run 'agent-sec-cli skill-ledger init-keys --force --passphrase' "
+                "Run 'agent-sec-cli skill-ledger init --force-keys --passphrase' "
                 "to add passphrase protection."
             )
 

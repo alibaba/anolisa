@@ -235,7 +235,7 @@ def _ensure_keys() -> None:
         return
     try:
         subprocess.run(
-            ["agent-sec-cli", "skill-ledger", "init-keys"],
+            ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
             capture_output=True,
             check=False,
             text=True,

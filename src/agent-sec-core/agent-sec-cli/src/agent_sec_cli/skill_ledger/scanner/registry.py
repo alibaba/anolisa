@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agent_sec_cli.skill_ledger.config import load_config
+from agent_sec_cli.skill_ledger.scanner.names import canonicalize_scanner_name
 
 
 @dataclass(frozen=True)
@@ -42,8 +43,9 @@ class ScannerInfo:
     def from_dict(cls, d: dict[str, Any]) -> "ScannerInfo":
         """Construct from a raw config dict entry."""
         known = {"name", "type", "parser", "description", "enabled"}
+        canonical_name = canonicalize_scanner_name(str(d["name"]))
         return cls(
-            name=d["name"],
+            name=canonical_name,
             type=d.get("type", "skill"),
             parser=d.get("parser", "findings-array"),
             description=d.get("description", ""),
@@ -119,7 +121,7 @@ class ScannerRegistry:
 
     def get_scanner(self, name: str) -> Optional[ScannerInfo]:
         """Return the scanner with *name*, or ``None``."""
-        return self._scanners.get(name)
+        return self._scanners.get(canonicalize_scanner_name(name))
 
     def get_parser(self, name: str) -> Optional[ParserInfo]:
         """Return the parser with *name*, or ``None``."""
@@ -141,14 +143,15 @@ class ScannerRegistry:
         *,
         names: list[str] | None = None,
     ) -> list[ScannerInfo]:
-        """Return scanners that the CLI can auto-invoke (non-``skill`` type).
+        """Return scanners that the CLI can currently invoke.
 
         If *names* is given, only return scanners whose name is in the list.
         """
         scanners = self.list_scanners(enabled_only=True)
-        # Skip "skill" type — requires Agent, CLI cannot invoke
-        scanners = [s for s in scanners if s.type != "skill"]
+        # cli/api adapters are reserved extension points; only builtin is
+        # implemented today.
+        scanners = [s for s in scanners if s.type == "builtin"]
         if names is not None:
-            name_set = set(names)
+            name_set = {canonicalize_scanner_name(name) for name in names}
             scanners = [s for s in scanners if s.name in name_set]
         return scanners

@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from agent_sec_cli.skill_ledger.scanner.names import STATIC_SCANNER_NAME
 
-SCANNER_NAME = "cisco-static-scanner"
+SCANNER_NAME = STATIC_SCANNER_NAME
 SCANNER_VERSION = "cisco-static-only-0.1.0"
 SCANNER_SOURCE = "cisco-skill-scanner-static-only"
 

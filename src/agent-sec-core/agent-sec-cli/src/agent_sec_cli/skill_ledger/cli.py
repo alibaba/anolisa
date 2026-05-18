@@ -18,11 +18,12 @@ app = typer.Typer(
     help=(
         "Skill security management — track changes, verify integrity, and sign skills.\n\n"
         "Typical workflow:\n\n"
-        "  1. init-keys  Generate signing key pair (one-time setup)\n"
-        "  2. check      Verify a skill's integrity status\n"
-        "  3. certify    Record scan findings and sign the manifest\n"
-        "  4. status     Show overall ledger health overview\n"
-        "  5. audit      Deep-verify the full version history\n\n"
+        "  1. init      Initialize keys and baseline covered skills\n"
+        "  2. scan      Run built-in scanners and sign the manifest\n"
+        "  3. check     Verify a skill's integrity status\n"
+        "  4. certify   Import external findings and sign the manifest\n"
+        "  5. status    Show overall ledger health overview\n"
+        "  6. audit     Deep-verify the full version history\n\n"
         "Integrity statuses:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
         "  none      Never scanned — baseline will be created on first check\n"
@@ -49,12 +50,79 @@ def _forward(result: ActionResult) -> None:
     raise typer.Exit(code=result.exit_code)
 
 
+def _parse_scanner_names(scanners: Optional[str]) -> list[str] | None:
+    """Parse a comma-separated scanner list."""
+    return [s.strip() for s in scanners.split(",") if s.strip()] if scanners else None
+
+
+def _resolve_new_key_passphrase(use_passphrase: bool) -> str | None:
+    """Resolve --passphrase using env first, then interactive prompts."""
+    passphrase: str | None = None
+    if use_passphrase:
+        env_pass = os.environ.get("SKILL_LEDGER_PASSPHRASE")
+        if env_pass is not None:
+            # Use ``is not None`` so that SKILL_LEDGER_PASSPHRASE="" is
+            # accepted (treated as "no passphrase" — unencrypted keys).
+            passphrase = env_pass if env_pass else None
+        else:
+            passphrase = getpass.getpass("Enter passphrase for new signing key: ")
+            confirm = getpass.getpass("Confirm passphrase: ")
+            if passphrase != confirm:
+                typer.echo("Error: passphrases do not match", err=True)
+                raise typer.Exit(code=1)
+            if not passphrase:
+                typer.echo("Error: passphrase cannot be empty", err=True)
+                raise typer.Exit(code=1)
+    return passphrase
+
+
 # ---------------------------------------------------------------------------
-# init-keys
+# init
 # ---------------------------------------------------------------------------
 
 
-@app.command("init-keys")
+@app.command("init")
+def cmd_init(
+    no_baseline: bool = typer.Option(
+        False,
+        "--no-baseline",
+        help="Only initialize keys; do not scan covered skills.",
+    ),
+    use_passphrase: bool = typer.Option(
+        False,
+        "--passphrase",
+        help="Protect a newly-created private key with a passphrase.",
+    ),
+    force_keys: bool = typer.Option(
+        False,
+        "--force-keys",
+        help="Overwrite existing keys (old public key is archived).",
+    ),
+    scanners: Optional[str] = typer.Option(
+        None,
+        "--scanners",
+        help="Comma-separated built-in scanners for baseline scan (default: code-scanner,static-scanner).",
+    ),
+) -> None:
+    """Initialize skill-ledger and baseline covered skills."""
+    passphrase = _resolve_new_key_passphrase(use_passphrase)
+    result = invoke(
+        "skill_ledger",
+        command="init",
+        baseline=not no_baseline,
+        passphrase=passphrase,
+        force_keys=force_keys,
+        scanner_names=_parse_scanner_names(scanners),
+    )
+    _forward(result)
+
+
+# ---------------------------------------------------------------------------
+# init-keys (hidden compatibility command)
+# ---------------------------------------------------------------------------
+
+
+@app.command("init-keys", hidden=True)
 def cmd_init_keys(
     force: bool = typer.Option(
         False, "--force", help="Overwrite existing keys (old key pair is archived)"
@@ -76,28 +144,7 @@ def cmd_init_keys(
 
     By default, no passphrase is required — safe for non-interactive use.
     """
-    # Resolve passphrase: --passphrase flag gates all passphrase logic.
-    # Without --passphrase, keys are always generated unencrypted regardless
-    # of whether SKILL_LEDGER_PASSPHRASE is set in the environment.
-    # With --passphrase, the env var serves as a non-interactive substitute
-    # for the interactive prompt (useful for CI).
-    passphrase: str | None = None
-    if use_passphrase:
-        env_pass = os.environ.get("SKILL_LEDGER_PASSPHRASE")
-        if env_pass is not None:
-            # Use ``is not None`` so that SKILL_LEDGER_PASSPHRASE="" is
-            # accepted (treated as "no passphrase" — unencrypted keys).
-            passphrase = env_pass if env_pass else None
-        else:
-            passphrase = getpass.getpass("Enter passphrase for new signing key: ")
-            confirm = getpass.getpass("Confirm passphrase: ")
-            if passphrase != confirm:
-                typer.echo("Error: passphrases do not match", err=True)
-                raise typer.Exit(code=1)
-            if not passphrase:
-                typer.echo("Error: passphrase cannot be empty", err=True)
-                raise typer.Exit(code=1)
-
+    passphrase = _resolve_new_key_passphrase(use_passphrase)
     result = invoke(
         "skill_ledger", command="init-keys", force=force, passphrase=passphrase
     )
@@ -155,15 +202,58 @@ def cmd_check(
 
 
 # ---------------------------------------------------------------------------
+# scan
+# ---------------------------------------------------------------------------
+
+
+@app.command("scan")
+def cmd_scan(
+    skill_dir: Optional[str] = typer.Argument(
+        None, help="Path to the skill directory to scan (omit when using --all)"
+    ),
+    all_skills: bool = typer.Option(
+        False,
+        "--all",
+        help="Scan every registered skill using fill-in behavior.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-run requested scanners even when matching results already exist.",
+    ),
+    scanners: Optional[str] = typer.Option(
+        None,
+        "--scanners",
+        help="Comma-separated built-in scanner names (default: code-scanner,static-scanner).",
+    ),
+) -> None:
+    """Run built-in scanners and record signed scan results."""
+    if all_skills and skill_dir is not None:
+        typer.echo(
+            "Error: --all and skill_dir are mutually exclusive.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    result = invoke(
+        "skill_ledger",
+        command="scan",
+        skill_dir=skill_dir,
+        all_skills=all_skills,
+        force=force,
+        scanner_names=_parse_scanner_names(scanners),
+    )
+    _forward(result)
+
+
+# ---------------------------------------------------------------------------
 # certify
 # ---------------------------------------------------------------------------
 
 
 @app.command("certify")
 def cmd_certify(
-    skill_dir: Optional[str] = typer.Argument(
-        None, help="Path to the skill directory (omit when using --all)"
-    ),
+    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
     findings: Optional[str] = typer.Option(
         None,
         "--findings",
@@ -179,56 +269,16 @@ def cmd_certify(
         "--scanner-version",
         help="Version of the scanner that produced the findings",
     ),
-    scanners: Optional[str] = typer.Option(
-        None,
-        "--scanners",
-        help="Comma-separated scanner names to auto-invoke (e.g., 'skill-code-scanner')",
-    ),
-    all_skills: bool = typer.Option(
+    delete_findings: bool = typer.Option(
         False,
-        "--all",
-        help="Certify every registered skill (auto-invoke mode only; incompatible with --findings).",
+        "--delete-findings",
+        help="Delete the findings file after a successful import.",
     ),
 ) -> None:
-    """Record scan findings into a signed manifest for a skill.
-
-    Two input modes:
-
-      External findings (recommended for Agent-driven scans):
-        certify <dir> --findings <file> --scanner skill-vetter
-
-      Auto-invoke (run registered scanners automatically):
-        certify <dir> --scanners <names>
-
-    What certify does:
-      1. Verify file consistency (creates a new version if files changed)
-      2. Normalize findings and merge into the manifest scans[]
-      3. Aggregate scanStatus (pass / warn / deny)
-      4. Re-sign and write to .skill-meta/latest.json
-
-    Use --all to certify every registered skill at once. Skill discovery uses
-    built-in default directories plus
-    ~/.config/agent-sec/skill-ledger/config.json managedSkillDirs (paths and
-    globs expanded automatically by the CLI). Set enableDefaultSkillDirs=false
-    in config.json for isolated runs that should ignore built-in defaults.
-    """
-    scanner_names = [s.strip() for s in scanners.split(",")] if scanners else None
-
-    # --all and skill_dir are mutually exclusive.
-    if all_skills and skill_dir is not None:
+    """Import external scanner findings into a signed manifest."""
+    if findings is None:
         typer.echo(
-            "Error: --all and skill_dir are mutually exclusive.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # --all + --findings is semantically invalid: findings are per-skill.
-    # In batch mode, use auto-invoke scanners or certify each skill individually.
-    if all_skills and findings:
-        typer.echo(
-            "Error: --all and --findings are incompatible. "
-            "Findings are per-skill; certify each skill individually with its own "
-            "--findings file, or use --all without --findings for auto-invoke mode.",
+            "Error: --findings is required for certify. Use 'skill-ledger scan' for built-in scanners.",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -237,11 +287,10 @@ def cmd_certify(
         "skill_ledger",
         command="certify",
         skill_dir=skill_dir,
-        all_skills=all_skills,
         findings=findings,
         scanner=scanner,
         scanner_version=scanner_version,
-        scanner_names=scanner_names,
+        delete_findings=delete_findings,
     )
     _forward(result)
 
@@ -329,7 +378,7 @@ def cmd_list_scanners() -> None:
     ~/.config/agent-sec/skill-ledger/config.json, including their invocation type,
     result parser, and enabled status.
 
-    Use this to discover valid values for the --scanner and --scanners flags in certify.
+    Use this to discover valid values for scan --scanners and certify --scanner.
     """
     result = invoke("skill_ledger", command="list-scanners")
     _forward(result)

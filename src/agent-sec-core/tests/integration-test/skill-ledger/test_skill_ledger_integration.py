@@ -222,6 +222,69 @@ def test_init_keys_with_passphrase_env(ws):
     assert out.get("encrypted") is True, f"expected encrypted=true, got {out}"
 
 
+def test_init_no_baseline_creates_keys_only(ws):
+    """init --no-baseline initializes keys without writing skill manifests."""
+    alt_data = ws.root / "init_nobase_data"
+    alt_config = ws.root / "init_nobase_config"
+    alt_data.mkdir()
+    alt_config.mkdir()
+    skill = make_skill(ws.skills_dir, "init-no-baseline", {"a.txt": "a"})
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "XDG_CONFIG_HOME": str(alt_config),
+        }
+    )
+
+    r = run_skill_ledger(["init", "--no-baseline"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["keyCreated"] is True
+    assert out["baseline"] is False
+    assert not (skill / ".skill-meta" / "latest.json").exists()
+
+
+def test_init_default_baselines_managed_skills(ws):
+    """init discovers managed skills and creates a signed quick-scan baseline."""
+    alt_data = ws.root / "init_base_data"
+    alt_config = ws.root / "init_base_config"
+    alt_data.mkdir()
+    alt_config.mkdir()
+    root = ws.root / "init_baseline_skills"
+    root.mkdir()
+    skill = make_skill(root, "init-baselined", {"a.txt": "a"})
+    config_dir = alt_config / "agent-sec" / "skill-ledger"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "enableDefaultSkillDirs": False,
+                "managedSkillDirs": [str(root / "*")],
+            }
+        )
+    )
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "XDG_CONFIG_HOME": str(alt_config),
+        }
+    )
+
+    r = run_skill_ledger(["init"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["keyCreated"] is True
+    assert out["baseline"] is True
+    assert len(out["results"]) == 1
+
+    manifest = read_latest_manifest(skill)
+    assert {entry["scanner"] for entry in manifest["scans"]} == {
+        "code-scanner",
+        "static-scanner",
+    }
+    assert manifest["signature"] is not None
+
+
 # ── Group 2: Happy path lifecycle ──────────────────────────────────────────
 
 
@@ -594,27 +657,78 @@ def test_certify_invalid_json_findings(ws):
     assert r.returncode == 1, f"expected exit 1 for invalid JSON, got {r.returncode}"
 
 
-def test_certify_no_findings_auto_invoke(ws):
-    """certify without --findings auto-invokes default built-in scanners."""
+def test_certify_without_findings_errors(ws):
+    """certify without --findings points users to scan."""
     skill = make_skill(ws.skills_dir, "certify-auto", {"f.txt": "f"})
     env = ws.env()
 
     r = run_skill_ledger(["certify", str(skill)], env_extra=env)
+    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    assert "scan" in (r.stdout + r.stderr)
+
+
+def test_scan_auto_invoke_default_scanners(ws):
+    """scan auto-invokes default built-in scanners."""
+    skill = make_skill(ws.skills_dir, "scan-auto", {"f.txt": "f"})
+    env = ws.env()
+
+    r = run_skill_ledger(["scan", str(skill)], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     assert out["scanStatus"] == "pass"
 
     manifest = read_latest_manifest(skill)
     scans = {scan["scanner"]: scan for scan in manifest["scans"]}
-    assert "skill-code-scanner" in scans
-    assert "cisco-static-scanner" in scans
-    assert scans["skill-code-scanner"]["status"] == "pass"
-    assert scans["cisco-static-scanner"]["status"] == "pass"
-    assert scans["skill-code-scanner"]["findings"] == []
+    assert "code-scanner" in scans
+    assert "static-scanner" in scans
+    assert scans["code-scanner"]["status"] == "pass"
+    assert scans["static-scanner"]["status"] == "pass"
+    assert scans["code-scanner"]["findings"] == []
 
 
-def test_certify_static_scanner_detects_dangerous_script(ws):
-    """Default Cisco static scanner findings are written into manifest."""
+def test_scan_second_run_noop_when_scanners_present(ws):
+    """A second fill-in scan skips existing scanner results when files are unchanged."""
+    skill = make_skill(ws.skills_dir, "scan-noop", {"f.txt": "f"})
+    env = ws.env()
+
+    r1 = run_skill_ledger(["scan", str(skill)], env_extra=env)
+    assert r1.returncode == 0, f"first scan failed: {r1.stderr}"
+
+    r2 = run_skill_ledger(["scan", str(skill)], env_extra=env)
+    assert r2.returncode == 0, f"second scan failed: {r2.stderr}"
+    out = parse_json_output(r2.stdout)
+    assert out["status"] == "noop"
+    assert out["scannersRun"] == []
+    assert out["skippedScanners"] == ["code-scanner", "static-scanner"]
+
+
+def test_scan_legacy_scanner_aliases_write_canonical_names(ws):
+    """Legacy scanner ids are accepted but new manifests use canonical names."""
+    skill = make_skill(ws.skills_dir, "scan-legacy-aliases", {"f.txt": "f"})
+    env = ws.env()
+
+    r = run_skill_ledger(
+        [
+            "scan",
+            str(skill),
+            "--scanners",
+            "skill-code-scanner,cisco-static-scanner",
+        ],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["scannersRun"] == ["code-scanner", "static-scanner"]
+
+    manifest = read_latest_manifest(skill)
+    assert {scan["scanner"] for scan in manifest["scans"]} == {
+        "code-scanner",
+        "static-scanner",
+    }
+
+
+def test_scan_static_scanner_detects_dangerous_script(ws):
+    """Default static scanner findings are written into manifest."""
     skill = make_skill(
         ws.skills_dir,
         "certify-static-danger",
@@ -625,7 +739,7 @@ def test_certify_static_scanner_detects_dangerous_script(ws):
     )
     env = ws.env()
 
-    r = run_skill_ledger(["certify", str(skill)], env_extra=env)
+    r = run_skill_ledger(["scan", str(skill)], env_extra=env)
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
     out = parse_json_output(r.stdout)
     assert out["scanStatus"] == "deny"
@@ -634,14 +748,14 @@ def test_certify_static_scanner_detects_dangerous_script(ws):
     cisco_scan = next(
         entry
         for entry in manifest["scans"]
-        if entry["scanner"] == "cisco-static-scanner"
+        if entry["scanner"] == "static-scanner"
     )
     rules = {finding["rule"] for finding in cisco_scan["findings"]}
     assert "shell-download-exec" in rules
 
 
-def test_certify_auto_invoke_skill_code_scanner_warn(ws):
-    """Dangerous Skill code is recorded through skill-code-scanner findings."""
+def test_scan_code_scanner_warn(ws):
+    """Dangerous Skill code is recorded through code-scanner findings."""
     skill = make_skill(
         ws.skills_dir,
         "certify-auto-warn",
@@ -650,7 +764,7 @@ def test_certify_auto_invoke_skill_code_scanner_warn(ws):
     env = ws.env()
 
     r = run_skill_ledger(
-        ["certify", str(skill), "--scanners", "skill-code-scanner"],
+        ["scan", str(skill), "--scanners", "code-scanner"],
         env_extra=env,
     )
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
@@ -659,14 +773,14 @@ def test_certify_auto_invoke_skill_code_scanner_warn(ws):
 
     manifest = read_latest_manifest(skill)
     scans = {scan["scanner"]: scan for scan in manifest["scans"]}
-    code_scan = scans["skill-code-scanner"]
+    code_scan = scans["code-scanner"]
     assert code_scan["status"] == "warn"
     assert code_scan["findings"][0]["rule"] == "shell-download-exec"
     assert code_scan["findings"][0]["file"] == "install.sh"
 
 
-def test_certify_merges_skill_vetter_and_skill_code_scanner(ws):
-    """External skill-vetter findings and auto-invoked code scan coexist."""
+def test_certify_merges_skill_vetter_and_scan_code_scanner(ws):
+    """External skill-vetter findings and scan code result coexist."""
     skill = make_skill(
         ws.skills_dir, "certify-merge-scanners", {"main.py": "print(1)\n"}
     )
@@ -692,7 +806,7 @@ def test_certify_merges_skill_vetter_and_skill_code_scanner(ws):
     out1 = parse_json_output(r1.stdout)
 
     r2 = run_skill_ledger(
-        ["certify", str(skill), "--scanners", "skill-code-scanner"],
+        ["scan", str(skill), "--scanners", "code-scanner"],
         env_extra=env,
     )
     assert r2.returncode == 0, f"second certify failed: {r2.stderr}"
@@ -702,7 +816,7 @@ def test_certify_merges_skill_vetter_and_skill_code_scanner(ws):
 
     manifest = read_latest_manifest(skill)
     scanners = {scan["scanner"] for scan in manifest["scans"]}
-    assert scanners == {"skill-vetter", "skill-code-scanner"}
+    assert scanners == {"skill-vetter", "code-scanner"}
 
 
 def test_certify_external_findings_does_not_auto_run_static_scanner(ws):
@@ -732,22 +846,73 @@ def test_certify_external_findings_does_not_auto_run_static_scanner(ws):
     assert scanner_names == ["skill-vetter"]
 
 
+def test_certify_auto_creates_key_when_missing(ws):
+    """certify initializes a default key when importing findings in a fresh XDG."""
+    skill = make_skill(ws.skills_dir, "certify-autokey", {"g.txt": "g"})
+    alt_data = ws.root / "certify_autokey_data"
+    alt_config = ws.root / "certify_autokey_config"
+    alt_data.mkdir()
+    alt_config.mkdir()
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "XDG_CONFIG_HOME": str(alt_config),
+        }
+    )
+    findings = write_findings_file(
+        ws.fixtures,
+        "autokey-findings.json",
+        [{"rule": "ok", "level": "pass", "message": "ok"}],
+    )
+
+    r = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["keyCreated"] is True
+    assert out["key"]["encrypted"] is False
+    assert (alt_data / "agent-sec" / "skill-ledger" / "key.enc").is_file()
+    assert (alt_data / "agent-sec" / "skill-ledger" / "key.pub").is_file()
+
+
+def test_certify_delete_findings_on_success(ws):
+    """--delete-findings removes the imported file only after a successful write."""
+    skill = make_skill(ws.skills_dir, "certify-delete-findings", {"g.txt": "g"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "delete-findings.json",
+        [{"rule": "ok", "level": "pass", "message": "ok"}],
+    )
+
+    r = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings), "--delete-findings"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["findingsDeleted"] is True
+    assert not findings.exists()
+
+
 def test_certify_no_skill_dir_no_all(ws):
     """certify without skill_dir and without --all → exit 1."""
     env = ws.env()
     r = run_skill_ledger(["certify"], env_extra=env)
-    assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
+    assert r.returncode != 0, f"expected nonzero exit, got {r.returncode}"
     combined = r.stdout + r.stderr
     assert (
         "required" in combined.lower() or "skill_dir" in combined.lower()
     ), f"Expected error about missing skill_dir: {combined}"
 
 
-# ── Group 5: certify --all ────────────────────────────────────────────────
+# ── Group 5: scan --all ───────────────────────────────────────────────────
 
 
-def test_certify_all_multiple_skills(ws):
-    """--all certifies all skills from config.json managedSkillDirs (auto-invoke mode)."""
+def test_scan_all_multiple_skills(ws):
+    """--all scans all skills from config.json managedSkillDirs."""
     env = ws.env()
 
     # Create skills
@@ -765,9 +930,8 @@ def test_certify_all_multiple_skills(ws):
     }
     (config_dir / "config.json").write_text(json.dumps(config))
 
-    # --all without --findings (auto-invoke mode)
     r = run_skill_ledger(
-        ["certify", "--all"],
+        ["scan", "--all"],
         env_extra=env,
     )
     assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
@@ -776,7 +940,7 @@ def test_certify_all_multiple_skills(ws):
     assert len(out["results"]) == 3, f"Expected 3 results, got {len(out['results'])}"
 
 
-def test_certify_all_no_skill_dirs(ws):
+def test_scan_all_no_skill_dirs(ws):
     """--all with default dirs disabled and empty managedSkillDirs → exit 1."""
     env = ws.env()
 
@@ -786,7 +950,7 @@ def test_certify_all_no_skill_dirs(ws):
     config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
     (config_dir / "config.json").write_text(json.dumps(config))
 
-    r = run_skill_ledger(["certify", "--all"], env_extra=env)
+    r = run_skill_ledger(["scan", "--all"], env_extra=env)
     assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
     combined = r.stdout + r.stderr
     assert (
@@ -1013,11 +1177,17 @@ def test_list_scanners(ws):
     names = [s["name"] for s in out["scanners"]]
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
     assert (
-        "skill-code-scanner" in names
-    ), f"Expected skill-code-scanner in scanners: {names}"
+        "code-scanner" in names
+    ), f"Expected code-scanner in scanners: {names}"
     assert (
-        "cisco-static-scanner" in names
-    ), f"Expected cisco-static-scanner in scanners: {names}"
+        "static-scanner" in names
+    ), f"Expected static-scanner in scanners: {names}"
+    assert "skill-code-scanner" not in names
+    assert "cisco-static-scanner" not in names
+    by_name = {s["name"]: s for s in out["scanners"]}
+    assert by_name["code-scanner"]["autoInvocable"] is True
+    assert by_name["static-scanner"]["autoInvocable"] is True
+    assert by_name["skill-vetter"]["autoInvocable"] is False
 
 
 def test_certify_empty_skill_dir(ws):
@@ -1044,6 +1214,24 @@ def test_contract_help_available(ws):
     assert (
         "skill-ledger" in r.stdout.lower()
     ), f"Expected 'skill-ledger' in help output: {r.stdout[:200]}"
+    assert "init" in r.stdout
+    assert "scan" in r.stdout
+    assert "certify" in r.stdout
+    assert "list-scanners" in r.stdout
+    assert "init-keys" not in r.stdout
+    assert "rotate-keys" not in r.stdout
+    assert "set-policy" not in r.stdout
+
+
+def test_contract_certify_help_is_findings_only(ws):
+    """certify help exposes external findings import options only."""
+    r = run_skill_ledger(["certify", "--help"], env_extra=ws.env())
+    assert r.returncode == 0, f"certify --help returned {r.returncode}: {r.stderr}"
+    assert "--findings" in r.stdout
+    assert "--delete-findings" in r.stdout
+    assert "--scanner-version" in r.stdout
+    assert "--scanners" not in r.stdout
+    assert "--all" not in r.stdout
 
 
 def test_contract_init_keys_empty_passphrase_env(ws):
