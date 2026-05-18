@@ -20,10 +20,14 @@ from agent_sec_cli.observability.sqlite_writer import ObservabilitySqliteWriter
 from agent_sec_cli.observability.writer import ObservabilityWriter
 
 
+def _fresh_observed_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "hook": "before_agent_run",
-        "observedAt": "2026-05-11T12:00:00Z",
+        "observedAt": _fresh_observed_at(),
         "metadata": {
             "sessionId": "session-123",
             "runId": "run-123",
@@ -122,7 +126,7 @@ def test_observability_sqlite_writer_only_writes_independent_sqlite_index(
     assert row is not None
     assert row[0] == 1
     assert row[1] == "before_agent_run"
-    assert row[2] == "2026-05-11T12:00:00Z"
+    assert row[2] == record.to_record()["observedAt"]
     assert row[3] == "session-123"
     assert row[4] == "run-123"
     assert json.loads(row[5])["prompt"] == "Summarize ./README.md"

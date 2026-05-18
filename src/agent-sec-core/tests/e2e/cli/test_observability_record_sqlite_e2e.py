@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .conftest import run_cli
@@ -12,7 +13,7 @@ def test_observability_record_json_creates_observability_sqlite_index() -> None:
     data_dir = Path(os.environ["AGENT_SEC_DATA_DIR"])
     payload = {
         "hook": "after_tool_call",
-        "observedAt": "2026-05-11T12:00:00Z",
+        "observedAt": datetime.now(timezone.utc).isoformat(),
         "metadata": {
             "sessionId": "session-e2e",
             "runId": "run-e2e",
