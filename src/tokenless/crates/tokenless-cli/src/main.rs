@@ -294,9 +294,12 @@ fn run() -> Result<(), (String, i32)> {
                     if !yes {
                         print!("Are you sure you want to clear all statistics? [y/N] ");
                         use std::io::Write;
-                        io::stdout().flush().unwrap();
+                        let _ = io::stdout().flush();
                         let mut input = String::new();
-                        io::stdin().read_line(&mut input).unwrap();
+                        if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+                            println!("Cancelled.");
+                            return Ok(());
+                        }
                         if !input.trim().eq_ignore_ascii_case("y") {
                             println!("Cancelled.");
                             return Ok(());

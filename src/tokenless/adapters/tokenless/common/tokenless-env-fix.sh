@@ -84,6 +84,25 @@ normalize_dep() {
   fi
 }
 
+# --- Input validation ---
+# Reject names that could be used for command injection or supply-chain attacks.
+
+validate_name() {
+  local val="$1" label="$2"
+  if [ -z "$val" ]; then
+    echo "[tokenless-env-fix] BLOCKED: empty ${label}"
+    return 1
+  fi
+  if [ "${#val}" -gt 128 ]; then
+    echo "[tokenless-env-fix] BLOCKED: ${label} too long (${#val} chars): ${val:0:32}..."
+    return 1
+  fi
+  if ! echo "$val" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._@/+-]*$'; then
+    echo "[tokenless-env-fix] BLOCKED: invalid ${label}: ${val}"
+    return 1
+  fi
+}
+
 # --- Package manager install functions ---
 # Each installs a package via the declared manager.
 # Returns 0 on success, 1 on failure.
@@ -182,6 +201,21 @@ install_via_cargo_build() {
 install_via_symlink() {
   local binary="$1"
   local source="$2"
+  # Only allow symlinks from trusted installation directories
+  case "$source" in
+    /usr/libexec/anolisa/*|/usr/share/anolisa/*|/usr/local/libexec/anolisa/*|/usr/local/share/anolisa/*)
+      ;;
+    "$HOME"/.local/share/anolisa/*)
+      ;;
+    *)
+      echo "[tokenless-env-fix] BLOCKED: symlink source not in trusted path: $source"
+      return 1
+      ;;
+  esac
+  if [ ! -f "$source" ]; then
+    echo "[tokenless-env-fix] BLOCKED: symlink source does not exist: $source"
+    return 1
+  fi
   $SUDO_PREFIX ln -sf "$source" /usr/local/bin/"$binary" 2>/dev/null || true
   chmod +x "$source" 2>/dev/null || true
 }
@@ -204,24 +238,24 @@ install_via_curl_pipe_sh() {
   local url="$1"
   local args="${2:-}"
   local timeout_secs="${3:-120}"
-  # Only allow URLs from trusted domains
-  local allowed_domains="^(https?://)?(github\.com|raw\.githubusercontent\.com|sh\.rustup\.rs|get\.docker\.com|cli\.run\.nu|get\.starship\.rs|astral\.sh)"
+  # Only allow HTTPS URLs from trusted domains (anchored with path separator)
+  local allowed_domains="^https://(github\.com/|raw\.githubusercontent\.com/|sh\.rustup\.rs(/|$)|get\.docker\.com(/|$)|cli\.run\.nu(/|$)|get\.starship\.rs(/|$)|astral\.sh(/|$))"
   if ! echo "$url" | grep -qE "$allowed_domains"; then
-    echo "[tokenless-env-fix] WARNING: curl|sh blocked — untrusted URL: $url"
+    echo "[tokenless-env-fix] BLOCKED: curl|sh denied — untrusted or non-HTTPS URL: $url"
     return 1
   fi
   echo "[tokenless-env-fix] NOTE: executing remote script from $url (timeout: ${timeout_secs}s)"
   if command -v curl &>/dev/null; then
     if [ -n "$args" ]; then
-      timeout "$timeout_secs" curl -fsSL "$url" 2>/dev/null | timeout "$timeout_secs" sh $args
+      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>/dev/null | timeout "$timeout_secs" sh -s -- "$args"
     else
-      timeout "$timeout_secs" curl -fsSL "$url" 2>/dev/null | timeout "$timeout_secs" sh
+      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>/dev/null | timeout "$timeout_secs" sh
     fi
   elif command -v wget &>/dev/null; then
     if [ -n "$args" ]; then
-      timeout "$timeout_secs" wget -qO- "$url" | timeout "$timeout_secs" sh $args
+      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" | timeout "$timeout_secs" sh -s -- "$args"
     else
-      timeout "$timeout_secs" wget -qO- "$url" | timeout "$timeout_secs" sh
+      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" | timeout "$timeout_secs" sh
     fi
   else
     return 1
@@ -246,18 +280,26 @@ fix_dep() {
   url=$(echo "$dep_json" | jq -r '.url // empty')
   args=$(echo "$dep_json" | jq -r '.args // empty')
 
+  # Validate names before any install action
+  validate_name "$binary" "binary" || return 1
+  validate_name "$package" "package" || return 1
+
   # Fill defaults: pip_name/uv_name/npm_name default to package
   [ -z "$pip_name" ] && pip_name="$package"
   [ -z "$uv_name" ] && uv_name="$package"
   [ -z "$npm_name" ] && npm_name="$package"
+
+  # Validate derived names
+  [ -n "$pip_name" ] && { validate_name "$pip_name" "pip_name" || return 1; }
+  [ -n "$uv_name" ] && { validate_name "$uv_name" "uv_name" || return 1; }
+  [ -n "$npm_name" ] && { validate_name "$npm_name" "npm_name" || return 1; }
 
   # Skip if already available (clear hash cache first)
   hash -r
   if command -v "$binary" &>/dev/null; then
     # Check version constraint if present
     if [ -n "$version" ]; then
-      local constraint_op constraint_ver installed_ver
-      constraint_op=$(echo "$version" | sed 's/[0-9.]//g')
+      local constraint_ver installed_ver
       constraint_ver=$(echo "$version" | sed 's/[>=<]//g')
       installed_ver=$("$binary" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")
 
@@ -268,7 +310,9 @@ fix_dep() {
         IFS='.' read -r r_major r_minor r_patch <<< "$constraint_ver"
         i_major=${i_major:-0}; i_minor=${i_minor:-0}; i_patch=${i_patch:-0}
         r_major=${r_major:-0}; r_minor=${r_minor:-0}; r_patch=${r_patch:-0}
-        if [ "$i_major" -ge "$r_major" ] && [ "$i_minor" -ge "$r_minor" ] && [ "$i_patch" -ge "$r_patch" ]; then
+        if [ "$i_major" -gt "$r_major" ] || \
+           { [ "$i_major" -eq "$r_major" ] && [ "$i_minor" -gt "$r_minor" ]; } || \
+           { [ "$i_major" -eq "$r_major" ] && [ "$i_minor" -eq "$r_minor" ] && [ "$i_patch" -ge "$r_patch" ]; }; then
           echo "[tokenless-env-fix] ${binary}: already available (v${installed_ver} satisfies ${version})"
           return 0
         fi
@@ -295,7 +339,7 @@ fix_dep() {
   # --- Primary install via declared manager ---
   local primary_ok=false
   case "$manager" in
-    rpm|apt|dnf|yum|apk)  install_via_system "$package" && primary_ok=true ;;
+    auto|rpm|apt|dnf|yum|apk)  install_via_system "$package" && primary_ok=true ;;
     pip)     install_via_pip "$package" "$pip_name" && primary_ok=true ;;
     uv)      install_via_uv "$package" "$uv_name" && primary_ok=true ;;
     npm)     install_via_npm "$package" "$npm_name" && primary_ok=true ;;
@@ -414,7 +458,6 @@ case "${1:-}" in
     else
       # Simple name — normalize to object with optional manager
       manager="${3:-$PACKAGE_MANAGER}"
-      dep_json
       dep_json=$(jq -n --arg bn "$2" --arg pk "$2" --arg mgr "$manager" '{binary:$bn, package:$pk, manager:$mgr}')
       fix_dep "$dep_json"
     fi

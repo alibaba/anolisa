@@ -21,6 +21,39 @@ log_v() { [ -n "$VERBOSE" ] && echo "[tokenless tool-ready] $1" >&2 || true; }
 # --- Dependency check (fail-open) ---
 if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 
+# --- File trust validation ---
+# User-writable paths must be owned by current user and not world-writable.
+is_trusted_file() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  # System paths are always trusted
+  case "$f" in /usr/share/*|/usr/libexec/*|/usr/local/share/*) return 0 ;; esac
+  # Resolve symlink target before owner/perm checks
+  local check_path="$f"
+  if [ -L "$f" ]; then
+    local target
+    target=$(readlink -f "$f" 2>/dev/null || realpath "$f" 2>/dev/null || echo "")
+    # System targets are always trusted
+    case "$target" in /usr/share/*|/usr/libexec/*|/usr/local/share/*) return 0 ;; esac
+    [ -z "$target" ] && return 1
+    check_path="$target"
+  fi
+  local file_owner
+  file_owner=$(stat -c '%u' "$check_path" 2>/dev/null || stat -f '%u' "$check_path" 2>/dev/null || echo "-1")
+  if [ "$file_owner" != "$(id -u)" ] && [ "$file_owner" != "0" ]; then
+    log_v "BLOCKED: $f owned by uid $file_owner (expected $(id -u) or 0)"
+    return 1
+  fi
+  local file_perms
+  file_perms=$(stat -c '%a' "$check_path" 2>/dev/null || stat -f '%Lp' "$check_path" 2>/dev/null || echo "777")
+  local other_perms="${file_perms: -1}"
+  if [ "$other_perms" -ge 6 ] 2>/dev/null; then
+    log_v "BLOCKED: $f is world-writable (perms=$file_perms)"
+    return 1
+  fi
+  return 0
+}
+
 # --- Resolve paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -32,7 +65,7 @@ for candidate in \
     "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
     "$HOME/.tokenless/tool-ready-spec.json" \
     "${SCRIPT_DIR}/../tool-ready-spec.json"; do
-    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    if [ -n "$candidate" ] && is_trusted_file "$candidate"; then
         SPEC_FILE="$candidate"
         break
     fi
@@ -46,7 +79,7 @@ for candidate in \
     "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "$HOME/.tokenless/tokenless-env-fix.sh" \
     "${SCRIPT_DIR}/../tokenless-env-fix.sh"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && is_trusted_file "$candidate"; then
         FIX_SCRIPT="$candidate"
         break
     fi
@@ -105,16 +138,16 @@ log_v "Phase 1: $TOOL_NAME → $SPEC_KEY found in spec dict"
 
 # --- Normalize deps to object format ---
 # Supports both string ("jq") and object ({binary:"jq",...}) formats.
-# String defaults: manager="rpm" (auto-detects yum/dnf/apt/apk at runtime).
+# String defaults: manager="auto" (fix script auto-detects yum/dnf/apt/apk).
 # Handles version constraints: "rtk>=0.35" → {binary:"rtk", version:">=0.35", ...}
 
 normalize_deps() {
   local array="$1"
   echo "$array" | jq -c '[.[] | if type == "string" then
     (if (test(">=") or test("[^<]<[^=]") or test("=")) then
-      {binary: (capture("^(?<b>[^>=<]+)") | .b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)") | .b), manager: "rpm"}
+      {binary: (capture("^(?<b>[^>=<]+)") | .b), version: (match("[>=<]+[0-9.]+").string), package: (capture("^(?<b>[^>=<]+)") | .b), manager: "auto"}
     else
-      {binary: ., package: ., manager: "rpm"}
+      {binary: ., package: ., manager: "auto"}
     end)
   else . end]' 2>/dev/null || echo '[]'
 }

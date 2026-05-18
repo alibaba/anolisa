@@ -12,6 +12,59 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(unix)]
+fn is_trusted_path(path: &std::path::Path) -> bool {
+    // System paths are always trusted
+    if path.starts_with("/usr/share")
+        || path.starts_with("/usr/libexec")
+        || path.starts_with("/usr/local/share")
+    {
+        return true;
+    }
+    // Resolve symlink target before owner/perm checks
+    let check_path = if path.is_symlink() {
+        match fs::canonicalize(path) {
+            Ok(resolved) => {
+                // System targets are always trusted
+                if resolved.starts_with("/usr/share")
+                    || resolved.starts_with("/usr/libexec")
+                    || resolved.starts_with("/usr/local/share")
+                {
+                    return true;
+                }
+                resolved
+            }
+            Err(_) => return false,
+        }
+    } else {
+        path.to_path_buf()
+    };
+    // Use symlink_metadata to check the target's metadata (not the symlink itself)
+    match fs::symlink_metadata(&check_path) {
+        Ok(meta) => {
+            let file_uid = meta.uid();
+            let current_uid = unsafe { libc::getuid() };
+            if file_uid != current_uid && file_uid != 0 {
+                return false;
+            }
+            let mode = meta.mode();
+            if mode & 0o002 != 0 {
+                return false;
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_trusted_path(_path: &std::path::Path) -> bool {
+    true
+}
+
 /// A single dependency entry — normalized from either string or object format.
 #[derive(Debug, Clone)]
 struct DepEntry {
@@ -250,30 +303,26 @@ fn detect_system_manager() -> String {
     // rpm-based: prefer dnf (modern), then yum (legacy)
     // dpkg-based: apt-get
     // apk-based: apk
-    let rpm_exists = Command::new("command")
-        .arg("-v")
-        .arg("rpm")
+    let rpm_exists = Command::new("sh")
+        .args(["-c", "command -v rpm"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    let dpkg_exists = Command::new("command")
-        .arg("-v")
-        .arg("dpkg")
+    let dpkg_exists = Command::new("sh")
+        .args(["-c", "command -v dpkg"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    let apk_exists = Command::new("command")
-        .arg("-v")
-        .arg("apk")
+    let apk_exists = Command::new("sh")
+        .args(["-c", "command -v apk"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     if rpm_exists {
         // Pick best frontend: dnf (modern Fedora/RHEL 8+) > yum (legacy)
-        if Command::new("command")
-            .arg("-v")
-            .arg("dnf")
+        if Command::new("sh")
+            .args(["-c", "command -v dnf"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -347,7 +396,9 @@ fn version_ge(installed: &str, required: &str) -> bool {
 
 /// Check if a binary is available and meets version constraints.
 fn check_dep(dep: &DepEntry) -> DepStatus {
-    let which_result = Command::new("command").arg("-v").arg(&dep.binary).output();
+    let which_result = Command::new("sh")
+        .args(["-c", "command -v \"$1\"", "--", &dep.binary])
+        .output();
 
     match which_result {
         Ok(output) if output.status.success() => {
@@ -385,9 +436,9 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
     }
 }
 
-/// Expand ~ in paths to HOME directory.
+/// Expand ~/... in paths to HOME directory.
 fn expand_path(path: &str) -> String {
-    if path.starts_with("~") {
+    if path == "~" || path.starts_with("~/") {
         let home = super::get_home_dir();
         path.replacen("~", &home, 1)
     } else {
@@ -406,8 +457,13 @@ fn check_permission(perm: &str) -> bool {
     match perm {
         "file_read" => fs::read_to_string("/etc/hostname").is_ok(),
         "file_write" => {
-            let test_path = std::env::temp_dir().join(".tokenless-ready-test");
-            let can_write = fs::write(&test_path, "").is_ok();
+            let test_path =
+                std::env::temp_dir().join(format!(".tokenless-ready-test-{}", std::process::id()));
+            let can_write = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&test_path)
+                .is_ok();
             if can_write {
                 let _ = fs::remove_file(&test_path);
             }
@@ -703,7 +759,10 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let fix_script = fix_script_candidates
         .iter()
         .flatten()
-        .find(|p| std::path::Path::new(p).exists())
+        .find(|p| {
+            let path = std::path::Path::new(p);
+            path.exists() && is_trusted_path(path)
+        })
         .cloned()
         .unwrap_or_else(|| format!("{}/.tokenless/tokenless-env-fix.sh", home));
 
@@ -784,7 +843,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let mut stdin_handle = child
         .stdin
         .take()
-        .unwrap_or_else(|| panic!("Failed to open stdin for env-fix process"));
+        .ok_or_else(|| "Failed to open stdin for env-fix process".to_string())?;
     stdin_handle
         .write_all(json_str.as_bytes())
         .map_err(|e| format!("Failed to write deps to env-fix stdin: {}", e))?;
@@ -827,7 +886,7 @@ fn find_spec_path() -> Result<PathBuf, String> {
     ];
 
     for candidate in candidates.iter().flatten() {
-        if candidate.exists() {
+        if candidate.exists() && is_trusted_path(candidate) {
             return Ok(candidate.clone());
         }
     }
@@ -939,12 +998,12 @@ pub fn run(
         let spec = specs.get(tool_name).unwrap();
         let result = check_tool(tool_name, spec);
 
-        // Collect missing deps
+        // Collect missing and version-low deps for auto-fix
         let missing_deps: Vec<DepEntry> = result
             .required_results
             .iter()
             .chain(result.recommended_results.iter())
-            .filter(|(_, s)| s == &DepStatus::Missing)
+            .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
             .map(|(d, _)| d.clone())
             .collect();
 
@@ -973,7 +1032,7 @@ pub fn run(
                 .required_results
                 .iter()
                 .chain(post_result.recommended_results.iter())
-                .filter(|(_, s)| s == &DepStatus::Missing)
+                .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
                 .map(|(d, _)| d.binary.clone())
                 .collect();
 
@@ -984,20 +1043,19 @@ pub fn run(
                 .collect();
 
             if json {
-                let post_status = if post_missing.is_empty()
-                    && post_result.permission_results.iter().all(|(_, ok)| *ok)
-                {
-                    ReadyStatus::Ready
-                } else if post_result
-                    .required_results
-                    .iter()
-                    .any(|(_, s)| s == &DepStatus::Missing)
-                    || post_result.permission_results.iter().any(|(_, ok)| !ok)
-                {
-                    ReadyStatus::NotReady
-                } else {
-                    ReadyStatus::Partial
-                };
+                let post_status =
+                    if post_missing.is_empty()
+                        && post_result.permission_results.iter().all(|(_, ok)| *ok)
+                    {
+                        ReadyStatus::Ready
+                    } else if post_result.required_results.iter().any(|(_, s)| {
+                        matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. })
+                    }) || post_result.permission_results.iter().any(|(_, ok)| !ok)
+                    {
+                        ReadyStatus::NotReady
+                    } else {
+                        ReadyStatus::Partial
+                    };
                 let result_json = build_json_result(tool_name, &post_status, &fixed, &post_missing);
                 println!("{}", serde_json::to_string(&result_json).unwrap());
             } else {

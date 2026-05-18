@@ -58,8 +58,14 @@ def _warn(msg: str) -> None:
 
 
 def _write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    os.makedirs(_CONTEXT_DIR, exist_ok=True)
-    with open(_CONTEXT_FILE, "w") as f:
+    os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)
+    if os.path.islink(_CONTEXT_FILE):
+        os.unlink(_CONTEXT_FILE)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(_CONTEXT_FILE, flags, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(f"{agent_id}\n")
         f.write(f"{session_id}\n")
         f.write(f"{tool_use_id}\n")

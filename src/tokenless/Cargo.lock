@@ -550,6 +550,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "libc",
  "rusqlite",
  "serde_json",
  "tokenless-schema",
