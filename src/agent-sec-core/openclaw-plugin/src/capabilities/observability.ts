@@ -12,6 +12,7 @@ import type {
 } from "openclaw/plugin-sdk/plugin-runtime";
 import type { SecurityCapability } from "../types.js";
 import { recordOpenClawObservability } from "../utils.js";
+import type { CliResult } from "../utils.js";
 import {
   OBSERVABILITY_HOOKS,
   type ObservabilityHookName,
@@ -23,6 +24,7 @@ export { buildOpenClawObservabilityRecord } from "../helpers/observability/recor
 
 const OBSERVABILITY_PRIORITY = 1000;
 const OBSERVABILITY_LATE_PRIORITY = -10_000;
+const LOG_DETAIL_MAX_CHARS = 1000;
 
 type ObservabilityHookEvent =
   | PluginHookLlmInputEvent
@@ -113,13 +115,56 @@ function observeHook(
     void recordOpenClawObservability(payload)
       .then((result) => {
         if (result.exitCode !== 0) {
-          api.logger.debug?.(`[observability] observability record failed exit=${result.exitCode}`);
+          api.logger.warn?.(formatRecordFailure(hookName, payload.hook, result));
         }
       })
       .catch((error: unknown) => {
-        api.logger.debug?.(`[observability] observability record error=${formatSafeError(error)}`);
+        api.logger.warn?.(
+          `[observability] record error source_hook=${hookName} record_hook=${formatLogValue(payload.hook)} error=${formatLogError(error)}`,
+        );
       });
   } catch (error) {
-    api.logger.debug?.(`[observability] failed to build ${hookName} payload: ${formatSafeError(error)}`);
+    api.logger.warn?.(`[observability] failed to build ${hookName} payload: ${formatSafeError(error)}`);
   }
+}
+
+function formatRecordFailure(
+  sourceHook: ObservabilityHookName,
+  recordHook: unknown,
+  result: CliResult,
+): string {
+  const fields = [
+    "[observability] record failed",
+    `source_hook=${sourceHook}`,
+    `record_hook=${formatLogValue(recordHook)}`,
+    `exit=${result.exitCode}`,
+  ];
+  const stderr = formatLogValue(result.stderr);
+  if (stderr) {
+    fields.push(`stderr=${stderr}`);
+  }
+  const stdout = formatLogValue(result.stdout);
+  if (stdout) {
+    fields.push(`stdout=${stdout}`);
+  }
+  return fields.join(" ");
+}
+
+function formatLogError(error: unknown): string {
+  if (error instanceof Error) {
+    const message = formatLogValue(error.message);
+    return message ? `${error.name}: ${message}` : error.name;
+  }
+  return `${typeof error}: ${formatLogValue(error)}`;
+}
+
+function formatLogValue(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  const text = String(value).trim().replace(/\s+/g, " ");
+  if (text.length <= LOG_DETAIL_MAX_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, LOG_DETAIL_MAX_CHARS)}...<truncated>`;
 }

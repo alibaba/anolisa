@@ -209,3 +209,55 @@ def test_capability_handlers_emit_all_registered_hook_types():
 
 def test_observability_is_exported_in_all_capabilities():
     assert "observability" in [cap.id for cap in ALL_CAPABILITIES]
+
+
+def test_record_logs_cli_failure_details(caplog):
+    cap = _make_capability()
+    record = {
+        "hook": "before_llm_call",
+        "metadata": {
+            "sessionId": "session-1",
+            "runId": "00000000-0000-0000-0000-000000000000",
+        },
+        "metrics": {"model_id": "gpt-test"},
+    }
+
+    with patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(
+            stdout="validation details",
+            stderr="schema validation failed",
+            exit_code=2,
+        ),
+    ):
+        with caplog.at_level("WARNING", logger="agent-sec-core"):
+            cap._record(record)
+
+    assert "observability record failed" in caplog.text
+    assert "hook=before_llm_call" in caplog.text
+    assert "exit_code=2" in caplog.text
+    assert "stderr=schema validation failed" in caplog.text
+    assert "stdout=validation details" in caplog.text
+
+
+def test_record_logs_unexpected_cli_exception(caplog):
+    cap = _make_capability()
+    record = {
+        "hook": "before_agent_run",
+        "metadata": {
+            "sessionId": "session-1",
+            "runId": "00000000-0000-0000-0000-000000000000",
+        },
+        "metrics": {"model_id": "gpt-test"},
+    }
+
+    with patch(
+        "src.capabilities.observability.record_hermes_observability",
+        side_effect=RuntimeError("spawn failed"),
+    ):
+        with caplog.at_level("WARNING", logger="agent-sec-core"):
+            cap._record(record)
+
+    assert "observability record error" in caplog.text
+    assert "hook=before_agent_run" in caplog.text
+    assert "RuntimeError: spawn failed" in caplog.text

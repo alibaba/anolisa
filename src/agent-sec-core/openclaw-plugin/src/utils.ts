@@ -69,7 +69,7 @@ export async function callAgentSecCli(
         // Return raw output — let each capability decide what to do
         resolve({
           stdout: stdout.trim(),
-          stderr: stderr.trim(),
+          stderr: stderr.trim() || error?.message || "",
           exitCode: typeof error?.code === "number" ? error.code : (error ? 1 : 0),
         });
       },

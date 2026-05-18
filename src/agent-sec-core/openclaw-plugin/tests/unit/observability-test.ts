@@ -127,6 +127,10 @@ function mockCli(result: CliResult = { exitCode: 0, stdout: "", stderr: "" }) {
   });
 }
 
+async function flushObservabilityWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function assertMetricsAllowedByAgentSecSchema(payload: { hook: string; metrics: Record<string, unknown> }): void {
   const allowed = AGENT_SEC_METRIC_ALLOWLIST[payload.hook];
   assert.ok(allowed, `unexpected agent-sec hook: ${payload.hook}`);
@@ -635,9 +639,13 @@ describe("observability", () => {
     assert.equal(capturedStdin, undefined);
   });
 
-  it("handles CLI failure and timeout results without throwing", () => {
-    mockCli({ exitCode: 124, stdout: "", stderr: "timeout" });
-    const { api, hooks } = createMockApi();
+  it("logs CLI failure details without throwing", async () => {
+    mockCli({
+      exitCode: 2,
+      stdout: "validation details",
+      stderr: "schema validation failed",
+    });
+    const { api, hooks, logs } = createMockApi();
     observability.register(api);
     const hook = hooks.find((item) => item.hookName === "before_tool_call");
     assert.ok(hook);
@@ -645,6 +653,36 @@ describe("observability", () => {
     assert.doesNotThrow(() => {
       hook.handler(beforeToolCallEvent(), { sessionId: "session-001" });
     });
+    await flushObservabilityWork();
+
+    const log = logs.find((entry) => entry.includes("[observability] record failed"));
+    assert.ok(log);
+    assert.ok(log.startsWith("[WARN]"));
+    assert.match(log, /source_hook=before_tool_call/);
+    assert.match(log, /record_hook=before_tool_call/);
+    assert.match(log, /exit=2/);
+    assert.match(log, /stderr=schema validation failed/);
+    assert.match(log, /stdout=validation details/);
+  });
+
+  it("logs rejected observability calls with hook details", async () => {
+    _setCliMock(async () => {
+      throw new Error("spawn failed");
+    });
+    const { api, hooks, logs } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    hook.handler(beforeToolCallEvent(), { sessionId: "session-001" });
+    await flushObservabilityWork();
+
+    const log = logs.find((entry) => entry.includes("[observability] record error"));
+    assert.ok(log);
+    assert.ok(log.startsWith("[WARN]"));
+    assert.match(log, /source_hook=before_tool_call/);
+    assert.match(log, /record_hook=before_tool_call/);
+    assert.match(log, /Error: spawn failed/);
   });
 
 });

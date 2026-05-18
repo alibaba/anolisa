@@ -12,6 +12,27 @@ from ..observability.record import build_record
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
+_LOG_DETAIL_MAX_CHARS = 1000
+
+
+def _log_detail(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    text = " ".join(text.strip().split())
+    if len(text) <= _LOG_DETAIL_MAX_CHARS:
+        return text
+    return text[:_LOG_DETAIL_MAX_CHARS] + "...<truncated>"
+
+
+def _format_error(error: Exception) -> str:
+    message = _log_detail(error)
+    if message:
+        return f"{error.__class__.__name__}: {message}"
+    return error.__class__.__name__
 
 
 class ObservabilityCapability(AgentSecCoreCapability):
@@ -44,11 +65,28 @@ class ObservabilityCapability(AgentSecCoreCapability):
         thread.start()
 
     def _record(self, record: dict[str, Any]) -> None:
-        result = record_hermes_observability(record, timeout=self._timeout)
-        if result.exit_code != 0:
-            logger.debug(
-                f"[agent-sec-core] observability record failed exit_code={result.exit_code}"
+        hook = _log_detail(record.get("hook")) or "unknown"
+        try:
+            result = record_hermes_observability(record, timeout=self._timeout)
+        except Exception as error:
+            logger.warning(
+                f"[agent-sec-core] observability record error hook={hook} error={_format_error(error)}"
             )
+            return
+
+        if result.exit_code != 0:
+            fields = [
+                "[agent-sec-core] observability record failed",
+                f"hook={hook}",
+                f"exit_code={result.exit_code}",
+            ]
+            stderr = _log_detail(result.stderr)
+            if stderr:
+                fields.append(f"stderr={stderr}")
+            stdout = _log_detail(result.stdout)
+            if stdout:
+                fields.append(f"stdout={stdout}")
+            logger.warning(" ".join(fields))
 
     def _on_pre_llm_call(self, messages: Any = None, **kwargs: Any) -> None:
         data = dict(kwargs)
