@@ -417,6 +417,7 @@ export interface SkillToolContext {
 }
 
 export interface PreToolUseInput extends HookInput {
+  tool_use_id?: string; // Unique identifier for the tool use
   permission_mode?: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;

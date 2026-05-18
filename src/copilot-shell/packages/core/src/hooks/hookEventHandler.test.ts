@@ -363,6 +363,59 @@ describe('HookEventHandler', () => {
       expect(input.skill_context).toEqual(skillContext);
     });
 
+    it('should include tool_use_id in hook input when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'Bash',
+        { command: 'ls' },
+        undefined,
+        'tool-call-1',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as Record<string, unknown>;
+      expect(input['tool_name']).toBe('Bash');
+      expect(input['tool_input']).toEqual({ command: 'ls' });
+      expect(input['tool_use_id']).toBe('tool-call-1');
+    });
+
+    it('should omit tool_use_id from hook input when not provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent('Bash', {
+        command: 'ls',
+      });
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as Record<string, unknown>;
+      expect(input).not.toHaveProperty('tool_use_id');
+    });
+
     it('should omit skill_context from hook input when not provided', async () => {
       const mockPlan = createMockExecutionPlan([
         {

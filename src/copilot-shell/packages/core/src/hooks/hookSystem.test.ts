@@ -62,6 +62,7 @@ describe('HookSystem', () => {
 
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
+      firePreToolUseEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
     } as unknown as HookEventHandler;
@@ -154,6 +155,37 @@ describe('HookSystem', () => {
 
       expect(hooks).toEqual(mockHooks);
       expect(mockHookRegistry.getAllHooks).toHaveBeenCalled();
+    });
+  });
+
+  describe('firePreToolUseEvent', () => {
+    it('should pass toolUseId through to the event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 12,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        undefined,
+        'tool-call-1',
+      );
+
+      expect(mockHookEventHandler.firePreToolUseEvent).toHaveBeenCalledWith(
+        'shell',
+        { command: 'ls' },
+        undefined,
+        'tool-call-1',
+      );
     });
   });
 

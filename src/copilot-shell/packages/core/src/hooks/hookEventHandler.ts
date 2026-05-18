@@ -86,6 +86,7 @@ export class HookEventHandler {
     toolName: string,
     toolInput: Record<string, unknown>,
     skillContext?: import('./types.js').SkillToolContext,
+    toolUseId?: string,
   ): Promise<AggregatedHookResult> {
     debugLogger.info(
       `[Hook Debug] hookEventHandler.firePreToolUseEvent: tool=${toolName}`,
@@ -95,6 +96,7 @@ export class HookEventHandler {
       tool_name: toolName,
       tool_input: toolInput,
       ...(skillContext && { skill_context: skillContext }),
+      ...(toolUseId && { tool_use_id: toolUseId }),
     };
 
     const result = await this.executeHooks(HookEventName.PreToolUse, input);

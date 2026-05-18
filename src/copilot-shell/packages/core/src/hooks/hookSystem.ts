@@ -111,6 +111,7 @@ export class HookSystem {
     toolName: string,
     toolInput: Record<string, unknown>,
     skillContext?: import('./types.js').SkillToolContext,
+    toolUseId?: string,
   ): Promise<PreToolUseHookOutput | undefined> {
     debugLogger.info(
       `[Hook Debug] hookSystem.firePreToolUseEvent: entering facade, tool=${toolName}`,
@@ -119,6 +120,7 @@ export class HookSystem {
       toolName,
       toolInput,
       skillContext,
+      toolUseId,
     );
     const output = result.finalOutput
       ? (createHookOutput(

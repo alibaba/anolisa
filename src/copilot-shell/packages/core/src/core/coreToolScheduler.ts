@@ -861,6 +861,7 @@ export class CoreToolScheduler {
                 reqInfo.name,
                 reqInfo.args,
                 skillContext,
+                reqInfo.callId,
               );
 
               if (hookOutput) {
