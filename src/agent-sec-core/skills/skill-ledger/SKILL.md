@@ -238,12 +238,12 @@ agent-sec-cli skill-ledger check --all
 
 文件内容必须是 JSON 数组。每条 finding 至少包含：
 
-- `severity`: `warn` 或 `deny`
-- `ruleId`
-- `file`
-- `line`（未知时可省略）
+- `rule`: 规则 ID，如 `dangerous-exec`
+- `level`: `warn` 或 `deny`
 - `message`
-- `evidence`（只放必要短证据，不泄露敏感内容）
+- `file`（未知时可省略）
+- `line`（未知时可省略）
+- `metadata`（可选；如需保留证据，放在 `metadata.evidence`，只放必要短证据，不泄露敏感内容）
 
 写入后验证 JSON 可解析。若无发现，写入空数组 `[]`。
 
