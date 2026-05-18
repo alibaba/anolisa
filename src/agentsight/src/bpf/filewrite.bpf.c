@@ -49,8 +49,8 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     u32 pid = pid_tgid >> 32;
 
     // Only monitor traced processes
-    u32 *val = bpf_map_lookup_elem(&traced_processes, &pid);
-    if (!val)
+    u32 ns_pid = is_pid_traced(pid);
+    if (!ns_pid)
         return 0;
 
     // Extract filename from file->f_path.dentry->d_name.name (basename)
@@ -91,7 +91,7 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     // Fill metadata
     event->source = EVENT_SOURCE_FILEWRITE;
     event->timestamp_ns = bpf_ktime_get_ns();
-    event->pid = pid;
+    event->pid = ns_pid;
     event->tid = (u32)pid_tgid;
     event->uid = bpf_get_current_uid_gid();
     event->write_size = (u32)count;

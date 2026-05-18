@@ -19,8 +19,8 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     u32 pid = pid_tgid >> 32;
 
     // Only monitor traced processes
-    u32 *val = bpf_map_lookup_elem(&traced_processes, &pid);
-    if (!val)
+    u32 ns_pid = is_pid_traced(pid);
+    if (!ns_pid)
         return 0;
 
     // Reserve space in ring buffer
@@ -54,7 +54,7 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     // Fill remaining event fields
     event->source = EVENT_SOURCE_FILEWATCH;
     event->timestamp_ns = bpf_ktime_get_ns();
-    event->pid = pid;
+    event->pid = ns_pid;
     event->tid = (u32)pid_tgid;
     event->uid = bpf_get_current_uid_gid();
     event->flags = (s32)ctx->args[2];

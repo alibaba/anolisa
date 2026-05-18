@@ -52,14 +52,9 @@ struct {
 } bufs SEC(".maps");
 
 
-static __always_inline bool trace_allowed(u32 uid, u32 pid)
+static __always_inline u32 trace_allowed(u32 uid, u32 pid)
 {
-    /* Check traced_processes map first - if map has entries, only trace those PIDs */
-    u32 *traced = bpf_map_lookup_elem(&traced_processes, &pid);
-    if (traced) {
-        return true;
-    }
-    return false;
+    return is_pid_traced(pid);
 }
 
 SEC("uprobe/do_handshake")
@@ -70,7 +65,8 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -90,7 +86,8 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -120,7 +117,7 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = delta_ns;
-    data->pid = pid;
+    data->pid = ns_pid;
     data->tid = tid;
     data->uid = uid;
     data->len = (u32)len;
@@ -171,7 +168,8 @@ int BPF_UPROBE(probe_SSL_write_ex_enter, void *ssl, void *buf, size_t num, size_
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -193,7 +191,8 @@ int BPF_UPROBE(probe_SSL_read_ex_enter, void *ssl, void *buf, size_t num, size_t
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -215,7 +214,8 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -244,7 +244,7 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = delta_ns;
-    data->pid = pid;
+    data->pid = ns_pid;
     data->tid = tid;
     data->uid = uid;
     data->len = (u32)len;
@@ -327,7 +327,8 @@ int BPF_UPROBE(probe_SSL_do_handshake_enter, void *ssl) {
     u64 ts = bpf_ktime_get_ns();
     u32 uid = bpf_get_current_uid_gid();
 
-    if (!trace_allowed(uid, pid)) {
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -350,8 +351,8 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     /* use kernel terminology here for tgid/pid: */
     u32 tgid = pid_tgid >> 32;
 
-    /* store arg info for later lookup */
-    if (!trace_allowed(tgid, pid)) {
+    u32 ns_pid = trace_allowed(tgid, pid);
+    if (!ns_pid) {
         return 0;
     }
 
@@ -371,7 +372,7 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = ts - *tsp;
-    data->pid = pid;
+    data->pid = ns_pid;
     data->tid = tid;
     data->uid = uid;
     data->len = ret;

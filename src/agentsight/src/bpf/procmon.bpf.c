@@ -44,7 +44,7 @@ int trace_execve_exit(struct trace_event_raw_sys_exit *ctx)
     // Fill event
     event->source = EVENT_SOURCE_PROCMON;
     event->timestamp_ns = ts;
-    event->pid = pid;
+    event->pid = get_task_ns_pid(task);
     event->tid = tid;
     event->ppid = ppid;
     event->uid = uid;
@@ -78,7 +78,7 @@ int trace_process_exit(void *ctx)
     // Fill event
     event->source = EVENT_SOURCE_PROCMON;
     event->timestamp_ns = ts;
-    event->pid = pid;
+    event->pid = current_ns_pid();
     event->tid = tid;
     event->ppid = 0;
     event->uid = uid;
