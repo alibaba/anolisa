@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -44,3 +46,15 @@ def call_agent_sec_cli(
         return CliResult(stdout="", stderr="timed out", exit_code=124)
     except Exception as e:
         return CliResult(stdout="", stderr=str(e), exit_code=1)
+
+
+def record_hermes_observability(
+    record: dict[str, Any],
+    timeout: float = 10.0,
+) -> CliResult:
+    """Emit one Hermes observability record via agent-sec-cli stdin."""
+    return call_agent_sec_cli(
+        ["observability", "record", "--format", "json", "--stdin"],
+        timeout=timeout,
+        stdin=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+    )

@@ -3,5 +3,6 @@
 from __future__ import annotations
 
 from .code_scan import CodeScanCapability
+from .observability import ObservabilityCapability
 
-ALL_CAPABILITIES = [CodeScanCapability()]
+ALL_CAPABILITIES = [CodeScanCapability(), ObservabilityCapability()]

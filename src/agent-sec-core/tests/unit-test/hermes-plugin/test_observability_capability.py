@@ -1,0 +1,211 @@
+"""Unit tests for Hermes observability capability."""
+
+from __future__ import annotations
+
+import inspect
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
+sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
+
+from src.capabilities import ALL_CAPABILITIES  # noqa: E402
+from src.capabilities.observability import ObservabilityCapability  # noqa: E402
+from src.cli_runner import CliResult  # noqa: E402
+
+
+class InlineThread:
+    def __init__(self, target, args=(), kwargs=None, daemon=None, name=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+        self.daemon = daemon
+        self.name = name
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
+def _make_capability() -> ObservabilityCapability:
+    cap = ObservabilityCapability()
+    cap._timeout = 5.0
+    cap._on_register({})
+    return cap
+
+
+def test_get_hooks_define_registers_expected_hooks():
+    cap = _make_capability()
+
+    assert set(cap.get_hooks_define()) == {
+        "pre_llm_call",
+        "pre_api_request",
+        "post_api_request",
+        "pre_tool_call",
+        "post_tool_call",
+        "post_llm_call",
+    }
+
+
+def test_hook_handlers_use_explicit_positional_contracts():
+    cap = _make_capability()
+
+    for callback in (
+        cap._on_pre_llm_call,
+        cap._on_post_tool_call,
+        cap._on_post_llm_call,
+    ):
+        signature = inspect.signature(callback)
+        assert inspect.Parameter.VAR_POSITIONAL not in {
+            parameter.kind for parameter in signature.parameters.values()
+        }
+
+
+def test_pre_llm_call_records_observability_payload_without_blocking_on_result():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        result = cap._on_pre_llm_call(
+            session_id="session-1",
+            user_message="hello",
+            conversation_history=[],
+            model="gpt-test",
+            platform="hermes",
+        )
+
+    assert result is None
+    mock_record.assert_called_once()
+    payload = mock_record.call_args.args[0]
+    assert mock_record.call_args.kwargs["timeout"] == 5.0
+    assert payload["hook"] == "before_agent_run"
+    assert payload["metadata"]["sessionId"] == "session-1"
+    assert payload["metadata"]["runId"] == "00000000-0000-0000-0000-000000000000"
+
+
+def test_pre_llm_call_accepts_positional_messages():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        result = cap._on_pre_llm_call(
+            [{"role": "user", "content": "hello"}],
+            session_id="session-1",
+            model="gpt-test",
+        )
+
+    assert result is None
+    mock_record.assert_called_once()
+    payload = mock_record.call_args.args[0]
+    assert payload["hook"] == "before_agent_run"
+    assert payload["metrics"] == {"model_id": "gpt-test"}
+
+
+def test_post_llm_call_accepts_positional_response():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        result = cap._on_post_llm_call(
+            [{"role": "assistant", "content": "done"}],
+            "done",
+            session_id="session-1",
+        )
+
+    assert result is None
+    mock_record.assert_called_once()
+    payload = mock_record.call_args.args[0]
+    assert payload["hook"] == "after_agent_run"
+    assert payload["metrics"] == {"response": "done"}
+
+
+def test_skips_cli_call_when_record_cannot_be_built():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability"
+    ) as mock_record:
+        result = cap._on_pre_tool_call(
+            "terminal", {"command": "ls"}, session_id="session-1"
+        )
+
+    assert result is None
+    mock_record.assert_not_called()
+
+
+def test_capability_handlers_emit_all_registered_hook_types():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        cap._on_pre_llm_call(session_id="session-1", user_message="hello")
+        cap._on_pre_api_request(
+            session_id="session-1",
+            task_id="task-1",
+            api_call_count=1,
+            model="gpt-test",
+        )
+        cap._on_post_api_request(
+            session_id="session-1",
+            task_id="task-1",
+            api_call_count=1,
+            api_duration=12.0,
+        )
+        cap._on_pre_tool_call(
+            "terminal",
+            {"command": "ls"},
+            session_id="session-1",
+            task_id="task-1",
+            tool_call_id="tool-1",
+        )
+        cap._on_post_tool_call(
+            "terminal",
+            {"command": "ls"},
+            {"stdout": "ok", "exit_code": 0},
+            session_id="session-1",
+            task_id="task-1",
+            tool_call_id="tool-1",
+            duration_ms=5,
+        )
+        cap._on_post_llm_call(
+            session_id="session-1",
+            assistant_response="done",
+            model="gpt-test",
+            platform="hermes",
+        )
+
+    assert [call.args[0]["hook"] for call in mock_record.call_args_list] == [
+        "before_agent_run",
+        "before_llm_call",
+        "after_llm_call",
+        "before_tool_call",
+        "after_tool_call",
+        "after_agent_run",
+    ]
+
+
+def test_observability_is_exported_in_all_capabilities():
+    assert "observability" in [cap.id for cap in ALL_CAPABILITIES]
