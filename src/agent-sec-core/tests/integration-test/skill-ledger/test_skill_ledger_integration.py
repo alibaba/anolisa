@@ -19,6 +19,7 @@ Prerequisites: Python 3.11, source tree
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -31,6 +32,12 @@ from typer.testing import CliRunner
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _runner = CliRunner()
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove Rich/Typer styling escapes from help output before assertions."""
+    return _ANSI_RE.sub("", text)
 
 
 @dataclass
@@ -1221,11 +1228,12 @@ def test_contract_certify_help_is_findings_only(ws):
     """certify help exposes external findings import options only."""
     r = run_skill_ledger(["certify", "--help"], env_extra=ws.env())
     assert r.returncode == 0, f"certify --help returned {r.returncode}: {r.stderr}"
-    assert "--findings" in r.stdout
-    assert "--delete-findings" in r.stdout
-    assert "--scanner-version" in r.stdout
-    assert "--scanners" not in r.stdout
-    assert "--all" not in r.stdout
+    help_text = strip_ansi(r.stdout)
+    assert "--findings" in help_text
+    assert "--delete-findings" in help_text
+    assert "--scanner-version" in help_text
+    assert "--scanners" not in help_text
+    assert "--all" not in help_text
 
 
 def test_contract_init_keys_empty_passphrase_env(ws):

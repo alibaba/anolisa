@@ -1431,7 +1431,7 @@ class TestSkillLedgerSuggestions:
             ),
         ]
         output = format_summary(events, "last 24 hours")
-        assert "Re-certify drifted skills" in output
+        assert "Re-scan drifted skills" in output
 
     def test_none_suggestion(self):
         events = [
@@ -1440,7 +1440,7 @@ class TestSkillLedgerSuggestions:
             ),
         ]
         output = format_summary(events, "last 24 hours")
-        assert "Certify unchecked skills" in output
+        assert "Scan unchecked skills" in output
 
     def test_no_suggestion_when_all_pass(self):
         events = [
