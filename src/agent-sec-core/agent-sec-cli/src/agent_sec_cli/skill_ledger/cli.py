@@ -45,6 +45,10 @@ def _forward(result: ActionResult) -> None:
     """Print ActionResult stdout/error and exit with its exit_code."""
     if result.stdout:
         typer.echo(result.stdout, nl=False)
+    warnings = result.data.get("warnings", [])
+    if isinstance(warnings, list):
+        for warning in warnings:
+            typer.echo(str(warning), err=True)
     if result.error:
         typer.echo(result.error, err=True)
     raise typer.Exit(code=result.exit_code)
@@ -111,6 +115,7 @@ def cmd_init(
         command="init",
         baseline=not no_baseline,
         passphrase=passphrase,
+        passphrase_requested=use_passphrase,
         force_keys=force_keys,
         scanner_names=_parse_scanner_names(scanners),
     )

@@ -21,6 +21,7 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     get_previous_signature,
     list_version_ids,
     load_latest_manifest,
+    load_version_manifest,
     next_version_id,
     save_manifest,
 )
@@ -56,6 +57,8 @@ from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
 logger = logging.getLogger(__name__)
 
 _ManifestState = str  # missing | trusted | unsigned | drifted | tampered
+
+_RECOVERY_EVENT_TYPE = "tampered_recovered"
 
 
 def _remember_skill_dir_best_effort(skill_dir: str) -> None:
@@ -271,6 +274,41 @@ def _classify_manifest(
     return "trusted"
 
 
+def _is_verifiable_manifest(
+    manifest: SignedManifest,
+    backend: SigningBackend,
+) -> bool:
+    """Return True when a historical version hash and signature verify."""
+    if manifest.manifestHash != manifest.compute_manifest_hash():
+        return False
+    if manifest.signature is None:
+        return False
+    try:
+        backend.verify(
+            manifest.manifestHash.encode("utf-8"),
+            manifest.signature.value,
+            manifest.signature.keyFingerprint,
+        )
+    except SignatureInvalidError:
+        return False
+    return True
+
+
+def _last_trusted_version_manifest(
+    skill_dir: str,
+    backend: SigningBackend,
+) -> SignedManifest | None:
+    """Return the newest version manifest whose own hash/signature verify."""
+    for version_id in reversed(list_version_ids(skill_dir)):
+        try:
+            manifest = load_version_manifest(skill_dir, version_id)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if manifest is not None and _is_verifiable_manifest(manifest, backend):
+            return manifest
+    return None
+
+
 def _previous_version_id(skill_dir: str, manifest: SignedManifest | None) -> str | None:
     """Return the best available previous version id for a new manifest."""
     if manifest is not None:
@@ -316,7 +354,10 @@ def _prepare_manifest_for_update(
     loaded, corrupted = _safe_load_latest_manifest(skill_dir)
     state = _classify_manifest(loaded, current_hashes, backend, corrupted=corrupted)
     if state in {"missing", "drifted", "tampered"}:
-        manifest = _new_manifest(skill_dir, current_hashes, loaded)
+        previous_manifest = loaded
+        if state == "tampered":
+            previous_manifest = _last_trusted_version_manifest(skill_dir, backend)
+        manifest = _new_manifest(skill_dir, current_hashes, previous_manifest)
         return manifest, state, True
     if loaded is None:
         # Defensive fallback; state should be "missing" above.
@@ -403,6 +444,24 @@ def _result_payload(
     return data
 
 
+def _tampered_recovery_event(
+    *,
+    operation: str,
+    manifest: SignedManifest,
+    scanners_run: list[str],
+) -> dict[str, Any]:
+    """Build the command-result audit event for successful tampered recovery."""
+    return {
+        "type": _RECOVERY_EVENT_TYPE,
+        "operation": operation,
+        "fromStatus": "tampered",
+        "toStatus": manifest.scanStatus,
+        "versionId": manifest.versionId,
+        "manifestHash": manifest.manifestHash,
+        "scannersRun": scanners_run,
+    }
+
+
 def scan_skill(
     skill_dir: str,
     backend: SigningBackend,
@@ -459,12 +518,23 @@ def scan_skill(
         backend,
         new_version_created=new_version_created,
     )
+    scanners_run = [entry.scanner for entry in scan_entries]
+    extra: dict[str, Any] = {}
+    if state == "tampered":
+        extra["auditEvents"] = [
+            _tampered_recovery_event(
+                operation="scan",
+                manifest=manifest,
+                scanners_run=scanners_run,
+            )
+        ]
     return _result_payload(
         manifest,
         skill_dir=skill_dir,
         new_version_created=new_version_created,
-        scanners_run=[entry.scanner for entry in scan_entries],
+        scanners_run=scanners_run,
         skipped_scanners=[name for name in requested if name not in scanners_to_run],
+        extra=extra,
     )
 
 
@@ -519,7 +589,7 @@ def certify(
 
     current_hashes = compute_file_hashes(skill_dir)
     registry = ScannerRegistry.from_config()
-    manifest, _state, new_version_created = _prepare_manifest_for_update(
+    manifest, state, new_version_created = _prepare_manifest_for_update(
         skill_dir, current_hashes, backend
     )
 
@@ -544,11 +614,21 @@ def certify(
             delete_result["findingsDeleted"] = False
             delete_result["findingsDeleteError"] = str(exc)
 
+    scanners_run = [scan_entry.scanner]
+    if state == "tampered":
+        delete_result["auditEvents"] = [
+            _tampered_recovery_event(
+                operation="certify",
+                manifest=manifest,
+                scanners_run=scanners_run,
+            )
+        ]
+
     return _result_payload(
         manifest,
         skill_dir=skill_dir,
         new_version_created=new_version_created,
-        scanners_run=[scan_entry.scanner],
+        scanners_run=scanners_run,
         extra=delete_result,
     )
 

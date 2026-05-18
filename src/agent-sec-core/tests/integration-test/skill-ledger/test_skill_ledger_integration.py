@@ -25,6 +25,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import agent_sec_cli.security_events as security_events
 import pytest
 from agent_sec_cli.cli import app as cli_app
 from typer.testing import CliRunner
@@ -73,6 +74,24 @@ def parse_json_output(stdout: str) -> dict:
         if line.startswith("{") or line.startswith("["):
             return json.loads(line)
     raise ValueError(f"No JSON found in stdout:\n{stdout}")
+
+
+def reset_security_event_writers() -> None:
+    """Reset in-process security-event singletons so env path overrides apply."""
+    sqlite_writer = getattr(security_events, "_sqlite_writer", None)
+    if sqlite_writer is not None:
+        sqlite_writer.close()
+    security_events._writer = None
+    security_events._sqlite_writer = None
+    security_events._reader = None
+
+
+def read_security_events(data_dir: Path) -> list[dict]:
+    """Read security-events JSONL records from an isolated test data dir."""
+    log_path = data_dir / "security-events.jsonl"
+    if not log_path.exists():
+        return []
+    return [json.loads(line) for line in log_path.read_text().splitlines() if line]
 
 
 def make_skill(parent: Path, name: str, files: dict[str, str]) -> Path:
@@ -229,6 +248,76 @@ def test_init_keys_with_passphrase_env(ws):
     assert out.get("encrypted") is True, f"expected encrypted=true, got {out}"
 
 
+def test_init_passphrase_existing_key_requires_force_keys(ws):
+    """init --passphrase must not silently ignore an existing key."""
+    alt_data = ws.root / "init_existing_passphrase_data"
+    alt_data.mkdir()
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
+        }
+    )
+    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    assert r1.returncode == 0, f"initial key setup failed: {r1.stderr}"
+
+    r2 = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
+    assert r2.returncode != 0, "Expected init --passphrase to reject existing keys"
+    assert "init --force-keys --passphrase" in (r2.stdout + r2.stderr)
+
+
+def test_init_passphrase_is_redacted_from_security_event(ws):
+    """Security event request details must not persist key passphrases."""
+    alt_data = ws.root / "init_passphrase_redacted_data"
+    event_data = ws.root / "events_init_passphrase_redacted"
+    alt_data.mkdir()
+    event_data.mkdir()
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "AGENT_SEC_DATA_DIR": str(event_data),
+            "SKILL_LEDGER_PASSPHRASE": "test-passphrase-123",
+        }
+    )
+    reset_security_event_writers()
+
+    r = run_skill_ledger(["init", "--no-baseline", "--passphrase"], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["key"]["encrypted"] is True
+
+    events = read_security_events(event_data)
+    reset_security_event_writers()
+    init_event = next(
+        event for event in events if event["details"]["result"].get("command") == "init"
+    )
+    request = init_event["details"]["request"]
+    assert request["passphrase"] == "[REDACTED]"
+    assert "test-passphrase-123" not in json.dumps(init_event)
+
+
+def test_init_force_key_archive_error_has_context(ws, monkeypatch):
+    """Key rotation errors include context about archiving the old public key."""
+    alt_data = ws.root / "init_force_archive_error_data"
+    alt_data.mkdir()
+    env = ws.env({"XDG_DATA_HOME": str(alt_data)})
+    r1 = run_skill_ledger(["init-keys"], env_extra=env)
+    assert r1.returncode == 0, f"initial key setup failed: {r1.stderr}"
+
+    def fail_archive():
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.security_middleware.backends.skill_ledger.archive_current_public_key",
+        fail_archive,
+    )
+    r2 = run_skill_ledger(["init", "--no-baseline", "--force-keys"], env_extra=env)
+    assert r2.returncode != 0
+    combined = r2.stdout + r2.stderr
+    assert "failed to archive existing public key before rotation" in combined
+    assert "copy failed" in combined
+
+
 def test_init_no_baseline_creates_keys_only(ws):
     """init --no-baseline initializes keys without writing skill manifests."""
     alt_data = ws.root / "init_nobase_data"
@@ -290,6 +379,57 @@ def test_init_default_baselines_managed_skills(ws):
         "static-scanner",
     }
     assert manifest["signature"] is not None
+
+
+def test_scan_auto_key_creation_warns_unencrypted(ws):
+    """scan self-initializes keys but warns when the default key is unencrypted."""
+    alt_data = ws.root / "scan_auto_key_data"
+    alt_config = ws.root / "scan_auto_key_config"
+    alt_data.mkdir()
+    alt_config.mkdir()
+    skill = make_skill(ws.skills_dir, "scan-auto-key-warning", {"main.py": "# ok\n"})
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "XDG_CONFIG_HOME": str(alt_config),
+        }
+    )
+
+    r = run_skill_ledger(["scan", str(skill)], env_extra=env)
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["keyCreated"] is True
+    assert out["warnings"]
+    assert "created an unencrypted Skill Ledger signing key" in r.stderr
+
+
+def test_certify_auto_key_creation_warns_unencrypted(ws):
+    """certify self-initializes keys but warns when the default key is unencrypted."""
+    alt_data = ws.root / "certify_auto_key_data"
+    alt_config = ws.root / "certify_auto_key_config"
+    alt_data.mkdir()
+    alt_config.mkdir()
+    skill = make_skill(ws.skills_dir, "certify-auto-key-warning", {"main.py": "# ok\n"})
+    findings = write_findings_file(
+        ws.fixtures,
+        "certify-auto-key-warning.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    env = ws.env(
+        {
+            "XDG_DATA_HOME": str(alt_data),
+            "XDG_CONFIG_HOME": str(alt_config),
+        }
+    )
+
+    r = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["keyCreated"] is True
+    assert out["warnings"]
+    assert "created an unencrypted Skill Ledger signing key" in r.stderr
 
 
 # ── Group 2: Happy path lifecycle ──────────────────────────────────────────
@@ -543,6 +683,138 @@ def test_check_tampered_manifest_hash(ws):
     assert r.returncode == 1, f"expected exit 1 for tampered, got {r.returncode}"
     out = parse_json_output(r.stdout)
     assert out["status"] == "tampered", f"expected tampered, got {out}"
+
+
+def test_check_tampered_writes_security_event(ws):
+    """Tampered checks remain visible through the sec-core event log."""
+    skill = make_skill(ws.skills_dir, "check-tamper-event", {"f.txt": "safe"})
+    event_data = ws.root / "events_check_tamper"
+    event_data.mkdir()
+    env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+    reset_security_event_writers()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "tamper-event-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    latest = skill / ".skill-meta" / "latest.json"
+    data = json.loads(latest.read_text())
+    data["scanStatus"] = "deny"
+    latest.write_text(json.dumps(data))
+
+    r = run_skill_ledger(["check", str(skill)], env_extra=env)
+    assert r.returncode == 1
+    events = read_security_events(event_data)
+    reset_security_event_writers()
+    assert any(
+        event["category"] == "skill_ledger"
+        and event["details"]["result"].get("command") == "check"
+        and event["details"]["result"].get("status") == "tampered"
+        for event in events
+    )
+
+
+def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
+    """scan records tampered recovery in event details without changing manifest schema."""
+    skill = make_skill(ws.skills_dir, "scan-tamper-recover", {"main.py": "# ok\n"})
+    event_data = ws.root / "events_scan_tamper_recover"
+    event_data.mkdir()
+    env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+    reset_security_event_writers()
+
+    findings = write_findings_file(
+        ws.fixtures,
+        "scan-tamper-recover-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    r1 = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    assert r1.returncode == 0, f"initial certify failed: {r1.stderr}"
+
+    latest = skill / ".skill-meta" / "latest.json"
+    data = json.loads(latest.read_text())
+    data["scanStatus"] = "deny"
+    latest.write_text(json.dumps(data))
+
+    r2 = run_skill_ledger(
+        ["scan", str(skill), "--scanners", "code-scanner"], env_extra=env
+    )
+    assert r2.returncode == 0, f"scan recovery failed: {r2.stderr}"
+    out = parse_json_output(r2.stdout)
+    event = out["auditEvents"][0]
+    assert event["type"] == "tampered_recovered"
+    assert event["operation"] == "scan"
+    assert event["fromStatus"] == "tampered"
+    assert event["toStatus"] == out["scanStatus"]
+    assert event["versionId"] == out["versionId"]
+    assert "auditEvents" not in read_latest_manifest(skill)
+
+    audit_result = run_skill_ledger(["audit", str(skill)], env_extra=env)
+    assert audit_result.returncode == 0, audit_result.stderr
+    assert parse_json_output(audit_result.stdout)["valid"] is True
+
+    events = read_security_events(event_data)
+    reset_security_event_writers()
+    assert any(
+        event["details"]["result"].get("command") == "scan"
+        and event["details"]["result"].get("auditEvents", [{}])[0].get("type")
+        == "tampered_recovered"
+        for event in events
+    )
+
+
+def test_certify_recovers_tampered_latest_with_audit_event(ws):
+    """certify records tampered recovery when imported findings are signed."""
+    skill = make_skill(ws.skills_dir, "certify-tamper-recover", {"main.py": "# ok\n"})
+    event_data = ws.root / "events_certify_tamper_recover"
+    event_data.mkdir()
+    env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+    reset_security_event_writers()
+
+    first_findings = write_findings_file(
+        ws.fixtures,
+        "certify-tamper-recover-first.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    r1 = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(first_findings)], env_extra=env
+    )
+    assert r1.returncode == 0, f"initial certify failed: {r1.stderr}"
+
+    latest = skill / ".skill-meta" / "latest.json"
+    data = json.loads(latest.read_text())
+    data["scanStatus"] = "deny"
+    latest.write_text(json.dumps(data))
+
+    second_findings = write_findings_file(
+        ws.fixtures,
+        "certify-tamper-recover-second.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    r2 = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(second_findings)], env_extra=env
+    )
+    assert r2.returncode == 0, f"certify recovery failed: {r2.stderr}"
+    out = parse_json_output(r2.stdout)
+    event = out["auditEvents"][0]
+    assert event["type"] == "tampered_recovered"
+    assert event["operation"] == "certify"
+    assert event["toStatus"] == out["scanStatus"]
+
+    events = read_security_events(event_data)
+    reset_security_event_writers()
+    assert any(
+        event["details"]["result"].get("command") == "certify"
+        and event["details"]["result"].get("auditEvents", [{}])[0].get("type")
+        == "tampered_recovered"
+        for event in events
+    )
 
 
 def test_check_deny_exit_code_1(ws):
@@ -943,6 +1215,44 @@ def test_scan_all_multiple_skills(ws):
     out = parse_json_output(r.stdout)
     assert "results" in out, f"Expected 'results' key: {out}"
     assert len(out["results"]) == 3, f"Expected 3 results, got {len(out['results'])}"
+
+
+def test_scan_all_reports_tampered_recovery_per_skill(ws):
+    """scan --all carries recovery audit events on each recovered skill result."""
+    env = ws.env()
+    batch_root = ws.root / "batch_recover_skills"
+    batch_root.mkdir()
+    skill_a = make_skill(batch_root, "recover-a", {"main.py": "# a\n"})
+    skill_b = make_skill(batch_root, "recover-b", {"main.py": "# b\n"})
+
+    config_dir = ws.xdg_config / "agent-sec" / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "enableDefaultSkillDirs": False,
+        "managedSkillDirs": [str(batch_root / "*")],
+    }
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+    for skill in (skill_a, skill_b):
+        r = run_skill_ledger(
+            ["scan", str(skill), "--scanners", "code-scanner"], env_extra=env
+        )
+        assert r.returncode == 0, r.stderr
+
+    latest_a = skill_a / ".skill-meta" / "latest.json"
+    data = json.loads(latest_a.read_text())
+    data["scanStatus"] = "deny"
+    latest_a.write_text(json.dumps(data))
+
+    r = run_skill_ledger(
+        ["scan", "--all", "--scanners", "code-scanner"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    by_name = {result["skillName"]: result for result in out["results"]}
+    assert by_name["recover-a"]["auditEvents"][0]["type"] == "tampered_recovered"
+    assert "auditEvents" not in by_name["recover-b"]
 
 
 def test_scan_all_no_skill_dirs(ws):

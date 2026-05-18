@@ -4,6 +4,9 @@
 // Run:  npx tsx tests/unit/skill-ledger-test.ts
 //       npm test
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 import { _resetCliMock, _setCliMock } from "../../src/utils.js";
 import type { CliResult } from "../../src/utils.js";
@@ -75,6 +78,28 @@ function mockSkillLedgerCheck(result: CliResult): void {
   });
 }
 
+function mockSkillLedgerInitFailure(stderr: string): void {
+  _setCliMock(async (args) => {
+    if (args[0] === "skill-ledger" && args[1] === "init" && args[2] === "--no-baseline") {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr,
+      };
+    }
+
+    if (args[0] === "skill-ledger" && args[1] === "check") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ status: "pass" }),
+        stderr: "",
+      };
+    }
+
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+}
+
 function mockSkillLedgerStatus(status: string, exitCode = 0): void {
   mockSkillLedgerCheck({
     exitCode,
@@ -120,6 +145,29 @@ console.log("[1] Hook registration");
 assert(hooks.length === 1, "registers exactly one hook");
 assert(hooks[0].hookName === "before_tool_call", "hook name is before_tool_call");
 assert(hooks[0].priority === 80, "priority is 80");
+
+{
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+  mockSkillLedgerInitFailure("init exploded");
+
+  try {
+    const failureRegistration = createMockApi();
+    skillLedger.register(failureRegistration.api);
+    await new Promise((r) => setTimeout(r, 300));
+    assert(
+      failureRegistration.logs.some((l) => l.includes("init --no-baseline failed: init exploded")),
+      "init failure → emits WARN with init failure details",
+    );
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    mockSkillLedgerStatus("pass");
+  }
+}
 
 // ── 2. Positive filtering — events that SHOULD match ────────────────────────
 console.log("\n[2] Positive filtering (should match → CLI invoked)");
