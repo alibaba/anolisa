@@ -292,7 +292,8 @@ hermes-plugin/
 │   └── capabilities/
 │       ├── __init__.py       # 能力清单
 │       ├── base.py           # AgentSecCoreCapability 抽象基类
-│       └── code_scan.py      # Code Scanner 实现
+│       ├── code_scan.py      # Code Scanner 实现
+│       └── pii_scan.py       # PII Checker 实现
 └── README.md                 # 开发指南
 tests/unit-test/hermes-plugin/ # 单元测试（位于 agent-sec-core/tests/unit-test/ 下）
 ```
@@ -361,6 +362,7 @@ class MyCapability(AgentSecCoreCapability):
 | `pre_tool_call` | 工具执行前 | `(tool_name, args, **kwargs)` | 返回 `{"action": "block", "message": str}` |
 | `post_tool_call` | 工具执行后 | `(tool_name, result, **kwargs)` | 无阻断 |
 | `pre_llm_call` | LLM 调用前 | `(messages, **kwargs)` | 注入 context |
+| `transform_llm_output` | 最终回复交付前 | `(response_text, session_id, **kwargs)` | 替换最终回复 |
 
 ### 6. 配置（config.toml）
 
@@ -369,11 +371,18 @@ class MyCapability(AgentSecCoreCapability):
 enabled = true          # 是否注册该能力（必填）
 timeout = 10            # agent-sec-cli 子进程超时（秒，必填）
 enable_block = false    # false=observe(仅日志), true=block(阻断)
+
+[capabilities.pii-scan-user-input]
+enabled = true
+timeout = 10
+include_low_confidence = false
+warning_ttl_seconds = 300
 ```
 
 - `enabled = false` → 能力完全不注册
 - `enable_block = false` → 检测到风险时仅记 WARNING 日志，不阻断工具调用
 - `enable_block = true` → 检测到 deny/warn 时阻断工具调用
+- `pii-scan-user-input` 仅扫描本轮用户输入，warning-only，不扫描 tool output
 
 ### 7. 测试
 
