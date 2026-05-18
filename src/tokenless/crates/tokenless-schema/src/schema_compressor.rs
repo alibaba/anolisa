@@ -1,6 +1,10 @@
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::sync::LazyLock;
+
+static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
+static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
+static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Find a valid UTF-8 char boundary at or before `pos`.
 /// Equivalent to `str::floor_char_boundary` (stabilized in 1.89).
@@ -21,8 +25,6 @@ fn find_char_boundary(s: &str, pos: usize) -> usize {
 /// by truncating descriptions, removing titles/examples, and applying
 /// smart compression to reduce token usage.
 pub struct SchemaCompressor {
-    #[allow(dead_code)]
-    protected_fields: HashSet<&'static str>,
     func_desc_max_len: usize,
     param_desc_max_len: usize,
     drop_examples: bool,
@@ -32,17 +34,7 @@ pub struct SchemaCompressor {
 
 impl Default for SchemaCompressor {
     fn default() -> Self {
-        let mut protected_fields = HashSet::new();
-        protected_fields.insert("name");
-        protected_fields.insert("type");
-        protected_fields.insert("required");
-        protected_fields.insert("enum");
-        protected_fields.insert("default");
-        protected_fields.insert("properties");
-        protected_fields.insert("const");
-
         Self {
-            protected_fields,
             func_desc_max_len: 256,
             param_desc_max_len: 160,
             drop_examples: true,
@@ -232,23 +224,15 @@ impl SchemaCompressor {
         // Trim whitespace
         let mut text = desc.trim().to_string();
 
-        // Remove markdown code blocks if configured
         if self.drop_markdown {
-            // Remove fenced code blocks: ```...```
-            let code_block_re = Regex::new(r"```[\s\S]*?```").unwrap();
-            text = code_block_re.replace_all(&text, "").to_string();
-
-            // Remove inline code: `...`
-            let inline_code_re = Regex::new(r"`[^`]+`").unwrap();
-            text = inline_code_re.replace_all(&text, "").to_string();
+            text = CODE_BLOCK_RE.replace_all(&text, "").to_string();
+            text = INLINE_CODE_RE.replace_all(&text, "").to_string();
         }
 
-        // Collapse multiple whitespace/newlines into single space
-        let whitespace_re = Regex::new(r"\s+").unwrap();
-        text = whitespace_re.replace_all(&text, " ").to_string();
+        text = WHITESPACE_RE.replace_all(&text, " ").to_string();
         text = text.trim().to_string();
 
-        // If already within limit (character count, not byte length), return as-is
+        // If already within limit, return as-is (use char count, not byte length)
         if text.chars().count() <= max_len {
             return text;
         }
@@ -312,15 +296,15 @@ mod tests {
 
         let result = compressor.compress(&schema);
 
-        // Function description should be truncated to <= 256 chars
+        // Function description should be truncated to <= 256
         let func_desc = result["function"]["description"].as_str().unwrap();
-        assert!(func_desc.chars().count() <= 256);
+        assert!(func_desc.len() <= 256);
 
-        // Parameter description should be truncated to <= 160 chars
+        // Parameter description should be truncated to <= 160
         let param_desc = result["function"]["parameters"]["properties"]["param1"]["description"]
             .as_str()
             .unwrap();
-        assert!(param_desc.chars().count() <= 160);
+        assert!(param_desc.len() <= 160);
     }
 
     #[test]
@@ -568,19 +552,15 @@ mod tests {
     #[test]
     fn truncate_description_cjk_no_panic() {
         let compressor = SchemaCompressor::new();
+        // 100 CJK chars fit within 256-char limit — no truncation needed
         let cjk = "中".repeat(100);
         let result = compressor.truncate_description(&cjk, 256);
         assert!(result.chars().all(|c| c == '中'));
         assert!(result.chars().count() <= 256);
-    }
 
-    #[test]
-    fn truncate_description_300_cjk_chars() {
-        let compressor = SchemaCompressor::new();
-        // 300 CJK characters — exceeds 256-char limit, triggers truncation
-        let cjk = "中".repeat(300);
-        let result = compressor.truncate_description(&cjk, 256);
-        assert!(result.chars().count() <= 256);
-        assert!(result.chars().all(|c| c == '中'));
+        // 300 CJK chars exceed 256-char limit — should be truncated
+        let cjk_long = "中".repeat(300);
+        let result_long = compressor.truncate_description(&cjk_long, 256);
+        assert!(result_long.chars().count() <= 256);
     }
 }

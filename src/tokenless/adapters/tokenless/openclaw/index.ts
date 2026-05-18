@@ -32,17 +32,16 @@ const sessionMap: Map<string, string> = new Map();
 
 let rtkAvailable: boolean | null = null;
 let tokenlessAvailable: boolean | null = null;
-let toonAvailable: boolean | null = null;
 
 // Resolved absolute paths — set by check*() functions so subprocess calls
 // use the correct path even when the binary is not on PATH (e.g. RPM installs
 // that place rtk/toon in /usr/libexec/anolisa/tokenless/).
 let rtkPath: string = "rtk";
 let tokenlessPath: string = "tokenless";
-let toonPath: string = "toon";
 
 const LIBEXEC_FALLBACK = "/usr/libexec/anolisa/tokenless";
 const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
+const LOCAL_FALLBACK = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
 
 // Check both existence and execute permission (mirrors shell `-x` test).
 function isExecutable(path: string): boolean {
@@ -63,13 +62,18 @@ function checkRtk(): boolean {
     } else if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
       rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
       rtkAvailable = true;
+    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/rtk`)) {
+      rtkPath = `${LOCAL_FALLBACK}/rtk`;
+      rtkAvailable = true;
     } else {
       rtkAvailable = false;
     }
   } catch {
-    // which not available; check libexec directly
     if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
       rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
+      rtkAvailable = true;
+    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/rtk`)) {
+      rtkPath = `${LOCAL_FALLBACK}/rtk`;
       rtkAvailable = true;
     } else {
       rtkAvailable = false;
@@ -100,12 +104,18 @@ function checkTokenless(): boolean {
     } else if (isExecutable(TOKENLESS_FALLBACK)) {
       tokenlessPath = TOKENLESS_FALLBACK;
       tokenlessAvailable = true;
+    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/tokenless`)) {
+      tokenlessPath = `${LOCAL_FALLBACK}/tokenless`;
+      tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
     }
   } catch {
     if (isExecutable(TOKENLESS_FALLBACK)) {
       tokenlessPath = TOKENLESS_FALLBACK;
+      tokenlessAvailable = true;
+    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/tokenless`)) {
+      tokenlessPath = `${LOCAL_FALLBACK}/tokenless`;
       tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
@@ -115,30 +125,6 @@ function checkTokenless(): boolean {
   return tokenlessAvailable;
 }
 
-function checkToon(): boolean {
-  if (toonAvailable !== null) return toonAvailable;
-  try {
-    const result = execSync("which toon 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
-    if (result && result !== "") {
-      toonPath = result;
-      toonAvailable = true;
-    } else if (isExecutable(`${LIBEXEC_FALLBACK}/toon`)) {
-      toonPath = `${LIBEXEC_FALLBACK}/toon`;
-      toonAvailable = true;
-    } else {
-      toonAvailable = false;
-    }
-  } catch {
-    if (isExecutable(`${LIBEXEC_FALLBACK}/toon`)) {
-      toonPath = `${LIBEXEC_FALLBACK}/toon`;
-      toonAvailable = true;
-    } else {
-      toonAvailable = false;
-    }
-    return toonAvailable;
-  }
-  return toonAvailable;
-}
 
 // ---- Subprocess helpers -------------------------------------------------------
 
@@ -425,12 +411,11 @@ export default {
   // ---- Done -------------------------------------------------------------------
 
   if (verbose) {
-    checkToon(); // populate toonAvailable cache before logging
     const features = [
       rtkEnabled && rtkAvailable ? "rtk-rewrite" : null,
       toolReadyEnabled && tokenlessAvailable ? "tool-ready" : null,
       responseCompressionEnabled && tokenlessAvailable ? "response-compression" : null,
-      toonCompressionEnabled && toonAvailable ? "toon-compression" : null,
+      toonCompressionEnabled && tokenlessAvailable ? "toon-compression" : null,
     ].filter(Boolean);
     console.log(`[tokenless] OpenClaw plugin registered — active features: ${features.join(", ") || "none"}`);
   }

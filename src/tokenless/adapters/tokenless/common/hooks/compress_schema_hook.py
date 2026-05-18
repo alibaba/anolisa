@@ -13,34 +13,21 @@ The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 
 import json
 import os
-import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hook_utils import resolve_binary, skip, warn
 
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
+_TOKENLESS_LOCAL = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
 
 
 # -- helpers -----------------------------------------------------------------
-
-
-def _resolve_binary(name: str, fallback_path: str) -> str | None:
-    path = shutil.which(name)
-    if path:
-        return path
-    if os.path.isfile(fallback_path) and os.access(fallback_path, os.X_OK):
-        return fallback_path
-    return None
-
-
-def _skip() -> None:
-    print(json.dumps({}))
-    sys.exit(0)
-
-
-def _warn(msg: str) -> None:
-    print(f"[tokenless] WARNING: {msg}", file=sys.stderr)
 
 
 def _is_json_array(data: str) -> bool:
@@ -56,23 +43,23 @@ def _is_json_array(data: str) -> bool:
 
 def main() -> None:
     # 1. Check tokenless binary
-    tokenless_bin = _resolve_binary("tokenless", "/usr/bin/tokenless")
+    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL)
     if not tokenless_bin:
-        _warn("tokenless is not installed or not in PATH. Schema compression hook disabled.")
-        _skip()
+        warn("tokenless is not installed or not in PATH. Schema compression hook disabled.")
+        skip()
 
     # 2. Read stdin JSON
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):
-        _warn("failed to read BeforeModel payload. Passing through unchanged.")
-        _skip()
+        warn("failed to read BeforeModel payload. Passing through unchanged.")
+        skip()
 
     # 3. Extract tools array
     llm_request = input_data.get("llm_request", {})
     tools = llm_request.get("tools")
     if not tools:
-        _skip()
+        skip()
 
     tools_json = json.dumps(tools, separators=(",", ":"))
 
@@ -94,13 +81,13 @@ def main() -> None:
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
-        _warn("Schema compression failed. Passing through unchanged.")
-        _skip()
+        warn("Schema compression failed. Passing through unchanged.")
+        skip()
 
     compressed = proc.stdout.strip()
     if not compressed or not _is_json_array(compressed):
-        _warn("Schema compression returned invalid JSON. Passing through unchanged.")
-        _skip()
+        warn("Schema compression returned invalid JSON. Passing through unchanged.")
+        skip()
 
     # 6. Build response
     output = {

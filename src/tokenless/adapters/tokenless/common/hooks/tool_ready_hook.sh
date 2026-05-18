@@ -299,7 +299,7 @@ missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
 log_v "Phase 3 FIX: $missing_count missing deps, fix_script=$FIX_SCRIPT"
 
 if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; then
-    FIX_OUTPUT=$(echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true)
+    echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true
     hash -r 2>/dev/null || true
 
     # Re-scan to check if fix succeeded
