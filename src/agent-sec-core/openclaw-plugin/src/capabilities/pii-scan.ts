@@ -71,7 +71,7 @@ function pushWarning(
   warningsByRun.set(runId, bucket);
 }
 
-function drainWarnings(
+function readWarnings(
   warningsByRun: Map<string, WarningBucket>,
   runId: string,
   warningTtlMs: number,
@@ -81,8 +81,14 @@ function drainWarnings(
   if (!bucket) {
     return [];
   }
-  warningsByRun.delete(runId);
   return [...bucket.warnings];
+}
+
+function deleteWarnings(
+  warningsByRun: Map<string, WarningBucket>,
+  runId: string,
+): void {
+  warningsByRun.delete(runId);
 }
 
 function shorten(value: string, limit = MAX_EVIDENCE_CHARS): string {
@@ -157,12 +163,12 @@ function buildScanArgs(prompt: string, includeLowConfidence: boolean): string[] 
  * 用户输入 PII / 凭据检测。
  *
  * v1 only scans event.prompt in before_prompt_build and shows non-blocking
- * warnings by prefixing the same run's outgoing message in message_sending.
+ * warnings by queueing a same-run block reply in reply_dispatch.
  */
 export const piiScan: SecurityCapability = {
   id: "pii-scan-user-input",
   name: "PII Checker",
-  hooks: ["before_prompt_build", "message_sending"],
+  hooks: ["before_prompt_build", "reply_dispatch"],
   register(api) {
     const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
     if (!cfg.scanUserInput) {
@@ -228,7 +234,7 @@ export const piiScan: SecurityCapability = {
     );
 
     api.on(
-      "message_sending",
+      "reply_dispatch",
       async (event: any, ctx: any) => {
         try {
           const runId = getRunId(event, ctx);
@@ -237,17 +243,25 @@ export const piiScan: SecurityCapability = {
             return undefined;
           }
 
-          const warnings = drainWarnings(warningsByRun, runId, cfg.warningTtlMs);
+          if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
+            deleteWarnings(warningsByRun, runId);
+            return undefined;
+          }
+
+          const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
           if (warnings.length === 0) {
             return undefined;
           }
 
-          const content = typeof event?.content === "string" ? event.content : "";
-          return {
-            content: content ? `${warnings.join("\n")}\n\n${content}` : warnings.join("\n"),
-          };
+          const queued = ctx?.dispatcher?.sendBlockReply?.({
+            text: warnings.join("\n"),
+          });
+          if (queued) {
+            deleteWarnings(warningsByRun, runId);
+          }
+          return undefined;
         } catch (error) {
-          api.logger.warn(`[pii-checker] message_sending failed open: ${error instanceof Error ? error.message : String(error)}`);
+          api.logger.warn(`[pii-checker] reply_dispatch failed open: ${error instanceof Error ? error.message : String(error)}`);
           return undefined;
         }
       },

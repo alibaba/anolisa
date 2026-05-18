@@ -32,10 +32,10 @@ function registerHandlers(pluginConfig: Record<string, any> = {}) {
   const { api, hooks, logs } = createMockApi(pluginConfig);
   piiScan.register(api);
   const beforePromptBuild = hooks.find((hook) => hook.hookName === "before_prompt_build");
-  const messageSending = hooks.find((hook) => hook.hookName === "message_sending");
+  const replyDispatch = hooks.find((hook) => hook.hookName === "reply_dispatch");
   assert.ok(beforePromptBuild, "before_prompt_build handler should be registered");
-  assert.ok(messageSending, "message_sending handler should be registered");
-  return { beforePromptBuild, messageSending, hooks, logs };
+  assert.ok(replyDispatch, "reply_dispatch handler should be registered");
+  return { beforePromptBuild, replyDispatch, hooks, logs };
 }
 
 let lastCliArgs: string[] | undefined;
@@ -63,6 +63,23 @@ function scanResult(verdict: string, findings: unknown[]) {
   };
 }
 
+function createReplyDispatchCtx(sendBlockReply?: (payload: any) => boolean) {
+  const blockReplies: any[] = [];
+  const dispatcher = {
+    sendToolResult: () => false,
+    sendBlockReply: sendBlockReply ?? ((payload: any) => {
+      blockReplies.push(payload);
+      return true;
+    }),
+    sendFinalReply: () => false,
+    waitForIdle: async () => {},
+    getQueuedCounts: () => ({ tool: 0, block: blockReplies.length, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    markComplete: () => {},
+  };
+  return { ctx: { dispatcher }, blockReplies };
+}
+
 const warnFinding = {
   type: "email",
   severity: "warn",
@@ -80,14 +97,14 @@ describe("pii-scan-user-input", () => {
     _resetCliMock();
   });
 
-  it("registers before_prompt_build and message_sending", () => {
+  it("registers before_prompt_build and reply_dispatch", () => {
     const { hooks } = registerHandlers();
 
     assert.deepEqual(
       hooks.map((hook) => hook.hookName),
-      ["before_prompt_build", "message_sending"],
+      ["before_prompt_build", "reply_dispatch"],
     );
-    assert.deepEqual(piiScan.hooks, ["before_prompt_build", "message_sending"]);
+    assert.deepEqual(piiScan.hooks, ["before_prompt_build", "reply_dispatch"]);
   });
 
   it("does not call CLI for empty prompt", async () => {
@@ -127,35 +144,54 @@ describe("pii-scan-user-input", () => {
   });
 
   it("pass verdict does not cache a warning", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(scanResult("pass", []));
 
     await beforePromptBuild.handler({ prompt: "hello", runId: "run-1" }, { runId: "run-1" });
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
     assert.equal(result, undefined);
+    assert.deepEqual(blockReplies, []);
   });
 
-  it("warn verdict prefixes same-run reply once and omits raw evidence", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+  it("warn verdict queues a same-run block reply once and omits raw evidence", async () => {
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(scanResult("warn", [warnFinding]));
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
-    const first = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
-    const second = await messageSending.handler({ content: "Hello again.", runId: "run-1" }, { runId: "run-1" });
+    const first = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+    const second = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
-    assert.equal(typeof first?.content, "string");
-    assert.match(first.content, /\[pii-checker\]/);
-    assert.match(first.content, /email/);
-    assert.match(first.content, /a\*\*\*@example\.com/);
-    assert.doesNotMatch(first.content, /alice@example\.com/);
-    assert.doesNotMatch(first.content, /raw_evidence/);
-    assert.ok(first.content.endsWith("\n\nHello."));
+    assert.equal(first, undefined);
     assert.equal(second, undefined);
+    assert.equal(blockReplies.length, 1);
+    assert.match(blockReplies[0].text, /\[pii-checker\]/);
+    assert.match(blockReplies[0].text, /email/);
+    assert.match(blockReplies[0].text, /a\*\*\*@example\.com/);
+    assert.doesNotMatch(blockReplies[0].text, /alice@example\.com/);
+    assert.doesNotMatch(blockReplies[0].text, /raw_evidence/);
+    assert.match(blockReplies[0].text, /本轮请求将继续处理/);
   });
 
-  it("deny verdict prefixes a high-risk warning", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+  it("keeps warning cached when reply_dispatch cannot queue the block reply", async () => {
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const failedCtx = createReplyDispatchCtx(() => false).ctx;
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+    mockCli(scanResult("warn", [warnFinding]));
+
+    await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, failedCtx);
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    assert.equal(blockReplies.length, 1);
+    assert.match(blockReplies[0].text, /\[pii-checker\]/);
+  });
+
+  it("deny verdict queues a high-risk warning", async () => {
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(
       scanResult("deny", [
         {
@@ -167,61 +203,89 @@ describe("pii-scan-user-input", () => {
     );
 
     await beforePromptBuild.handler({ prompt: "password=secret", runId: "run-1" }, { runId: "run-1" });
-    const result = await messageSending.handler({ content: "Done.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
-    assert.match(result.content, /高风险/);
-    assert.match(result.content, /credential/);
-    assert.match(result.content, /Done\./);
+    assert.equal(result, undefined);
+    assert.equal(blockReplies.length, 1);
+    assert.match(blockReplies[0].text, /高风险/);
+    assert.match(blockReplies[0].text, /credential/);
   });
 
   it("uses event.runId when ctx.runId is missing", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(scanResult("warn", [warnFinding]));
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-event" }, {});
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-event" }, {});
+    const result = await replyDispatch.handler({ runId: "run-event", sendPolicy: "allow" }, ctx);
 
-    assert.match(result.content, /\[pii-checker\]/);
+    assert.equal(result, undefined);
+    assert.equal(blockReplies.length, 1);
+    assert.match(blockReplies[0].text, /\[pii-checker\]/);
   });
 
   it("does not cache warning when runId is missing", async () => {
-    const { beforePromptBuild, messageSending, logs } = registerHandlers();
+    const { beforePromptBuild, replyDispatch, logs } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(scanResult("warn", [warnFinding]));
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com" }, { sessionKey: "session-1" });
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
     assert.equal(result, undefined);
+    assert.deepEqual(blockReplies, []);
     assert.ok(logs.some((log) => log.includes("missing runId")));
   });
 
   it("CLI nonzero fails open", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli({ exitCode: 1, stdout: "", stderr: "boom" });
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
     assert.equal(result, undefined);
+    assert.deepEqual(blockReplies, []);
   });
 
   it("invalid CLI JSON fails open", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers();
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli({ exitCode: 0, stdout: "not-json", stderr: "" });
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
     assert.equal(result, undefined);
+    assert.deepEqual(blockReplies, []);
   });
 
   it("expires undrained warnings by TTL", async () => {
-    const { beforePromptBuild, messageSending } = registerHandlers({ piiWarningTtlMs: 0 });
+    const { beforePromptBuild, replyDispatch } = registerHandlers({ piiWarningTtlMs: 0 });
+    const { ctx, blockReplies } = createReplyDispatchCtx();
     mockCli(scanResult("warn", [warnFinding]));
 
     await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
-    const result = await messageSending.handler({ content: "Hello.", runId: "run-1" }, { runId: "run-1" });
+    const result = await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
     assert.equal(result, undefined);
+    assert.deepEqual(blockReplies, []);
+  });
+
+  it("drops warnings without display when user delivery is suppressed or denied", async () => {
+    const { beforePromptBuild, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+    mockCli(scanResult("warn", [warnFinding]));
+
+    await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-1" }, { runId: "run-1" });
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow", suppressUserDelivery: true }, ctx);
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    await beforePromptBuild.handler({ prompt: "email alice@example.com", runId: "run-2" }, { runId: "run-2" });
+    await replyDispatch.handler({ runId: "run-2", sendPolicy: "deny" }, ctx);
+    await replyDispatch.handler({ runId: "run-2", sendPolicy: "allow" }, ctx);
+
+    assert.deepEqual(blockReplies, []);
   });
 });

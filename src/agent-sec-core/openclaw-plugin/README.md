@@ -30,7 +30,7 @@ openclaw-plugin/
 │   │   ├── skill-ledger.ts     #   before_tool_call
 │   │   ├── code-scan.ts        #   before_tool_call hook
 │   │   ├── prompt-scan.ts      #   before_dispatch hook
-│   │   ├── pii-scan.ts         #   before_prompt_build + message_sending hooks
+│   │   ├── pii-scan.ts         #   before_prompt_build + reply_dispatch hooks
 │   │   └── observability.ts    #   observability hook registration
 │   └── helpers/                # Capability support code
 │       └── observability/      #   OpenClaw → agent-sec observability adapter
@@ -187,7 +187,7 @@ Source: ~/path/to/openclaw-plugin/dist/index.js
 Typed hooks:
 before_dispatch (priority 190)
 before_prompt_build (priority 0)
-message_sending (priority 0)
+reply_dispatch (priority 0)
 llm_input (priority 1000)
 model_call_started (priority 1000)
 model_call_ended (priority 1000)
@@ -234,7 +234,7 @@ AGENT_SEC_LIVE=1 npm run smoke
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
-| `pii-scan-user-input` | `before_prompt_build`, `message_sending` | 0 (default) | Scans current user prompt for PII/credentials and prefixes a non-blocking same-run warning |
+| `pii-scan-user-input` | `before_prompt_build`, `reply_dispatch` | 0 (default) | Scans current user prompt for PII/credentials and emits a non-blocking same-run warning |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read         |
 | `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
@@ -243,7 +243,7 @@ AGENT_SEC_LIVE=1 npm run smoke
 
 The `pii-scan-user-input` capability scans only `event.prompt` in `before_prompt_build`. It intentionally does not scan `event.messages`, because that list may include history, tool results, memory, or RAG context and can repeatedly warn on older PII that was not submitted in the current turn.
 
-`warn` and `deny` verdicts never block OpenClaw in v1. The capability caches a minimal warning under the current `runId`, then `message_sending` drains that warning and prefixes it to the same run's outgoing message. If `runId` is missing, the capability fails open and does not cache a session-level warning.
+`warn` and `deny` verdicts never block OpenClaw in v1. The capability caches a minimal warning under the current `runId`, then `reply_dispatch` reads that warning and queues it with `dispatcher.sendBlockReply({ text })` before the default agent reply flow continues. In this context, block reply means OpenClaw's intermediate reply type, not a security block. The warning is removed only after it is successfully queued. This avoids consuming the warning in a generic outbound `message_sending` hook that may not represent the final user-visible reply. If `runId` is missing, the capability fails open and does not cache a session-level warning. If OpenClaw marks the turn with `sendPolicy: "deny"` or `suppressUserDelivery: true`, the warning is dropped without display so the plugin does not override host-level delivery policy.
 
 ### Configuring `observability`
 

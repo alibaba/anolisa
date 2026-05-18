@@ -31,10 +31,13 @@ const mockEvents: Record<string, Record<string, unknown>> = {
     prompt: "hello world",
     messages: [{ role: "user", content: "hello world" }],
   },
-  message_sending: {
+  reply_dispatch: {
     runId: "run-001",
     sessionId: "session-001",
-    content: "Hello.",
+    sendPolicy: "allow",
+    inboundAudio: false,
+    shouldRouteToOriginating: false,
+    shouldSendToolSummaries: true,
   },
   llm_input: {
     runId: "run-001",
@@ -111,8 +114,18 @@ const mockCtx: Record<string, Record<string, unknown>> = {
   before_prompt_build: {
     channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
   },
-  message_sending: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+  reply_dispatch: {
+    dispatcher: {
+      sendToolResult: () => false,
+      sendBlockReply: () => true,
+      sendFinalReply: () => false,
+      waitForIdle: async () => {},
+      getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+      getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+      markComplete: () => {},
+    },
+    recordProcessed: () => {},
+    markIdle: () => {},
   },
   llm_input: {
     channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
