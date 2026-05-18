@@ -853,12 +853,8 @@ def test_list_scanners(ws: Workspace):
     assert "scanners" in out, f"Expected 'scanners' key in JSON output: {out}"
     names = [s["name"] for s in out["scanners"]]
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
-    assert (
-        "code-scanner" in names
-    ), f"Expected code-scanner in scanners: {names}"
-    assert (
-        "static-scanner" in names
-    ), f"Expected static-scanner in scanners: {names}"
+    assert "code-scanner" in names, f"Expected code-scanner in scanners: {names}"
+    assert "static-scanner" in names, f"Expected static-scanner in scanners: {names}"
 
 
 def test_certify_empty_skill_dir(ws: Workspace):
@@ -1442,7 +1438,10 @@ def main():
             "G5: missing findings file", lambda: test_certify_missing_findings_file(ws)
         )
         test("G5: invalid JSON", lambda: test_certify_invalid_json_findings(ws))
-        test("G5: scan auto-invoke mode", lambda: test_scan_auto_invoke_default_scanners(ws))
+        test(
+            "G5: scan auto-invoke mode",
+            lambda: test_scan_auto_invoke_default_scanners(ws),
+        )
         test("G5: no skill_dir no --all", lambda: test_certify_no_skill_dir_no_all(ws))
 
         # G6: scan --all

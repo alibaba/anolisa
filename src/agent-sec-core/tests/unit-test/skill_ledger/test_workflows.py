@@ -382,31 +382,40 @@ class TestCertifyWorkflow(SkillDirTestCase):
         self.assertEqual(len(data["scans"]), 1)
 
     def test_scan_entry_merge_canonicalizes_legacy_scanner_names(self):
-        """Legacy scanner ids are replaced by canonical scanner entries."""
-        from agent_sec_cli.skill_ledger.core.certifier import _merge_scan_entries
-        from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
+        """Legacy scanner ids are replaced through the public scan workflow."""
         from agent_sec_cli.skill_ledger.models.scan import ScanEntry
 
-        manifest = SignedManifest(
-            skillName="test-skill",
-            fileHashes={},
-            scans=[
-                ScanEntry(scanner="skill-code-scanner", status="warn"),
-                ScanEntry(scanner="cisco-static-scanner", status="pass"),
-            ],
+        findings_path = self._write_findings(
+            [
+                {"rule": "legacy", "level": "warn", "message": "legacy"},
+            ]
         )
-        incoming = [
-            ScanEntry(scanner="code-scanner", status="pass"),
-            ScanEntry(scanner="static-scanner", status="pass"),
+        certify(self.skill_dir, self.backend, findings_path=findings_path)
+
+        latest = os.path.join(self.skill_dir, ".skill-meta", "latest.json")
+        with open(latest, "r") as f:
+            data = json.load(f)
+        data["scans"] = [
+            ScanEntry(scanner="skill-code-scanner", status="warn").model_dump(),
+            ScanEntry(scanner="cisco-static-scanner", status="pass").model_dump(),
         ]
+        with open(latest, "w") as f:
+            json.dump(data, f)
 
-        _merge_scan_entries(manifest, incoming)
+        scan_skill(
+            self.skill_dir,
+            self.backend,
+            scanner_names=["code-scanner", "static-scanner"],
+            force=True,
+        )
 
+        with open(latest, "r") as f:
+            data = json.load(f)
         self.assertEqual(
-            [scan.scanner for scan in manifest.scans],
+            [scan["scanner"] for scan in data["scans"]],
             ["code-scanner", "static-scanner"],
         )
-        self.assertEqual(manifest.scanStatus, "pass")
+        self.assertEqual(data["scanStatus"], "pass")
 
     def test_deny_finding_produces_deny_status(self):
         findings_path = self._write_findings(

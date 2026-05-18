@@ -249,6 +249,36 @@ copilot-shell hook 当前仅覆盖 project / user / system 三类目录：`<cwd>
 
 不存在的目录会被静默忽略。此外，对 Skill 执行 `check`、`scan` 或 `certify` 时，未收录的目录会自动追加到配置中，方便后续 `--all` 批量操作。
 
+#### 定时执行默认快速扫描
+
+如果希望定期刷新默认快速扫描结果，可以把 `scan --all` 放入 cron。`scan --all` 会自动跳过文件未变且已有完整扫描结果的 Skill，只补扫新增、变更、缺少扫描结果或 manifest 异常的 Skill。
+
+无口令密钥场景：
+
+```bash
+mkdir -p "$HOME/.local/state/agent-sec"
+AGENT_SEC_CLI="$(command -v agent-sec-cli)"
+CRON_LINE="0 3 * * * $AGENT_SEC_CLI skill-ledger scan --all >> $HOME/.local/state/agent-sec/skill-ledger-scan.log 2>&1"
+(crontab -l 2>/dev/null | grep -Fv "skill-ledger scan --all"; echo "$CRON_LINE") | crontab -
+```
+
+使用口令保护私钥时，定时任务需要提供 `SKILL_LEDGER_PASSPHRASE`。下面的命令会把口令以明文写入当前用户的 crontab 和系统 cron spool，请只在可信单用户环境中使用；更安全的做法是使用默认无口令密钥，或通过本机 secret manager / 受限权限文件包装 `scan --all`。
+
+```bash
+read -rsp "SKILL_LEDGER_PASSPHRASE: " SKILL_LEDGER_PASSPHRASE; echo
+mkdir -p "$HOME/.local/state/agent-sec"
+AGENT_SEC_CLI="$(command -v agent-sec-cli)"
+CRON_LINE="0 3 * * * SKILL_LEDGER_PASSPHRASE='$SKILL_LEDGER_PASSPHRASE' $AGENT_SEC_CLI skill-ledger scan --all >> $HOME/.local/state/agent-sec/skill-ledger-scan.log 2>&1"
+(crontab -l 2>/dev/null | grep -Fv "skill-ledger scan --all"; echo "$CRON_LINE") | crontab -
+unset SKILL_LEDGER_PASSPHRASE
+```
+
+查看已安装的定时任务：
+
+```bash
+crontab -l
+```
+
 #### 触发扫描
 
 通过自然语言向 Agent 发出指令即可。默认扫描执行 Phase 1 → Phase 2；用户明确要求深度扫描时执行 Phase 1 → Phase 3。

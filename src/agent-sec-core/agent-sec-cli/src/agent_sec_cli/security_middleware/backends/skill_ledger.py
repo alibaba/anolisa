@@ -12,7 +12,11 @@ from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
 from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
 from agent_sec_cli.skill_ledger.core.auditor import audit
-from agent_sec_cli.skill_ledger.core.certifier import certify, scan_batch, scan_skill
+from agent_sec_cli.skill_ledger.core.certifier import (
+    certify,
+    scan_batch,
+    scan_skill,
+)
 from agent_sec_cli.skill_ledger.core.checker import check, check_batch
 from agent_sec_cli.skill_ledger.core.status import ledger_status
 from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
@@ -44,7 +48,9 @@ class SkillLedgerBackend(BaseBackend):
     # Handlers
     # ------------------------------------------------------------------
 
-    def _generate_keys(self, *, force: bool = False, passphrase: str | None = None) -> dict:
+    def _generate_keys(
+        self, *, force: bool = False, passphrase: str | None = None
+    ) -> dict:
         """Generate key material and return the backend result dict."""
         ensure_keys_not_exist(force=force)
         # Archive the old public key into the keyring so that existing
@@ -74,7 +80,9 @@ class SkillLedgerBackend(BaseBackend):
         key_result: dict[str, Any] | None = None
         try:
             if force_keys or not keys_exist():
-                key_result = self._generate_keys(force=force_keys, passphrase=passphrase)
+                key_result = self._generate_keys(
+                    force=force_keys, passphrase=passphrase
+                )
                 key_created = True
 
             results: list[dict[str, Any]] = []

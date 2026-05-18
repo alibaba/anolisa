@@ -24,7 +24,10 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     next_version_id,
     save_manifest,
 )
-from agent_sec_cli.skill_ledger.errors import FindingsFileError, SignatureInvalidError
+from agent_sec_cli.skill_ledger.errors import (
+    FindingsFileError,
+    SignatureInvalidError,
+)
 from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.models.manifest import (
     ManifestSignature,
@@ -60,7 +63,9 @@ def _remember_skill_dir_best_effort(skill_dir: str) -> None:
     try:
         remember_skill_dir(Path(skill_dir))
     except Exception:
-        logger.debug("auto-remember failed for %s, continuing", skill_dir, exc_info=True)
+        logger.debug(
+            "auto-remember failed for %s, continuing", skill_dir, exc_info=True
+        )
 
 
 def _sign_manifest(manifest: SignedManifest, backend: SigningBackend) -> SignedManifest:
@@ -555,7 +560,7 @@ def certify_batch(
     scanner: str = "skill-vetter",
     scanner_version: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compatibility helper for callers that still import certify_batch."""
+    """Deprecated compatibility helper for callers that still import certify_batch."""
     results: list[dict[str, Any]] = []
     for skill_dir in skill_dirs:
         try:

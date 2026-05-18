@@ -746,9 +746,7 @@ def test_scan_static_scanner_detects_dangerous_script(ws):
 
     manifest = read_latest_manifest(skill)
     cisco_scan = next(
-        entry
-        for entry in manifest["scans"]
-        if entry["scanner"] == "static-scanner"
+        entry for entry in manifest["scans"] if entry["scanner"] == "static-scanner"
     )
     rules = {finding["rule"] for finding in cisco_scan["findings"]}
     assert "shell-download-exec" in rules
@@ -1176,12 +1174,8 @@ def test_list_scanners(ws):
     assert "scanners" in out, f"Expected 'scanners' key in JSON output: {out}"
     names = [s["name"] for s in out["scanners"]]
     assert "skill-vetter" in names, f"Expected skill-vetter in scanners: {names}"
-    assert (
-        "code-scanner" in names
-    ), f"Expected code-scanner in scanners: {names}"
-    assert (
-        "static-scanner" in names
-    ), f"Expected static-scanner in scanners: {names}"
+    assert "code-scanner" in names, f"Expected code-scanner in scanners: {names}"
+    assert "static-scanner" in names, f"Expected static-scanner in scanners: {names}"
     assert "skill-code-scanner" not in names
     assert "cisco-static-scanner" not in names
     by_name = {s["name"]: s for s in out["scanners"]}
