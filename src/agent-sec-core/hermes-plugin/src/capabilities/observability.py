@@ -103,24 +103,31 @@ class ObservabilityCapability(AgentSecCoreCapability):
         self._emit("post_api_request", dict(kwargs))
         return None
 
-    def _on_pre_tool_call(self, tool_name: Any, args: Any, **kwargs: Any) -> None:
+    def _on_pre_tool_call(
+        self,
+        *,
+        tool_name: Any,
+        args: Any,
+        **kwargs: Any,
+    ) -> None:
         data = {"tool_name": tool_name, "args": args, **kwargs}
         self._emit("pre_tool_call", data)
         return None
 
     def _on_post_tool_call(
         self,
+        *,
         tool_name: Any,
-        args: Any = None,
-        result: Any = None,
+        args: Any,
+        result: Any,
         **kwargs: Any,
     ) -> None:
-        data: dict[str, Any] = {"tool_name": tool_name, **kwargs}
-        if result is None:
-            data["result"] = args
-        else:
-            data["args"] = args
-            data["result"] = result
+        data: dict[str, Any] = {
+            "tool_name": tool_name,
+            "args": args,
+            "result": result,
+            **kwargs,
+        }
         self._emit("post_tool_call", data)
         return None
 
