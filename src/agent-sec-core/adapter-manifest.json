@@ -29,30 +29,30 @@
   "resources": {
     "sandboxBinary": {
       "source": "linux-sandbox/target/release/linux-sandbox",
-      "stagePath": "target/sec-core/bin/linux-sandbox",
+      "stagePath": "target/linux-sandbox",
       "installPath": "/usr/local/bin/linux-sandbox"
     },
     "cliWheel": {
       "source": "agent-sec-cli/target/wheels/agent_sec_cli-*.whl",
-      "stagePath": "target/sec-core/lib/anolisa/sec-core/wheels",
-      "installPath": "/usr/lib/anolisa/sec-core/wheels"
+      "stagePath": "target/wheels",
+      "installPath": "/usr/local/lib/anolisa/sec-core/wheels"
     },
     "openclawPlugin": {
       "source": "openclaw-plugin",
-      "stagePath": "target/sec-core/lib/anolisa/sec-core/openclaw-plugin",
-      "installPath": "/usr/lib/anolisa/sec-core/openclaw-plugin",
-      "deployScript": "/usr/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh",
+      "stagePath": "target/openclaw-plugin",
+      "installPath": "/usr/local/lib/anolisa/sec-core/openclaw-plugin",
+      "deployScript": "/usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh",
       "openclawPath": "OpenClaw plugin registry"
     },
     "securitySkills": {
       "source": "skills",
-      "stagePath": "target/sec-core/share/anolisa/skills",
+      "stagePath": "target/skills",
       "installPath": "/usr/share/anolisa/skills",
       "openclawPath": "~/.openclaw/skills"
     },
     "coshExtension": {
       "source": "cosh-extension",
-      "stagePath": "target/sec-core/share/anolisa/extensions/agent-sec-core",
+      "stagePath": "target/cosh-extension",
       "installPath": "/usr/share/anolisa/extensions/agent-sec-core"
     }
   }

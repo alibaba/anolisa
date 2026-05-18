@@ -15,7 +15,7 @@
 # Components (build order):
 #   cosh     copilot-shell      (Node.js / TypeScript)
 #   skills   os-skills          (Markdown skill definitions, no compilation)
-#   sec-core agent-sec-core     (Rust sandbox, Linux only)
+#   sec-core agent-sec-core     (Security CLI + sandbox + hooks)
 #   tokenless tokenless         (Rust compression library, cross-platform)
 #   ws-ckpt  ws-ckpt           (Rust workspace checkpoint daemon)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
@@ -64,14 +64,10 @@ USER_COSH_DIR="$HOME/.copilot-shell"
 USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
 USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
 
-SEC_CORE_BIN_DIR="$SYSTEM_BIN_DIR"
-SEC_CORE_LIB_DIR="/usr/lib/anolisa/sec-core"
-SEC_CORE_VENV_DIR="$SEC_CORE_LIB_DIR/venv"
-SEC_CORE_WHEEL_DIR="$SEC_CORE_LIB_DIR/wheels"
-SEC_CORE_OPENCLAW_PLUGIN_DIR="$SEC_CORE_LIB_DIR/openclaw-plugin"
-SEC_CORE_SKILL_DIR="/usr/share/anolisa/skills"
-SEC_CORE_EXTENSION_DIR="/usr/share/anolisa/extensions/agent-sec-core"
-SEC_CORE_ADAPTER_DIR="/usr/share/anolisa/adapters/sec-core"
+# sec-core install paths are loaded from src/agent-sec-core/Makefile after
+# INSTALL_PROFILE is resolved, so build-all does not duplicate its defaults.
+SEC_CORE_BIN_DIR=""
+SEC_CORE_LIB_DIR=""
 SEC_CORE_RUST_TOOLCHAIN="1.93.0"
 
 # ─── output / staging ───
@@ -294,6 +290,25 @@ run_logged_timeout() {
     fi
 }
 
+makefile_var() {
+    local dir="$1" profile="$2" var="$3"
+    make -s -C "$dir" INSTALL_PROFILE="$profile" VAR="$var" -f - print-var <<'MAKE_EOF'
+include Makefile
+print-var:
+	@printf '%s\n' "$($(VAR))"
+MAKE_EOF
+}
+
+load_sec_core_make_paths() {
+    local dir="$PROJECT_ROOT/src/agent-sec-core"
+    [[ -f "$dir/Makefile" ]] || return 0
+
+    SEC_CORE_BIN_DIR="$(makefile_var "$dir" "$INSTALL_MODE" BINDIR)" || \
+        die "Failed to read BINDIR from sec-core Makefile"
+    SEC_CORE_LIB_DIR="$(makefile_var "$dir" "$INSTALL_MODE" LIBDIR)" || \
+        die "Failed to read LIBDIR from sec-core Makefile"
+}
+
 ensure_user_mode() {
     case "$INSTALL_MODE" in
         user)
@@ -320,22 +335,7 @@ ensure_user_mode() {
     USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
     USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
 
-    if [[ "$INSTALL_MODE" == "system" ]]; then
-        SEC_CORE_BIN_DIR="$SYSTEM_BIN_DIR"
-        SEC_CORE_LIB_DIR="/usr/lib/anolisa/sec-core"
-        SEC_CORE_SKILL_DIR="/usr/share/anolisa/skills"
-        SEC_CORE_EXTENSION_DIR="/usr/share/anolisa/extensions/agent-sec-core"
-        SEC_CORE_ADAPTER_DIR="/usr/share/anolisa/adapters/sec-core"
-    else
-        SEC_CORE_BIN_DIR="$USER_BIN_DIR"
-        SEC_CORE_LIB_DIR="$USER_LIB_DIR/anolisa/sec-core"
-        SEC_CORE_SKILL_DIR="$USER_COSH_SKILLS_DIR"
-        SEC_CORE_EXTENSION_DIR="$USER_COSH_EXTENSIONS_DIR/agent-sec-core"
-        SEC_CORE_ADAPTER_DIR="$USER_SHARE_DIR/anolisa/adapters/sec-core"
-    fi
-    SEC_CORE_VENV_DIR="$SEC_CORE_LIB_DIR/venv"
-    SEC_CORE_WHEEL_DIR="$SEC_CORE_LIB_DIR/wheels"
-    SEC_CORE_OPENCLAW_PLUGIN_DIR="$SEC_CORE_LIB_DIR/openclaw-plugin"
+    load_sec_core_make_paths
 }
 
 system_service_dir() {
@@ -1279,7 +1279,6 @@ build_sec_core() {
 
     local bin="$build_dir/linux-sandbox"
     if [[ -f "$bin" ]]; then
-        stage_adapter_manifest "sec-core" "$PROJECT_ROOT/src/agent-sec-core/adapter-manifest.json"
         ok "agent-sec-core built successfully"
     else
         warn "Expected artifact $bin not found"
@@ -1472,27 +1471,11 @@ install_sec_core() {
     _configure_uv_mirror
 
     if $DRY_RUN; then
-        local dry_prefix="$INSTALL_PREFIX"
-        [[ "$INSTALL_MODE" == "system" ]] && dry_prefix="$SYSTEM_PREFIX"
-        local make_args=(
-            -C "$dir" install
-            "BUILD_DIR=$build_dir"
-            "PREFIX=$dry_prefix"
-            "BINDIR=$SEC_CORE_BIN_DIR"
-            "LIBDIR=$SEC_CORE_LIB_DIR"
-            "VENV_DIR=$SEC_CORE_VENV_DIR"
-            "SKILLDIR=$SEC_CORE_SKILL_DIR"
-            "EXTENSIONDIR=$SEC_CORE_EXTENSION_DIR"
-            "OPENCLAW_PLUGIN_DIR=$SEC_CORE_OPENCLAW_PLUGIN_DIR"
-        )
         if [[ "$INSTALL_MODE" == "system" ]]; then
-            make_args=("INSTALL_PROFILE=system" "${make_args[@]}")
-            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make ${make_args[*]}"
+            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=system"
         else
-            make_args=("INSTALL_PROFILE=user" "${make_args[@]}")
-            echo "DRY-RUN: make ${make_args[*]}"
+            echo "DRY-RUN: make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=user"
         fi
-        echo "DRY-RUN: install sec-core adapter manifest -> $SEC_CORE_ADAPTER_DIR/manifest.json"
         echo "DRY-RUN: check/install sec-core runtime dependencies"
         ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
         return 0
@@ -1502,28 +1485,13 @@ install_sec_core() {
         run_logged "make install (agent-sec-core)" \
             as_root env PATH="$PATH" \
                 UV_PYTHON_INSTALL_MIRROR="${UV_PYTHON_INSTALL_MIRROR:-}" \
-                make -C "$dir" install BUILD_DIR="$build_dir" \
-                INSTALL_PROFILE=system PREFIX="$SYSTEM_PREFIX" \
-                BINDIR="$SYSTEM_BIN_DIR" LIBDIR="$SEC_CORE_LIB_DIR" \
-                VENV_DIR="$SEC_CORE_VENV_DIR" \
-                SKILLDIR="$SEC_CORE_SKILL_DIR" \
-                EXTENSIONDIR="$SEC_CORE_EXTENSION_DIR" \
-                OPENCLAW_PLUGIN_DIR="$SEC_CORE_OPENCLAW_PLUGIN_DIR"
+                make -C "$dir" install \
+                BUILD_DIR="$build_dir" INSTALL_PROFILE=system
     else
         run_logged "make install (agent-sec-core)" \
-            make -C "$dir" install BUILD_DIR="$build_dir" \
-                INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" \
-                BINDIR="$SEC_CORE_BIN_DIR" LIBDIR="$SEC_CORE_LIB_DIR" \
-                VENV_DIR="$SEC_CORE_VENV_DIR" \
-                SKILLDIR="$SEC_CORE_SKILL_DIR" \
-                EXTENSIONDIR="$SEC_CORE_EXTENSION_DIR" \
-                OPENCLAW_PLUGIN_DIR="$SEC_CORE_OPENCLAW_PLUGIN_DIR"
+            make -C "$dir" install \
+                BUILD_DIR="$build_dir" INSTALL_PROFILE=user
     fi
-
-    sec_core_cmd install -d -m 0755 "$SEC_CORE_ADAPTER_DIR"
-    sec_core_cmd install -p -m 0644 \
-        "$PROJECT_ROOT/src/agent-sec-core/adapter-manifest.json" \
-        "$SEC_CORE_ADAPTER_DIR/manifest.json"
 
     install_sec_core_runtime_deps
 
@@ -1623,14 +1591,26 @@ uninstall_skills() {
 
 uninstall_sec_core() {
     step "Uninstalling agent-sec-core"
-    sec_core_cmd rm -f \
-        "$SEC_CORE_BIN_DIR/linux-sandbox" \
-        "$SEC_CORE_BIN_DIR/agent-sec-cli"
-    remove_skill_dirs_flat "$PROJECT_ROOT/src/agent-sec-core/skills" "$SEC_CORE_SKILL_DIR"
-    sec_core_cmd rm -rf \
-        "$SEC_CORE_LIB_DIR" \
-        "$SEC_CORE_EXTENSION_DIR" \
-        "$SEC_CORE_ADAPTER_DIR"
+    local dir="$PROJECT_ROOT/src/agent-sec-core"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    if $DRY_RUN; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            echo "DRY-RUN: sudo make -C $dir uninstall INSTALL_PROFILE=system"
+        else
+            echo "DRY-RUN: make -C $dir uninstall INSTALL_PROFILE=user"
+        fi
+        ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
+        return 0
+    fi
+
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        run_logged "make uninstall (agent-sec-core)" \
+            as_root make -C "$dir" uninstall INSTALL_PROFILE=system || true
+    else
+        run_logged "make uninstall (agent-sec-core)" \
+            make -C "$dir" uninstall INSTALL_PROFILE=user || true
+    fi
     ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
 }
 

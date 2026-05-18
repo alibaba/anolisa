@@ -20,18 +20,18 @@
   "resources": {
     "binary": {
       "source": "src/target/release/ws-ckpt",
-      "stagePath": "target/ws-ckpt/bin/ws-ckpt",
+      "stagePath": "target/bin/ws-ckpt",
       "installPath": "/usr/local/bin/ws-ckpt"
     },
     "skill": {
       "source": "src/skills/ws-ckpt",
-      "stagePath": "target/ws-ckpt/share/anolisa/skills/ws-ckpt",
+      "stagePath": "target/share/anolisa/skills/ws-ckpt",
       "installPath": "/usr/share/anolisa/skills/ws-ckpt",
       "openclawPath": "~/.openclaw/skills/ws-ckpt"
     },
     "systemd": {
       "source": "src/systemd/ws-ckpt.service",
-      "stagePath": "target/ws-ckpt/lib/systemd/system/ws-ckpt.service",
+      "stagePath": "target/lib/systemd/system/ws-ckpt.service",
       "installPath": "/usr/lib/systemd/system/ws-ckpt.service"
     }
   }

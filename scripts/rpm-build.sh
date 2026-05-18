@@ -219,6 +219,7 @@ build_agent_sec_core() {
     cp -p "${SEC_DIR}/scripts/agent-sec-cli-wrapper.sh" "$pkg_dir/scripts/"
     cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
+    cp "${SEC_DIR}/adapter-manifest.json" "$pkg_dir/"
     [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
 

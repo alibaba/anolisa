@@ -176,8 +176,13 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/tools
 	cp -p tools/sign-skill.sh $(BUILD_DIR)/tools/
 
+.PHONY: stage-adapter-manifest
+stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
+	install -d -m 0755 $(ADAPTER_STAGE_DIR)
+	install -p -m 0644 adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
+
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin stage-cosh-extension stage-skills ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -210,6 +215,7 @@ INSTALL_PROFILE ?= system
 
 ifeq ($(INSTALL_PROFILE),user)
   PREFIX          ?= $(HOME)/.local
+  ANOLISA_DATADIR ?= $(PREFIX)/share/anolisa
   EXTENSIONDIR    ?= $(HOME)/.copilot-shell/extensions/agent-sec-core
   SKILLDIR        ?= $(HOME)/.copilot-shell/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
@@ -218,8 +224,11 @@ else
   ANOLISA_DATADIR ?= /usr/share/anolisa
   EXTENSIONDIR    ?= $(ANOLISA_DATADIR)/extensions/agent-sec-core
   SKILLDIR        ?= $(ANOLISA_DATADIR)/skills
-  OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
+  OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
 endif
+
+ADAPTER_DIR         ?= $(ANOLISA_DATADIR)/adapters/sec-core
+ADAPTER_STAGE_DIR   ?= $(BUILD_DIR)/share/anolisa/adapters/sec-core
 
 BINDIR              ?= $(PREFIX)/bin
 LIBDIR              ?= $(PREFIX)/lib/anolisa/sec-core
@@ -228,6 +237,7 @@ VENV_DIR            ?= $(LIBDIR)/venv
 WHEEL_DIR           ?= $(LIBDIR)/wheels
 CLI_STAGED_SITE     ?= $(BUILD_DIR)/site-packages
 CLI_PRIVATE_SITE    ?= /opt/agent-sec/lib/python3.11/site-packages
+RPM_OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -297,11 +307,58 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
 	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
 
+.PHONY: install-adapter-manifest
+install-adapter-manifest: ## Install adapter-manifest.json from staged copy
+	test -f $(ADAPTER_STAGE_DIR)/manifest.json
+	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)
+	install -p -m 0644 $(ADAPTER_STAGE_DIR)/manifest.json $(DESTDIR)$(ADAPTER_DIR)/manifest.json
+
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-skills ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-skills install-adapter-manifest ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
+install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-skills ## Install all (RPM build)
+
+# =============================================================================
+# UNINSTALL
+# =============================================================================
+# Mirrors install-all (source build). RPM uninstall is handled by the package
+# manager via the .spec %files manifests, not by `make uninstall`.
+
+.PHONY: uninstall-cli-venv
+uninstall-cli-venv: ## Remove venv and agent-sec-cli symlink
+	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
+	rm -rf $(DESTDIR)$(VENV_DIR)
+
+.PHONY: uninstall-cli-site
+uninstall-cli-site: ## Remove RPM-style private site-packages and wrapper
+	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
+	rm -rf $(DESTDIR)$(CLI_PRIVATE_SITE)
+
+.PHONY: uninstall-cosh-hook
+uninstall-cosh-hook: ## Remove linux-sandbox and cosh extension
+	rm -f $(DESTDIR)$(BINDIR)/linux-sandbox
+	rm -rf $(DESTDIR)$(EXTENSIONDIR)
+
+.PHONY: uninstall-openclaw-plugin
+uninstall-openclaw-plugin: ## Remove openclaw plugin
+	rm -rf $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)
+
+.PHONY: uninstall-skills
+uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
+	@for d in skills/*/; do \
+		[ -d "$$d" ] || continue; \
+		name=$$(basename "$$d"); \
+		rm -rf "$(DESTDIR)$(SKILLDIR)/$$name"; \
+	done
+
+.PHONY: uninstall-adapter-manifest
+uninstall-adapter-manifest: ## Remove installed adapter manifest directory
+	rm -rf $(DESTDIR)$(ADAPTER_DIR)
+
+.PHONY: uninstall
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message

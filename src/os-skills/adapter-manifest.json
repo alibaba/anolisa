@@ -43,7 +43,7 @@
   "resources": {
     "skills": {
       "source": ".",
-      "stagePath": "target/os-skills/share/anolisa/skills",
+      "stagePath": "target/share/anolisa/skills",
       "installPath": "/usr/share/anolisa/skills",
       "openclawPath": "~/.openclaw/skills"
     }
