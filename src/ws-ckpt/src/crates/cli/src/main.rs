@@ -698,7 +698,17 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                     // Dynamically compute column widths
                     let hdr_ws = "WORKSPACE";
                     let hdr_snap = "SNAPSHOT";
-                    let hdr_date = "CREATED";
+                    let offset_secs = chrono::Local::now().offset().local_minus_utc();
+                    let sign = if offset_secs >= 0 { '+' } else { '-' };
+                    let h = offset_secs.abs() / 3600;
+                    let m = (offset_secs.abs() % 3600) / 60;
+                    let local_offset = if m == 0 {
+                        format!("{sign}{h}")
+                    } else {
+                        format!("{sign}{h}:{m:02}")
+                    };
+                    let hdr_date = format!("CREATED (UTC{local_offset})");
+                    let hdr_date = hdr_date.as_str();
                     let hdr_msg = "MESSAGE";
 
                     let w_ws = snapshots
@@ -736,7 +746,11 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                             "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
                             entry.workspace,
                             id_display,
-                            entry.meta.created_at.format("%Y-%m-%d %H:%M:%S"),
+                            entry
+                                .meta
+                                .created_at
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S"),
                             entry.meta.message.as_deref().unwrap_or("-"),
                         );
                     }

@@ -1499,6 +1499,7 @@ name = "ws-ckpt-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "serde_json",
  "tokio",
