@@ -24,9 +24,13 @@ import sys
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-_MIN_RESPONSE_LEN = 200
+_MIN_RESPONSE_CHARS = 200  # character count, not byte length
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOON_FALLBACK = "/usr/libexec/anolisa/tokenless/toon"
+
+_SKIP_TOOLS = {
+    "Read", "read_file", "Glob", "list_directory",
+    "NotebookRead", "read", "glob", "notebookread",
+}
 
 
 # -- helpers -----------------------------------------------------------------
@@ -71,19 +75,25 @@ def _unwrap_string_json(raw: str) -> str | None:
     return raw
 
 
+def _is_skill_file(text: str) -> bool:
+    """Detect YAML frontmatter markdown (skill files) that must not be compressed."""
+    if not text.startswith("---"):
+        return False
+    lines = text.split("\n", 20)
+    for line in lines[1:]:
+        if line.startswith("name:") or line.startswith("description:"):
+            return True
+    return False
+
+
 # -- main --------------------------------------------------------------------
 
 
 def main() -> None:
-    # 1. Resolve binaries
+    # 1. Resolve tokenless binary
     tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)
     if not tokenless_bin:
         _warn("tokenless is not installed. TOON compression hook disabled.")
-        _skip()
-
-    toon_bin = _resolve_binary("toon", _TOON_FALLBACK)
-    if not toon_bin:
-        _warn("toon is not installed. TOON compression hook disabled.")
         _skip()
 
     # 2. Read stdin JSON
@@ -93,12 +103,21 @@ def main() -> None:
         _warn("failed to read PostToolUse payload. Passing through unchanged.")
         _skip()
 
-    # 3. Extract tool_response
+    # 3. Skip content-retrieval tools
+    tool_name = input_data.get("tool_name", "unknown")
+    if tool_name in _SKIP_TOOLS:
+        _skip()
+
+    # 4. Extract tool_response
     tool_response_raw = input_data.get("tool_response", "")
     if not tool_response_raw or tool_response_raw == "{}":
         _skip()
 
-    # 4. Normalize: unwrap string-wrapped JSON
+    # 5. Skip skill files (YAML frontmatter)
+    if isinstance(tool_response_raw, str) and _is_skill_file(tool_response_raw):
+        _skip()
+
+    # 6. Normalize: unwrap string-wrapped JSON
     if isinstance(tool_response_raw, str):
         tool_response = _unwrap_string_json(tool_response_raw)
         if tool_response is None:
@@ -111,21 +130,20 @@ def main() -> None:
     if not tool_response:
         _skip()
 
-    # 5. Skip small responses
-    if len(tool_response) < _MIN_RESPONSE_LEN:
+    # 7. Skip small responses (character count, not byte length)
+    if len(tool_response) < _MIN_RESPONSE_CHARS:
         _skip()
 
-    # 6. Validate it's JSON
+    # 8. Validate it's JSON
     parsed = _try_parse_json(tool_response)
     if parsed is None:
         _skip()
 
-    # 7. Extract caller context
+    # 9. Extract caller context
     session_id = input_data.get("session_id", "")
     tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
-    tool_name = input_data.get("tool_name", "unknown")
 
-    # 8. Encode to TOON via tokenless compress-toon
+    # 10. Encode to TOON via tokenless compress-toon
     cmd = [tokenless_bin, "compress-toon", "--agent-id", _AGENT_ID]
     if session_id:
         cmd.extend(["--session-id", session_id])
@@ -147,14 +165,15 @@ def main() -> None:
         _warn("TOON encoding returned empty output. Passing through unchanged.")
         _skip()
 
-    # 9. Calculate savings metrics
+    # 11. Size guard — skip if TOON output is not smaller
     before_chars = len(tool_response)
     after_chars = len(toon_output)
-    savings_pct = 0
-    if before_chars > 0:
-        savings_pct = (before_chars - after_chars) * 100 // before_chars
+    if after_chars >= before_chars:
+        _skip()
 
-    # 10. Build response
+    savings_pct = (before_chars - after_chars) * 100 // before_chars if before_chars > 0 else 0
+
+    # 12. Build response
     context = (
         f"[tokenless] {tool_name} → TOON encoded ({savings_pct}% savings)\n"
         f"{toon_output}"

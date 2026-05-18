@@ -248,7 +248,7 @@ export default {
   const pluginConfig = api.config ?? {};
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
-  const toonCompressionEnabled = pluginConfig.toon_compression_enabled !== false;
+  const toonCompressionEnabled = pluginConfig.toon_compression_enabled === true;
   const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;
   const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead"]).map((t: string) => t.toLowerCase()));
   const verbose = pluginConfig.verbose !== false;

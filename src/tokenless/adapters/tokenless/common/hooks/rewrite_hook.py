@@ -146,10 +146,9 @@ def main() -> None:
     updated_input["command"] = rewritten
 
     output = {
-        "decision": "allow",
-        "reason": "RTK auto-rewrite",
         "hookSpecificOutput": {
-            "tool_input": updated_input,
+            "hookEventName": "PreToolUse",
+            "updatedInput": updated_input,
         },
     }
     print(json.dumps(output))

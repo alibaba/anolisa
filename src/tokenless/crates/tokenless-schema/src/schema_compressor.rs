@@ -248,8 +248,8 @@ impl SchemaCompressor {
         text = whitespace_re.replace_all(&text, " ").to_string();
         text = text.trim().to_string();
 
-        // If already within limit, return as-is
-        if text.len() <= max_len {
+        // If already within limit (character count, not byte length), return as-is
+        if text.chars().count() <= max_len {
             return text;
         }
 
@@ -312,15 +312,15 @@ mod tests {
 
         let result = compressor.compress(&schema);
 
-        // Function description should be truncated to <= 256
+        // Function description should be truncated to <= 256 chars
         let func_desc = result["function"]["description"].as_str().unwrap();
-        assert!(func_desc.len() <= 256);
+        assert!(func_desc.chars().count() <= 256);
 
-        // Parameter description should be truncated to <= 160
+        // Parameter description should be truncated to <= 160 chars
         let param_desc = result["function"]["parameters"]["properties"]["param1"]["description"]
             .as_str()
             .unwrap();
-        assert!(param_desc.len() <= 160);
+        assert!(param_desc.chars().count() <= 160);
     }
 
     #[test]
@@ -571,6 +571,16 @@ mod tests {
         let cjk = "中".repeat(100);
         let result = compressor.truncate_description(&cjk, 256);
         assert!(result.chars().all(|c| c == '中'));
-        assert!(result.len() <= 256);
+        assert!(result.chars().count() <= 256);
+    }
+
+    #[test]
+    fn truncate_description_300_cjk_chars() {
+        let compressor = SchemaCompressor::new();
+        // 300 CJK characters — exceeds 256-char limit, triggers truncation
+        let cjk = "中".repeat(300);
+        let result = compressor.truncate_description(&cjk, 256);
+        assert!(result.chars().count() <= 256);
+        assert!(result.chars().all(|c| c == '中'));
     }
 }

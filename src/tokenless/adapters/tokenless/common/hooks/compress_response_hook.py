@@ -3,7 +3,7 @@
 
 Reads a PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
-format via ``toon -e`` for additional token savings.
+format via ``tokenless compress-toon`` for additional token savings.
 
 Pipeline: Env Attribution → Response Compression → TOON Encoding
   1. If tool_response contains errors, classify as environment vs logic issue
@@ -16,7 +16,7 @@ Hook point: **PostToolUse**
 
 The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 (set by the install action script).  Fallback paths follow the ANOLISA
-FHS spec: /usr/bin/tokenless, /usr/libexec/anolisa/tokenless/toon.
+FHS spec: /usr/bin/tokenless.
 """
 
 import json
@@ -29,16 +29,14 @@ import sys
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-_MIN_RESPONSE_LEN = 200
+_MIN_RESPONSE_CHARS = 200  # character count, not byte length
 
-# Tools that return content the agent explicitly requested — must not compress.
 _SKIP_TOOLS = {
     "Read", "read_file", "Glob", "list_directory",
     "NotebookRead", "read", "glob", "notebookread",
 }
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOON_FALLBACK = "/usr/libexec/anolisa/tokenless/toon"
 
 
 # -- helpers -----------------------------------------------------------------
@@ -69,7 +67,7 @@ def _try_parse_json(data: str) -> object | None:
         return None
 
 
-def _unwrap_string_json(raw: str) -> str:
+def _unwrap_string_json(raw: str) -> str | None:
     """If raw is a JSON-encoded string whose inner content is valid JSON,
     unwrap it into the inner JSON object."""
     if not raw.startswith('"'):
@@ -79,8 +77,7 @@ def _unwrap_string_json(raw: str) -> str:
         inner_obj = _try_parse_json(inner)
         if inner_obj is not None and isinstance(inner_obj, (dict, list)):
             return json.dumps(inner_obj, separators=(",", ":"))
-        # Inner is plain text — not JSON, skip
-        return ""
+        return None  # Plain text, not JSON
     return raw
 
 
@@ -197,8 +194,6 @@ def main() -> None:
         _warn("tokenless is not installed. Response compression hook disabled.")
         _skip()
 
-    toon_bin = _resolve_binary("toon", _TOON_FALLBACK)
-
     # 2. Read stdin JSON
     try:
         input_data = json.load(sys.stdin)
@@ -222,7 +217,6 @@ def main() -> None:
 
     # 6. Normalize response
     if isinstance(tool_response_raw, str):
-        # May be a JSON-encoded string wrapper or raw text
         unwrapped = _unwrap_string_json(tool_response_raw)
         if not unwrapped:
             _skip()  # Plain text, not JSON
@@ -232,8 +226,8 @@ def main() -> None:
     else:
         _skip()
 
-    # 7. Skip small responses
-    if len(tool_response) < _MIN_RESPONSE_LEN:
+    # 7. Skip small responses (character count, not byte length)
+    if len(tool_response) < _MIN_RESPONSE_CHARS:
         _skip()
 
     # 8. Validate it's JSON
@@ -278,11 +272,12 @@ def main() -> None:
         except Exception:
             pass  # Fall through to original
 
-    # 11. Step 2: TOON encoding (via tokenless compress-toon for stats)
+    # 11. Step 2: TOON encoding (validate compressed is JSON before encoding)
     toon_output = ""
     savings_label = ""
 
-    if tokenless_bin and isinstance(_try_parse_json(compressed), (dict, list)):
+    toon_parsed = _try_parse_json(compressed)
+    if toon_parsed is not None:
         cmd = [tokenless_bin, "compress-toon", "--agent-id", _AGENT_ID]
         if session_id:
             cmd.extend(["--session-id", session_id])
@@ -296,10 +291,10 @@ def main() -> None:
                 capture_output=True, text=True, timeout=10,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-                toon_result = proc.stdout.strip()
-                # Skip if TOON didn't reduce size
-                if len(toon_result) < len(compressed):
-                    toon_output = toon_result
+                candidate = proc.stdout.strip()
+                # Only emit TOON if it is smaller
+                if len(candidate) < len(compressed):
+                    toon_output = candidate
                     if used_resp_compression:
                         savings_label = "response compressed + TOON encoded"
                     else:

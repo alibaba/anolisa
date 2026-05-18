@@ -153,7 +153,14 @@ impl StatsRecorder {
                     SELECT_COLS
                 ))?;
                 let rows = stmt.query_map([n as i64], Self::row_to_record)?;
-                rows.filter_map(|r| r.ok()).collect()
+                rows.filter_map(|r| match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
+                        None
+                    }
+                })
+                .collect()
             }
             None => {
                 let mut stmt = conn.prepare(&format!(
@@ -161,7 +168,14 @@ impl StatsRecorder {
                     SELECT_COLS
                 ))?;
                 let rows = stmt.query_map([], Self::row_to_record)?;
-                rows.filter_map(|r| r.ok()).collect()
+                rows.filter_map(|r| match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
+                        None
+                    }
+                })
+                .collect()
             }
         };
 

@@ -129,15 +129,16 @@ impl ResponseCompressor {
 
     /// Compress a string value, truncating if necessary
     fn compress_string(&self, s: &str) -> Value {
-        if s.len() <= self.truncate_strings_at {
+        let char_count = s.chars().count();
+        if char_count <= self.truncate_strings_at {
             return Value::String(s.to_string());
         }
 
-        // Find a safe UTF-8 boundary
-        let mut truncate_pos = self.truncate_strings_at;
-        while !s.is_char_boundary(truncate_pos) && truncate_pos > 0 {
-            truncate_pos -= 1;
-        }
+        let truncate_pos = s
+            .char_indices()
+            .nth(self.truncate_strings_at)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
 
         let truncated = &s[..truncate_pos];
 
