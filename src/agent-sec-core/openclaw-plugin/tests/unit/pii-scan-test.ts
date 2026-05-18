@@ -39,7 +39,7 @@ function registerHandlers(pluginConfig: Record<string, any> = {}) {
 }
 
 let lastCliArgs: string[] | undefined;
-let lastCliOpts: { timeout?: number } | undefined;
+let lastCliOpts: { timeout?: number; stdin?: string } | undefined;
 
 function mockCli(result: CliResult) {
   _setCliMock(async (args, opts) => {
@@ -124,14 +124,14 @@ describe("pii-scan-user-input", () => {
 
     assert.deepEqual(lastCliArgs, [
       "scan-pii",
-      "--text",
-      "hello",
+      "--stdin",
       "--format",
       "json",
       "--source",
       "user_input",
     ]);
     assert.equal(lastCliOpts?.timeout, 10000);
+    assert.equal(lastCliOpts?.stdin, "hello");
   });
 
   it("adds --include-low-confidence when configured", async () => {

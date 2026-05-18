@@ -148,13 +148,13 @@ class TestCoshHookMain:
         assert captured["args"] == [
             "agent-sec-cli",
             "scan-pii",
-            "--text",
-            "Phone: 13800138000",
+            "--stdin",
             "--format",
             "json",
             "--source",
             "user_input",
         ]
+        assert captured["kwargs"]["input"] == "Phone: 13800138000"
         assert captured["kwargs"]["timeout"] == 10
         assert output["decision"] == "allow"
         assert "phone_cn" in output["reason"]

@@ -133,8 +133,7 @@ class PiiScanCapability(AgentSecCoreCapability):
         """Run agent-sec-cli scan-pii and parse its JSON output."""
         args = [
             "scan-pii",
-            "--text",
-            text,
+            "--stdin",
             "--format",
             "json",
             "--source",
@@ -143,7 +142,7 @@ class PiiScanCapability(AgentSecCoreCapability):
         if self._include_low_confidence:
             args.append("--include-low-confidence")
 
-        result = call_agent_sec_cli(args, timeout=self._timeout)
+        result = call_agent_sec_cli(args, timeout=self._timeout, stdin=text)
         if result.exit_code != 0:
             logger.warning(
                 f"[agent-sec-core] {self.id} agent-sec-cli exit_code={result.exit_code}, fail-open"

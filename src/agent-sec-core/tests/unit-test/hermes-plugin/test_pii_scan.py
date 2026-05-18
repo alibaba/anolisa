@@ -176,14 +176,14 @@ class TestPiiScanCapability:
         call_args = mock_cli.call_args[0][0]
         assert call_args == [
             "scan-pii",
-            "--text",
-            "hello",
+            "--stdin",
             "--format",
             "json",
             "--source",
             "user_input",
             "--include-low-confidence",
         ]
+        assert mock_cli.call_args.kwargs["stdin"] == "hello"
 
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_extracts_last_user_message_from_messages(self, mock_cli, capability):
@@ -200,7 +200,15 @@ class TestPiiScanCapability:
         )
 
         call_args = mock_cli.call_args[0][0]
-        assert call_args[2] == "new text"
+        assert call_args == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--source",
+            "user_input",
+        ]
+        assert mock_cli.call_args.kwargs["stdin"] == "new text"
 
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_missing_cache_key_fails_open(self, mock_cli, capability):

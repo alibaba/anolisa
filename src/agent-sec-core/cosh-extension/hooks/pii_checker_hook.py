@@ -120,8 +120,7 @@ def main() -> None:
             [
                 "agent-sec-cli",
                 "scan-pii",
-                "--text",
-                prompt_text,
+                "--stdin",
                 "--format",
                 "json",
                 "--source",
@@ -129,6 +128,7 @@ def main() -> None:
             ],
             capture_output=True,
             check=False,
+            input=prompt_text,
             text=True,
             timeout=10,
         )

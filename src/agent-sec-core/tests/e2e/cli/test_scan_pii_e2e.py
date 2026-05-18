@@ -90,6 +90,27 @@ def test_scan_pii_text_json(mode: str, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_stdin_json(mode: str, tmp_path: Path) -> None:
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--stdin",
+        "--source",
+        "manual",
+        "--format",
+        "json",
+        data_dir=tmp_path / mode / "stdin-json",
+        input_text="Contact alice@securecorp.cn for help.",
+    )
+    data = _load_json(result)
+
+    assert data["ok"] is True
+    assert data["verdict"] == "warn"
+    assert data["summary"]["source"] == "manual"
+    assert any(finding["type"] == "email" for finding in data["findings"])
+
+
+@pytest.mark.parametrize("mode", _MODES)
 def test_scan_pii_input_file_json(mode: str, tmp_path: Path) -> None:
     input_path = tmp_path / mode / "input.txt"
     input_path.parent.mkdir(parents=True, exist_ok=True)

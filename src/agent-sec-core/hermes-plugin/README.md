@@ -162,7 +162,7 @@ CLI 调用方式和 `openclaw-plugin` 保持一致：helper 将一条 JSON paylo
 
 - 挂在 `pre_llm_call`、`transform_llm_output`、`on_session_end`
 - 只扫描本轮用户输入，不扫描 history、tool output 或 terminal 原始输出
-- 调用 `agent-sec-cli scan-pii --format json --source user_input`
+- 调用 `agent-sec-cli scan-pii --stdin --format json --source user_input`，敏感原文仅通过 stdin 传入子进程
 - `warn` / `deny` 不阻断请求，只缓存脱敏 warning
 - `transform_llm_output` 在最终回复前 prepend warning，成功交付后清理缓存
 - 当前实现依赖 Hermes 对完整最终回复调用一次 `transform_llm_output`；若未来改成流式分片 transform，需要重新审视 warning pop 语义

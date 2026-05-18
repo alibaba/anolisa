@@ -166,6 +166,32 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertIsNone(kwargs["max_bytes"])
 
     @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_stdin_json(self, mock_invoke):
+        mock_invoke.return_value = ActionResult(
+            success=True,
+            exit_code=0,
+            stdout='{"ok": true, "verdict": "warn"}',
+            data={
+                "ok": True,
+                "verdict": "warn",
+                "summary": {"total": 1},
+                "findings": [],
+            },
+        )
+
+        result = self.runner.invoke(
+            app,
+            ["scan-pii", "--stdin", "--source", "manual"],
+            input="alice@example.com",
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        mock_invoke.assert_called_once()
+        _, kwargs = mock_invoke.call_args
+        self.assertEqual(kwargs["text"], "alice@example.com")
+        self.assertEqual(kwargs["source"], "manual")
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
     def test_scan_pii_text_output(self, mock_invoke):
         mock_invoke.return_value = ActionResult(
             success=True,
@@ -196,6 +222,16 @@ class TestScanPiiCli(unittest.TestCase):
 
     def test_scan_pii_requires_one_input(self):
         result = self.runner.invoke(app, ["scan-pii"])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("provide exactly one", result.output)
+
+    def test_scan_pii_rejects_multiple_inputs(self):
+        result = self.runner.invoke(
+            app,
+            ["scan-pii", "--text", "hello", "--stdin"],
+            input="alice@example.com",
+        )
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("provide exactly one", result.output)

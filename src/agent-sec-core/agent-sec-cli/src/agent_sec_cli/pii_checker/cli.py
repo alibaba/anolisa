@@ -1,5 +1,6 @@
 """CLI entry point for the PII checker (scan-pii command)."""
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,12 @@ scanner_app = typer.Typer(
 _OUTPUT_FORMATS = {"json", "text"}
 _SOURCES = {"user_input", "tool_output", "manual", "unknown"}
 _TEXT_OPTION = typer.Option(None, "--text", help="Text to scan.")
+_STDIN_OPTION = typer.Option(
+    False,
+    "--stdin",
+    "--text-stdin",
+    help="Read UTF-8 text to scan from stdin.",
+)
 _INPUT_OPTION = typer.Option(
     None,
     "--input",
@@ -135,6 +142,7 @@ def _format_text_output(data: dict[str, Any]) -> str:
 def scan_pii(
     ctx: typer.Context,
     text: str | None = _TEXT_OPTION,
+    use_stdin: bool = _STDIN_OPTION,
     input_path: Path | None = _INPUT_OPTION,
     output_format: str = _FORMAT_OPTION,
     include_low_confidence: bool = _INCLUDE_LOW_OPTION,
@@ -143,7 +151,7 @@ def scan_pii(
     source: str = _SOURCE_OPTION,
     max_bytes: int | None = _MAX_BYTES_OPTION,
 ) -> None:
-    """Detect PII and credentials in text or a file."""
+    """Detect PII and credentials in text, stdin, or a file."""
     if ctx.invoked_subcommand is not None:
         return
     if output_format not in _OUTPUT_FORMATS:
@@ -158,16 +166,26 @@ def scan_pii(
     if max_bytes is not None and max_bytes <= 0:
         typer.echo("Error: --max-bytes must be greater than zero.", err=True)
         raise typer.Exit(code=1)
-    if (text is None and input_path is None) or (
-        text is not None and input_path is not None
-    ):
-        typer.echo("Error: provide exactly one of --text or --input.", err=True)
+    input_count = sum(
+        [
+            text is not None,
+            input_path is not None,
+            use_stdin,
+        ]
+    )
+    if input_count != 1:
+        typer.echo(
+            "Error: provide exactly one of --text, --input, or --stdin.",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
     input_truncated = False
     input_bytes_scanned = None
     scan_text = text or ""
-    if input_path is not None:
+    if use_stdin:
+        scan_text = sys.stdin.read()
+    elif input_path is not None:
         try:
             scan_text, input_truncated, input_bytes_scanned = _read_limited_input(
                 input_path, max_bytes

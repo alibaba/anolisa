@@ -143,11 +143,10 @@ function formatPiiWarning(verdict: string, findings: unknown[]): string {
   return parts.join("；");
 }
 
-function buildScanArgs(prompt: string, includeLowConfidence: boolean): string[] {
+function buildScanArgs(includeLowConfidence: boolean): string[] {
   const args = [
     "scan-pii",
-    "--text",
-    prompt,
+    "--stdin",
     "--format",
     "json",
     "--source",
@@ -189,8 +188,9 @@ export const piiScan: SecurityCapability = {
             return undefined;
           }
 
-          const result = await callAgentSecCli(buildScanArgs(prompt, cfg.includeLowConfidence), {
+          const result = await callAgentSecCli(buildScanArgs(cfg.includeLowConfidence), {
             timeout: CLI_TIMEOUT_MS,
+            stdin: prompt,
           });
           if (result.exitCode !== 0) {
             api.logger.warn(`[pii-checker] CLI failed: ${result.stderr || result.exitCode}`);
