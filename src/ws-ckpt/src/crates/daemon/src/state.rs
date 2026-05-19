@@ -192,7 +192,7 @@ impl DaemonState {
                 mount_path: self.backend.data_root().to_path_buf(),
                 data_root: self.backend.data_root().to_path_buf(),
                 snapshots_root: self.backend.snapshots_root().to_path_buf(),
-                loop_img: None, // filled in by bootstrap
+                loop_img: self.backend.loop_img_state().await,
             },
             BackendType::BtrfsBase => BackendPaths::BtrfsBase {
                 mount_path: self.backend.data_root().to_path_buf(),

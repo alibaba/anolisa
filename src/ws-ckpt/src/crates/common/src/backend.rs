@@ -113,4 +113,9 @@ pub trait StorageBackend: Send + Sync {
     async fn bootstrap(&self, _config: &crate::DaemonConfig) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Optional hook: BtrfsLoop reports its on-disk image state for state.json.
+    async fn loop_img_state(&self) -> Option<crate::persist::LoopImgState> {
+        None
+    }
 }

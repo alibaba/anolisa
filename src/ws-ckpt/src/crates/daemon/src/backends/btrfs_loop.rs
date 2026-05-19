@@ -8,6 +8,7 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::*;
+use ws_ckpt_common::persist::LoopImgState;
 use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
 
 use super::btrfs_common;
@@ -458,6 +459,24 @@ impl StorageBackend for BtrfsLoopBackend {
         info!("BtrfsLoop bootstrap complete (img={:?})", self.img_path);
         Ok(())
     }
+
+    async fn loop_img_state(&self) -> Option<LoopImgState> {
+        let img_size_bytes = match tokio::fs::metadata(&self.img_path).await {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                warn!("loop_img_state: stat {:?} failed: {:#}", self.img_path, e);
+                return None;
+            }
+        };
+        let img_path_str = self.img_path.to_string_lossy().to_string();
+        let last_loop_device = find_loop_device_for(&img_path_str).await.ok();
+        Some(LoopImgState {
+            img_path: self.img_path.clone(),
+            img_size_bytes,
+            last_loop_device,
+        })
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -470,17 +489,13 @@ impl StorageBackend for BtrfsLoopBackend {
 ///
 /// Decision tree:
 ///
-/// 1. `mount_path` already mounted — trust the existing kernel mount and look
-///    up its backing file via `findmnt` + `losetup`. Skip migration this run;
-///    if backing is the legacy file, log a notice — migration will retry next
-///    time the mount is gone (e.g. system reboot).
-///    - Backing-file lookup may fail (findmnt/losetup not in PATH, unexpected
-///      output). In that case we **fail loud** rather than guessing. Picking
-///      a candidate based on disk presence isn't safe: a stale/empty target
-///      file may sit on disk while the live mount is actually backed by
-///      legacy, and choosing target here would (a) cause `reconcile_img_size`
-///      to operate on the wrong file this run, and (b) bias the *next* cold
-///      boot toward mounting the stale target, hiding live data.
+/// 1. `mount_path` already mounted — look up backing via `findmnt` + `losetup`.
+///    - Backing == target: return target.
+///    - Backing == legacy: try in-place relocation (umount → rename → remount).
+///      Pre-rename failure (busy / cross-fs / cmd error) → fall back to legacy.
+///      Post-rename failure (losetup/mount) → return target; bootstrap will mount.
+///    - Lookup itself failed: bail loud — guessing risks reconciling a stale
+///      target while live data still sits on legacy.
 /// 2. Cold path (mount not active):
 ///    - target exists → use target.
 ///    - target missing && legacy exists → attempt migration.
@@ -496,19 +511,36 @@ pub async fn decide_effective_img_path(
     let mount_path_str = mount_path.to_string_lossy().to_string();
     match is_mounted(&mount_path_str).await {
         Ok(true) => match find_backing_file(&mount_path_str).await {
-            Ok(p) => {
-                info!(
-                    "{} already mounted; trusting existing kernel state (backing: {:?})",
-                    mount_path_str, p
-                );
-                if p == legacy {
-                    warn!(
-                        "Currently running on legacy img {:?}; migration deferred until \
-                         {} is unmounted (e.g. system reboot)",
-                        legacy, mount_path_str
+            Ok((loop_dev, backing)) => {
+                if backing == legacy {
+                    info!(
+                        "Backing {:?} is at legacy path; attempting live relocation to {:?}",
+                        legacy, target
                     );
+                    match try_relocate_active_legacy_mount(
+                        &mount_path_str,
+                        legacy,
+                        target,
+                        &loop_dev,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            info!("Live img migration complete: {:?} -> {:?}", legacy, target);
+                            return Ok(target.to_path_buf());
+                        }
+                        Err(e) => {
+                            error!(
+                                "In-place relocation from legacy {:?} -> target {:?} aborted: {:#}. \
+                                 Daemon will keep serving on legacy this run; migration will retry \
+                                 on next start once the mount is idle.",
+                                legacy, target, e
+                            );
+                            return Ok(legacy.to_path_buf());
+                        }
+                    }
                 }
-                return Ok(p);
+                return Ok(backing);
             }
             Err(e) => {
                 bail!(
@@ -577,23 +609,137 @@ pub async fn decide_effective_img_path(
     Ok(target.to_path_buf())
 }
 
-/// Resolve the file backing the loop device currently mounted at `mount_path`.
-async fn find_backing_file(mount_path: &str) -> anyhow::Result<PathBuf> {
+/// Resolve the loop device and its backing file for the mount at `mount_path`.
+async fn find_backing_file(mount_path: &str) -> anyhow::Result<(String, PathBuf)> {
     let src = run_command("findmnt", &["-no", "SOURCE", mount_path])
         .await
         .context("findmnt failed")?;
-    let loop_dev = src.trim();
+    let loop_dev = src.trim().to_string();
     if loop_dev.is_empty() {
         bail!("findmnt returned no SOURCE for {}", mount_path);
     }
-    let out = run_command("losetup", &["-nl", "--output", "BACK-FILE", loop_dev])
+    let out = run_command("losetup", &["-nl", "--output", "BACK-FILE", &loop_dev])
         .await
         .context("losetup -l failed")?;
     let back = out.trim();
     if back.is_empty() {
         bail!("losetup returned empty BACK-FILE for {}", loop_dev);
     }
-    Ok(PathBuf::from(back))
+    Ok((loop_dev, PathBuf::from(back)))
+}
+
+/// Live-mount migration legacy → target: idle-check, umount, rename, remount.
+/// Aborts (without touching the live mount) when busy or cross-fs.
+/// On failure after umount, best-effort remounts legacy before bubbling the error.
+async fn try_relocate_active_legacy_mount(
+    mount_path: &str,
+    legacy: &Path,
+    target: &Path,
+    loop_device: &str,
+) -> anyhow::Result<()> {
+    if let Some(pids) = check_mount_busy(mount_path).await {
+        bail!(
+            "mount {} is in use by PIDs [{}]; refusing to umount during relocation",
+            mount_path,
+            pids
+        );
+    }
+
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create target parent {:?}", parent))?;
+    }
+    let legacy_dev = tokio::fs::metadata(legacy)
+        .await
+        .with_context(|| format!("stat legacy {:?}", legacy))?
+        .dev();
+    let target_parent = target.parent().unwrap_or_else(|| Path::new("/"));
+    let target_dev = tokio::fs::metadata(target_parent)
+        .await
+        .with_context(|| format!("stat target parent {:?}", target_parent))?
+        .dev();
+    if legacy_dev != target_dev {
+        bail!(
+            "legacy {:?} (dev {}) and target parent {:?} (dev {}) are on different \
+             filesystems; cross-fs rename is not atomic — this is unexpected since \
+             both paths should live under the host root fs",
+            legacy,
+            legacy_dev,
+            target_parent,
+            target_dev
+        );
+    }
+
+    let legacy_str = legacy.to_string_lossy().to_string();
+
+    run_command_checked("umount", &[mount_path])
+        .await
+        .context("umount mount_path")?;
+    // From here on any failure best-effort remounts legacy so the system isn't
+    // left worse than before.
+    if let Err(e) = run_command_checked("losetup", &["-d", loop_device]).await {
+        // Loop still attached — don't rename a file the kernel still tracks as backing.
+        if let Err(re) = run_command_checked("mount", &[loop_device, mount_path]).await {
+            warn!(
+                "losetup -d and remount both failed; mount {} is now offline: {:#}",
+                mount_path, re
+            );
+        }
+        return Err(e).context("losetup -d failed; attempted remount of legacy (may have failed)");
+    }
+
+    if let Err(e) = tokio::fs::rename(legacy, target).await {
+        if let Err(remount_err) = remount_legacy(&legacy_str, mount_path).await {
+            warn!(
+                "rename {:?} -> {:?} failed and remount of legacy failed too: {:#}; \
+                 mount {} is now offline — manual intervention required",
+                legacy, target, remount_err, mount_path
+            );
+        }
+        return Err(anyhow::Error::from(e).context(format!("rename {:?} -> {:?}", legacy, target)));
+    }
+
+    // Past rename: legacy is gone — we return Ok(()) regardless so the caller
+    // uses `target`. If remount fails, bootstrap will handle it on this same run.
+    let target_str = target.to_string_lossy().to_string();
+    match run_command("losetup", &["--find", "--show", &target_str]).await {
+        Ok(new_loop) => {
+            let new_loop = new_loop.trim().to_string();
+            if let Err(e) = run_command_checked("mount", &[&new_loop, mount_path]).await {
+                let _ = run_command_checked("losetup", &["-d", &new_loop]).await;
+                warn!(
+                    "Post-rename mount failed ({:#}); bootstrap will retry for {:?}",
+                    e, target
+                );
+            } else {
+                info!(
+                    "Relocated active mount {} -> backing {:?}",
+                    mount_path, target
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Post-rename losetup --find failed ({:#}); bootstrap will retry for {:?}",
+                e, target
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reattach + mount `img`; used only by `try_relocate_active_legacy_mount` rollback.
+/// Called after `losetup -d` succeeded, so the original loop device is gone and we
+/// must allocate a fresh one via `losetup --find`.
+async fn remount_legacy(img: &str, mount_path: &str) -> anyhow::Result<()> {
+    let loop_dev = run_command("losetup", &["--find", "--show", img])
+        .await
+        .context("reattach legacy via losetup --find")?;
+    let loop_dev = loop_dev.trim().to_string();
+    run_command_checked("mount", &[&loop_dev, mount_path])
+        .await
+        .context("remount legacy after relocation rollback")
 }
 
 /// Move `legacy` to `target`. Tries atomic rename first; on `EXDEV` falls back
@@ -1116,5 +1262,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, target);
+    }
+
+    /// Reports size; degrades `last_loop_device` to `None` when losetup is
+    /// unavailable or no loop backs the file (e.g. unit tests on macOS).
+    #[tokio::test]
+    async fn loop_img_state_reports_size_and_tolerates_missing_losetup() {
+        use ws_ckpt_common::backend::StorageBackend;
+
+        let dir = tempdir().unwrap();
+        let img = dir.path().join("data.img");
+        let payload = vec![0u8; 4096];
+        tokio::fs::write(&img, &payload).await.unwrap();
+
+        let backend = super::BtrfsLoopBackend::new(dir.path().join("mnt"), img.clone());
+        let st = backend.loop_img_state().await.expect("Some(state)");
+        assert_eq!(st.img_path, img);
+        assert_eq!(st.img_size_bytes, payload.len() as u64);
+        assert!(st.last_loop_device.is_none());
+    }
+
+    /// Missing img → `None` (not yet bootstrapped).
+    #[tokio::test]
+    async fn loop_img_state_none_when_img_missing() {
+        use ws_ckpt_common::backend::StorageBackend;
+
+        let dir = tempdir().unwrap();
+        let img = dir.path().join("never-created.img");
+        let backend = super::BtrfsLoopBackend::new(dir.path().join("mnt"), img.clone());
+        assert!(backend.loop_img_state().await.is_none());
     }
 }
