@@ -1,0 +1,197 @@
+"""ws-ckpt Hermes plugin — workspace checkpoint on each conversation turn.
+
+Implements the Hermes Plugin interface: ``register(ctx)`` is called once at
+plugin load time and registers three hooks:
+
+- ``on_session_start`` — create an initial baseline checkpoint.
+- ``pre_llm_call``     — capture the latest user message for later use.
+- ``on_session_end``   — create a turn-end checkpoint with the captured message.
+
+Note: Hermes fires ``on_session_end`` at the end of every ``run_conversation()``
+call, which is per-turn (one user message), not per-session.
+"""
+
+from __future__ import annotations
+
+import os
+import secrets
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from .checkpoint_manager import CheckpointManager
+from .config import MSG_TRUNCATE_LEN, load_config
+from .tools import TOOLS, check_ws_ckpt_available
+
+# ---------------------------------------------------------------------------
+# Module-level state
+# ---------------------------------------------------------------------------
+
+_manager: Optional[CheckpointManager] = None
+_last_user_message: str = ""
+_msg_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_manager() -> CheckpointManager:
+    """Return (or create) the singleton CheckpointManager."""
+    global _manager
+    if _manager is None:
+        config = load_config()
+        _manager = CheckpointManager(config)
+        print("[ws-ckpt] Plugin initialized", flush=True)
+    return _manager
+
+
+def _cwd_invalidation_warning(workspace: str) -> Optional[str]:
+    # btrfs init replaces the workspace directory's inode (remove_dir_all → symlink),
+    # so any shell holding cwd inside it will get ENOENT on getcwd() after exiting hermes.
+    # Re-init is safe because the path is already a symlink — only the very first init
+    # triggers the inode swap.
+    if Path(workspace).is_symlink():
+        return None
+    try:
+        cwd = Path(os.getcwd()).resolve()
+    except (FileNotFoundError, OSError):
+        return None
+    ws_path = Path(workspace).resolve()
+    if cwd != ws_path and ws_path not in cwd.parents:
+        return None
+    return (
+        f"first-time init of {workspace} will replace it with a btrfs subvolume symlink. "
+        f"Your shell's cwd is inside this directory — after exiting hermes you'll need to "
+        f"`cd` out and back in (e.g. `cd ~ && cd -`) before the shell can run commands again."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hook callbacks
+# ---------------------------------------------------------------------------
+
+
+def _on_session_start(session_id: str = "", model: str = "", **_: Any) -> None:
+    """Handle on_session_start — init the workspace then create a baseline checkpoint."""
+    manager = _get_manager()
+
+    if not manager.config.auto_checkpoint:
+        return
+
+    warning = _cwd_invalidation_warning(manager.config.workspace)
+    if warning is not None:
+        print(f"[ws-ckpt] Heads-up: {warning}", flush=True)
+
+    # Idempotent: ws-ckpt init is a no-op if the workspace is already registered,
+    # so eager-init here avoids the implicit init-on-first-checkpoint cost.
+    init_output = manager.init_workspace()
+    if init_output.exit_code != 0:
+        print(
+            f"[ws-ckpt] init failed ✗ {init_output.stderr.strip() or init_output.stdout.strip()}",
+            flush=True,
+        )
+        return
+
+    snapshot_id = secrets.token_hex(4)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    metadata = {
+        "event": "session_start",
+        "turn": 0,
+        "timestamp": timestamp,
+    }
+
+    result = manager.create_checkpoint(
+        snapshot_id=snapshot_id,
+        message="session-start",
+        metadata=metadata,
+    )
+
+    if result.success:
+        print(f"[ws-ckpt] Initial snapshot saved ✓ {result.snapshot}", flush=True)
+    else:
+        print(f"[ws-ckpt] Initial snapshot failed ✗ {result.message}", flush=True)
+
+
+def _on_pre_llm_call(
+    user_message: str = "",
+    session_id: str = "",
+    is_first_turn: bool = False,
+    **_: Any,
+) -> None:
+    """Capture the latest user message for use in on_session_end."""
+    global _last_user_message
+    with _msg_lock:
+        _last_user_message = user_message
+
+
+def _on_session_end(
+    session_id: str = "",
+    completed: bool = True,
+    interrupted: bool = False,
+    **_: Any,
+) -> None:
+    """Handle on_session_end — create a checkpoint after the turn."""
+    manager = _get_manager()
+
+    if not manager.config.auto_checkpoint:
+        return
+
+    # Retrieve the user message captured by pre_llm_call
+    with _msg_lock:
+        raw_message = _last_user_message
+
+    if isinstance(raw_message, str) and raw_message:
+        truncated_message = raw_message[:MSG_TRUNCATE_LEN]
+        if len(raw_message) > MSG_TRUNCATE_LEN:
+            truncated_message += "..."
+    else:
+        truncated_message = "agent turn"
+
+    turn = manager.advance_turn()
+    snapshot_id = secrets.token_hex(4)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    metadata = {
+        "event": "turn_end",
+        "turn": turn,
+        "timestamp": timestamp,
+        "success": completed,
+    }
+
+    result = manager.create_checkpoint(
+        snapshot_id=snapshot_id,
+        message=truncated_message,
+        metadata=metadata,
+    )
+
+    if result.success:
+        print(f"[ws-ckpt] Turn {turn} snapshot saved ✓ {result.snapshot}", flush=True)
+    else:
+        print(f"[ws-ckpt] Turn {turn} snapshot failed ✗ {result.message}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Plugin registration entry point
+# ---------------------------------------------------------------------------
+
+
+def register(ctx) -> None:  # noqa: ANN001
+    """Register ws-ckpt hooks and tools with the Hermes plugin system."""
+    ctx.register_hook("on_session_start", _on_session_start)
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("on_session_end", _on_session_end)
+
+    # Register tools
+    for name, schema, handler, emoji in TOOLS:
+        ctx.register_tool(
+            name=name,
+            toolset="ws-ckpt",
+            schema=schema,
+            handler=handler,
+            check_fn=check_ws_ckpt_available,
+            emoji=emoji,
+        )
