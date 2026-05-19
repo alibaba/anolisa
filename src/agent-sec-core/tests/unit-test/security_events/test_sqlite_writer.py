@@ -116,6 +116,9 @@ class TestSqliteEventWriter:
             timestamp="2026-04-20T13:47:00.123456+00:00",
             trace_id="test-trace-123",
             session_id="session-abc",
+            run_id="run-abc",
+            call_id="call-abc",
+            tool_call_id="tool-abc",
             details={
                 "nested": {"key": "value"},
                 "list": [1, 2, 3],
@@ -145,6 +148,9 @@ class TestSqliteEventWriter:
         assert row["pid"] == evt.pid
         assert row["uid"] == evt.uid
         assert row["session_id"] == "session-abc"
+        assert row["run_id"] == "run-abc"
+        assert row["call_id"] == "call-abc"
+        assert row["tool_call_id"] == "tool-abc"
 
         # Verify timestamp_epoch is correct
         expected_epoch = datetime.fromisoformat(evt.timestamp).timestamp()
@@ -414,6 +420,99 @@ class TestSqliteEventWriter:
         assert "timestamp_epoch" in columns
         writer.close()
 
+    def test_security_events_has_tracing_columns_and_indexes(
+        self, db_path: str
+    ) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(
+            SecurityEvent(
+                event_type="code_scan",
+                category="code_scan",
+                details={},
+                trace_id="trace-1",
+                session_id="session-1",
+                run_id="run-1",
+                call_id="call-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(security_events)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(security_events)")}
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        assert user_version == 2
+        assert {"session_id", "run_id", "call_id", "tool_call_id"}.issubset(columns)
+        assert "idx_session_id_timestamp_epoch" in indexes
+        assert "idx_run_id_timestamp_epoch" in indexes
+        assert "idx_session_run_timestamp_epoch" in indexes
+        assert "idx_call_id_not_null" not in indexes
+        assert "idx_tool_call_id_not_null" not in indexes
+
+    def test_v1_database_migrates_on_write_and_preserves_old_rows(
+        self, db_path: str
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE security_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT 'succeeded',
+                timestamp TEXT NOT NULL,
+                timestamp_epoch FLOAT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                pid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                session_id TEXT,
+                details TEXT NOT NULL
+            );
+            PRAGMA user_version = 1;
+            """)
+        conn.execute("""
+            INSERT INTO security_events (
+                event_id, event_type, category, result, timestamp, timestamp_epoch,
+                trace_id, pid, uid, session_id, details
+            ) VALUES (
+                'old-event', 'code_scan', 'code_scan', 'succeeded',
+                '2026-05-19T00:00:00+00:00', 1779148800.0,
+                'old-trace', 1, 1, 'old-session', '{}'
+            )
+            """)
+        conn.commit()
+        conn.close()
+
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(
+            SecurityEvent(
+                event_type="prompt_scan",
+                category="prompt_scan",
+                details={},
+                trace_id="new-trace",
+                session_id="new-session",
+                run_id="new-run",
+                call_id="new-call",
+                tool_call_id="new-tool",
+            )
+        )
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT event_id, run_id FROM security_events ORDER BY event_id"
+        ).fetchall()
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        assert user_version == 2
+        assert ("old-event", None) in rows
+        assert any(
+            event_id != "old-event" and run_id == "new-run" for event_id, run_id in rows
+        )
+
     def test_schema_repairs_missing_indexes(self, db_path: str) -> None:
         conn = sqlite3.connect(db_path)
         conn.execute(
@@ -453,7 +552,7 @@ class TestSqliteEventWriter:
 
     def test_schema_error_requests_repair_for_next_write(self, db_path: str) -> None:
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA user_version = 1")
+        conn.execute("PRAGMA user_version = 2")
         conn.commit()
         conn.close()
 

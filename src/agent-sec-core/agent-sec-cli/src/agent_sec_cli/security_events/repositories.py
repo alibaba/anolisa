@@ -63,6 +63,9 @@ class SecurityEventRepository:
             "pid": event.pid,
             "uid": event.uid,
             "session_id": event.session_id,
+            "run_id": event.run_id,
+            "call_id": event.call_id,
+            "tool_call_id": event.tool_call_id,
             "details": json.dumps(event.details, ensure_ascii=False),
         }
 
@@ -269,6 +272,9 @@ class SecurityEventRepository:
                 pid=record.pid,
                 uid=record.uid,
                 session_id=record.session_id,
+                run_id=record.run_id,
+                call_id=record.call_id,
+                tool_call_id=record.tool_call_id,
                 details=json.loads(record.details),
             )
         except (json.JSONDecodeError, TypeError, ValueError) as exc:

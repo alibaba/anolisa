@@ -65,6 +65,9 @@ class TestSqliteEventReader:
             timestamp="2026-04-20T13:47:00.123456+00:00",
             trace_id="test-trace-456",
             session_id="session-xyz",
+            run_id="run-xyz",
+            call_id="call-xyz",
+            tool_call_id="tool-xyz",
             details={
                 "request": {"config": "default", "dry_run": True},
                 "result": {"violations": ["RULE_001", "RULE_002"]},
@@ -96,6 +99,9 @@ class TestSqliteEventReader:
         assert retrieved_event.pid == original_event.pid
         assert retrieved_event.uid == original_event.uid
         assert retrieved_event.session_id == original_event.session_id
+        assert retrieved_event.run_id == original_event.run_id
+        assert retrieved_event.call_id == original_event.call_id
+        assert retrieved_event.tool_call_id == original_event.tool_call_id
 
         # Verify details JSON round-trip
         assert retrieved_event.details == original_event.details
@@ -343,6 +349,84 @@ class TestSqliteEventReader:
         reader._dispose_engine()
         assert reader._engine is None
         assert reader._session_factory is None
+
+    def test_round_trips_new_tracing_fields(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path)
+        writer.write(
+            SecurityEvent(
+                event_type="code_scan",
+                category="code_scan",
+                details={},
+                trace_id="trace-1",
+                session_id="session-1",
+                run_id="run-1",
+                call_id="call-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.close()
+
+        events = SqliteEventReader(path=db_path).query(limit=10)
+
+        assert len(events) == 1
+        assert events[0].trace_id == "trace-1"
+        assert events[0].session_id == "session-1"
+        assert events[0].run_id == "run-1"
+        assert events[0].call_id == "call-1"
+        assert events[0].tool_call_id == "tool-1"
+
+    def test_read_only_v1_schema_missing_new_columns_warns_and_returns_empty(
+        self,
+        db_path: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE security_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT 'succeeded',
+                timestamp TEXT NOT NULL,
+                timestamp_epoch FLOAT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                pid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                session_id TEXT,
+                details TEXT NOT NULL
+            );
+            PRAGMA user_version = 1;
+            """)
+        conn.execute("""
+            INSERT INTO security_events (
+                event_id, event_type, category, result, timestamp, timestamp_epoch,
+                trace_id, pid, uid, session_id, details
+            ) VALUES (
+                'old-event', 'code_scan', 'code_scan', 'succeeded',
+                '2026-05-19T00:00:00+00:00', 1779148800.0,
+                'old-trace', 1, 1, 'old-session', '{}'
+            )
+            """)
+        conn.commit()
+        conn.close()
+
+        assert SqliteEventReader(path=db_path).query(limit=10) == []
+        stderr = capsys.readouterr().err
+        assert "sqlite schema is v1, this binary expects v2" in stderr
+        assert "run any write command" in stderr
+        assert "read-only queries may return empty results until then" in stderr
+
+        conn = sqlite3.connect(db_path)
+        try:
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(security_events)")
+            }
+        finally:
+            conn.close()
+
+        assert user_version == 1
+        assert "run_id" not in columns
 
     def test_close_disposes_readonly_store(self, db_path: str) -> None:
         writer = SqliteEventWriter(path=db_path)

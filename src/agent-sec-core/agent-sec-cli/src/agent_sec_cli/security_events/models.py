@@ -15,9 +15,19 @@ class SecurityEventRecord(Base):
         Index("idx_category_epoch", "category", "timestamp_epoch"),
         Index("idx_trace_id", "trace_id"),
         Index("idx_timestamp_epoch", "timestamp_epoch"),
+        Index("idx_session_id_timestamp_epoch", "session_id", "timestamp_epoch"),
+        Index("idx_run_id_timestamp_epoch", "run_id", "timestamp_epoch"),
+        Index(
+            "idx_session_run_timestamp_epoch",
+            "session_id",
+            "run_id",
+            "timestamp_epoch",
+        ),
     )
     __schema_columns__: dict[str, str] = {
-        # "severity": "TEXT DEFAULT 'info'",  # Future: add and bump schema version.
+        "run_id": "TEXT",
+        "call_id": "TEXT",
+        "tool_call_id": "TEXT",
     }
 
     event_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -32,6 +42,9 @@ class SecurityEventRecord(Base):
     pid: Mapped[int] = mapped_column(Integer, nullable=False)
     uid: Mapped[int] = mapped_column(Integer, nullable=False)
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     details: Mapped[str] = mapped_column(Text, nullable=False)
 
 

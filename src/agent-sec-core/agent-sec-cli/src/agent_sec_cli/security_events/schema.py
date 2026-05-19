@@ -31,6 +31,9 @@ class SecurityEvent(BaseModel):
         event_id    — UUID
         pid / uid   — current process identity
         session_id  — optional session correlation
+        run_id      — optional agent run/turn correlation
+        call_id     — optional LLM call correlation
+        tool_call_id — optional tool call correlation
     """
 
     event_type: str
@@ -43,6 +46,9 @@ class SecurityEvent(BaseModel):
     pid: int = Field(default_factory=os.getpid)
     uid: int = Field(default_factory=os.getuid)
     session_id: str | None = None
+    run_id: str | None = None
+    call_id: str | None = None
+    tool_call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain ``dict`` suitable for ``json.dumps``."""
@@ -58,5 +64,8 @@ class SecurityEvent(BaseModel):
             "pid": d["pid"],
             "uid": d["uid"],
             "session_id": d["session_id"],
+            "run_id": d["run_id"],
+            "call_id": d["call_id"],
+            "tool_call_id": d["tool_call_id"],
             "details": d["details"],
         }

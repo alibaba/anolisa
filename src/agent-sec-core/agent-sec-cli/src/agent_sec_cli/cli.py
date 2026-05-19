@@ -1,11 +1,16 @@
 """CLI entry point for agent-sec-cli package."""
 
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 import typer
+from agent_sec_cli.correlation_context import (
+    init_process_trace_context,
+    parse_trace_context,
+)
 from agent_sec_cli.observability.cli import app as observability_app
 from agent_sec_cli.pii_checker.cli import scanner_app as pii_scanner_app
 from agent_sec_cli.prompt_scanner.cli import scanner_app
@@ -34,6 +39,30 @@ app = typer.Typer(
 )
 
 
+def _extract_trace_context_arg(argv: list[str]) -> str | None:
+    """Return hidden top-level trace context before Typer/logging setup.
+
+    This bootstrap parser intentionally mirrors only top-level CLI syntax so
+    future logging initialization can see caller correlation before Typer runs.
+    """
+    for index, arg in enumerate(argv):
+        if arg == "--":
+            return None
+        if arg == "--trace-context":
+            if index + 1 < len(argv):
+                return argv[index + 1]
+            return None
+        prefix = "--trace-context="
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+    return None
+
+
+def _init_trace_context(trace_context: str | None) -> None:
+    """Initialize process trace context from raw CLI JSON."""
+    init_process_trace_context(parse_trace_context(trace_context))
+
+
 @app.callback(invoke_without_command=True)
 def main_callback(
     ctx: typer.Context,
@@ -44,8 +73,17 @@ def main_callback(
         is_eager=True,
         help="Show version and exit.",
     ),
+    trace_context: str | None = typer.Option(
+        None,
+        "--trace-context",
+        help="JSON tracing context for plugin integrations.",
+        hidden=True,
+    ),
 ) -> None:
     """Main callback for version option."""
+    # Declared but intentionally unused here so Typer recognizes the hidden
+    # top-level option; process trace context is initialized once in main().
+
     if version:
         typer.echo(f"agent-sec-cli {__version__}")
         raise typer.Exit()
@@ -587,6 +625,14 @@ def events(
 
 def main() -> None:
     """Main entry point."""
+    try:
+        # Preload tracing before Typer executes callbacks so future CLI logging
+        # setup can correlate startup records. This is the single process-level
+        # trace-context initialization path.
+        _init_trace_context(_extract_trace_context_arg(sys.argv))
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1) from exc
     app()
 
 

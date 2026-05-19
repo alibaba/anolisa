@@ -4,10 +4,21 @@ import unittest
 import uuid
 from datetime import datetime
 
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    clear_process_trace_context,
+    init_process_trace_context,
+)
 from agent_sec_cli.security_middleware.context import RequestContext
 
 
 class TestRequestContext(unittest.TestCase):
+    def setUp(self):
+        clear_process_trace_context()
+
+    def tearDown(self):
+        clear_process_trace_context()
+
     def test_auto_trace_id_is_valid_uuid(self):
         ctx = RequestContext(action="test")
         # Should not raise
@@ -39,6 +50,51 @@ class TestRequestContext(unittest.TestCase):
         ctx1 = RequestContext(action="a")
         ctx2 = RequestContext(action="b")
         self.assertNotEqual(ctx1.trace_id, ctx2.trace_id)
+
+    def test_uses_caller_trace_context_when_available(self):
+        init_process_trace_context(
+            TraceContext(
+                trace_id="trace-1",
+                session_id="session-1",
+                run_id="run-1",
+                call_id="call-1",
+                tool_call_id="tool-1",
+            )
+        )
+
+        ctx = RequestContext(action="code_scan")
+
+        self.assertEqual(ctx.trace_id, "trace-1")
+        self.assertEqual(ctx.session_id, "session-1")
+        self.assertEqual(ctx.run_id, "run-1")
+        self.assertEqual(ctx.call_id, "call-1")
+        self.assertEqual(ctx.tool_call_id, "tool-1")
+
+    def test_generates_trace_id_when_caller_does_not_supply_one(self):
+        init_process_trace_context(TraceContext(session_id="session-1"))
+
+        ctx = RequestContext(action="code_scan")
+
+        self.assertTrue(ctx.trace_id)
+        self.assertEqual(ctx.session_id, "session-1")
+
+    def test_explicit_tracing_fields_are_preserved(self):
+        init_process_trace_context(TraceContext(session_id="process-session"))
+
+        ctx = RequestContext(
+            action="code_scan",
+            trace_id="explicit-trace",
+            session_id="explicit-session",
+            run_id="explicit-run",
+            call_id="explicit-call",
+            tool_call_id="explicit-tool",
+        )
+
+        self.assertEqual(ctx.trace_id, "explicit-trace")
+        self.assertEqual(ctx.session_id, "explicit-session")
+        self.assertEqual(ctx.run_id, "explicit-run")
+        self.assertEqual(ctx.call_id, "explicit-call")
+        self.assertEqual(ctx.tool_call_id, "explicit-tool")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SQLITE_PRIMARY_CODE_MASK = 0xFF
 _SQLITE_CORRUPTION_CODES = {
     sqlite3.SQLITE_CORRUPT,
@@ -224,7 +224,15 @@ def warn_readonly_schema_readiness(
 
     if version > schema_version:
         _warn_newer_schema_version(int(version), schema_version, log_prefix)
-    elif version < schema_version or missing_tables:
+    elif version < schema_version and not missing_tables and version != 0:
+        print(
+            f"{log_prefix} sqlite schema is v{version}, "
+            f"this binary expects v{schema_version}; "
+            "run any write command (for example `agent-sec-cli scan-code ...`) "
+            "to migrate. read-only queries may return empty results until then.",
+            file=sys.stderr,
+        )
+    elif missing_tables or version == 0:
         print(
             f"{log_prefix} sqlite schema not ready for read-only access: "
             f"version={version}, expected={schema_version}, "

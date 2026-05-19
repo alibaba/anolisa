@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from agent_sec_cli.security_events.schema import SecurityEvent
 
@@ -56,6 +56,12 @@ class TestSecurityEventAutoFill(unittest.TestCase):
         evt = SecurityEvent(event_type="t", category="c", details={})
         self.assertIsNone(evt.session_id)
 
+    def test_agent_trace_fields_default_none(self):
+        evt = SecurityEvent(event_type="t", category="c", details={})
+        self.assertIsNone(evt.run_id)
+        self.assertIsNone(evt.call_id)
+        self.assertIsNone(evt.tool_call_id)
+
 
 class TestSecurityEventToDict(unittest.TestCase):
     def test_to_dict_has_all_keys(self):
@@ -71,9 +77,32 @@ class TestSecurityEventToDict(unittest.TestCase):
             "pid",
             "uid",
             "session_id",
+            "run_id",
+            "call_id",
+            "tool_call_id",
             "details",
         }
         self.assertEqual(set(d.keys()), expected_keys)
+
+    def test_to_dict_includes_top_level_tracing_fields(self):
+        evt = SecurityEvent(
+            event_type="code_scan",
+            category="code_scan",
+            details={},
+            trace_id="trace-1",
+            session_id="session-1",
+            run_id="run-1",
+            call_id="call-1",
+            tool_call_id="tool-1",
+        )
+
+        payload = evt.to_dict()
+
+        self.assertEqual(payload["trace_id"], "trace-1")
+        self.assertEqual(payload["session_id"], "session-1")
+        self.assertEqual(payload["run_id"], "run-1")
+        self.assertEqual(payload["call_id"], "call-1")
+        self.assertEqual(payload["tool_call_id"], "tool-1")
 
     def test_to_dict_roundtrip_json(self):
         evt = SecurityEvent(

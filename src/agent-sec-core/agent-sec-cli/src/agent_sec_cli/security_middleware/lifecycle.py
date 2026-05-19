@@ -63,6 +63,9 @@ def post_action(
             details=details,
             trace_id=ctx.trace_id,
             session_id=ctx.session_id,
+            run_id=ctx.run_id,
+            call_id=ctx.call_id,
+            tool_call_id=ctx.tool_call_id,
         )
         log_event(event)
     except Exception:  # noqa: BLE001
@@ -89,6 +92,9 @@ def on_error(
             details=details,
             trace_id=ctx.trace_id,
             session_id=ctx.session_id,
+            run_id=ctx.run_id,
+            call_id=ctx.call_id,
+            tool_call_id=ctx.tool_call_id,
         )
         log_event(event)
     except Exception:  # noqa: BLE001

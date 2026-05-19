@@ -4,9 +4,177 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_sec_cli.cli import app
+import pytest
+from agent_sec_cli.cli import _extract_trace_context_arg, app, main
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    clear_process_trace_context,
+    get_current_trace_context,
+)
 from agent_sec_cli.security_middleware.result import ActionResult
 from typer.testing import CliRunner
+
+
+@patch("agent_sec_cli.cli.invoke")
+def test_trace_context_is_hidden_global_option_and_commands_do_not_forward_it(
+    mock_invoke,
+):
+    mock_invoke.return_value = ActionResult(success=True, exit_code=0, stdout="{}")
+
+    try:
+        result = CliRunner().invoke(
+            app,
+            [
+                "--trace-context",
+                '{"sessionId":"session-1","runId":"run-1"}',
+                "scan-code",
+                "--code",
+                "echo ok",
+                "--language",
+                "bash",
+            ],
+        )
+    finally:
+        clear_process_trace_context()
+
+    assert result.exit_code == 0
+    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+
+
+@patch("agent_sec_cli.cli.invoke")
+def test_trace_context_option_is_declared_but_not_used_by_typer_callback(mock_invoke):
+    mock_invoke.return_value = ActionResult(success=True, exit_code=0, stdout="{}")
+
+    try:
+        result = CliRunner().invoke(
+            app,
+            ["--trace-context", "not-json", "scan-code", "--code", "echo ok"],
+        )
+    finally:
+        clear_process_trace_context()
+
+    assert result.exit_code == 0
+    assert get_current_trace_context() is None
+    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+
+
+def test_trace_context_option_is_hidden_from_help():
+    result = CliRunner().invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "--trace-context" not in result.output
+
+
+def test_extract_trace_context_arg_supports_future_pre_app_initialization():
+    assert (
+        _extract_trace_context_arg(
+            [
+                "agent-sec-cli",
+                "--trace-context",
+                '{"session_id":"session-1"}',
+                "scan-code",
+            ]
+        )
+        == '{"session_id":"session-1"}'
+    )
+
+
+def test_extract_trace_context_arg_supports_equals_style():
+    assert (
+        _extract_trace_context_arg(
+            ["agent-sec-cli", '--trace-context={"session_id":"session-1"}', "scan-code"]
+        )
+        == '{"session_id":"session-1"}'
+    )
+
+
+def test_extract_trace_context_arg_stops_at_posix_double_dash():
+    assert (
+        _extract_trace_context_arg(
+            [
+                "agent-sec-cli",
+                "scan-code",
+                "--",
+                "--trace-context",
+                '{"session_id":"not-top-level"}',
+            ]
+        )
+        is None
+    )
+
+
+@patch("agent_sec_cli.cli.app")
+def test_main_initializes_trace_context_before_app(mock_app, monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["agent-sec-cli", "--trace-context", '{"session_id":"session-1"}', "scan-code"],
+    )
+
+    try:
+        main()
+    finally:
+        clear_process_trace_context()
+
+    mock_app.assert_called_once()
+
+
+@patch("agent_sec_cli.cli.invoke")
+@patch("agent_sec_cli.cli.init_process_trace_context")
+def test_main_initializes_process_trace_context_once(
+    mock_init_process_trace_context,
+    mock_invoke,
+    monkeypatch,
+):
+    mock_invoke.return_value = ActionResult(success=True, exit_code=0, stdout="{}")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "agent-sec-cli",
+            "--trace-context",
+            '{"session_id":"session-1","run_id":"run-1"}',
+            "scan-code",
+            "--code",
+            "echo ok",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    mock_init_process_trace_context.assert_called_once_with(
+        TraceContext(session_id="session-1", run_id="run-1")
+    )
+    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+
+
+@patch("agent_sec_cli.cli.app")
+def test_main_does_not_initialize_session_from_env(mock_app, monkeypatch):
+    monkeypatch.setenv("AGENT_SEC_SESSION_ID", "env-session")
+    monkeypatch.setattr("sys.argv", ["agent-sec-cli", "scan-code"])
+
+    try:
+        main()
+        assert get_current_trace_context() is None
+    finally:
+        clear_process_trace_context()
+
+    mock_app.assert_called_once()
+
+
+@patch("agent_sec_cli.cli.app")
+def test_main_invalid_trace_context_exits_before_app(mock_app, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["agent-sec-cli", "--trace-context", "not-json", "scan-code"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert "invalid trace context JSON" in capsys.readouterr().err
+    mock_app.assert_not_called()
 
 
 class TestHardenCli(unittest.TestCase):

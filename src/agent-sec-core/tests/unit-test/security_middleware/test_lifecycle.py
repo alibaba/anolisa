@@ -65,6 +65,27 @@ class TestPostAction(unittest.TestCase):
         self.assertIn("result", event.details)
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
+    def test_post_action_copies_request_tracing_to_security_event(self, mock_log):
+        ctx = RequestContext(
+            action="code_scan",
+            trace_id="trace-1",
+            session_id="session-1",
+            run_id="run-1",
+            call_id="call-1",
+            tool_call_id="tool-1",
+        )
+        result = ActionResult(success=True, data={"passed": 5})
+
+        post_action(ctx, result, {"mode": "scan"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        self.assertEqual(event.trace_id, "trace-1")
+        self.assertEqual(event.session_id, "session-1")
+        self.assertEqual(event.run_id, "run-1")
+        self.assertEqual(event.call_id, "call-1")
+        self.assertEqual(event.tool_call_id, "tool-1")
+
+    @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_pii_scan_event_redacts_request_and_result(self, mock_log):
         ctx = RequestContext(action="pii_scan", trace_id="t-pii")
         result = ActionResult(
@@ -128,6 +149,27 @@ class TestOnError(unittest.TestCase):
         self.assertIn("error", event.details)
         self.assertEqual(event.details["error"], "test error")
         self.assertEqual(event.details["error_type"], "RuntimeError")
+
+    @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
+    def test_on_error_copies_request_tracing_to_security_event(self, mock_log):
+        ctx = RequestContext(
+            action="verify",
+            trace_id="trace-1",
+            session_id="session-1",
+            run_id="run-1",
+            call_id="call-1",
+            tool_call_id="tool-1",
+        )
+        exc = RuntimeError("test error")
+
+        on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        self.assertEqual(event.trace_id, "trace-1")
+        self.assertEqual(event.session_id, "session-1")
+        self.assertEqual(event.run_id, "run-1")
+        self.assertEqual(event.call_id, "call-1")
+        self.assertEqual(event.tool_call_id, "tool-1")
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_pii_scan_error_redacts_request(self, mock_log):
