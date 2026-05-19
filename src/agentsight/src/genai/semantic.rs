@@ -75,8 +75,8 @@ pub struct LLMRequest {
     pub stop_sequences: Option<Vec<String>>,
     /// Stream mode enabled
     pub stream: bool,
-    /// Tools/functions available
-    pub tools: Option<Vec<ToolDefinition>>,
+    /// Tools/functions available (raw JSON from request)
+    pub tools: Option<Vec<serde_json::Value>>,
     /// Raw request body (optional, for debugging)
     pub raw_body: Option<String>,
 }

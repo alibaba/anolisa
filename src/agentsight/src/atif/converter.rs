@@ -300,17 +300,15 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
     for call in parsed.iter().filter_map(|p| p.as_ref()) {
         if let Some(ref tools) = call.request.tools {
             for tool in tools {
-                if seen_names.insert(tool.name.clone()) {
-                    // Build OpenAI function calling schema format
-                    let def = serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
-                    });
-                    defs.push(def);
+                // Extract tool name for deduplication
+                let name = tool.get("function")
+                    .and_then(|f| f.get("name"))
+                    .or_else(|| tool.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if seen_names.insert(name) {
+                    defs.push(tool.clone());
                 }
             }
         }

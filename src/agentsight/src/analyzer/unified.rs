@@ -810,7 +810,7 @@ impl Analyzer {
                     request_body,
                     response_headers: serde_json::to_string(&resp.parsed.headers).unwrap_or_default(),
                     response_body,
-                    duration_ns: resp.duration_ns(),
+                    duration_ns: resp.end_timestamp_ns().saturating_sub(req.source_event.timestamp_ns),
                     is_sse: true,
                     sse_event_count: resp.sse_event_count(),
                 })

@@ -609,7 +609,7 @@ impl GenAIBuilder {
                         seed: req.seed,
                         stop_sequences: req.stop.clone(),
                         stream: req.stream.unwrap_or(false),
-                        tools: None,
+                        tools: req.tools.clone(),
                         raw_body: http.request_body.clone(),
                     };
                 }
@@ -635,7 +635,7 @@ impl GenAIBuilder {
                         seed: None,
                         stop_sequences: req.stop_sequences.clone(),
                         stream: req.stream.unwrap_or(false),
-                        tools: None,
+                        tools: req.tools.clone(),
                         raw_body: http.request_body.clone(),
                     };
                 }
@@ -680,7 +680,7 @@ impl GenAIBuilder {
                         seed: None,
                         stop_sequences: None,
                         stream: req.params.stream,
-                        tools: None,
+                        tools: req.params.tools.clone(),
                         raw_body: http.request_body.clone(),
                     };
                 }
@@ -769,6 +769,10 @@ impl GenAIBuilder {
             return None;
         }
 
+        let tools = obj.get("tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.to_vec());
+
         Some(LLMRequest {
             messages,
             temperature: obj.get("temperature").and_then(|v| v.as_f64()),
@@ -782,7 +786,7 @@ impl GenAIBuilder {
                 v.as_array().map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
             }),
             stream: obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
-            tools: None,
+            tools,
             raw_body: Some(body.to_string()),
         })
     }

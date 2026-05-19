@@ -82,6 +82,9 @@ static void on_llm_event(const AgentsightLLMData *data, void *user_data) {
     if (data->finish_reason) {
         printf("  finish_reason=%s\n", data->finish_reason);
     }
+    if (data->tools && data->tools_len > 0) {
+        printf("  tools (%u bytes): %.256s\n", data->tools_len, data->tools);
+    }
 }
 
 int main(void) {
