@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process;
 
 use anyhow::{Context, Result};
+use clap::builder::{StringValueParser, TypedValueParser};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -13,14 +14,12 @@ use ws_ckpt_common::{
     ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
+    MAX_FRAME_SIZE,
 };
 
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
 const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
-
-/// Upper bound for the best-effort advisory IPC; a stuck daemon must not delay
-/// user-visible commands. Local UDS RTT is sub-millisecond.
-const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10);
+const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
 
 // Parse CLI value for `--auto-cleanup-keep`: integer -> Count mode, duration
 // string (e.g. "30d", units s/m/h/d/w) -> Age mode. Mirrors TOML semantics in
@@ -59,14 +58,14 @@ enum Commands {
     /// Initialize a workspace for btrfs snapshot management
     Init {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
     },
 
     /// Create a checkpoint (readonly snapshot)
     Checkpoint {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
         /// Snapshot ID (must be unique within the workspace)
@@ -85,7 +84,7 @@ enum Commands {
     /// Rollback workspace to a specific snapshot
     Rollback {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
         /// Target snapshot (ID like msg1-step2, or name like before-refactor)
@@ -96,7 +95,7 @@ enum Commands {
     /// Delete a specific snapshot
     Delete {
         /// Workspace path or ID (optional; omit for global snapshot lookup)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
         /// Snapshot ID or unique prefix
@@ -111,7 +110,7 @@ enum Commands {
     /// List all snapshots for a workspace (or all workspaces if omitted)
     List {
         /// Workspace path or ID (optional; omit to list all workspaces)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
         /// Output format: table or json (default: table)
@@ -122,7 +121,7 @@ enum Commands {
     /// Show diff between two snapshots
     Diff {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
         /// Source snapshot (ID or name)
@@ -137,7 +136,7 @@ enum Commands {
     /// Show daemon and workspace status
     Status {
         /// Workspace path or ID (optional filter)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
         /// Output format: table or json (default: table)
@@ -148,7 +147,7 @@ enum Commands {
     /// Clean up old snapshots, keeping the most recent ones
     Cleanup {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
-        #[arg(long, short = 'w')]
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
         /// Number of recent unpinned snapshots to keep (default: 20)
@@ -193,7 +192,7 @@ enum Commands {
     /// Recover workspace to a normal directory (undo init)
     Recover {
         /// Workspace path or ID
-        #[arg(short, long, conflicts_with = "all")]
+        #[arg(short, long, conflicts_with = "all", value_parser = workspace_value_parser())]
         workspace: Option<String>,
 
         /// Recover all registered workspaces
@@ -413,12 +412,27 @@ fn get_socket_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SOCKET_PATH))
 }
 
+/// Clap value parser that rejects empty and whitespace-only workspace strings.
+/// Stricter than `NonEmptyStringValueParser`, which only rejects `""`.
+fn workspace_value_parser() -> impl TypedValueParser<Value = String> {
+    StringValueParser::new().try_map(|s: String| {
+        if s.trim().is_empty() {
+            Err("workspace argument must not be empty or whitespace")
+        } else {
+            Ok(s)
+        }
+    })
+}
+
 /// Resolve workspace identifier: convert filesystem paths to absolute,
 /// pass workspace IDs through unchanged.
 ///
 /// IMPORTANT: We must NOT follow symlinks here. With symlink-based workspaces,
 /// the user-facing path is a symlink (e.g. `/tmp/test-ws -> /mnt/btrfs-workspace/ws-xxx`).
 /// The daemon registers the symlink path, so we must preserve it.
+///
+/// Assumes the input has already been validated non-empty by
+/// `workspace_value_parser`; callers feeding raw strings should validate first.
 fn resolve_workspace_arg(workspace: &str) -> String {
     let path = std::path::Path::new(workspace);
     // If it looks like a workspace ID (no path separators), pass through unchanged
@@ -475,9 +489,15 @@ async fn send_request_to_daemon(request: &Request) -> Result<Response> {
         .read_exact(&mut len_buf)
         .await
         .context("failed to read response length")?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut payload = vec![0u8; len];
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_SIZE {
+        anyhow::bail!(
+            "Response frame too large: {} bytes (max {})",
+            len,
+            MAX_FRAME_SIZE
+        );
+    }
+    let mut payload = vec![0u8; len as usize];
     stream
         .read_exact(&mut payload)
         .await
@@ -508,9 +528,15 @@ async fn try_send_request_to_daemon_silent(request: &Request) -> Result<Response
         .read_exact(&mut len_buf)
         .await
         .context("read response length (silent)")?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut payload = vec![0u8; len];
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_SIZE {
+        anyhow::bail!(
+            "Response frame too large: {} bytes (max {})",
+            len,
+            MAX_FRAME_SIZE
+        );
+    }
+    let mut payload = vec![0u8; len as usize];
     stream
         .read_exact(&mut payload)
         .await
@@ -1210,6 +1236,72 @@ mod tests {
             Commands::Init { workspace } => assert_eq!(workspace, "/tmp/test"),
             _ => panic!("expected Init"),
         }
+    }
+
+    #[test]
+    fn parse_rejects_empty_or_whitespace_workspace_on_every_subcommand() {
+        let subcommands: &[&[&str]] = &[
+            &["init", "-w"],
+            &["checkpoint", "-w"],
+            &["rollback", "-w"],
+            &["delete", "-w"],
+            &["list", "-w"],
+            &["diff", "-w"],
+            &["status", "-w"],
+            &["cleanup", "-w"],
+            &["recover", "-w"],
+        ];
+        // Trailing args needed to satisfy required-flag validation for some
+        // subcommands. Tested independently for each blank value.
+        let trailing: &[(&str, &[&str])] = &[
+            ("init", &[]),
+            ("checkpoint", &["-i", "snap-1"]),
+            ("rollback", &["-s", "snap-1"]),
+            ("delete", &["-s", "snap-1"]),
+            ("list", &[]),
+            ("diff", &["-f", "a", "-t", "b"]),
+            ("status", &[]),
+            ("cleanup", &[]),
+            ("recover", &[]),
+        ];
+        for blank in ["", "   ", "\t"] {
+            for sub in subcommands {
+                let name = sub[0];
+                let extra = trailing
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, a)| *a)
+                    .unwrap_or(&[]);
+                let mut argv: Vec<&str> = vec!["ws-ckpt"];
+                argv.extend_from_slice(sub);
+                argv.push(blank);
+                argv.extend_from_slice(extra);
+                let err = Cli::try_parse_from(&argv)
+                    .err()
+                    .unwrap_or_else(|| panic!("expected parse error for argv: {:?}", argv));
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "argv {:?} should fail with ValueValidation, got {:?}",
+                    argv,
+                    err.kind()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_accepts_non_blank_workspace() {
+        // Sanity: non-blank values still parse.
+        Cli::try_parse_from(["ws-ckpt", "init", "-w", "ws-abc"]).unwrap();
+        Cli::try_parse_from(["ws-ckpt", "init", "-w", "/foo"]).unwrap();
+        Cli::try_parse_from(["ws-ckpt", "init", "-w", "  abc  "]).unwrap();
+    }
+
+    #[test]
+    fn resolve_workspace_arg_passes_through_non_empty() {
+        assert_eq!(resolve_workspace_arg("ws-abc123"), "ws-abc123");
+        assert_eq!(resolve_workspace_arg("/abs/path"), "/abs/path");
     }
 
     #[test]

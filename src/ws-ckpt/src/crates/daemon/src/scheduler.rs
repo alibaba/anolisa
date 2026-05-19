@@ -47,8 +47,18 @@ pub fn start_scheduler(state: Arc<DaemonState>) {
 /// `auto_cleanup_interval_secs`, and `auto_cleanup_keep.is_disabled()`.
 /// Disabled parks on `config_notify`; active races `sleep` vs `config_notify`
 /// for immediate reload.
+///
+/// `notify_waiters()` does **not** store a permit, so a notify that fires
+/// before a waiter has registered is lost. To close the window between the
+/// config read and registration, we build the `Notified` future and
+/// `enable()` it (registers immediately) **before** reading config. Any
+/// `notify_waiters()` issued afterwards is then captured by this waiter.
 async fn auto_cleanup_loop(state: Arc<DaemonState>) {
     loop {
+        let notified = state.config_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         let (enabled, interval, keep_disabled) = {
             let cfg = state.config.read().unwrap();
             (
@@ -59,14 +69,14 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
         };
         if !enabled || interval == 0 || keep_disabled {
             // Disabled: block until a reload arrives, then re-check.
-            state.config_notify.notified().await;
+            notified.await;
             continue;
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(interval)) => {
                 auto_cleanup(&state).await;
             }
-            _ = state.config_notify.notified() => {
+            _ = notified.as_mut() => {
                 // Config changed mid-sleep: skip this cleanup pass and re-read.
             }
         }
@@ -74,19 +84,24 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
 }
 
 /// Health-check loop. Same push-based pattern as `auto_cleanup_loop`, keyed
-/// off `health_check_interval_secs`.
+/// off `health_check_interval_secs`. See that function's comment for why
+/// `enable()` is called before the config read.
 async fn health_check_loop(state: Arc<DaemonState>) {
     loop {
+        let notified = state.config_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         let interval = state.config.read().unwrap().health_check_interval_secs;
         if interval == 0 {
-            state.config_notify.notified().await;
+            notified.await;
             continue;
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(interval)) => {
                 health_check(&state).await;
             }
-            _ = state.config_notify.notified() => {}
+            _ = notified.as_mut() => {}
         }
     }
 }

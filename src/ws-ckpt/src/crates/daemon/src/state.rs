@@ -258,6 +258,9 @@ impl DaemonState {
     /// Resolve a workspace by identifier: tries workspace ID first, then filesystem path.
     /// Supports absolute paths, relative paths, and workspace IDs (e.g., "ws-6d5aaa").
     pub async fn resolve_workspace(&self, workspace: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
+        if workspace.trim().is_empty() {
+            return None;
+        }
         // Normalize: strip trailing slashes so "/a/b/" and "/a/b" are equivalent.
         let workspace = {
             let t = workspace.trim_end_matches('/');

@@ -8,6 +8,8 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 use ws_ckpt_common::{ChangeType, DiffEntry};
 
+use crate::util::unescape_proc_mount;
+
 /// Ensure the current kernel can mount btrfs.
 ///
 /// Checks `/proc/filesystems`; if absent, tries `modprobe btrfs` once and rechecks.
@@ -592,8 +594,8 @@ pub async fn find_available_btrfs_partition() -> Result<MountInfo> {
                 continue;
             }
             return Ok(MountInfo {
-                device: parts[0].to_string(),
-                mount_point: parts[1].to_string(),
+                device: unescape_proc_mount(parts[0]),
+                mount_point: unescape_proc_mount(parts[1]),
             });
         }
     }

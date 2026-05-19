@@ -643,7 +643,9 @@ impl Default for DaemonConfig {
 
 // ── Frame encoding/decoding (sync, no tokio dependency) ──
 
-const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024; // 16MB max
+/// Max IPC frame payload (excludes 4-byte length header). Enforced on both
+/// sides to prevent OOM from a malformed length prefix.
+pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 
 /// Serialize a message into a length-prefixed frame: [4-byte LE length][bincode payload]
 pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, WsCkptError> {

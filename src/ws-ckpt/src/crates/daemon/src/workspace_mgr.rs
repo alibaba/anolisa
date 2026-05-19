@@ -19,12 +19,11 @@ fn error_resp(code: ErrorCode, msg: impl Into<String>) -> Response {
     }
 }
 
-/// Strip trailing slashes from a path string, preserving root "/".
-///
-/// POSIX lstat() follows a trailing-slash symlink, so passing
-/// "/path/symlink/" to `symlink_metadata` misses the symlink detection.
-/// Normalize user-supplied paths once at the boundary to avoid this pitfall.
+/// Strip trailing slashes, preserving root "/". Empty stays empty.
 fn strip_trailing_slashes(s: &str) -> &str {
+    if s.is_empty() {
+        return s;
+    }
     let trimmed = s.trim_end_matches('/');
     if trimmed.is_empty() {
         "/"
@@ -33,9 +32,61 @@ fn strip_trailing_slashes(s: &str) -> &str {
     }
 }
 
+/// Re-adopt an existing managed subvolume into the daemon state and return
+/// `InitOk { ws_id }`. Used when a workspace is discovered out-of-band
+/// (e.g. after daemon restart with on-disk subvol intact) — either through
+/// a user-facing symlink (Step 0) or through canonical resolution into
+/// mount_path (Step 2b).
+///
+/// Loads the index from disk if present; falls back to rebuilding it from
+/// the snapshots directory; persists the rebuilt index. Save_manifest
+/// failure is warned but not fatal — the in-memory registration succeeded
+/// and subsequent writes will retry persistence.
+async fn adopt_existing_subvol(
+    state: &Arc<DaemonState>,
+    ws_id: &str,
+    registered_path: std::path::PathBuf,
+) -> Response {
+    let snap_dir = state.index_dir(ws_id);
+    let btrfs_snap_dir = state.backend.snapshots_root().join(ws_id);
+    let mut index = if let Ok(idx) = index_store::load(&snap_dir).await {
+        idx
+    } else {
+        SnapshotIndex::new(registered_path.clone())
+    };
+    if index.snapshots.is_empty() {
+        if let Ok(rebuilt) =
+            index_store::rebuild_from_fs(&btrfs_snap_dir, registered_path.clone()).await
+        {
+            if !rebuilt.snapshots.is_empty() {
+                info!(
+                    "Recovered {} snapshot(s) from filesystem for {}",
+                    rebuilt.snapshots.len(),
+                    ws_id
+                );
+                index = rebuilt;
+                let _ = index_store::save(&snap_dir, &index).await;
+            }
+        }
+    }
+    state.register_workspace(ws_id.to_string(), registered_path, index);
+    if let Err(e) = state.save_manifest().await {
+        warn!("save_manifest failed after subvol re-adoption: {:#}", e);
+    }
+    Response::InitOk {
+        ws_id: ws_id.to_string(),
+    }
+}
+
 // ── init ──
 
 pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<Response> {
+    if workspace.trim().is_empty() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "workspace path is empty",
+        ));
+    }
     let workspace = strip_trailing_slashes(workspace);
     // 0. Early check: detect workspace already managed via symlink to our data_root.
     //    This must run before canonicalize(), which would resolve the symlink
@@ -68,35 +119,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
                             "recovering unregistered workspace: {} -> {:?} (ws_id={})",
                             workspace, target, ws_id
                         );
-                        let snap_dir = state.index_dir(&ws_id);
-                        let btrfs_snap_dir = state.backend.snapshots_root().join(&ws_id);
-                        let mut index = if let Ok(idx) = index_store::load(&snap_dir).await {
-                            idx
-                        } else {
-                            SnapshotIndex::new(ws_path.clone())
-                        };
-                        // If index has no snapshots, try rebuilding from filesystem
-                        if index.snapshots.is_empty() {
-                            if let Ok(rebuilt) =
-                                index_store::rebuild_from_fs(&btrfs_snap_dir, ws_path.clone()).await
-                            {
-                                if !rebuilt.snapshots.is_empty() {
-                                    info!(
-                                        "Recovered {} snapshot(s) from filesystem for {}",
-                                        rebuilt.snapshots.len(),
-                                        ws_id
-                                    );
-                                    index = rebuilt;
-                                    // Persist rebuilt index
-                                    let _ = index_store::save(&snap_dir, &index).await;
-                                }
-                            }
-                        }
-                        state.register_workspace(ws_id.clone(), ws_path.clone(), index);
-                        if let Err(e) = state.save_manifest().await {
-                            warn!("save_manifest failed after recovery register: {:#}", e);
-                        }
-                        return Ok(Response::InitOk { ws_id });
+                        return Ok(adopt_existing_subvol(state, &ws_id, ws_path.clone()).await);
                     } else {
                         // Broken symlink — target subvolume gone; remove and re-init
                         warn!(
@@ -128,6 +151,15 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         );
     }
 
+    // Refuse '/' as workspace: rsync would be self-referential and pull in
+    // /proc, /sys, etc.; recover() would overwrite the root filesystem.
+    if abs_path == std::path::Path::new("/") {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "root '/' is not a supported workspace; use a specific subdirectory",
+        ));
+    }
+
     // 2. Pre-checks
     let meta = match tokio::fs::metadata(&abs_path).await {
         Ok(m) => m,
@@ -156,6 +188,50 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         });
     }
     if abs_path.starts_with(&state.mount_path) {
+        // The user-facing path canonicalises into our mount root. Two
+        // sub-cases need different handling:
+        //   (a) `abs_path == mount_path/<ws_id>` for some `ws_id` we
+        //       manage. The user is effectively reaching one of our
+        //       subvolumes through a bind mount or symlink chain — treat
+        //       this as idempotent (already registered) or auto-adopt
+        //       (orphan subvol after restart).
+        //   (b) Anything else under mount_path (e.g. `.snapshots/...`, a
+        //       nested directory inside a subvol, or an unknown name at
+        //       the root). This is real self-referential nesting and
+        //       must stay an error.
+        if let Ok(rest) = abs_path.strip_prefix(&state.mount_path) {
+            let mut comps = rest.components();
+            let single = match (comps.next(), comps.next()) {
+                (Some(first), None) => Some(first.as_os_str().to_string_lossy().to_string()),
+                _ => None,
+            };
+            if let Some(ws_id) = single {
+                if let Some(existing) = state.get_by_wsid(&ws_id) {
+                    let ws = existing.read().await;
+                    warn!(
+                        "init target {} resolves to managed subvolume {:?}; \
+                         treating as already initialized",
+                        workspace, abs_path
+                    );
+                    return Ok(Response::InitOk {
+                        ws_id: ws.ws_id.clone(),
+                    });
+                }
+                // Orphan subvol — re-adopt if its snapshot bucket exists
+                // (created at init, proving it was a real workspace).
+                if tokio::fs::metadata(state.backend.snapshots_root().join(&ws_id))
+                    .await
+                    .is_ok()
+                {
+                    warn!(
+                        "init target {} resolves to orphan subvolume {:?}; \
+                         re-adopting (ws_id={})",
+                        workspace, abs_path, ws_id
+                    );
+                    return Ok(adopt_existing_subvol(state, &ws_id, abs_path.clone()).await);
+                }
+            }
+        }
         return Ok(error_resp(
             ErrorCode::InvalidPath,
             format!(
@@ -531,6 +607,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_empty_workspace_returns_invalid_path() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        for blank in ["", "   ", "\t"] {
+            let resp = init(&state, blank).await.unwrap();
+            match resp {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath);
+                    assert!(
+                        message.contains("empty"),
+                        "expected empty-path message, got: {}",
+                        message
+                    );
+                }
+                other => panic!(
+                    "expected InvalidPath error for blank input, got {:?}",
+                    other
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn init_root_path_returns_invalid_path() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        // All of these canonicalize to "/" and must be rejected.
+        for variant in ["/", "///", "/.", "/./"] {
+            let resp = init(&state, variant).await.unwrap();
+            match resp {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath, "variant {:?}", variant);
+                    assert!(
+                        message.contains("root"),
+                        "variant {:?}: expected root-rejection message, got: {}",
+                        variant,
+                        message
+                    );
+                }
+                other => panic!(
+                    "variant {:?}: expected InvalidPath error, got {:?}",
+                    variant, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn strip_trailing_slashes_preserves_empty_and_root() {
+        assert_eq!(strip_trailing_slashes(""), "");
+        assert_eq!(strip_trailing_slashes("/"), "/");
+        assert_eq!(strip_trailing_slashes("///"), "/");
+        assert_eq!(strip_trailing_slashes("/foo/"), "/foo");
+        assert_eq!(strip_trailing_slashes("/foo"), "/foo");
+        assert_eq!(strip_trailing_slashes("foo/"), "foo");
+    }
+
+    #[tokio::test]
     async fn init_already_initialized_returns_ok() {
         let state = Arc::new(DaemonState::new(
             test_config(),
@@ -579,6 +719,33 @@ mod tests {
                 assert!(message.contains("inside mount_path"));
             }
             _ => panic!("expected InvalidPath error for path inside mount_path"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_canonical_into_managed_subvol_is_idempotent() {
+        // User-facing path resolves (via bind mount / symlink chain) into
+        // `mount_path/<ws_id>` for a workspace that's already registered.
+        // Expectation: warn + InitOk, not InvalidPath.
+        let mount_dir = tempfile::tempdir().unwrap();
+        let mount_path = tokio::fs::canonicalize(mount_dir.path()).await.unwrap();
+        let ws_id = "ws-abc123";
+        let subvol_path = mount_path.join(ws_id);
+        tokio::fs::create_dir_all(&subvol_path).await.unwrap();
+
+        let mut cfg = test_config();
+        cfg.mount_path = mount_path.clone();
+        let state = Arc::new(DaemonState::new(cfg, test_backend(), test_state_dir()));
+        state.register_workspace(
+            ws_id.to_string(),
+            PathBuf::from("/some/user/facing/path"),
+            SnapshotIndex::new(PathBuf::from("/some/user/facing/path")),
+        );
+
+        let resp = init(&state, &subvol_path.to_string_lossy()).await.unwrap();
+        match resp {
+            Response::InitOk { ws_id: returned } => assert_eq!(returned, ws_id),
+            other => panic!("expected idempotent InitOk, got {:?}", other),
         }
     }
 
