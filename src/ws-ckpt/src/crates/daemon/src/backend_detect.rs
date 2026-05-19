@@ -85,10 +85,20 @@ pub(crate) async fn create_backend(
 ) -> anyhow::Result<Arc<dyn StorageBackend>> {
     match backend_type {
         BackendType::BtrfsLoop => {
-            let backend = BtrfsLoopBackend::new(
-                config.mount_path.clone(),
-                PathBuf::from(ws_ckpt_common::BTRFS_IMG_PATH),
-            );
+            // Decide effective image path before constructing the backend; this
+            // also performs the one-shot legacy → target migration on upgrade.
+            // On migration failure we transparently fall back to legacy so the
+            // daemon keeps serving — see decide_effective_img_path for the tree.
+            let target = PathBuf::from(ws_ckpt_common::BTRFS_IMG_PATH);
+            let legacy = PathBuf::from(ws_ckpt_common::LEGACY_BTRFS_IMG_PATH);
+            let effective = crate::backends::btrfs_loop::decide_effective_img_path(
+                &config.mount_path,
+                &target,
+                &legacy,
+            )
+            .await
+            .context("Failed to resolve effective btrfs image path")?;
+            let backend = BtrfsLoopBackend::new(config.mount_path.clone(), effective);
             Ok(Arc::new(backend))
         }
         BackendType::BtrfsBase => {

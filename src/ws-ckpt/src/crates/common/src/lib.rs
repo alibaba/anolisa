@@ -19,6 +19,8 @@ pub const SNAPSHOTS_DIR: &str = "snapshots";
 pub const INDEX_FILE: &str = "index.json";
 pub const BTRFS_IMG_PATH: &str = "/var/lib/ws-ckpt/btrfs-data.img";
 pub const BTRFS_IMG_DIR: &str = "/var/lib/ws-ckpt";
+/// Pre-FHS-migration location (kept for one-shot in-daemon migration on upgrade).
+pub const LEGACY_BTRFS_IMG_PATH: &str = "/data/ws-ckpt/btrfs-data.img";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation

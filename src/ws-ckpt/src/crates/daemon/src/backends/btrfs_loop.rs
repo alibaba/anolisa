@@ -409,27 +409,27 @@ impl StorageBackend for BtrfsLoopBackend {
             .await
             .context("btrfs kernel support is required")?;
 
-        let img_path = &config.img_path;
-        let img_dir = derive_img_dir(img_path)
-            .context("Failed to derive image directory from config.img_path")?;
+        let img_path_str = self.img_path.to_string_lossy().to_string();
+        let img_dir = derive_img_dir(&img_path_str)
+            .context("Failed to derive image directory from self.img_path")?;
 
         tokio::fs::create_dir_all(&img_dir)
             .await
             .context("Failed to create ws-ckpt data directory")?;
 
         // A newly created image already matches target; only reconcile pre-existing ones.
-        let img_existed_before = tokio::fs::metadata(img_path).await.is_ok();
+        let img_existed_before = tokio::fs::metadata(&self.img_path).await.is_ok();
         if !img_existed_before {
-            create_sparse_image(config, &img_dir).await?;
+            create_sparse_image(&img_path_str, config, &img_dir).await?;
         }
 
-        tokio::fs::create_dir_all(&config.mount_path)
+        tokio::fs::create_dir_all(&self.mount_path)
             .await
             .context("Failed to create mount point directory")?;
 
-        let mount_path_str = config.mount_path.to_string_lossy().to_string();
+        let mount_path_str = self.mount_path.to_string_lossy().to_string();
         if !is_mounted(&mount_path_str).await? {
-            let loop_device = run_command("losetup", &["--find", "--show", &config.img_path])
+            let loop_device = run_command("losetup", &["--find", "--show", &img_path_str])
                 .await
                 .context("Failed to setup loop device")?;
             let loop_device = loop_device.trim().to_string();
@@ -438,11 +438,11 @@ impl StorageBackend for BtrfsLoopBackend {
                 .context("Failed to mount btrfs image")?;
             info!("Mounted {} at {}", loop_device, mount_path_str);
         } else {
-            info!("Already mounted at {:?}", config.mount_path);
+            info!("Already mounted at {:?}", self.mount_path);
         }
 
         if img_existed_before {
-            if let Err(e) = reconcile_img_size(config).await {
+            if let Err(e) = reconcile_img_size(&img_path_str, &mount_path_str, config).await {
                 warn!(
                     "Failed to reconcile btrfs image size: {:#}. Continuing with current size.",
                     e
@@ -450,14 +450,212 @@ impl StorageBackend for BtrfsLoopBackend {
             }
         }
 
-        let snapshots_dir = config.mount_path.join(SNAPSHOTS_DIR);
+        let snapshots_dir = self.mount_path.join(SNAPSHOTS_DIR);
         tokio::fs::create_dir_all(&snapshots_dir)
             .await
             .context("Failed to create snapshots directory")?;
 
-        info!("BtrfsLoop bootstrap complete");
+        info!("BtrfsLoop bootstrap complete (img={:?})", self.img_path);
         Ok(())
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Effective image path resolution & legacy migration
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Decide which image file the daemon will operate on this run, performing a
+/// best-effort one-shot migration from the pre-FHS legacy path to the canonical
+/// path when applicable. This is invoked before `BtrfsLoopBackend::new`.
+///
+/// Decision tree:
+///
+/// 1. `mount_path` already mounted — trust the existing kernel mount and look
+///    up its backing file via `findmnt` + `losetup`. Skip migration this run;
+///    if backing is the legacy file, log a notice — migration will retry next
+///    time the mount is gone (e.g. system reboot).
+///    - Backing-file lookup may fail (findmnt/losetup not in PATH, unexpected
+///      output). In that case we **fail loud** rather than guessing. Picking
+///      a candidate based on disk presence isn't safe: a stale/empty target
+///      file may sit on disk while the live mount is actually backed by
+///      legacy, and choosing target here would (a) cause `reconcile_img_size`
+///      to operate on the wrong file this run, and (b) bias the *next* cold
+///      boot toward mounting the stale target, hiding live data.
+/// 2. Cold path (mount not active):
+///    - target exists → use target.
+///    - target missing && legacy exists → attempt migration.
+///      - success → use target.
+///      - failure → warn and fall back to legacy; daemon serves on legacy and
+///        retries migration on the next start.
+///    - neither exists → use target (fresh install; bootstrap will create).
+pub async fn decide_effective_img_path(
+    mount_path: &Path,
+    target: &Path,
+    legacy: &Path,
+) -> anyhow::Result<PathBuf> {
+    let mount_path_str = mount_path.to_string_lossy().to_string();
+    match is_mounted(&mount_path_str).await {
+        Ok(true) => match find_backing_file(&mount_path_str).await {
+            Ok(p) => {
+                info!(
+                    "{} already mounted; trusting existing kernel state (backing: {:?})",
+                    mount_path_str, p
+                );
+                if p == legacy {
+                    warn!(
+                        "Currently running on legacy img {:?}; migration deferred until \
+                         {} is unmounted (e.g. system reboot)",
+                        legacy, mount_path_str
+                    );
+                }
+                return Ok(p);
+            }
+            Err(e) => {
+                bail!(
+                    "{} is mounted but backing-file lookup failed ({:#}). Refusing to \
+                     guess which img file backs the mount — picking the wrong file \
+                     would let bootstrap reconcile a stale image and let the next \
+                     cold start mount empty data, silently hiding the live workspace. \
+                     Diagnose with `findmnt -no SOURCE {0}` and `losetup -l <loop>`, \
+                     then restart the daemon.",
+                    mount_path_str,
+                    e
+                );
+            }
+        },
+        Ok(false) => {}
+        Err(e) => {
+            // /proc/mounts being unreadable is a degenerate state that downstream
+            // `bootstrap()` will also hit (it calls `is_mounted` with `?`), so the
+            // daemon won't actually drift into a wrong-img branch — bootstrap will
+            // bail before touching loop/mount. Logging here and proceeding to the
+            // cold path is enough; we don't need a second loud failure.
+            warn!(
+                "Failed to check mount state of {}: {:#}; assuming not mounted",
+                mount_path_str, e
+            );
+        }
+    }
+
+    let target_exists = tokio::fs::metadata(target).await.is_ok();
+    let legacy_exists = tokio::fs::metadata(legacy).await.is_ok();
+
+    if target_exists {
+        if legacy_exists {
+            warn!(
+                "Both target {:?} and legacy {:?} exist; using target. \
+                 Legacy is left in place — please remove manually after verification.",
+                target, legacy
+            );
+        }
+        return Ok(target.to_path_buf());
+    }
+
+    if legacy_exists {
+        info!(
+            "Target img missing, legacy img at {:?} present — attempting one-shot migration",
+            legacy
+        );
+        match migrate_legacy_img(legacy, target).await {
+            Ok(()) => {
+                info!("Migrated legacy img {:?} -> {:?}", legacy, target);
+                return Ok(target.to_path_buf());
+            }
+            Err(e) => {
+                error!(
+                    "Failed to migrate legacy img {:?} -> {:?}: {:#}. \
+                     Daemon will serve on the legacy path and retry migration on next start. \
+                     Old data is intact.",
+                    legacy, target, e
+                );
+                return Ok(legacy.to_path_buf());
+            }
+        }
+    }
+
+    // Fresh install: nothing exists yet.
+    Ok(target.to_path_buf())
+}
+
+/// Resolve the file backing the loop device currently mounted at `mount_path`.
+async fn find_backing_file(mount_path: &str) -> anyhow::Result<PathBuf> {
+    let src = run_command("findmnt", &["-no", "SOURCE", mount_path])
+        .await
+        .context("findmnt failed")?;
+    let loop_dev = src.trim();
+    if loop_dev.is_empty() {
+        bail!("findmnt returned no SOURCE for {}", mount_path);
+    }
+    let out = run_command("losetup", &["-nl", "--output", "BACK-FILE", loop_dev])
+        .await
+        .context("losetup -l failed")?;
+    let back = out.trim();
+    if back.is_empty() {
+        bail!("losetup returned empty BACK-FILE for {}", loop_dev);
+    }
+    Ok(PathBuf::from(back))
+}
+
+/// Move `legacy` to `target`. Tries atomic rename first; on `EXDEV` falls back
+/// to copy-to-tmp + fsync + atomic rename + unlink-legacy. Failure leaves the
+/// legacy file untouched so the next bootstrap can retry.
+async fn migrate_legacy_img(legacy: &Path, target: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create target parent {:?}", parent))?;
+    }
+
+    match tokio::fs::rename(legacy, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => cross_fs_migrate(legacy, target).await,
+        Err(e) => {
+            Err(anyhow::Error::from(e).context(format!("rename {:?} -> {:?}", legacy, target)))
+        }
+    }
+}
+
+/// EXDEV fallback: long-running copy is staged at `<target>.migrate-tmp` (same
+/// fs as `target`), fsync'd, then atomically renamed onto `target`. The legacy
+/// file is unlinked only after the new target is fully published, so an
+/// interruption never leaves a half-written `target` for the next bootstrap to
+/// mount as a corrupt image.
+async fn cross_fs_migrate(legacy: &Path, target: &Path) -> anyhow::Result<()> {
+    let tmp = {
+        let mut t = target.as_os_str().to_owned();
+        t.push(".migrate-tmp");
+        PathBuf::from(t)
+    };
+    // Drop any leftover from a previous failed attempt to keep this idempotent.
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    tokio::fs::copy(legacy, &tmp)
+        .await
+        .with_context(|| format!("cross-fs copy {:?} -> {:?}", legacy, tmp))?;
+
+    let f = tokio::fs::File::open(&tmp)
+        .await
+        .with_context(|| format!("open tmp for fsync {:?}", tmp))?;
+    f.sync_all()
+        .await
+        .with_context(|| format!("fsync tmp {:?}", tmp))?;
+    drop(f);
+
+    tokio::fs::rename(&tmp, target)
+        .await
+        .with_context(|| format!("atomic publish {:?} -> {:?}", tmp, target))?;
+
+    // Failure to unlink legacy after a successful publish is non-fatal: the
+    // next bootstrap sees both files exist and just leaves legacy for manual
+    // cleanup.
+    if let Err(e) = tokio::fs::remove_file(legacy).await {
+        warn!(
+            "Migration succeeded but failed to unlink legacy {:?}: {:#}; \
+             target {:?} is fully in place — please remove legacy manually.",
+            legacy, e, target
+        );
+    }
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -466,8 +664,11 @@ impl StorageBackend for BtrfsLoopBackend {
 
 /// Create a sparse image file sized by `min(img_size GB, total * img_max_percent%)`,
 /// degrading to `avail * img_max_percent%` if target exceeds host avail. Then mkfs.btrfs.
-async fn create_sparse_image(config: &DaemonConfig, img_dir: &str) -> anyhow::Result<()> {
-    let img_path = &config.img_path;
+async fn create_sparse_image(
+    img_path: &str,
+    config: &DaemonConfig,
+    img_dir: &str,
+) -> anyhow::Result<()> {
     // `-P` forces POSIX single-line output; long device names must not wrap.
     let df_output = run_command("df", &["-P", "-B1", img_dir])
         .await
@@ -534,16 +735,18 @@ fn compute_target_size(img_size_gb: u64, img_max_percent: f64, total_bytes: u64)
 /// - Equal: no-op (still runs a final `btrfs fs resize max` for self-healing).
 /// - Less : grow in place via truncate + `losetup -c`, guarded by host avail.
 /// - Greater: shrink via btrfs resize + unmount + truncate + remount, guarded by `fuser -m`.
-async fn reconcile_img_size(config: &DaemonConfig) -> anyhow::Result<()> {
-    let img_path = &config.img_path;
-    let mount_path_str = config.mount_path.to_string_lossy().to_string();
+async fn reconcile_img_size(
+    img_path: &str,
+    mount_path_str: &str,
+    config: &DaemonConfig,
+) -> anyhow::Result<()> {
     let current = tokio::fs::metadata(img_path)
         .await
         .with_context(|| format!("Failed to stat image {}", img_path))?
         .len();
 
-    let img_dir = derive_img_dir(img_path)
-        .context("Failed to derive image directory from config.img_path")?;
+    let img_dir =
+        derive_img_dir(img_path).context("Failed to derive image directory from img_path")?;
     let df_output = run_command("df", &["-P", "-B1", &img_dir])
         .await
         .context("Failed to get host partition info for reconcile")?;
@@ -582,7 +785,7 @@ async fn reconcile_img_size(config: &DaemonConfig) -> anyhow::Result<()> {
             grew_to = Some(target);
         }
         std::cmp::Ordering::Greater => {
-            if let Some(pids) = check_mount_busy(&mount_path_str).await {
+            if let Some(pids) = check_mount_busy(mount_path_str).await {
                 warn!(
                     "Cannot shrink btrfs image: mount {} in use by PIDs [{}]. Keeping current ({} bytes).",
                     mount_path_str, pids, current,
@@ -593,14 +796,14 @@ async fn reconcile_img_size(config: &DaemonConfig) -> anyhow::Result<()> {
             // Shrink fs first — fails cleanly if used bytes exceed target, no data loss.
             run_command_checked(
                 "btrfs",
-                &["filesystem", "resize", &target.to_string(), &mount_path_str],
+                &["filesystem", "resize", &target.to_string(), mount_path_str],
             )
             .await
             .context("Failed to shrink btrfs filesystem (data may exceed new size)")?;
             let loop_device = find_loop_device_for(img_path)
                 .await
                 .context("Failed to locate loop device for image")?;
-            run_command_checked("umount", &[&mount_path_str])
+            run_command_checked("umount", &[mount_path_str])
                 .await
                 .context("Failed to unmount for image shrink")?;
             run_command_checked("losetup", &["-d", &loop_device])
@@ -613,7 +816,7 @@ async fn reconcile_img_size(config: &DaemonConfig) -> anyhow::Result<()> {
                 .await
                 .context("Failed to reattach loop device")?;
             let new_loop = new_loop.trim().to_string();
-            run_command_checked("mount", &[&new_loop, &mount_path_str])
+            run_command_checked("mount", &[&new_loop, mount_path_str])
                 .await
                 .context("Failed to remount after image shrink")?;
             info!("Btrfs image shrunk to {} bytes", target);
@@ -622,7 +825,7 @@ async fn reconcile_img_size(config: &DaemonConfig) -> anyhow::Result<()> {
 
     // Single exit point: syncs fs size to loop capacity. Also self-heals a previous
     // half-done grow (truncate+losetup -c succeeded but btrfs resize died).
-    run_command_checked("btrfs", &["filesystem", "resize", "max", &mount_path_str])
+    run_command_checked("btrfs", &["filesystem", "resize", "max", mount_path_str])
         .await
         .context("Failed to sync btrfs filesystem size to loop capacity")?;
     if let Some(t) = grew_to {
@@ -793,5 +996,125 @@ mod tests {
     fn derive_img_dir_rejects_root_and_empty() {
         assert!(derive_img_dir("/").is_err());
         assert!(derive_img_dir("").is_err());
+    }
+
+    use super::{cross_fs_migrate, decide_effective_img_path, migrate_legacy_img};
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    /// On the same filesystem, `migrate_legacy_img` should take the fast path
+    /// (`rename`) and leave the legacy file gone, the target file populated.
+    #[tokio::test]
+    async fn migrate_legacy_img_same_fs_renames_atomically() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join("legacy.img");
+        let target = dir.path().join("nested/target.img");
+        tokio::fs::write(&legacy, b"hello-world-data")
+            .await
+            .unwrap();
+
+        migrate_legacy_img(&legacy, &target).await.unwrap();
+
+        assert!(!legacy.exists(), "legacy must be gone after migration");
+        let got = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(got, b"hello-world-data");
+        // No tmp file should leak.
+        let mut tmp = target.as_os_str().to_owned();
+        tmp.push(".migrate-tmp");
+        assert!(!PathBuf::from(tmp).exists());
+    }
+
+    /// Direct-call test for the cross-fs path: copies, atomically publishes,
+    /// unlinks legacy, and leaves no tmp behind.
+    #[tokio::test]
+    async fn cross_fs_migrate_publishes_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join("legacy.img");
+        let target = dir.path().join("target.img");
+        tokio::fs::write(&legacy, b"payload-bytes").await.unwrap();
+
+        cross_fs_migrate(&legacy, &target).await.unwrap();
+
+        assert!(!legacy.exists());
+        let got = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(got, b"payload-bytes");
+        let mut tmp = target.as_os_str().to_owned();
+        tmp.push(".migrate-tmp");
+        assert!(!PathBuf::from(tmp).exists());
+    }
+
+    /// A leftover tmp from a previously interrupted attempt must not block a
+    /// fresh migration — `cross_fs_migrate` overwrites it.
+    #[tokio::test]
+    async fn cross_fs_migrate_clobbers_stale_tmp() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join("legacy.img");
+        let target = dir.path().join("target.img");
+        let mut tmp_os = target.as_os_str().to_owned();
+        tmp_os.push(".migrate-tmp");
+        let stale_tmp = PathBuf::from(tmp_os);
+
+        tokio::fs::write(&legacy, b"new-data").await.unwrap();
+        tokio::fs::write(&stale_tmp, b"stale-junk").await.unwrap();
+
+        cross_fs_migrate(&legacy, &target).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"new-data");
+        assert!(!legacy.exists());
+        assert!(!stale_tmp.exists());
+    }
+
+    /// Both files exist (e.g. operator copied target back manually): use target
+    /// and leave legacy in place untouched.
+    #[tokio::test]
+    async fn decide_prefers_target_when_both_exist() {
+        let dir = tempdir().unwrap();
+        let mount = dir.path().join("mnt-not-exist"); // unmounted
+        let target = dir.path().join("target.img");
+        let legacy = dir.path().join("legacy.img");
+        tokio::fs::write(&target, b"t").await.unwrap();
+        tokio::fs::write(&legacy, b"l").await.unwrap();
+
+        let got = decide_effective_img_path(&mount, &target, &legacy)
+            .await
+            .unwrap();
+        assert_eq!(got, target);
+        assert!(
+            legacy.exists(),
+            "legacy must be left in place for manual cleanup"
+        );
+    }
+
+    /// Cold path with only legacy: triggers migration; on a same-fs tempdir the
+    /// migration succeeds, daemon ends up using the canonical target path.
+    #[tokio::test]
+    async fn decide_migrates_when_only_legacy_exists() {
+        let dir = tempdir().unwrap();
+        let mount = dir.path().join("mnt-not-exist");
+        let target = dir.path().join("nested/target.img");
+        let legacy = dir.path().join("legacy.img");
+        tokio::fs::write(&legacy, b"old-data").await.unwrap();
+
+        let got = decide_effective_img_path(&mount, &target, &legacy)
+            .await
+            .unwrap();
+        assert_eq!(got, target);
+        assert!(target.exists());
+        assert!(!legacy.exists());
+    }
+
+    /// Cold path with neither file present: daemon proceeds as fresh install
+    /// — return target so bootstrap can `create_sparse_image`.
+    #[tokio::test]
+    async fn decide_falls_through_to_target_on_fresh_install() {
+        let dir = tempdir().unwrap();
+        let mount = dir.path().join("mnt-not-exist");
+        let target = dir.path().join("target.img");
+        let legacy = dir.path().join("legacy.img");
+
+        let got = decide_effective_img_path(&mount, &target, &legacy)
+            .await
+            .unwrap();
+        assert_eq!(got, target);
     }
 }

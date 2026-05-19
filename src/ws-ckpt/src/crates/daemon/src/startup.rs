@@ -84,17 +84,22 @@ async fn resolve_from_persisted(
             )
         })?;
 
-    // BtrfsLoop restore invariant: img must pre-exist. Missing img = data loss; fail loud.
+    // BtrfsLoop restore invariant: img data must pre-exist somewhere. Either the
+    // canonical FHS path or the pre-FHS legacy path counts — backend creation has
+    // already attempted migration / fallback, so this only catches the truly
+    // catastrophic "both files gone but state.json still claims data" case.
     if backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop {
-        let img_path = std::path::Path::new(&config.img_path);
-        if !img_path.exists() {
+        let target = std::path::Path::new(ws_ckpt_common::BTRFS_IMG_PATH);
+        let legacy = std::path::Path::new(ws_ckpt_common::LEGACY_BTRFS_IMG_PATH);
+        if !target.exists() && !legacy.exists() {
             anyhow::bail!(
-                "Backend image file not found at {:?}. \
+                "Backend image file not found at {:?} (and no legacy file at {:?}). \
                  Persisted state expects a BtrfsLoop backend but the image is missing — \
                  all snapshot data may be lost. \
                  To change backend type, edit [backend] type in /etc/ws-ckpt/config.toml. \
                  To reset all state, remove {:?}.",
-                img_path,
+                target,
+                legacy,
                 state_dir.join(ws_ckpt_common::STATE_FILE)
             );
         }
