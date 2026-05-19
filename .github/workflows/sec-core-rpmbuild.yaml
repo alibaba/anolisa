@@ -166,6 +166,7 @@ jobs:
 
           hooks_dir = pathlib.Path('/usr/share/anolisa/extensions/agent-sec-core/hooks')
           print(f'Hooks directory: {hooks_dir.resolve()}')
+          sys.path.insert(0, str(hooks_dir))
 
           py_files = sorted(hooks_dir.glob('*.py'))
           if not py_files:
