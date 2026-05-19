@@ -16,7 +16,7 @@ logger = logging.getLogger("agent-sec-core")
 
 _TOOL_NAME = "skill_view"
 _SKILL_MANIFEST = "SKILL.md"
-_DEFAULT_SKILL_ROOTS = ["~/.hermes/skills"]
+_DEFAULT_HERMES_SKILLS_DIR = Path("~/.hermes/skills")
 _DEFAULT_BLOCK_STATUSES = ["none", "drifted", "deny", "tampered"]
 _SKIP_DIRS = frozenset({".git", ".github", ".hub", ".archive", ".skill-meta"})
 _CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id", "conversation_id")
@@ -60,14 +60,13 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         if not isinstance(statuses, list):
             statuses = _DEFAULT_BLOCK_STATUSES
         self._block_statuses = {str(s) for s in statuses}
-        roots = config.get("skill_roots", _DEFAULT_SKILL_ROOTS)
-        if not isinstance(roots, list):
-            roots = _DEFAULT_SKILL_ROOTS
-        self._skill_roots = [str(root) for root in roots if str(root).strip()]
-        max_warnings = config.get("max_warnings_per_turn", 5)
-        self._max_warnings_per_turn = max(1, int(max_warnings))
-        max_contexts = config.get("max_warning_contexts", 128)
-        self._max_warning_contexts = max(1, int(max_contexts))
+        self._skills_dir = _DEFAULT_HERMES_SKILLS_DIR
+        self._max_warnings_per_turn = self._read_int_config(
+            config, "max_warnings_per_turn", default=5, minimum=0
+        )
+        self._max_warning_contexts = self._read_int_config(
+            config, "max_warning_contexts", default=128, minimum=1
+        )
 
     def get_hooks_define(self) -> dict:
         return {
@@ -83,7 +82,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             logger.warning("[agent-sec-core] skill-ledger missing args, fail-open")
             return None
 
-        skill_dir = self._resolve_skill_dir(args, kwargs)
+        skill_dir = self._resolve_skill_dir(args)
         if skill_dir is None:
             logger.warning(
                 "[agent-sec-core] skill-ledger could not resolve skill_dir, fail-open"
@@ -140,6 +139,8 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         """Prepend user-visible skill-ledger warnings to the final response."""
         if self._enable_block:
             return None
+        if self._max_warnings_per_turn == 0:
+            return None
         if not isinstance(response, str):
             return None
 
@@ -163,86 +164,86 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         lines.append(response)
         return "\n".join(lines)
 
-    def _resolve_skill_dir(
-        self, args: dict[str, Any], kwargs: dict[str, Any]
-    ) -> Path | None:
+    def _resolve_skill_dir(self, args: dict[str, Any]) -> Path | None:
         """Resolve a Hermes skill_view call to a local skill directory."""
-        direct_path = self._extract_string(args, "file_path", "path")
-        if direct_path:
-            skill_dir = self._resolve_skill_dir_from_file_path(direct_path, kwargs)
-            if skill_dir is not None:
-                return skill_dir
-
         skill_name = self._extract_string(args, "name", "skill", "skill_name")
         if not skill_name:
             return None
         return self._resolve_skill_dir_from_name(skill_name)
 
-    def _resolve_skill_dir_from_file_path(
-        self, file_path: str, kwargs: dict[str, Any]
-    ) -> Path | None:
-        """Resolve file_path when Hermes directly points at SKILL.md."""
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            cwd = kwargs.get("cwd")
-            if isinstance(cwd, str) and cwd.strip():
-                path = Path(cwd).expanduser() / path
-            else:
-                return None
-        try:
-            resolved = path.resolve()
-        except (OSError, ValueError):
-            return None
-        if resolved.name != _SKILL_MANIFEST or not resolved.is_file():
-            return None
-        return resolved.parent
-
     def _resolve_skill_dir_from_name(self, skill_name: str) -> Path | None:
-        """Resolve by directory name, category/name, or SKILL.md frontmatter name."""
+        """Resolve by Hermes local directory name or category/name."""
         wanted = skill_name.strip()
         if not wanted:
             return None
-        for skill_file in self._iter_skill_files():
-            skill_dir = skill_file.parent
-            names = {
-                skill_dir.name,
-                self._frontmatter_name(skill_file),
-            }
-            for root in self._resolved_skill_roots():
-                try:
-                    names.add(skill_dir.relative_to(root).as_posix())
-                except ValueError:
-                    continue
-            if wanted in {name for name in names if name}:
-                return skill_dir
-        return None
+        if ":" in wanted:
+            logger.debug(
+                "[agent-sec-core] skill-ledger skips qualified/plugin skill name: %s",
+                wanted,
+            )
+            return None
 
-    def _iter_skill_files(self):
-        """Yield SKILL.md files under configured Hermes skill roots."""
+        root = self._resolved_skills_dir()
+        if root is None or not root.is_dir():
+            return None
+
+        candidates: list[Path] = []
         seen: set[Path] = set()
-        for root in self._resolved_skill_roots():
-            if not root.is_dir():
-                continue
-            for skill_file in sorted(root.rglob(_SKILL_MANIFEST)):
-                try:
-                    resolved = skill_file.resolve()
-                except (OSError, ValueError):
-                    continue
-                if resolved in seen or self._is_ignored_path(resolved, root):
-                    continue
-                seen.add(resolved)
-                yield resolved
 
-    def _resolved_skill_roots(self) -> list[Path]:
-        roots: list[Path] = []
-        for raw_root in self._skill_roots:
+        def record(skill_dir: Path, skill_file: Path) -> None:
             try:
-                roots.append(Path(raw_root).expanduser().resolve())
+                resolved_file = skill_file.resolve()
+                resolved_dir = skill_dir.resolve()
             except (OSError, ValueError):
-                logger.warning(
-                    "[agent-sec-core] skill-ledger invalid skill root: %s", raw_root
-                )
-        return roots
+                return
+            if not self._is_under_root(resolved_file, root):
+                return
+            if resolved_file in seen:
+                return
+            seen.add(resolved_file)
+            candidates.append(resolved_dir)
+
+        relative_name = self._safe_relative_name(wanted)
+        if relative_name is not None:
+            direct_path = root / relative_name
+            direct_skill_file = direct_path / _SKILL_MANIFEST
+            if direct_path.is_dir() and direct_skill_file.is_file():
+                record(direct_path, direct_skill_file)
+
+        if "/" not in wanted:
+            for skill_file in self._iter_skill_files(root):
+                if skill_file.parent.name == wanted:
+                    record(skill_file.parent, skill_file)
+
+        if len(candidates) > 1:
+            logger.warning(
+                "[agent-sec-core] skill-ledger ambiguous Hermes skill name=%s matches=%s, fail-open",
+                wanted,
+                [str(path) for path in candidates],
+            )
+            return None
+        return candidates[0] if candidates else None
+
+    def _resolved_skills_dir(self) -> Path | None:
+        try:
+            return self._skills_dir.expanduser().resolve()
+        except (OSError, ValueError):
+            logger.warning(
+                "[agent-sec-core] skill-ledger invalid Hermes skills dir: %s",
+                self._skills_dir,
+            )
+            return None
+
+    def _iter_skill_files(self, root: Path):
+        """Yield SKILL.md files under the default Hermes local skills dir."""
+        for skill_file in sorted(root.rglob(_SKILL_MANIFEST)):
+            try:
+                resolved = skill_file.resolve()
+            except (OSError, ValueError):
+                continue
+            if self._is_ignored_path(resolved, root):
+                continue
+            yield resolved
 
     @staticmethod
     def _is_ignored_path(path: Path, root: Path) -> bool:
@@ -250,22 +251,22 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             parts = path.relative_to(root).parts
         except ValueError:
             return True
-        return any(part.startswith(".") or part in _SKIP_DIRS for part in parts)
+        return any(part in _SKIP_DIRS for part in parts)
 
     @staticmethod
-    def _frontmatter_name(skill_file: Path) -> str | None:
+    def _is_under_root(path: Path, root: Path) -> bool:
         try:
-            text = skill_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _safe_relative_name(skill_name: str) -> Path | None:
+        path = Path(skill_name)
+        if path.is_absolute() or ".." in path.parts:
             return None
-        if not text.startswith("---"):
-            return None
-        for line in text.splitlines()[1:40]:
-            if line.strip() == "---":
-                return None
-            if line.startswith("name:"):
-                return line.split(":", 1)[1].strip().strip("\"'")
-        return None
+        return path
 
     @staticmethod
     def _extract_string(args: dict[str, Any], *keys: str) -> str | None:
@@ -283,7 +284,14 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         status: str,
         message: str,
     ) -> None:
+        if self._max_warnings_per_turn == 0:
+            return
         context_key = self._context_key(kwargs)
+        if context_key is None:
+            logger.debug(
+                "[agent-sec-core] skill-ledger warning has no stable context; user-visible injection skipped"
+            )
+            return
         bucket = self._warnings_by_context.setdefault(context_key, {})
         bucket[str(skill_dir)] = SkillWarning(
             skill_name=skill_name,
@@ -297,19 +305,43 @@ class SkillLedgerCapability(AgentSecCoreCapability):
 
     def _pop_warnings(self, kwargs: dict[str, Any]) -> list[SkillWarning]:
         context_key = self._context_key(kwargs)
+        if context_key is None:
+            return []
         if context_key in self._warnings_by_context:
             return list(self._warnings_by_context.pop(context_key).values())
-        if context_key != "__global__" and "__global__" in self._warnings_by_context:
-            return list(self._warnings_by_context.pop("__global__").values())
         return []
 
     @staticmethod
-    def _context_key(kwargs: dict[str, Any]) -> str:
+    def _context_key(kwargs: dict[str, Any]) -> str | None:
         for field in _CONTEXT_KEY_FIELDS:
             value = kwargs.get(field)
             if isinstance(value, str) and value.strip():
                 return f"{field}:{value}"
-        return "__global__"
+        return None
+
+    @staticmethod
+    def _read_int_config(config: dict, key: str, *, default: int, minimum: int) -> int:
+        raw = config.get(key, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[agent-sec-core] skill-ledger invalid integer config %s=%r; using %s",
+                key,
+                raw,
+                default,
+            )
+            return default
+        if value < minimum:
+            logger.warning(
+                "[agent-sec-core] skill-ledger config %s=%r below minimum %s; using %s",
+                key,
+                raw,
+                minimum,
+                minimum,
+            )
+            return minimum
+        return value
 
     @staticmethod
     def _format_message(status: str, skill_name: str, skill_dir: Path) -> str:

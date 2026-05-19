@@ -127,8 +127,11 @@ Hermes 支持的 hook 及其回调签名：
   `transform_llm_output` 追加到最终回复开头，确保用户可见。
 - `enable_block = true`：命中 `block_statuses` 时直接返回 Hermes block 结果；此模式不再追加
   warning。
-- 默认技能根目录为 `~/.hermes/skills`，按递归 `SKILL.md` 发现 Hermes 的
-  `category/skill` 目录结构；额外目录可通过 `skill_roots` 配置。
+- 当前版本仅覆盖 Hermes 默认本地技能目录 `~/.hermes/skills`，按 Hermes `skill_view`
+  的本地目录规则解析 `category/skill` 或裸 skill 名称；`skills.external_dirs` 和
+  plugin-provided skills 暂不覆盖，hook 会 fail-open 跳过。
+- `file_path` / `path` 仅表示 skill 内 supporting file，不参与 skill 目录定位。
+- `max_warnings_per_turn = 0` 表示关闭用户可见 warning 注入，仅保留日志。
 
 配置示例：
 
@@ -138,7 +141,6 @@ enabled = true
 timeout = 5
 enable_block = false
 block_statuses = ["none", "drifted", "deny", "tampered"]
-skill_roots = ["~/.hermes/skills"]
 max_warnings_per_turn = 5
 max_warning_contexts = 128
 ```

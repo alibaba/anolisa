@@ -21,6 +21,8 @@ def _make_capability(
     *,
     enable_block: bool = False,
     block_statuses: list[str] | None = None,
+    max_warnings_per_turn: int | str = 5,
+    max_warning_contexts: int | str = 128,
 ) -> SkillLedgerCapability:
     cap = SkillLedgerCapability()
     cap._timeout = 5.0
@@ -28,11 +30,11 @@ def _make_capability(
         {
             "enable_block": enable_block,
             "block_statuses": block_statuses or ["none", "drifted", "deny", "tampered"],
-            "skill_roots": [str(root)],
-            "max_warnings_per_turn": 5,
-            "max_warning_contexts": 128,
+            "max_warnings_per_turn": max_warnings_per_turn,
+            "max_warning_contexts": max_warning_contexts,
         }
     )
+    cap._skills_dir = root
     return cap
 
 
@@ -135,8 +137,8 @@ class TestSkillLedgerHooks:
         cap = _make_capability(root)
         mock_cli.return_value = _cli_status("drifted", exit_code=1)
 
-        cap._on_pre_tool_call("skill_view", {"name": "drifted"})
-        output = cap._on_transform_llm_output("assistant response")
+        cap._on_pre_tool_call("skill_view", {"name": "drifted"}, session_id="s1")
+        output = cap._on_transform_llm_output("assistant response", session_id="s1")
 
         assert "status=drifted" in output
 
@@ -187,9 +189,75 @@ class TestSkillLedgerHooks:
         assert len(cap._warnings_by_context) == 2
         assert "session_id:s0" not in cap._warnings_by_context
 
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_warning_without_context_is_not_injected_into_later_session(
+        self, mock_cli, tmp_path
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("warn")
+
+        cap._on_pre_tool_call("skill_view", {"name": "risky"})
+        output = cap._on_transform_llm_output("assistant response", session_id="s1")
+
+        assert output is None
+        assert cap._warnings_by_context == {}
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_warning_with_context_is_not_consumed_by_contextless_transform(
+        self, mock_cli, tmp_path
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("warn")
+
+        cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
+
+        assert cap._on_transform_llm_output("assistant response") is None
+        output = cap._on_transform_llm_output("assistant response", session_id="s1")
+        assert output.startswith("[agent-sec-core skill-ledger warning]")
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_zero_max_warnings_disables_visible_injection(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root, max_warnings_per_turn=0)
+        mock_cli.return_value = _cli_status("warn")
+
+        cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
+
+        assert (
+            cap._on_transform_llm_output("assistant response", session_id="s1") is None
+        )
+        assert cap._warnings_by_context == {}
+
+    def test_invalid_warning_config_uses_safe_defaults(self, tmp_path):
+        root = tmp_path / "skills"
+        cap = _make_capability(
+            root,
+            max_warnings_per_turn="invalid",
+            max_warning_contexts="invalid",
+        )
+
+        assert cap._max_warnings_per_turn == 5
+        assert cap._max_warning_contexts == 128
+
+    def test_negative_warning_config_clamps_to_minimum(self, tmp_path):
+        root = tmp_path / "skills"
+        cap = _make_capability(
+            root,
+            max_warnings_per_turn=-1,
+            max_warning_contexts=-1,
+        )
+
+        assert cap._max_warnings_per_turn == 0
+        assert cap._max_warning_contexts == 1
+
 
 class TestSkillResolution:
-    """Skill name and file path resolution tests."""
+    """Hermes local skill name resolution tests."""
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_resolves_by_category_name(self, mock_cli, tmp_path):
@@ -203,9 +271,9 @@ class TestSkillResolution:
         assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_resolves_by_frontmatter_name(self, mock_cli, tmp_path):
+    def test_frontmatter_name_is_not_used_for_resolution(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
-        skill_dir = _make_skill(
+        _make_skill(
             root,
             "directory-name",
             frontmatter_name="frontmatter-name",
@@ -215,36 +283,39 @@ class TestSkillResolution:
 
         cap._on_pre_tool_call("skill_view", {"skill_name": "frontmatter-name"})
 
-        assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
+        mock_cli.assert_not_called()
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_file_path_direct_to_skill_md_wins(self, mock_cli, tmp_path):
+    def test_supporting_file_path_does_not_override_name(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
-        skill_dir = _make_skill(root, "tools/direct")
+        skill_dir = _make_skill(root, "tools/name-wins")
+        other_dir = _make_skill(root, "tools/ignored-path")
         cap = _make_capability(root)
         mock_cli.return_value = _cli_status("pass")
 
         cap._on_pre_tool_call(
             "skill_view",
-            {"name": "wrong-name", "file_path": str(skill_dir / "SKILL.md")},
+            {
+                "name": "name-wins",
+                "file_path": str(other_dir / "SKILL.md"),
+            },
         )
 
         assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_relative_file_path_requires_cwd(self, mock_cli, tmp_path):
+    def test_file_path_without_name_fails_open(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
-        skill_dir = _make_skill(root, "tools/relative")
+        _make_skill(root, "tools/relative")
         cap = _make_capability(root)
-        mock_cli.return_value = _cli_status("pass")
 
-        cap._on_pre_tool_call(
+        result = cap._on_pre_tool_call(
             "skill_view",
             {"file_path": "SKILL.md"},
-            cwd=str(skill_dir),
         )
 
-        assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
+        assert result is None
+        mock_cli.assert_not_called()
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_ignored_internal_dirs_are_not_resolved(self, mock_cli, tmp_path):
@@ -253,6 +324,29 @@ class TestSkillResolution:
         cap = _make_capability(root)
 
         result = cap._on_pre_tool_call("skill_view", {"name": "hidden"})
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_ambiguous_bare_name_fails_open_without_cli(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/duplicate")
+        _make_skill(root, "security/duplicate")
+        cap = _make_capability(root)
+
+        result = cap._on_pre_tool_call("skill_view", {"name": "duplicate"})
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_qualified_plugin_style_name_is_skipped(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "plugin/skill")
+        cap = _make_capability(root)
+
+        result = cap._on_pre_tool_call("skill_view", {"name": "plugin:skill"})
 
         assert result is None
         mock_cli.assert_not_called()

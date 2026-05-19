@@ -18,6 +18,5 @@ enabled = true
 timeout = 5
 enable_block = false
 block_statuses = ["none", "drifted", "deny", "tampered"]
-skill_roots = ["~/.hermes/skills"]
 max_warnings_per_turn = 5
 max_warning_contexts = 128

@@ -609,7 +609,7 @@ skill-ledger 需适配多个宿主系统，各宿主的 Skill 模型和 Hook 机
 | Hook 机制 | Plugin Hook（进程内 async handler） | Command Hook（fork 子进程，stdin/stdout JSON） | Plugin Hook（`pre_tool_call` + `transform_llm_output`） |
 | 默认告警输出 | `api.logger.warn` / 宿主消息通道 | `decision: "allow"` + `reason` | 缓存本轮 warning，并追加到最终回复开头 |
 | 强门禁方式 | 可返回 `requireApproval` | 可返回 `decision: "ask"` | `enable_block = true` 时返回 `{"action": "block"}` |
-| Skill 安装路径 | `~/.openclaw/skills/` | `~/.copilot-shell/skills/` | `~/.hermes/skills/**` |
+| Skill 安装路径 | `~/.openclaw/skills/` | `~/.copilot-shell/skills/` | 当前 hook 覆盖 `~/.hermes/skills/**` |
 
 各实现共享相同的默认语义：拦截 Skill 加载 → 调用 `skill-ledger check` → `pass` 静默放行，非 `pass` 告警放行；需要强门禁时，由宿主侧配置把 `none` / `drifted` / `deny` / `tampered` 等状态升级为确认或阻断。
 
@@ -650,4 +650,4 @@ skill-ledger 需适配多个宿主系统，各宿主的 Skill 模型和 Hook 机
 
 ### 6.3 Hermes（Plugin Hook）
 
-以 Hermes Plugin 形式分发。`pre_tool_call` handler 过滤 `skill_view`，通过 `file_path` 或 Skill 名称解析本地 Skill 目录后调用 `agent-sec-cli skill-ledger check`。默认 `enable_block = false`，非 `pass` 状态记录为本轮 warning，并由 `transform_llm_output` 追加到最终回复开头，保证用户可见；当 `enable_block = true` 且状态命中 `block_statuses` 时直接阻断本次 `skill_view`。
+以 Hermes Plugin 形式分发。`pre_tool_call` handler 过滤 `skill_view`，仅根据 `name` / `skill` / `skill_name` 在 Hermes 默认本地目录 `~/.hermes/skills` 下解析 Skill 目录后调用 `agent-sec-cli skill-ledger check`。`file_path` / `path` 在 Hermes 中表示 Skill 内 supporting file，不作为 Skill 身份来源。若无法解析、匹配到多个候选、命中 `~/.hermes/config.yaml` 的 `skills.external_dirs` 或 plugin-provided skills 等当前未覆盖来源，hook 采用 fail-open 并仅记录日志；未来如需覆盖这些来源，应单独补充 resolver、信任边界与测试。默认 `enable_block = false`，非 `pass` 状态记录为本轮 warning，并由 `transform_llm_output` 追加到最终回复开头，保证用户可见；当 `enable_block = true` 且状态命中 `block_statuses` 时直接阻断本次 `skill_view`。`max_warnings_per_turn = 0` 可关闭用户可见 warning 注入，仅保留日志。
