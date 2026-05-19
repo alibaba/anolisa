@@ -66,6 +66,10 @@ typedef struct {
     uint32_t    request_messages_len;
     const char* response_messages;    /* LLMResponse.messages 序列化 JSON */
     uint32_t    response_messages_len;
+
+    /* 工具定义（JSON 数组字符串） */
+    const char* tools;                /* LLMRequest.tools 序列化 JSON 数组; 无工具时为 "[]" */
+    uint32_t    tools_len;
 } AgentsightLLMData;
 ```
 

@@ -144,6 +144,8 @@ pub struct AgentsightLLMData {
     pub request_messages_len: u32,
     pub response_messages: *const c_char,
     pub response_messages_len: u32,
+    pub tools: *const c_char,
+    pub tools_len: u32,
 }
 
 // ===========================================================================
@@ -204,6 +206,7 @@ struct LlmDataHolder {
     _finish_reason: Option<CString>,
     _req_messages: CString,
     _resp_messages: CString,
+    _tools: CString,
 }
 
 fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
@@ -301,6 +304,14 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let req_messages = safe_cstring(&req_messages_json);
     let resp_messages = safe_cstring(&resp_messages_json);
 
+    let tools_json = call
+        .request
+        .tools
+        .as_ref()
+        .map(|tools| serde_json::to_string(tools).unwrap_or_default())
+        .unwrap_or_else(|| "[]".to_string());
+    let tools = safe_cstring(&tools_json);
+
     let c_data = AgentsightLLMData {
         response_id: response_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         conversation_id: conversation_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
@@ -326,6 +337,8 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         request_messages_len: req_messages_json.len() as u32,
         response_messages: resp_messages.as_ptr(),
         response_messages_len: resp_messages_json.len() as u32,
+        tools: tools.as_ptr(),
+        tools_len: tools_json.len() as u32,
     };
 
     LlmDataHolder {
@@ -340,6 +353,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         _finish_reason: finish_reason,
         _req_messages: req_messages,
         _resp_messages: resp_messages,
+        _tools: tools,
     }
 }
 
