@@ -131,25 +131,120 @@ impl AnthropicParser {
     }
 
     /// Aggregate SSE events into a single AnthropicResponse
+    ///
+    /// Handles both text and tool_use content blocks from the streaming event sequence:
+    /// - `MessageStart` → extract message metadata (id, model, usage)
+    /// - `ContentBlockStart` → begin a new text or tool_use block
+    /// - `ContentBlockDelta` → append text (TextDelta) or tool args (InputJsonDelta)
+    /// - `ContentBlockStop` → finalize and push current block to content list
+    /// - `MessageDelta` → extract stop_reason and final usage
     fn aggregate_sse_events(events: &[serde_json::Value]) -> Option<AnthropicResponse> {
-        let mut content_parts: Vec<String> = Vec::new();
+        let mut content_blocks: Vec<AnthropicContentBlock> = Vec::new();
         let mut stop_reason: Option<String> = None;
         let mut usage: Option<AnthropicUsage> = None;
         let mut message_start: Option<AnthropicSseEvent> = None;
 
+        // State for the current content block being streamed
+        enum CurrentBlock {
+            Text { text: String },
+            Thinking { thinking: String, signature: String },
+            ToolUse { id: String, name: String, input_json: String },
+        }
+        let mut current_block: Option<CurrentBlock> = None;
+
         for event_value in events {
             // Try to parse as AnthropicSseEvent
             if let Ok(sse_event) = serde_json::from_value::<AnthropicSseEvent>(event_value.clone()) {
-                // Extract data for aggregation based on event type
                 match &sse_event {
                     AnthropicSseEvent::MessageStart { message } => {
                         message_start = Some(sse_event.clone());
                         usage = Some(message.usage.clone());
                     }
+                    AnthropicSseEvent::ContentBlockStart { content_block, .. } => {
+                        // Begin a new content block based on its type
+                        current_block = match content_block {
+                            AnthropicContentBlock::ToolUse { id, name, .. } => {
+                                Some(CurrentBlock::ToolUse {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    input_json: String::new(),
+                                })
+                            }
+                            AnthropicContentBlock::Thinking { .. } => {
+                                Some(CurrentBlock::Thinking {
+                                    thinking: String::new(),
+                                    signature: String::new(),
+                                })
+                            }
+                            _ => {
+                                // Text or any other block type
+                                Some(CurrentBlock::Text { text: String::new() })
+                            }
+                        };
+                    }
                     AnthropicSseEvent::ContentBlockDelta { delta, .. } => {
                         use super::types::AnthropicSseDelta;
-                        if let AnthropicSseDelta::TextDelta { text } = delta {
-                            content_parts.push(text.clone());
+                        match delta {
+                            AnthropicSseDelta::TextDelta { text } => {
+                                if let Some(CurrentBlock::Text { text: ref mut buf }) = current_block {
+                                    buf.push_str(text);
+                                } else if current_block.is_none() {
+                                    // Fallback: no ContentBlockStart seen, create text block
+                                    current_block = Some(CurrentBlock::Text { text: text.clone() });
+                                }
+                            }
+                            AnthropicSseDelta::ThinkingDelta { thinking } => {
+                                if let Some(CurrentBlock::Thinking { thinking: ref mut buf, .. }) = current_block {
+                                    buf.push_str(thinking);
+                                } else if current_block.is_none() {
+                                    current_block = Some(CurrentBlock::Thinking {
+                                        thinking: thinking.clone(),
+                                        signature: String::new(),
+                                    });
+                                }
+                            }
+                            AnthropicSseDelta::SignatureDelta { signature } => {
+                                if let Some(CurrentBlock::Thinking { signature: ref mut sig, .. }) = current_block {
+                                    sig.push_str(signature);
+                                }
+                            }
+                            AnthropicSseDelta::InputJsonDelta { partial_json } => {
+                                if let Some(CurrentBlock::ToolUse { ref mut input_json, .. }) = current_block {
+                                    input_json.push_str(partial_json);
+                                }
+                            }
+                        }
+                    }
+                    AnthropicSseEvent::ContentBlockStop { .. } => {
+                        // Finalize and push the current block
+                        if let Some(block) = current_block.take() {
+                            match block {
+                                CurrentBlock::Text { text } => {
+                                    if !text.is_empty() {
+                                        content_blocks.push(AnthropicContentBlock::Text {
+                                            text,
+                                            cache_control: None,
+                                        });
+                                    }
+                                }
+                                CurrentBlock::Thinking { thinking, signature } => {
+                                    if !thinking.is_empty() {
+                                        content_blocks.push(AnthropicContentBlock::Thinking {
+                                            thinking,
+                                            signature: if signature.is_empty() { None } else { Some(signature) },
+                                        });
+                                    }
+                                }
+                                CurrentBlock::ToolUse { id, name, input_json } => {
+                                    let input = serde_json::from_str::<serde_json::Value>(&input_json)
+                                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    content_blocks.push(AnthropicContentBlock::ToolUse {
+                                        id,
+                                        name,
+                                        input,
+                                    });
+                                }
+                            }
                         }
                     }
                     AnthropicSseEvent::MessageDelta { delta, usage: delta_usage } => {
@@ -168,18 +263,62 @@ impl AnthropicParser {
             }
         }
 
-        // Build aggregated response from message_start
+        // Flush any remaining block that didn't get a ContentBlockStop
+        if let Some(block) = current_block.take() {
+            match block {
+                CurrentBlock::Text { text } => {
+                    if !text.is_empty() {
+                        content_blocks.push(AnthropicContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        });
+                    }
+                }
+                CurrentBlock::Thinking { thinking, signature } => {
+                    if !thinking.is_empty() {
+                        content_blocks.push(AnthropicContentBlock::Thinking {
+                            thinking,
+                            signature: if signature.is_empty() { None } else { Some(signature) },
+                        });
+                    }
+                }
+                CurrentBlock::ToolUse { id, name, input_json } => {
+                    let input = serde_json::from_str::<serde_json::Value>(&input_json)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    content_blocks.push(AnthropicContentBlock::ToolUse { id, name, input });
+                }
+            }
+        }
+
+        // Build aggregated response
+        // If message_start is available, use its metadata; otherwise use defaults.
+        // Some proxies (e.g. DashScope) strip the message_start event from the
+        // SSE stream, so we must still return parsed content blocks.
         if let Some(AnthropicSseEvent::MessageStart { message }) = message_start {
-            let combined_content = content_parts.join("");
             Some(AnthropicResponse {
                 id: message.id,
                 type_: "message".to_string(),
                 role: MessageRole::Assistant,
-                content: vec![AnthropicContentBlock::Text {
-                    text: combined_content,
-                    cache_control: None,
-                }],
+                content: content_blocks,
                 model: message.model,
+                stop_reason,
+                stop_sequence: None,
+                usage: usage.unwrap_or(AnthropicUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+            })
+        } else if !content_blocks.is_empty() {
+            // No message_start but we still parsed content blocks — return with defaults
+            log::debug!("aggregate_sse_events: no message_start found, returning {} content blocks with defaults", content_blocks.len());
+            Some(AnthropicResponse {
+                id: String::new(),
+                type_: "message".to_string(),
+                role: MessageRole::Assistant,
+                content: content_blocks,
+                model: String::new(),
                 stop_reason,
                 stop_sequence: None,
                 usage: usage.unwrap_or(AnthropicUsage {
@@ -465,5 +604,182 @@ mod tests {
 
         let request = request.unwrap();
         assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Test: SSE stream with text + tool_use mixed content (Claude Code typical pattern)
+    #[test]
+    fn test_aggregate_sse_with_tool_use() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_01",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 100, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Let me read "}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "that file."}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_01ABC",
+                    "name": "Read",
+                    "input": {}
+                }
+            },
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"path\": \"/src/"}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "main.rs\"}"}},
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 42}
+            },
+            {"type": "message_stop"}
+        ]);
+
+        let response = AnthropicParser::parse_response(&events);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.id, "msg_01");
+        assert_eq!(resp.content.len(), 2);
+
+        // First block: text
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text, .. } => {
+                assert_eq!(text, "Let me read that file.");
+            }
+            other => panic!("Expected Text block, got {:?}", other),
+        }
+
+        // Second block: tool_use
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_01ABC");
+                assert_eq!(name, "Read");
+                assert_eq!(input["path"], "/src/main.rs");
+            }
+            other => panic!("Expected ToolUse block, got {:?}", other),
+        }
+
+        assert_eq!(resp.stop_reason, Some("tool_use".to_string()));
+        assert_eq!(resp.usage.output_tokens, 42);
+    }
+
+    /// Test: SSE stream with multiple tool calls
+    #[test]
+    fn test_aggregate_sse_multiple_tool_calls() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_02",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 200, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_A", "name": "Bash", "input": {}}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"command\": \"ls\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_B", "name": "Read", "input": {}}
+            },
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"path\": \"Cargo.toml\"}"}},
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 30}
+            }
+        ]);
+
+        let response = AnthropicParser::parse_response(&events);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.content.len(), 2);
+
+        // Both should be ToolUse
+        match &resp.content[0] {
+            AnthropicContentBlock::ToolUse { name, .. } => assert_eq!(name, "Bash"),
+            other => panic!("Expected ToolUse, got {:?}", other),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolUse { name, input, .. } => {
+                assert_eq!(name, "Read");
+                assert_eq!(input["path"], "Cargo.toml");
+            }
+            other => panic!("Expected ToolUse, got {:?}", other),
+        }
+    }
+
+    /// Test: InputJsonDelta fragments are correctly concatenated
+    #[test]
+    fn test_aggregate_sse_input_json_delta() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_03",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 50, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_C", "name": "Write", "input": {}}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\": \"/tmp/"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "test.txt\", "}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "\"content\": \"hello\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 20}
+            }
+        ]);
+
+        let response = AnthropicParser::parse_response(&events);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.content.len(), 1);
+
+        match &resp.content[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_C");
+                assert_eq!(name, "Write");
+                assert_eq!(input["path"], "/tmp/test.txt");
+                assert_eq!(input["content"], "hello");
+            }
+            other => panic!("Expected ToolUse, got {:?}", other),
+        }
     }
 }

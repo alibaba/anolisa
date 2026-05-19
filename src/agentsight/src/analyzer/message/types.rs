@@ -462,6 +462,16 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
+    /// Thinking content block (extended thinking / chain-of-thought)
+    #[serde(rename = "thinking")]
+    Thinking {
+        /// The thinking/reasoning content
+        #[serde(default)]
+        thinking: String,
+        /// Cryptographic signature for thinking verification
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     /// Image content block
     #[serde(rename = "image")]
     Image {
@@ -675,6 +685,15 @@ pub enum AnthropicSseDelta {
     /// Text delta
     TextDelta {
         text: String,
+    },
+    /// Thinking delta (extended thinking / chain-of-thought)
+    ThinkingDelta {
+        thinking: String,
+    },
+    /// Signature delta (thinking block signature)
+    SignatureDelta {
+        #[serde(default)]
+        signature: String,
     },
     /// Input JSON delta (for tool use)
     InputJsonDelta {

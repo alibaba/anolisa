@@ -94,14 +94,34 @@ impl ParsedSseEvent {
     }
 
     /// Check if this is a completion marker
+    ///
+    /// Recognizes:
+    /// - OpenAI style: data is `[DONE]` or `[END]`
+    /// - Anthropic style: event field is `message_stop`, or data is `{"type":"message_stop"}`
     pub fn is_done(&self) -> bool {
         if self.is_synthetic_done {
+            return true;
+        }
+        // Anthropic SSE: event field is "message_stop"
+        if self.event.as_deref() == Some("message_stop") {
             return true;
         }
         let data = self.data();
         let text = String::from_utf8_lossy(data);
         let trimmed = text.trim();
-        trimmed == "[DONE]" || trimmed == "[END]"
+        // OpenAI style
+        if trimmed == "[DONE]" || trimmed == "[END]" {
+            return true;
+        }
+        // Anthropic style: data contains {"type":"message_stop"}
+        if trimmed.starts_with('{') {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Get data length
@@ -431,6 +451,62 @@ mod tests {
         let ev = make_event(data);
         let parsed = ParsedSseEvent::new(None, None, None, 0, 5, ev);
         assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_anthropic_message_stop_data() {
+        // Anthropic sends data: {"type":"message_stop"}
+        let data = b"{\"type\":\"message_stop\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_anthropic_message_stop_event_field() {
+        // Anthropic SSE has event: message_stop field
+        let data = b"{\"type\":\"message_stop\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(
+            None,
+            Some("message_stop".to_string()),  // event field
+            None,
+            0,
+            data.len(),
+            ev,
+        );
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_anthropic_event_field_only() {
+        // Even with empty data, event=message_stop should trigger done
+        let ev = make_event(b"");
+        let parsed = ParsedSseEvent::new(
+            None,
+            Some("message_stop".to_string()),
+            None,
+            0,
+            0,
+            ev,
+        );
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_anthropic_other_event_not_done() {
+        // Other Anthropic events (e.g. content_block_delta) should NOT be done
+        let data = b"{\"type\":\"content_block_delta\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(
+            None,
+            Some("content_block_delta".to_string()),
+            None,
+            0,
+            data.len(),
+            ev,
+        );
+        assert!(!parsed.is_done());
     }
 
     #[test]
