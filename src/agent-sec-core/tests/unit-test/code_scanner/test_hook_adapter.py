@@ -653,7 +653,7 @@ class TestCoshHook:
                         "session_id": "session-1",
                         "sessionId": "wrong-session",
                         "run_id": "run-1",
-                        "toolUseId": "tool-1",
+                        "tool_use_id": "tool-1",
                         "trace": {"callId": "nested-call-is-not-hook-input"},
                     }
                 )

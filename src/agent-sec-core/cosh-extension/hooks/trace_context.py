@@ -3,41 +3,23 @@
 import json
 from typing import Any
 
-
-def _first_string(*values: Any) -> str | None:
-    for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+_FIELD_MAP = {
+    "trace_id": "trace_id",
+    "session_id": "session_id",
+    "run_id": "run_id",
+    "call_id": "call_id",
+    "tool_call_id": "tool_use_id",
+}
 
 
 def trace_context(input_data: dict[str, Any]) -> dict[str, str] | None:
     """Build canonical trace context from fields directly present on hook input."""
-    context = {
-        "trace_id": _first_string(
-            input_data.get("trace_id"),
-            input_data.get("traceId"),
-        ),
-        "session_id": _first_string(
-            input_data.get("session_id"),
-            input_data.get("sessionId"),
-        ),
-        "run_id": _first_string(
-            input_data.get("run_id"),
-            input_data.get("runId"),
-        ),
-        "call_id": _first_string(
-            input_data.get("call_id"),
-            input_data.get("callId"),
-        ),
-        "tool_call_id": _first_string(
-            input_data.get("tool_call_id"),
-            input_data.get("toolCallId"),
-            input_data.get("tool_use_id"),
-            input_data.get("toolUseId"),
-        ),
-    }
-    return {key: value for key, value in context.items() if value} or None
+    context: dict[str, str] = {}
+    for output_key, input_key in _FIELD_MAP.items():
+        value = input_data.get(input_key)
+        if isinstance(value, str) and value.strip():
+            context[output_key] = value.strip()
+    return context or None
 
 
 def with_trace_context(args: list[str], input_data: dict[str, Any]) -> list[str]:

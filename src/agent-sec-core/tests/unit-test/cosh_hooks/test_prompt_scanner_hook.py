@@ -310,7 +310,7 @@ class TestCoshHookSubprocess:
                 json.dumps(
                     {
                         "prompt": "hello",
-                        "sessionId": "session-1",
+                        "session_id": "session-1",
                         "run_id": "run-1",
                         "trace": {"callId": "nested-call-is-not-hook-input"},
                     }

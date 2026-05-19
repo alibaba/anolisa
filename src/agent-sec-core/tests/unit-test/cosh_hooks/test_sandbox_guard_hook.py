@@ -41,7 +41,7 @@ def test_sandbox_guard_log_injects_trace_context_into_logging_command(monkeypatc
         {
             "session_id": "session-1",
             "run_id": "run-1",
-            "toolUseId": "tool-1",
+            "tool_use_id": "tool-1",
         },
         decision="sandbox",
         command="rm -rf build",

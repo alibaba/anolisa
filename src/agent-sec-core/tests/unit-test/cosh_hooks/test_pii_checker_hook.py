@@ -180,8 +180,7 @@ class TestCoshHookMain:
             json.dumps(
                 {
                     "prompt": "Phone: 13800138000",
-                    "trace_id": "",
-                    "traceId": "trace-1",
+                    "trace_id": "trace-1",
                     "session_id": "session-1",
                     "sessionId": "wrong-session",
                     "run_id": "run-1",
