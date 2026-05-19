@@ -232,7 +232,7 @@ if [ -f ~/.openclaw/extensions/tokenless-openclaw/index.js ]; then pass "插件 
 else fail "插件 JS 文件不存在"; fi
 
 info "8.2: 插件包含 toon 检测逻辑"
-if grep -q "checkToon" ~/.openclaw/extensions/tokenless-openclaw/index.js; then pass "插件包含 toon 检测"
+if grep -q "checkTokenless" ~/.openclaw/extensions/tokenless-openclaw/index.js; then pass "插件包含 tokenless 检测"
 else fail "插件缺少 toon 检测"; fi
 
 info "8.3: 插件包含 toon 压缩函数"

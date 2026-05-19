@@ -423,19 +423,15 @@ build_tokenless() {
     local spec_file
     spec_file=$(process_spec_template "$spec_in" "$version")
 
-    log "Step 1/3: Initializing submodules..."
+    log "Step 1/3: Setting up rtk vendored source..."
+    command -v just &>/dev/null || die "'just' is required for RPM build. Install: cargo install just"
     (
         cd "$TOKEN_DIR"
+        # Clone rtk into third_party/ (no submodule — uses justfile setup-rtk)
+        # Note: rtk source in tarball is already patched via justfile setup-rtk
         if [ ! -d "third_party/rtk/.git" ]; then
-            log "Initializing git submodules..."
-            git submodule update --init
+            just setup-rtk
         fi
-        # Build tokenless
-        cargo build --release --workspace
-        # Build rtk from submodule
-        cargo build --release --manifest-path third_party/rtk/Cargo.toml
-        # Build toon from submodule (fallback to pre-built binary if Rust < 1.88)
-        cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
     )
 
     log "Step 2/3: Creating source tarball ${tarball_name}..."
@@ -444,11 +440,11 @@ build_tokenless() {
     local pkg_dir="${tmp_dir}/${pkg_name}"
     mkdir -p "$pkg_dir"
 
-    # Copy full source tree, excluding build artifacts and VCS
+    # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
+    # Note: third_party/rtk must be included — it's built separately via --manifest-path
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
-        --exclude='.gitmodules' \
         --exclude='node_modules' \
         . | tar -xf - -C "$pkg_dir"
 

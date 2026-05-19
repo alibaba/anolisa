@@ -19,13 +19,12 @@ SHARE_DIR ?= $(DATADIR)/anolisa/adapters/tokenless
 BIN_DIR ?= $(BINDIR)
 LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
-RTK_DIR := third_party/rtk
-TOON_DIR := third_party/toon
+TOON_VER := 0.4.6
 
-.PHONY: build build-tokenless build-rtk build-toon install uninstall test lint clean \
+.PHONY: build build-tokenless build-toon install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
-        cosh-install cosh-uninstall \
+        cosh-extension-install cosh-extension-uninstall \
         openclaw-install openclaw-uninstall \
         hermes-install hermes-uninstall \
         setup help \
@@ -35,19 +34,17 @@ TOON_DIR := third_party/toon
 all: build
 
 # Build both projects
-build: build-tokenless build-rtk build-toon
+build: build-tokenless build-toon
 
 build-tokenless:
-	@echo "==> Building tokenless..."
+	@echo "==> Building tokenless + rtk..."
+	just setup-rtk
 	cargo build --release
-
-build-rtk:
-	@echo "==> Building rtk..."
-	cargo build --release --manifest-path $(RTK_DIR)/Cargo.toml
+	cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
 build-toon:
-	@echo "==> Building toon..."
-	cargo build --release --manifest-path $(TOON_DIR)/Cargo.toml --features cli
+	@echo "==> Installing toon binary (v$(TOON_VER))..."
+	cargo install toon-format --version $(TOON_VER) --locked
 
 # Install binaries + adapter resources per FHS spec.
 install: build install-binaries install-helpers install-adapter-resources install-cosh-extension
@@ -60,8 +57,10 @@ install-binaries:
 install-helpers:
 	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
 	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
-	install -p -m 0755 $(RTK_DIR)/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
-	install -p -m 0755 $(TOON_DIR)/target/release/toon $(DESTDIR)$(LIBEXECDIR)/
+	install -p -m 0755 third_party/rtk/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
+	install -p -m 0755 $(HOME)/.cargo/bin/toon $(DESTDIR)$(LIBEXECDIR)/
+	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
+	ln -sf $(LIBEXECDIR)/toon $(DESTDIR)$(BINDIR)/toon
 
 install-adapter-resources:
 	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
@@ -87,50 +86,41 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-rtk test-toon test-hooks
+test: test-tokenless test-hooks
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
-	cargo test --workspace
-
-test-rtk:
-	@echo "==> Testing rtk build..."
-	cargo check --manifest-path $(RTK_DIR)/Cargo.toml
-
-test-toon:
-	@echo "==> Testing toon build..."
-	cargo check --manifest-path $(TOON_DIR)/Cargo.toml
+	cargo test -p tokenless-cli -p tokenless-schema -p tokenless-stats
 
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
 
-# Lint
+# Lint (rtk excluded — vendored third-party source)
 lint:
 	@echo "==> Linting tokenless..."
-	cargo clippy --workspace -- -D warnings
+	cargo clippy -p tokenless-cli -p tokenless-schema -p tokenless-stats -- -D warnings
 
 # Format
 fmt:
 	@echo "==> Formatting..."
-	cargo fmt --all
+	cargo fmt -p tokenless-cli -p tokenless-schema -p tokenless-stats
 
-# Clean
+# Clean (rtk excluded from workspace — needs explicit clean)
 clean:
 	@echo "==> Cleaning..."
 	cargo clean
-	cargo clean --manifest-path $(RTK_DIR)/Cargo.toml
-	cargo clean --manifest-path $(TOON_DIR)/Cargo.toml
+	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 
 # Create source tarball (excludes build artifacts)
 dist: clean
-	@echo "==> Creating tarball..."
-	tar czf ../tokenless-0.1.0.tar.gz \
+	@echo "==> Creating tarball (with pre-patched rtk source)..."
+	just setup-rtk
+	tar czf ../tokenless-0.3.2.tar.gz \
 	    --exclude='target' \
-	    --exclude='third_party/rtk/target' \
 	    --exclude='.git' \
 	    -C .. tokenless
-	@echo "==> Tarball: ../tokenless-0.1.0.tar.gz"
+	@echo "==> Tarball: ../tokenless-0.3.2.tar.gz"
 
 # Adapter management — invokes detect/install/uninstall action scripts per the
 # ANOLISA FHS adapter spec.  Environment variables point to installed FHS paths.
@@ -139,17 +129,19 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=0.3.2
 
-adapter-install: cosh-install openclaw-install hermes-install
+adapter-install: cosh-extension-install openclaw-install hermes-install
 
-adapter-uninstall: cosh-uninstall openclaw-uninstall hermes-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
 	@python3 -c "import json; m=json.load(open('$(SHARE_DIR)/manifest.json')); print(f\"  component: {m['component']} v{m['version']}\"); [print(f\"  {t:12s} {c['compatibleVersions']:12s} \" + (', '.join(f'{len(v)} {k}' for k,v in c.get('capabilities',{}).items()) or 'no caps')) for t,c in m['targets'].items()]"
 
-# --- copilot-shell (cosh) ---
+# --- Copilot Shell (cosh) — extension format ---
+# cosh uses cosh-extension.json (not adapter scripts) for auto-discovery.
+# The extension directory deploys hooks/commands/spec from adapter resources.
 
-cosh-install:
+cosh-extension-install:
 	@echo "==> Installing tokenless cosh extension..."
 	@rm -rf $(COSH_EXTENSION_DIR)
 	@install -d -m 0755 $(COSH_EXTENSION_DIR)/hooks $(COSH_EXTENSION_DIR)/commands
@@ -159,9 +151,10 @@ cosh-install:
 	find $(COSH_EXTENSION_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
 	@echo "==> tokenless cosh extension installed to $(COSH_EXTENSION_DIR)"
 
-cosh-uninstall:
+cosh-extension-uninstall:
 	@echo "==> Uninstalling tokenless cosh extension..."
 	rm -rf $(COSH_EXTENSION_DIR)
+	@echo "==> tokenless cosh extension removed from $(COSH_EXTENSION_DIR)"
 
 # --- OpenClaw ---
 
@@ -194,8 +187,10 @@ setup: install adapter-install
 	@echo "============================================"
 	@echo "  Binaries (FHS):"
 	@echo "    tokenless -> $(BIN_DIR)/tokenless"
-	@echo "    rtk       -> $(LIB_DIR)/rtk -> $(BIN_DIR)/rtk"
-	@echo "    toon      -> $(LIB_DIR)/toon -> $(BIN_DIR)/toon"
+	@echo "    rtk       -> $(LIB_DIR)/rtk"
+	@echo "    toon      -> $(LIB_DIR)/toon"
+	@echo "  Extension (cosh):"
+	@echo "    $(COSH_EXTENSION_DIR)/"
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
@@ -213,10 +208,10 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  build             Build tokenless + rtk + toon (release mode)"
-	@echo "  build-tokenless   Build tokenless only"
-	@echo "  build-rtk         Build rtk only"
-	@echo "  build-toon        Build toon only"
+	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
+	@echo "  build-toon        Install toon binary via cargo install toon-format"
 	@echo "  install           Install binaries + adapter to FHS paths"
+	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
@@ -224,8 +219,8 @@ help:
 	@echo "  adapter-scan      List registered adapter capabilities"
 	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes)"
 	@echo "  adapter-uninstall Unregister all adapters"
-	@echo "  cosh-install      Register copilot-shell extension"
-	@echo "  cosh-uninstall    Unregister copilot-shell extension"
+	@echo "  cosh-extension-install  Install cosh extension"
+	@echo "  cosh-extension-uninstall Uninstall cosh extension"
 	@echo "  openclaw-install  Register OpenClaw plugin"
 	@echo "  openclaw-uninstall Unregister OpenClaw plugin"
 	@echo "  hermes-install    Install Hermes Agent plugin"
@@ -240,3 +235,4 @@ help:
 	@echo "  BINDIR           Binary install path"
 	@echo "  LIBEXECDIR       Helper binary install path"
 	@echo "  SHARE_DIR        Adapter resources path"
+	@echo "  COSH_EXTENSION_DIR  Cosh extension path"

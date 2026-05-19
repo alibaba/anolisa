@@ -2,10 +2,10 @@
 
 > LLM token optimization toolkit — Schema/Response 压缩 + 命令重写 + TOON 格式
 
-**版本**：0.1.0
+**版本**：0.3.2
 **源码**：https://code.alibaba-inc.com/Agentic-OS/Token-Less
 **RPM 源码**：https://code.alibaba-inc.com/alinux/tokenless
-**系统要求**：Rust 1.70+, Linux (推荐 Alinux 4)
+**系统要求**：Rust 1.89+ (edition 2024), Linux (推荐 Alinux 4)
 
 ---
 
@@ -62,9 +62,9 @@ Token-Less/
 ├── crates/tokenless-schema/   # 核心库：SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI 二进制：tokenless 命令
 ├── crates/tokenless-stats/    # 统计记录库（SQLite）
-├── adapters/tokenless/        # FHS 适配器包（manifest, common, cosh, openclaw）
-├── third_party/rtk/           # RTK 子模块（命令重写引擎）
-├── third_party/toon/          # TOON 子模块（二进制 JSON 编解码器）
+├── adapters/tokenless/        # FHS 适配器包（manifest, common, openclaw, hermes）
+├── third_party/rtk/           # RTK 外部源码（justfile clone+patch）
+├── third_party/patches/      # 外部源码补丁
 ├── Makefile                   # 统一构建系统
 └── docs/                      # 文档
 ```
@@ -152,7 +152,7 @@ Token-Less/
 
 TOON（Token-Oriented Object Notation）是一种**无损二进制 JSON 编解码器**，通过消除 JSON 语法开销（引号、逗号、冒号、花括号）来减少 token 消耗，同时完整保留所有数据。对于结构化数据和表格数据效果尤为显著。
 
-**源码位置**：通过 `third_party/toon/` 子模块集成，由 CLI 作为子进程调用。
+**源码位置**：通过 `toon-format` crate（crates.io v0.4.6）集成，由 CLI 作为库直接调用。独立 `toon` 二进制用于 Python hooks 子进程调用。
 
 #### TOON 工作原理
 
@@ -199,11 +199,12 @@ TOON 将 JSON 的文本语法替换为紧凑的二进制编码：
 
 | 依赖 | 版本要求 | 用途 | 必需 |
 |------|---------|------|------|
-| Rust | >= 1.70 (stable) | 编译 tokenless 和 rtk | 构建时需要 |
-| Git | 任意 | 子模块管理 | 构建时需要 |
+| Rust | >= 1.89 (edition 2024) | 编译 tokenless 和 rtk | 构建时需要 |
+| Git | 任意 | rtk 源码下载（justfile） | 构建时需要 |
+| just | 任意 | 构建编排（rtk clone+patch） | 构建时需要 |
 | jq | 任意 | Hook 脚本 JSON 处理 | 是 |
-| rtk | >= 0.28.0 | 命令重写 | 可选 |
-| toon | >= 0.1.0 | TOON 格式压缩 | 可选 |
+| rtk | >= 0.35.0 | 命令重写 | 可选 |
+| toon | >= 0.4.0 | TOON 格式压缩 | 可选 |
 | tokenless | >= 0.1.0 | Schema/响应压缩 | 可选 |
 | sqlite3 | 任意 | 统计数据库 | 可选 |
 
@@ -268,8 +269,8 @@ cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
 ### 4.2 方法二：源码一键安装
 
 ```bash
-# 克隆仓库（包含子模块）
-git clone --recursive https://code.alibaba-inc.com/Agentic-OS/Token-Less
+# 克隆仓库（无需子模块，rtk 构建时由 justfile 下载）
+git clone https://code.alibaba-inc.com/Agentic-OS/Token-Less
 cd Token-Less
 
 # 完整安装：编译 + 安装二进制 + 部署 OpenClaw 插件 + Copilot Shell Hook
@@ -286,7 +287,7 @@ make setup
 make openclaw-install
 
 # 仅安装 copilot-shell hooks
-make cosh-install
+make cosh-extension-install
 ```
 
 ### 4.4 方法四：分步安装
@@ -294,14 +295,11 @@ make cosh-install
 #### 4.4.1 编译
 
 ```bash
-# 编译 tokenless + rtk（release 模式）
+# 编译 tokenless + rtk（release 模式，rtk 通过 justfile clone+patch）
 make build
 
-# 仅编译 tokenless
+# 仅编译 tokenless + rtk
 make build-tokenless
-
-# 仅编译 rtk
-make build-rtk
 ```
 
 #### 4.4.2 安装二进制文件
@@ -331,7 +329,7 @@ cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/opencla
 
 ```bash
 # 使用 Makefile
-make copilot-shell-install
+make cosh-extension-install
 
 # 手动安装
 mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
@@ -802,20 +800,20 @@ jq --version
 | 命令 | 功能 |
 |------|------|
 | `make build` | 编译 tokenless + rtk |
-| `make build-tokenless` | 仅编译 tokenless |
-| `make build-rtk` | 仅编译 rtk |
-| `make build-toon` | 从子模块编译 TOON 编解码器 |
+| `make build-tokenless` | 编译 tokenless + rtk（通过 justfile） |
+| `make build-toon` | 安装 TOON 二进制（cargo install toon-format） |
 | `make install` | 安装二进制到 BIN_DIR（默认 ~/.local/bin） |
 | `make test` | 运行测试 |
-| `make test-toon` | 运行 TOON 专项测试 |
 | `make lint` | 运行 clippy 检查 |
 | `make fmt` | 格式化代码 |
 | `make clean` | 清理构建产物 |
 | `make openclaw-install` | 安装 OpenClaw 插件 |
 | `make openclaw-uninstall` | 卸载 OpenClaw 插件 |
-| `make copilot-shell-install` | 安装 Copilot Shell Hook |
-| `make copilot-shell-uninstall` | 卸载 Copilot Shell Hook |
-| `make setup` | 完整安装：编译 + 安装 + 插件部署 |
+| `make hermes-install` | 安装 Hermes Agent 插件 |
+| `make hermes-uninstall` | 卸载 Hermes Agent 插件 |
+| `make cosh-extension-install` | 安装 Copilot Shell Hook |
+| `make cosh-extension-uninstall` | 卸载 Copilot Shell Hook |
+| `make setup` | 完整安装：编译 + 安装 + 适配器部署 |
 
 ### 8.2 关键文件路径
 
@@ -834,7 +832,7 @@ jq --version
 | Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
 | 工具依赖 spec | `adapters/tokenless/common/tool-ready-spec.json` |
 | 自动修复脚本 | `adapters/tokenless/common/tokenless-env-fix.sh` |
-| TOON 编解码器（子模块） | `third_party/toon/` |
+| TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
 | 统计数据库（默认） | `~/.tokenless/stats.db` |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON 端到端测试 | `tests/test-toon-full.sh` |

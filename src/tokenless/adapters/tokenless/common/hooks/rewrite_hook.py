@@ -20,15 +20,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn
+from hook_utils import resolve_binary, skip, warn, _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
 
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk")
-_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 
 _CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
@@ -64,7 +60,7 @@ def _write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
 
 def main() -> None:
     # 1. Resolve rtk binary
-    rtk_bin = resolve_binary("rtk", _RTK_FALLBACK, _RTK_LOCAL)
+    rtk_bin = resolve_binary("rtk", _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB)
     if not rtk_bin:
         warn("rtk is not installed or not in PATH. Hook disabled.")
         skip()
@@ -83,7 +79,7 @@ def main() -> None:
         pass  # version check non-fatal
 
     # 3. Check tokenless binary (for stats)
-    if not resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL):
+    if not resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
         warn("tokenless is not installed. Hook disabled.")
         skip()
 

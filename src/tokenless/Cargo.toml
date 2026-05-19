@@ -7,7 +7,6 @@ members = [
 ]
 exclude = [
     "third_party/rtk",
-    "third_party/toon",
 ]
 
 [workspace.package]
@@ -22,3 +21,14 @@ regex = "1.10"
 thiserror = "2.0"
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
+toon-format = { version = "0.4", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
+dirs = "5.0"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -52,8 +52,7 @@
     "recommended": [
       { "binary": "rtk", "version": ">=0.35", "package": "tokenless", "manager": "rpm",
         "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" },
-          { "method": "cargo", "binary": "rtk", "package": "rtk" }
+          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
         ]
       },
       { "binary": "tokenless", "package": "tokenless", "manager": "rpm",
@@ -64,7 +63,7 @@
       { "binary": "toon", "package": "tokenless", "manager": "rpm",
         "fallback": [
           { "method": "symlink", "binary": "toon", "source": "/usr/libexec/anolisa/tokenless/toon" },
-          { "method": "cargo", "binary": "toon", "package": "toon", "features": ["cli"] }
+          { "method": "cargo", "binary": "toon", "package": "toon-format" }
         ]
       },
       { "binary": "git", "package": "git", "manager": "rpm" },

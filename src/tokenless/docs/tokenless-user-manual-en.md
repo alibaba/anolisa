@@ -2,10 +2,10 @@
 
 > LLM token optimization toolkit — Schema/Response Compression + Command Rewriting + TOON Format
 
-**Version**: 0.1.0  
+**Version**: 0.3.2  
 **Source**: https://code.alibaba-inc.com/Agentic-OS/Token-Less  
 **RPM Source**: https://code.alibaba-inc.com/alinux/tokenless  
-**System Requirements**: Rust 1.70+, Linux (Alinux 4 recommended)
+**System Requirements**: Rust 1.89+ (edition 2024), Linux (Alinux 4 recommended), just (build runner)
 
 ---
 
@@ -62,9 +62,9 @@ Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: tokenless command
 ├── crates/tokenless-stats/    # Stats recording library (SQLite)
-├── adapters/tokenless/        # FHS adapter bundle (manifest, common, cosh, openclaw)
-├── third_party/rtk/           # RTK submodule (command rewriting engine)
-├── third_party/toon/          # TOON submodule (binary JSON codec)
+├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes)
+├── third_party/rtk/           # RTK vendored source (justfile clone+patch)
+├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
 └── docs/                      # Documentation
 ```
@@ -152,7 +152,7 @@ Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI comman
 
 TOON (Token-Oriented Object Notation) is a **lossless binary JSON codec** that eliminates JSON syntax overhead — quotes, commas, colons, and braces — while preserving all data intact. It is particularly effective for structured and tabular data where syntax overhead dominates content.
 
-**Source Location**: Integrated via `third_party/toon/` submodule, invoked as a subprocess from the CLI.
+**Source Location**: Integrated via `toon-format` crate (crates.io v0.4.6), called directly as a Rust library by the CLI. The standalone `toon` binary is used by Python hooks as a subprocess.
 
 #### How TOON Works
 
@@ -199,11 +199,12 @@ This two-stage pipeline maximizes savings: response compression strips verbose/d
 
 | Dependency | Version | Purpose | Required |
 |------------|---------|---------|----------|
-| Rust | >= 1.70 (stable) | Compile tokenless and rtk | Build time only |
-| Git | Any | Submodule management | Build time only |
+| Rust | >= 1.89 (edition 2024) | Compile tokenless and rtk | Build time only |
+| Git | Any | rtk source download (justfile) | Build time only |
+| just | Any | Build orchestration (rtk clone+patch) | Build time only |
 | jq | Any | Hook script JSON processing | Yes |
-| rtk | >= 0.28.0 | Command rewriting | Optional |
-| toon | >= 0.1.0 | TOON format compression | Optional |
+| rtk | >= 0.35.0 | Command rewriting | Optional |
+| toon | >= 0.4.0 | TOON format compression | Optional |
 | tokenless | >= 0.1.0 | Schema/Response compression | Optional |
 | sqlite3 | Any | Stats database | Optional |
 
@@ -268,8 +269,8 @@ cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
 ### 4.2 Method 2: One-Click Source Installation
 
 ```bash
-# Clone repository (including submodules)
-git clone --recursive https://code.alibaba-inc.com/Agentic-OS/Token-Less
+# Clone repository (no submodules needed, rtk is downloaded at build time via justfile)
+git clone https://code.alibaba-inc.com/Agentic-OS/Token-Less
 cd Token-Less
 
 # Full installation: build + install binaries + deploy OpenClaw plugin + Copilot Shell Hook
@@ -286,7 +287,7 @@ make setup
 make openclaw-install
 
 # Install copilot-shell hooks only
-make cosh-install
+make cosh-extension-install
 ```
 
 ### 4.4 Method 4: Step-by-Step Installation
@@ -294,14 +295,11 @@ make cosh-install
 #### 4.4.1 Build
 
 ```bash
-# Build tokenless + rtk (release mode)
+# Build tokenless + rtk (release mode, rtk cloned+patched via justfile)
 make build
 
-# Build tokenless only
+# Build tokenless + rtk only
 make build-tokenless
-
-# Build rtk only
-make build-rtk
 ```
 
 #### 4.4.2 Install Binaries
@@ -331,7 +329,7 @@ cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/opencla
 
 ```bash
 # Using Makefile
-make copilot-shell-install
+make cosh-extension-install
 
 # Manual installation
 mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
@@ -802,20 +800,21 @@ jq --version
 | Command | Function |
 |---------|----------|
 | `make build` | Build tokenless + rtk |
-| `make build-tokenless` | Build tokenless only |
-| `make build-rtk` | Build rtk only |
-| `make build-toon` | Build TOON codec from submodule |
+| `make build-tokenless` | Build tokenless + rtk (via justfile) |
+| `make build-toon` | Install TOON binary via `cargo install toon-format` |
 | `make install` | Install binaries to BIN_DIR (default: ~/.local/bin) |
 | `make test` | Run tests |
-| `make test-toon` | Run TOON-specific tests |
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
+| `make adapter-install` | Install all adapters (cosh+openclaw+hermes) |
 | `make openclaw-install` | Install OpenClaw plugin |
 | `make openclaw-uninstall` | Uninstall OpenClaw plugin |
-| `make copilot-shell-install` | Install Copilot Shell Hook |
-| `make copilot-shell-uninstall` | Uninstall Copilot Shell Hook |
-| `make setup` | Full installation: build + install + plugin deployment |
+| `make hermes-install` | Install Hermes Agent plugin |
+| `make hermes-uninstall` | Uninstall Hermes Agent plugin |
+| `make cosh-extension-install` | Install Copilot Shell Hook |
+| `make cosh-extension-uninstall` | Uninstall Copilot Shell Hook |
+| `make setup` | Full installation: build + install + adapter deployment |
 
 ### 8.2 Key File Paths
 
@@ -834,7 +833,7 @@ jq --version
 | Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
 | Tool dependency spec | `adapters/tokenless/common/tool-ready-spec.json` |
 | Auto-fix script | `adapters/tokenless/common/tokenless-env-fix.sh` |
-| TOON codec (submodule) | `third_party/toon/` |
+| TOON codec (crates.io toon-format) | `toon-format` crate v0.4.6 |
 | Stats database (default) | `~/.tokenless/stats.db` |
 | Integration tests | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON E2E tests | `tests/test-toon-full.sh` |

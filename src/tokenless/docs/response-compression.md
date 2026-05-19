@@ -84,7 +84,7 @@ Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
 **流水线说明**：copilot-shell 的 PostToolUse hook 中实现了一个**两阶段链式压缩流水线**：
 
 1. **第一阶段 — 响应压缩（有损）**：`ResponseCompressor` 移除 debug 字段、null 值、空值，截断过长字符串和数组。
-2. **第二阶段 — TOON 编码（无损）**：将第一阶段输出的 JSON 通过 `toon -e` 编码为紧凑的二进制 TOON 格式，消除 JSON 语法开销（引号、逗号、冒号、花括号）。
+2. **第二阶段 — TOON 编码（无损）**：将第一阶段输出的 JSON 通过 `toon_format::encode_default()` 编码为紧凑的二进制 TOON 格式，消除 JSON 语法开销（引号、逗号、冒号、花括号）。
 
 两个阶段各自独立，任一步骤失败都不影响原始结果的透传（fail-open）。
 
@@ -269,7 +269,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 | OpenClaw 插件 | `adapters/tokenless/openclaw/index.ts` |
 | OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
 | copilot-shell hook（响应+TOON 流水线） | `adapters/tokenless/common/hooks/compress_response_hook.py` |
-| TOON 编解码器（子模块） | `third_party/toon/` |
+| TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
 | 全量测试套件 | `tests/run-all-tests.sh` |

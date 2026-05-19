@@ -35,30 +35,30 @@ Three integration paths are available:
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
-├── adapters/tokenless/        # FHS adapter bundle (manifest, common, cosh, openclaw)
-│   ├── manifest.json            # Adapter manifest (cosh + openclaw targets)
-│   ├── common/                  # Shared: hooks, spec, env-fix, commands
+├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes)
+│   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes targets)
+│   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
+│   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
 │   │   ├── tool-ready-spec.json # Tool dependency spec (4 categories)
 │   │   ├── tokenless-env-fix.sh # Auto-fix script for missing deps
 │   │   └── commands/            # Hook command configs
-│   ├── cosh/scripts/            # copilot-shell agent scripts (detect/install/uninstall)
 │   ├── openclaw/                # OpenClaw plugin + agent scripts
 │   └── hermes/                  # Hermes Agent plugin + scripts
 │       ├── scripts/               # detect/install/uninstall (user-driven registration)
 │       ├── plugin.yaml            # Plugin manifest
 │       └── __init__.py            # register(ctx): transform_tool_result + pre_tool_call (env-check + rtk rewrite) + on_session_start
-├── third_party/rtk/           # RTK submodule (command rewriting engine)
-├── third_party/toon/          # TOON submodule (JSON to TOON encoding)
+├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
+├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
-└── scripts/                    # Helper scripts (git submodule init, etc.)
+└── scripts/                    # Helper scripts
 ```
 
 ## Quick Start
 
 ```bash
-# Clone with submodules
-git clone --recursive <repo-url>
+# Clone repo (no submodules needed)
+git clone <repo-url>
 cd Token-Less
 
 # Full setup: build + install binaries + deploy all adapters
@@ -116,7 +116,7 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 
 ## copilot-shell Hooks
 
-The adapter provides hooks that are auto-discovered by copilot-shell via the adapter manifest:
+The adapter provides hooks that are auto-discovered by copilot-shell via the cosh extension manifest:
 
 | Hook | Event | File | Description |
 |------|-------|------|-------------|
@@ -128,10 +128,10 @@ The adapter provides hooks that are auto-discovered by copilot-shell via the ada
 ### Install
 
 ```bash
-make cosh-install
+make cosh-extension-install  # or: make openclaw-install, make hermes-install
 ```
 
-Hooks are registered via the adapter manifest and auto-discovered by copilot-shell — no manual `settings.json` configuration needed.
+Hooks are registered via the cosh extension manifest (`cosh-extension.json`) and auto-discovered by copilot-shell — no manual `settings.json` configuration needed.
 
 ## Tool Ready
 
@@ -248,9 +248,8 @@ plugins:
 | Target | Description |
 |---|---|
 | `make build` | Build `tokenless` + `rtk` + `toon` (release mode) |
-| `make build-tokenless` | Build `tokenless` only |
-| `make build-rtk` | Build `rtk` only |
-| `make build-toon` | Build `toon` only |
+| `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
+| `make build-toon` | Install TOON binary via `cargo install toon-format` |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests (Rust + hooks) |
 | `make test-hooks` | Run hook integration tests |
@@ -259,8 +258,8 @@ plugins:
 | `make clean` | Clean build artifacts |
 | `make adapter-install` | Install all adapters (cosh + openclaw + hermes) |
 | `make adapter-uninstall` | Remove all adapters |
-| `make cosh-install` | Install copilot-shell extension |
-| `make cosh-uninstall` | Uninstall copilot-shell extension |
+| `make cosh-extension-install` | Install Copilot Shell extension |
+| `make cosh-extension-uninstall` | Remove Copilot Shell extension |
 | `make openclaw-install` | Install OpenClaw plugin |
 | `make openclaw-uninstall` | Remove OpenClaw plugin |
 | `make hermes-install` | Install Hermes Agent plugin |
@@ -281,14 +280,15 @@ make install BIN_DIR=/usr/local/bin
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
 | `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
 | `adapters/tokenless/hermes/` | Hermes Agent adapter — plugin + detect/install/uninstall scripts |
-| `third_party/rtk/` | RTK git submodule — command rewriting engine (70+ commands) |
-| `third_party/toon/` | TOON git submodule — JSON to TOON format encoding |
+| `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
+| `third_party/patches/` | Patches for vendored third_party sources |
 | `Makefile` | Unified build system for the entire workspace |
 
 ## Prerequisites
 
-- **Rust** toolchain >= 1.88 — required by toon submodule (darling, image, time crates). Install via [rustup](https://rustup.rs)
-- **Git** — for submodule management
+- **Rust** toolchain >= 1.89 — required by rtk (edition 2024) and toon-format (is_multiple_of). Install via [rustup](https://rustup.rs)
+- **just** — build runner for rtk setup (clone + patch orchestration)
+- **Git** — for rtk source download via justfile
 
 ## License
 

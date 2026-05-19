@@ -179,7 +179,7 @@ fn run() -> Result<(), (String, i32)> {
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 1))?;
+                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
             let compressor = SchemaCompressor::new();
 
@@ -232,7 +232,7 @@ fn run() -> Result<(), (String, i32)> {
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 1))?;
+                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
             let compressor = ResponseCompressor::new();
             let result_json = serde_json::to_string_pretty(&compressor.compress(&value))
@@ -358,33 +358,11 @@ fn run() -> Result<(), (String, i32)> {
             tool_use_id,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let mut child = std::process::Command::new("toon")
-                .arg("-e")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| (format!("Failed to spawn toon: {}", e), 2))?;
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(input.as_bytes())
-                    .map_err(|e| (format!("Failed to write to toon stdin: {}", e), 2))?;
-            }
-            let out = child
-                .wait_with_output()
-                .map_err(|e| (format!("Failed to wait for toon: {}", e), 2))?;
-            if !out.status.success() {
-                return Err((
-                    format!(
-                        "toon encode failed: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    ),
-                    2,
-                ));
-            }
-            let output = String::from_utf8_lossy(&out.stdout);
-            let output = output.trim_end();
+            let value: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
+            let output = toon_format::encode_default(&value)
+                .map_err(|e| (format!("toon encode failed: {}", e), 2))?;
+            let output = output.trim_end().to_string();
 
             // If no token savings, output original instead of TOON result
             let before_tokens = estimate_tokens_from_bytes(input.len());
@@ -392,7 +370,7 @@ fn run() -> Result<(), (String, i32)> {
             let display = if output.is_empty() || after_tokens >= before_tokens {
                 input.clone()
             } else {
-                output.to_string()
+                output
             };
             println!("{}", display);
 
@@ -407,33 +385,11 @@ fn run() -> Result<(), (String, i32)> {
         }
         Commands::DecompressToon { file } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let mut child = std::process::Command::new("toon")
-                .arg("-d")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| (format!("Failed to spawn toon: {}", e), 2))?;
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(input.as_bytes())
-                    .map_err(|e| (format!("Failed to write to toon stdin: {}", e), 2))?;
-            }
-            let out = child
-                .wait_with_output()
-                .map_err(|e| (format!("Failed to wait for toon: {}", e), 2))?;
-            if !out.status.success() {
-                return Err((
-                    format!(
-                        "toon decode failed: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    ),
-                    2,
-                ));
-            }
-            let output = String::from_utf8_lossy(&out.stdout);
-            let output = output.trim_end();
+            let value: serde_json::Value = toon_format::decode_default(&input)
+                .map_err(|e| (format!("toon decode failed: {}", e), 2))?;
+            let output = serde_json::to_string_pretty(&value)
+                .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+            let output = output.trim_end().to_string();
             if !output.is_empty() {
                 println!("{}", output);
             }

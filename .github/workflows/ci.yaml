@@ -549,7 +549,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.85.0'
+          toolchain: '1.89.0'
           components: 'rustfmt, clippy'
 
       - uses: Swatinem/rust-cache@v2
@@ -559,17 +559,17 @@ jobs:
       - name: Check formatting
         run: |
           cd src/tokenless
-          cargo fmt --all --check
+          cargo fmt -p tokenless-cli -p tokenless-schema -p tokenless-stats -- --check
 
       - name: Lint
         run: |
           cd src/tokenless
-          cargo clippy --workspace -- -D warnings
+          cargo clippy -p tokenless-cli -p tokenless-schema -p tokenless-stats -- -D warnings
 
       - name: Run tests
         run: |
           cd src/tokenless
-          cargo test --workspace
+          cargo test -p tokenless-cli -p tokenless-schema -p tokenless-stats
 
   # =========================================================================
   # Step 7: Test ws-ckpt

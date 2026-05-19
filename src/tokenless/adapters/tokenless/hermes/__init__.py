@@ -38,7 +38,21 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from typing import Any
+
+# Import shared FHS constants from hook_utils
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "common", "hooks"))
+from hook_utils import (
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_SHARE,
+    _TOKENLESS_LOCAL_LIB,
+    _RTK_FALLBACK,
+    _RTK_LOCAL_SHARE,
+    _RTK_LOCAL_LIB,
+    resolve_binary as _resolve_binary_shared,
+    warn as _warn_shared,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +72,6 @@ _SKIP_TOOLS: set[str] = {
     "list_sessions",
 }
 
-_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _MIN_RTK_VERSION = (0, 35, 0)
 _SHELL_TOOLS: set[str] = {"terminal"}
 
@@ -73,22 +85,23 @@ _CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
 _resolved: dict[str, str | None] = {}
 
 
-def _resolve_binary(name: str, fallback: str) -> str | None:
+def _resolve_binary(name: str, *fallback_paths: str) -> str | None:
     if name in _resolved:
         return _resolved[name]
     path = shutil.which(name)
     if path:
         _resolved[name] = path
         return path
-    if os.path.isfile(fallback) and os.access(fallback, os.X_OK):
-        _resolved[name] = fallback
-        return fallback
+    for fp in fallback_paths:
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            _resolved[name] = fp
+            return fp
     _resolved[name] = None
     return None
 
 
-def _have(name: str, fallback: str) -> bool:
-    return _resolve_binary(name, fallback) is not None
+def _have(name: str, *fallback_paths: str) -> bool:
+    return _resolve_binary(name, *fallback_paths) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +160,7 @@ def _compress_response(
     session_id: str,
     tool_call_id: str,
 ) -> str | None:
-    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)
+    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
     if not tokenless_bin:
         return None
 
@@ -177,7 +190,7 @@ def _compress_response(
 
 
 def _encode_toon(data: str, session_id: str = "", tool_call_id: str = "") -> tuple[str, int] | None:
-    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)
+    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
     if not tokenless_bin:
         return None
 
@@ -214,7 +227,7 @@ def _encode_toon(data: str, session_id: str = "", tool_call_id: str = "") -> tup
 
 def _env_check(tool_name: str) -> str | None:
     """Run tool-ready env-check and return feedback if tool is not ready."""
-    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)
+    tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
     if not tokenless_bin:
         return None
 
@@ -271,7 +284,7 @@ def _try_rewrite(
     executes the command.  On success, returns a block directive suggesting
     the rewritten command so the agent re-executes with the optimized version.
     """
-    rtk_bin = _resolve_binary("rtk", _RTK_FALLBACK)
+    rtk_bin = _resolve_binary("rtk", _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB)
     if not rtk_bin:
         return None
 
@@ -364,7 +377,7 @@ def on_pre_tool_call(
     command (one extra round-trip; safe — rtk rewrite never executes).
     """
     # Step 1: env-check (all tools, needs tokenless)
-    if _have("tokenless", _TOKENLESS_FALLBACK):
+    if _have("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
         if session_id:
             os.environ["TOKENLESS_SESSION_ID"] = str(session_id)
         feedback = _env_check(tool_name)
@@ -373,7 +386,7 @@ def on_pre_tool_call(
             return {"action": "block", "message": feedback}
 
     # Step 2: RTK rewrite (terminal only, needs rtk)
-    if tool_name in _SHELL_TOOLS and _have("rtk", _RTK_FALLBACK):
+    if tool_name in _SHELL_TOOLS and _have("rtk", _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB):
         result = _try_rewrite(args, str(session_id), str(tool_call_id))
         if result:
             return result
@@ -396,7 +409,7 @@ def on_transform_tool_result(
     Replaces the tool result string with a compressed/TOON-encoded version.
     Runs after post_tool_call; first valid string return wins.
     """
-    if not _have("tokenless", _TOKENLESS_FALLBACK):
+    if not _have("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
         return None
 
     # Skip content-retrieval tools
@@ -475,11 +488,11 @@ def register(ctx: Any) -> None:
 
     # Log what's active
     features: list[str] = []
-    if _have("tokenless", _TOKENLESS_FALLBACK):
+    if _have("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
         features.append("response-compression")
         features.append("toon-encoding")
         features.append("tool-ready")
-    if _have("rtk", _RTK_FALLBACK):
+    if _have("rtk", _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB):
         features.append("rtk-rewrite")
 
     logger.info(

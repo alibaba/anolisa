@@ -6,6 +6,16 @@ import shutil
 import sys
 
 
+# -- FHS fallback paths (ANOLISA spec) ----------------------------------------
+
+_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
+_TOKENLESS_LOCAL_SHARE = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
+_TOKENLESS_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless")
+_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
+_RTK_LOCAL_SHARE = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk")
+
+
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
     path = shutil.which(name)
     if path:

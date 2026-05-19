@@ -47,7 +47,7 @@ for cmd in toon tokenless jq openclaw; do
 done
 
 # 检查 OpenClaw 插件
-if [ -f ~/.openclaw/extensions/tokenless/index.js ]; then
+if [ -f ~/.openclaw/extensions/tokenless-openclaw/index.js ]; then
     pass "OpenClaw 插件文件存在"
 else
     fail "OpenClaw 插件文件缺失"

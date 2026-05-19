@@ -18,13 +18,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn
+from hook_utils import resolve_binary, skip, warn, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
 
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
 
 
 # -- helpers -----------------------------------------------------------------
@@ -43,7 +41,7 @@ def _is_json_array(data: str) -> bool:
 
 def main() -> None:
     # 1. Check tokenless binary
-    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL)
+    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
     if not tokenless_bin:
         warn("tokenless is not installed or not in PATH. Schema compression hook disabled.")
         skip()

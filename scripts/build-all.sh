@@ -1082,7 +1082,7 @@ _configure_git_mirror() {
     # Configure a reachable GitHub mirror for git operations when
     # github.com is blocked (e.g. ECS instances in China).
     # IMPORTANT: we write to --global (not --local) so that git-clone processes
-    # spawned by "git submodule update --init" also inherit the insteadOf rule.
+    # (e.g. justfile setup-rtk) also inherit the insteadOf rule.
     local repo_dir="${1:-.}"
 
     if curl -sSf --connect-timeout 3 --max-time 6 -o /dev/null https://github.com 2>/dev/null; then
@@ -1310,6 +1310,30 @@ check_ebpf_deps() {
 
 # ─── top-level dep installer ───
 
+install_just() {
+    step "just (command runner, for tokenless rtk setup)"
+
+    if cmd_exists just; then
+        ok "just already installed, skipping"
+        return 0
+    fi
+
+    # just may have been installed alongside rustup; source cargo env first
+    # shellcheck source=/dev/null
+    [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+
+    if cmd_exists cargo; then
+        info "Installing just via cargo install ..."
+        cargo install just 2>/dev/null || true
+        if cmd_exists just; then
+            ok "just installed via cargo install"
+            return 0
+        fi
+    fi
+
+    warn "'just' is required for tokenless build (rtk clone+patch). Install manually: cargo install just"
+}
+
 do_install_deps() {
     if $DRY_RUN; then
         step "Dependency plan"
@@ -1319,6 +1343,9 @@ do_install_deps() {
         fi
         if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
+        fi
+        if want_component tokenless; then
+            echo "DRY-RUN: check/install just if needed"
         fi
         if want_component sec-core; then
             echo "DRY-RUN: check/install uv and configure Python mirrors if needed"
@@ -1340,6 +1367,10 @@ do_install_deps() {
 
     if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
         install_rust
+    fi
+
+    if want_component tokenless; then
+        install_just
     fi
 
     if want_component sec-core; then
@@ -1475,14 +1506,14 @@ build_tokenless() {
     [[ -d "$dir" ]] || die "Directory not found: $dir"
     cd "$dir"
 
-    if [ ! -d "third_party/rtk/.git" ]; then
-        info "Initializing git submodules..."
-        if $DRY_RUN; then
-            echo "DRY-RUN: configure git mirror for $dir"
-        else
-            _configure_git_mirror "$dir"
+    # rtk setup is handled by Makefile build-tokenless target (just setup-rtk),
+    # but 'just' must be available before make install runs.
+    if ! $DRY_RUN; then
+        if ! command -v just &>/dev/null; then
+            die "'just' is required for tokenless build (rtk clone+patch orchestration). Install: cargo install just"
         fi
-        run_logged "git submodule update --init" git submodule update --init --recursive
+    else
+        info "DRY-RUN: just setup-rtk would be called by Makefile build-tokenless"
     fi
 
     info "make install (tokenless workspace) ..."

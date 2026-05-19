@@ -16,6 +16,12 @@ use std::process::Command;
 use std::os::unix::fs::MetadataExt;
 
 #[cfg(unix)]
+fn current_uid() -> u32 {
+    // libc::getuid is a FFI call — requires unsafe block per Rust 2024 edition rules.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(unix)]
 fn is_trusted_path(path: &std::path::Path) -> bool {
     // System paths are always trusted
     if path.starts_with("/usr/share")
@@ -46,7 +52,7 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
     match fs::symlink_metadata(&check_path) {
         Ok(meta) => {
             let file_uid = meta.uid();
-            let current_uid = unsafe { libc::getuid() };
+            let current_uid = current_uid();
             if file_uid != current_uid && file_uid != 0 {
                 return false;
             }

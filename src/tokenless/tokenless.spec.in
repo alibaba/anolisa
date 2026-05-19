@@ -11,10 +11,14 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
 # Build dependencies
-# Note: toon submodule requires rust >= 1.88 (darling, image, time crates)
-# cargo build for toon uses || true fallback in spec if Rust < 1.88
+# Note: workspace edition = 2024 (rust >= 1.85); rtk requires >= 1.86.
+# The 1.89 minimum is set because tokenless-cli uses str::floor_char_boundary
+# (stable since 1.89) via a hand-written compat fallback, and CI pins 1.89.0
+# to avoid local/CI version divergence. Vendored rtk source in tarball.
+# toon-format built via cargo install (requires network access to crates.io or mirror).
+# RPM build environments must configure a crates.io mirror (e.g. sparse+https://mirrors.aliyun.com/crates.io-index/).
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.88
+BuildRequires:  rust >= 1.89
 
 # Runtime dependencies
 Requires:       python3
@@ -36,8 +40,8 @@ Core Features:
 
 The package includes:
 - tokenless: CLI tool for schema/response compression and toon integration
-- rtk: High-performance CLI proxy for command rewriting (Apache-2.0 licensed)
-- toon: JSON to TOON format encoder/decoder for LLM token optimization
+- rtk: High-performance CLI proxy for command rewriting (vendored source, Apache-2.0, excluded from workspace)
+- toon: JSON to TOON format encoder/decoder (crates.io toon-format v0.4.6)
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
 Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
@@ -48,24 +52,19 @@ Run the install script to register with Hermes: hermes/scripts/install.sh
 %prep
 %setup -q -n tokenless
 
+# rtk source in tarball is already patched (rtk-tokenless-stats.patch
+# applied during tarball creation via justfile setup-rtk).
+
 # Clean any stale build artifacts from the tarball
 cargo clean --release
-cargo clean --release --manifest-path third_party/rtk/Cargo.toml
-# Do NOT clean toon target — may contain pre-built binary (Rust < 1.88 fallback)
-
-# Apply tokenless stats patch to RTK (upstream rtk v0.36.0)
-# Patch is included in the tarball under third_party/patches/
-patch --forward -p1 --no-backup-if-mismatch -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
 
 %build
-# Build tokenless (schema + response compression + stats + env-check)
+# Build tokenless (rtk excluded from workspace — built separately)
 cargo build --release
-
-# Build rtk (command rewriting)
 cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
-# toon requires rust >= 1.88; use pre-built binary if cargo build fails
-cargo build --release --manifest-path third_party/toon/Cargo.toml --features cli || true
+# Build toon (standalone binary for Python hooks)
+cargo install toon-format --version 0.4.6 --root %{_builddir}/toon-root --locked
 
 # Compile OpenClaw TypeScript plugin to JS (from adapters/ bundle)
 if command -v npx &>/dev/null; then
@@ -88,12 +87,7 @@ mkdir -p %{buildroot}%{_docdir}/tokenless
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
 install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/anolisa/tokenless/rtk
-# toon: use built binary if available, fallback to pre-installed
-if [ -f "third_party/toon/target/release/toon" ]; then
-    install -m 0755 third_party/toon/target/release/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
-else
-    install -m 0755 /usr/bin/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
-fi
+install -m 0755 %{_builddir}/toon-root/bin/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
 
 # Create symlinks so rtk and toon are discoverable via PATH
 ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
@@ -236,6 +230,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri May 22 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.2-2
+- refactor(tokenless): replace submodules with crates.io deps and inline toon
+- fix(tokenless): use libc::getuid() syscall instead of spoofable home-dir uid
+- fix(tokenless): hard-fail on rtk patch failure in justfile setup-rtk
+- fix(tokenless): unify compress error exit codes (all exit 2)
+- fix(tokenless): remove 2>/dev/null || true from Makefile toon install
+- fix(tokenless): deduplicate Python hook path constants into hook_utils
+
 * Wed May 13 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.2-1
 - Bump to v0.3.2 with multiple fixes
 

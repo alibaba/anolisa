@@ -8,7 +8,7 @@
  *   2. Tokenless response compression — compresses tool responses via
  *      `tokenless compress-response` (removes debug/null/empty values).
  *   3. TOON context compression — encodes JSON tool responses to TOON format
- *      via `toon -e`, reducing token usage for structured data. When both
+ *      via `tokenless compress-toon`, reducing token usage for structured data. When both
  *      response and TOON compression are enabled, they run sequentially:
  *      Response Compression strips noise → TOON eliminates JSON format overhead.
  *
@@ -41,7 +41,8 @@ let tokenlessPath: string = "tokenless";
 
 const LIBEXEC_FALLBACK = "/usr/libexec/anolisa/tokenless";
 const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
-const LOCAL_FALLBACK = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
+const LOCAL_SHARE = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
+const LOCAL_LIB = `${process.env.HOME || ""}/.local/lib/anolisa/tokenless`;
 
 // Check both existence and execute permission (mirrors shell `-x` test).
 function isExecutable(path: string): boolean {
@@ -62,8 +63,11 @@ function checkRtk(): boolean {
     } else if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
       rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
       rtkAvailable = true;
-    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/rtk`)) {
-      rtkPath = `${LOCAL_FALLBACK}/rtk`;
+    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/rtk`)) {
+      rtkPath = `${LOCAL_SHARE}/rtk`;
+      rtkAvailable = true;
+    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/rtk`)) {
+      rtkPath = `${LOCAL_LIB}/rtk`;
       rtkAvailable = true;
     } else {
       rtkAvailable = false;
@@ -72,8 +76,11 @@ function checkRtk(): boolean {
     if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
       rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
       rtkAvailable = true;
-    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/rtk`)) {
-      rtkPath = `${LOCAL_FALLBACK}/rtk`;
+    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/rtk`)) {
+      rtkPath = `${LOCAL_SHARE}/rtk`;
+      rtkAvailable = true;
+    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/rtk`)) {
+      rtkPath = `${LOCAL_LIB}/rtk`;
       rtkAvailable = true;
     } else {
       rtkAvailable = false;
@@ -104,8 +111,11 @@ function checkTokenless(): boolean {
     } else if (isExecutable(TOKENLESS_FALLBACK)) {
       tokenlessPath = TOKENLESS_FALLBACK;
       tokenlessAvailable = true;
-    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/tokenless`)) {
-      tokenlessPath = `${LOCAL_FALLBACK}/tokenless`;
+    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/tokenless`)) {
+      tokenlessPath = `${LOCAL_SHARE}/tokenless`;
+      tokenlessAvailable = true;
+    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/tokenless`)) {
+      tokenlessPath = `${LOCAL_LIB}/tokenless`;
       tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
@@ -114,8 +124,11 @@ function checkTokenless(): boolean {
     if (isExecutable(TOKENLESS_FALLBACK)) {
       tokenlessPath = TOKENLESS_FALLBACK;
       tokenlessAvailable = true;
-    } else if (LOCAL_FALLBACK && isExecutable(`${LOCAL_FALLBACK}/tokenless`)) {
-      tokenlessPath = `${LOCAL_FALLBACK}/tokenless`;
+    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/tokenless`)) {
+      tokenlessPath = `${LOCAL_SHARE}/tokenless`;
+      tokenlessAvailable = true;
+    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/tokenless`)) {
+      tokenlessPath = `${LOCAL_LIB}/tokenless`;
       tokenlessAvailable = true;
     } else {
       tokenlessAvailable = false;
@@ -349,7 +362,7 @@ export default {
         let usedToon = false;
         let toonText = "";
 
-        if (toonCompressionEnabled && checkToon()) {
+        if (toonCompressionEnabled && checkTokenless()) {
           const result = tryCompressToon(currentMessage, sessionId, toolCallId);
           if (result) {
             toonText = result.toonText;

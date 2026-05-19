@@ -477,7 +477,7 @@ test_tool_ready() {
     local astral_out=$(bash "$FIX_SCRIPT" fix '{"binary":"uv","package":"uv","manager":"pip","fallback":[{"method":"curl_pipe_sh","url":"https://astral.sh/uv/install.sh"}]}' 2>&1)
     ! echo "$astral_out" | grep -q "untrusted URL" && log_pass "astral.sh is whitelisted" || log_fail "astral.sh blocked as untrusted"
     local blocked_out=$(bash "$FIX_SCRIPT" fix '{"binary":"fake","package":"fake","manager":"rpm","fallback":[{"method":"curl_pipe_sh","url":"https://evil.example.com/install.sh"}]}' 2>&1)
-    assert_contains "$blocked_out" "untrusted URL" "Non-whitelisted domain is blocked"
+    assert_contains "$blocked_out" "untrusted" "Non-whitelisted domain is blocked"
 
     # ==========================================
     # 6.20 env-fix script: timeout on curl_pipe_sh

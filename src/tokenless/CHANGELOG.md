@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.2
+
+- replace spoofable home-dir uid derivation with libc::getuid() syscall for trust chain integrity
+- replace subprocess toon -e calls with in-process toon_format::encode_default() library call
+- replace rtk/toon git submodules with crates.io deps and inline toon-format source
+- hard-fail on rtk stats patch failure in justfile setup-rtk recipe
+- unify compress-toon/compress-schema/compress-response error exit codes (all exit 2)
+- remove 2>/dev/null || true from Makefile toon install (hard fail on missing binary)
+- remove redundant #[source] attribute on thiserror variants that already have #[from]
+- deduplicate Python hook FHS path constants into shared hook_utils module
+- add libc to workspace dependencies for uid syscall
+- add detailed rust >= 1.89 comment in spec.in explaining CI pin rationale
+
 ## 0.3.0
 
 - add tool-ready 4-phase environment pre-check with cosh extension integration

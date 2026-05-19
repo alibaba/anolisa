@@ -12,11 +12,11 @@ path = "src/main.rs"
 [dependencies]
 tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats" }
-dirs = "5.0"
+dirs.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+toon-format.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite.workspace = true
+libc.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

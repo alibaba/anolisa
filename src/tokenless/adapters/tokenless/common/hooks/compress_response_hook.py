@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file
+from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
 
 # -- constants ---------------------------------------------------------------
 
@@ -38,9 +38,6 @@ _SKIP_TOOLS = {
     "Read", "read_file", "Glob", "list_directory",
     "NotebookRead", "read", "glob", "notebookread",
 }
-
-_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
 
 
 # -- env attribution patterns -------------------------------------------------
@@ -140,7 +137,7 @@ def _build_additional_context(
 
 def main() -> None:
     # 1. Resolve binaries
-    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL)
+    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
     if not tokenless_bin:
         warn("tokenless is not installed. Response compression hook disabled.")
         skip()

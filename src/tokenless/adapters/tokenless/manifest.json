@@ -4,6 +4,9 @@
   "targets": {
     "cosh": {
       "compatibleVersions": "*",
+      "method": "extension",
+      "extensionFile": "common/cosh-extension.json",
+      "extensionDir": "extensions/tokenless",
       "capabilities": {
         "hooks": [
           "tool-ready",
