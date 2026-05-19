@@ -125,8 +125,7 @@ class ObservabilityEventRepository:
 
         Two queries (constant, not N+1):
           1. GROUP BY run_id for stats.
-          2. WHERE session_id=? AND hook='before_agent_run' for first-row preview
-             of each run; Python keys the result by run_id.
+          2. Window query for the first before_agent_run metrics_json per run.
         """
         session_factory = self._store.session_factory()
         if session_factory is None:
@@ -146,18 +145,29 @@ class ObservabilityEventRepository:
             .order_by(func.min(ObservabilityEventRecord.observed_at_epoch).asc())
         )
 
-        before_run_stmt = (
+        first_before_run_subq = (
             select(
-                ObservabilityEventRecord.run_id,
-                ObservabilityEventRecord.observed_at_epoch,
-                ObservabilityEventRecord.metrics_json,
+                ObservabilityEventRecord.run_id.label("run_id"),
+                ObservabilityEventRecord.metrics_json.label("metrics_json"),
+                func.row_number()
+                .over(
+                    partition_by=ObservabilityEventRecord.run_id,
+                    order_by=(
+                        ObservabilityEventRecord.observed_at_epoch.asc(),
+                        ObservabilityEventRecord.id.asc(),
+                    ),
+                )
+                .label("rn"),
             )
             .where(
                 ObservabilityEventRecord.session_id == session_id,
                 ObservabilityEventRecord.hook == "before_agent_run",
             )
-            .order_by(ObservabilityEventRecord.observed_at_epoch.asc())
+            .subquery()
         )
+        before_run_stmt = select(
+            first_before_run_subq.c.run_id, first_before_run_subq.c.metrics_json
+        ).where(first_before_run_subq.c.rn == 1)
 
         try:
             with session_factory() as session:
@@ -167,10 +177,7 @@ class ObservabilityEventRepository:
             self._store.dispose()
             return []
 
-        first_metrics: dict[str, str] = {}
-        for row in before_rows:
-            # before_run_stmt is sorted ascending; only keep the earliest per run.
-            first_metrics.setdefault(row.run_id, row.metrics_json)
+        first_metrics = {row.run_id: row.metrics_json for row in before_rows}
 
         return [
             RunSummary(

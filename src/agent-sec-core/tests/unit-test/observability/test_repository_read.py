@@ -76,6 +76,41 @@ def _open_repository(db_path: str) -> tuple[SqliteStore, ObservabilityEventRepos
     return store, ObservabilityEventRepository(store)
 
 
+class _FakeResult:
+    def all(self):
+        return []
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.statements = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, statement):
+        self.statements.append(statement)
+        return _FakeResult()
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.session = _FakeSession()
+
+    def session_factory(self):
+        return lambda: self.session
+
+    def dispose(self) -> None:
+        pass
+
+
+def _compiled_sql(statement) -> str:
+    return str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+
+
 # ---------------------------------------------------------------------------
 # Assertion 1: empty DB returns empty lists
 # ---------------------------------------------------------------------------
@@ -200,6 +235,22 @@ def test_list_runs_preview_fallback_and_truncation(
     assert by_id["run-C"].user_input_preview is None
     # ordering: chronological by started_at (run-A < run-B < run-C)
     assert [r.run_id for r in runs] == ["run-A", "run-B", "run-C"]
+
+
+def test_list_runs_preview_query_selects_first_before_agent_run_per_run_in_sql() -> (
+    None
+):
+    store = _FakeStore()
+    repo = ObservabilityEventRepository(store)  # type: ignore[arg-type]
+
+    repo.list_runs("session-S")
+
+    assert len(store.session.statements) == 2
+    before_run_sql = _compiled_sql(store.session.statements[1])
+    assert "row_number()" in before_run_sql
+    assert "partition by observability_events.run_id" in before_run_sql
+    assert "where" in before_run_sql
+    assert "rn = 1" in before_run_sql
 
 
 def test_list_runs_preview_tolerates_malformed_metrics_json(
