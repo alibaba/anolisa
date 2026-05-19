@@ -66,13 +66,10 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
-		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
-	@# standalone-script e2e suites (not pytest-compatible)
-	python3 tests/e2e/skill-ledger/e2e_test.py
 	@# linux-sandbox e2e skipped: requires privileged container
 
 VENV_PYTHON ?= $(HOME)/.local/lib/anolisa/sec-core/venv/bin/python
@@ -84,12 +81,10 @@ test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec
 	@$(VENV_PYTHON) -m pytest --version >/dev/null 2>&1 || uv pip install --python $(VENV_PYTHON) --quiet pytest
 	$(VENV_PYTHON) -m pytest tests/e2e/ \
 		--import-mode=importlib \
-		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
-	@# skill-ledger e2e skipped: installed system skills affect G6/G8 expected results
 	@# linux-sandbox e2e skipped: requires privileged container
 
 .PHONY: test-python-coverage
