@@ -362,6 +362,7 @@ impl AgentSight {
         let _ = self.probes.remove_traced_pid(pid).inspect_err(|e| {
             log::error!("failed to delete {pid} from traced pid map: {e}");
         });
+        self.probes.detach_ssl_probes(pid);
     }
 
     /// Try to receive and process the next event (non-blocking)

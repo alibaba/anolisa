@@ -300,6 +300,11 @@ impl Probes {
             .context("failed to remove traced pid")
     }
 
+    /// Detach SSL probes for a process and clean up traced inodes.
+    pub fn detach_ssl_probes(&mut self, pid: u32) {
+        self.sslsniff.detach_process(pid);
+    }
+
     /// Get a handle to the traced_processes map
     pub fn traced_processes_handle(&self) -> Result<MapHandle> {
         self.proctrace.traced_processes_handle()

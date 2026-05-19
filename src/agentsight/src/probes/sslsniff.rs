@@ -179,6 +179,9 @@ pub struct SslSniff {
     skel: Box<SslsniffSkel<'static>>,
     _links: Vec<Link>,
     traced_files: HashSet<u64>,
+    /// Maps pid -> inodes that were attached for this pid.
+    /// Used to clean up traced_files when the process exits.
+    pid_inodes: HashMap<u32, Vec<u64>>,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -235,6 +238,7 @@ impl SslSniff {
             skel,
             _links: Vec::new(),
             traced_files: HashSet::default(),
+            pid_inodes: HashMap::default(),
             tx,
             rx,
         })
@@ -258,6 +262,7 @@ impl SslSniff {
             libs.iter().map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k))).collect::<Vec<_>>()
         );
 
+        let mut attached_inodes = Vec::new();
         for (path, inode, kind) in libs {
             // Skip libraries whose inode we already traced.
             // Now using pid=-1 for global attach, so each library only needs to be attached once.
@@ -290,11 +295,37 @@ impl SslSniff {
             };
 
             match result {
-                Ok(ls) => self._links.extend(ls),
-                Err(e) => eprintln!("Warning: attach_process pid={pid} {path}: {e:#}"),
+                Ok(ls) => {
+                    self._links.extend(ls);
+                    attached_inodes.push(inode);
+                }
+                Err(e) => {
+                    // Attach failed: remove inode from traced_files so retries can succeed
+                    self.traced_files.remove(&inode);
+                    eprintln!("Warning: attach_process pid={pid} {path}: {e:#}");
+                }
             }
         }
+
+        // Record inodes attached for this pid so we can clean up on process exit
+        if !attached_inodes.is_empty() {
+            self.pid_inodes.insert(pid as u32, attached_inodes);
+        }
+
         Ok(())
+    }
+
+    /// Detach SSL probes for a process and clean up traced inodes.
+    ///
+    /// When a process exits, its inodes are removed from `traced_files` so that
+    /// a new process using the same binary can be re-attached.
+    pub fn detach_process(&mut self, pid: u32) {
+        if let Some(inodes) = self.pid_inodes.remove(&pid) {
+            for inode in &inodes {
+                self.traced_files.remove(inode);
+            }
+            log::debug!("[detach_process] pid={pid}: removed {} inodes from traced_files", inodes.len());
+        }
     }
 
     /// Spawn a background thread that polls the BPF ring buffer and sends
