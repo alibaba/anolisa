@@ -111,6 +111,33 @@ def test_scan_pii_stdin_json(mode: str, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_stdin_max_bytes_truncates_before_scan(
+    mode: str, tmp_path: Path
+) -> None:
+    max_bytes = len("备注".encode("utf-8")) + 1
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--stdin",
+        "--source",
+        "manual",
+        "--format",
+        "json",
+        "--max-bytes",
+        str(max_bytes),
+        data_dir=tmp_path / mode / "stdin-max-bytes",
+        input_text="备注🙂 alice@example.com",
+    )
+    data = _load_json(result)
+
+    assert data["ok"] is True
+    assert data["summary"]["source"] == "manual"
+    assert data["summary"]["truncated"] is True
+    assert data["summary"]["bytes_scanned"] == max_bytes
+    assert not any(finding["type"] == "email" for finding in data["findings"])
+
+
+@pytest.mark.parametrize("mode", _MODES)
 def test_scan_pii_input_file_json(mode: str, tmp_path: Path) -> None:
     input_path = tmp_path / mode / "input.txt"
     input_path.parent.mkdir(parents=True, exist_ok=True)

@@ -81,19 +81,11 @@ def _decode_utf8_input(data: bytes, *, allow_partial_tail: bool = False) -> str:
         raise
 
 
-def _read_limited_input(path: Path, max_bytes: int | None) -> tuple[str, bool, int]:
-    """Read a UTF-8 file, applying max_bytes only when explicitly provided.
-
-    The returned byte count reflects file bytes read for scanning. When the CLI
-    truncates a file, that truncation flag takes precedence over the scanner's
-    string-level truncation result in the final summary.
-    """
+def _decode_limited_input(data: bytes, max_bytes: int | None) -> tuple[str, bool, int]:
+    """Decode bytes after applying an optional byte scan limit."""
     if max_bytes is None:
-        data = path.read_bytes()
         return _decode_utf8_input(data), False, len(data)
 
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
     truncated = len(data) > max_bytes
     if truncated:
         data = data[:max_bytes]
@@ -102,6 +94,35 @@ def _read_limited_input(path: Path, max_bytes: int | None) -> tuple[str, bool, i
         truncated,
         len(data),
     )
+
+
+def _read_limited_input(path: Path, max_bytes: int | None) -> tuple[str, bool, int]:
+    """Read a UTF-8 file, applying max_bytes only when explicitly provided.
+
+    The returned byte count reflects file bytes read for scanning. When the CLI
+    truncates a file, that truncation flag takes precedence over the scanner's
+    string-level truncation result in the final summary.
+    """
+    if max_bytes is None:
+        return _decode_limited_input(path.read_bytes(), max_bytes)
+
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    return _decode_limited_input(data, max_bytes)
+
+
+def _read_limited_stdin(max_bytes: int | None) -> tuple[str, bool, int]:
+    """Read UTF-8 stdin, applying max_bytes before decoding when possible."""
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is not None:
+        data = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+        return _decode_limited_input(data, max_bytes)
+
+    text = sys.stdin.read()
+    data = text.encode("utf-8")
+    if max_bytes is not None:
+        data = data[: max_bytes + 1]
+    return _decode_limited_input(data, max_bytes)
 
 
 def _format_text_output(data: dict[str, Any]) -> str:
@@ -184,7 +205,13 @@ def scan_pii(
     input_bytes_scanned = None
     scan_text = text or ""
     if use_stdin:
-        scan_text = sys.stdin.read()
+        try:
+            scan_text, input_truncated, input_bytes_scanned = _read_limited_stdin(
+                max_bytes
+            )
+        except UnicodeDecodeError as exc:
+            typer.echo(f"Error: --stdin must be valid UTF-8: {exc}.", err=True)
+            raise typer.Exit(code=1) from exc
     elif input_path is not None:
         try:
             scan_text, input_truncated, input_bytes_scanned = _read_limited_input(

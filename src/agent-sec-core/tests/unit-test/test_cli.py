@@ -192,6 +192,43 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertEqual(kwargs["source"], "manual")
 
     @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_stdin_reports_byte_limit(self, mock_invoke):
+        mock_invoke.return_value = ActionResult(
+            success=True,
+            exit_code=0,
+            stdout='{"ok": true, "verdict": "pass"}',
+            data={
+                "ok": True,
+                "verdict": "pass",
+                "summary": {"total": 0},
+                "findings": [],
+            },
+        )
+
+        text = "备注🙂 alice@example.com"
+        max_bytes = len("备注".encode("utf-8")) + 1
+        result = self.runner.invoke(
+            app,
+            ["scan-pii", "--stdin", "--max-bytes", str(max_bytes)],
+            input=text,
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        _, kwargs = mock_invoke.call_args
+        self.assertEqual(kwargs["text"], "备注")
+        self.assertTrue(kwargs["input_truncated"])
+        self.assertEqual(kwargs["input_bytes_scanned"], max_bytes)
+        self.assertNotIn("\ufffd", kwargs["text"])
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_stdin_rejects_invalid_utf8(self, mock_invoke):
+        result = self.runner.invoke(app, ["scan-pii", "--stdin"], input=b"\xff")
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("--stdin must be valid UTF-8", result.output)
+        mock_invoke.assert_not_called()
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
     def test_scan_pii_text_output(self, mock_invoke):
         mock_invoke.return_value = ActionResult(
             success=True,
