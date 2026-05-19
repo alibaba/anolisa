@@ -6,6 +6,7 @@ fn generate_skeleton(out: &mut PathBuf, name: &str) {
     let c_path = format!("src/bpf/{name}.bpf.c");
     let rs_name = format!("{name}.skel.rs");
     out.push(&rs_name);
+
     SkeletonBuilder::new()
         .source(&c_path)
         .build_and_generate(&out)

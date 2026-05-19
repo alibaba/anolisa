@@ -6,7 +6,7 @@
 #include <bpf/bpf_core_read.h>
 
 #ifndef RING_BUFFER_SIZE
-#define RING_BUFFER_SIZE (64 * 1024 * 1024)
+#define RING_BUFFER_SIZE (32 * 1024 * 1024)
 #endif
 
 #ifndef MAX_TRACED_PROCESSES
