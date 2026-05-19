@@ -35,6 +35,7 @@ class TestDefaultConfig(unittest.TestCase):
         dirs = DEFAULT_SKILL_DIRS
         self.assertIn("~/.openclaw/skills/*", dirs)
         self.assertIn("~/.copilot-shell/skills/*", dirs)
+        self.assertIn("~/.hermes/skills/**", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
         self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
         self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])
@@ -232,6 +233,31 @@ class TestResolveSkillDirs(unittest.TestCase):
         resolved = [p.resolve() for p in result]
         self.assertEqual(len(resolved), len(set(resolved)))
 
+    def test_recursive_glob_includes_nested_hermes_skills(self):
+        skill_dir = self.parent / "mlops" / "axolotl"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: axolotl\n---\n")
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/**"],
+        }
+        result = resolve_skill_dirs(config)
+        self.assertEqual([p.resolve() for p in result], [skill_dir.resolve()])
+
+    def test_recursive_glob_skips_internal_and_hidden_dirs(self):
+        visible = self.parent / "ai" / "visible"
+        hidden = self.parent / ".archive" / "hidden"
+        meta = self.parent / "real" / ".skill-meta" / "snapshot"
+        for skill_dir in (visible, hidden, meta):
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: test\n---\n")
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/**"],
+        }
+        result = resolve_skill_dirs(config)
+        self.assertEqual([p.resolve() for p in result], [visible.resolve()])
+
 
 class TestCompactSkillDirs(unittest.TestCase):
     """Specific paths subsumed by a glob must be pruned."""
@@ -259,6 +285,11 @@ class TestCompactSkillDirs(unittest.TestCase):
         ]
         result = _compact_skill_dirs(entries)
         self.assertEqual(result, ["~/.copilot-shell/skills/*"])
+
+    def test_specific_removed_when_recursive_glob_exists(self):
+        entries = ["/opt/hermes/skills/**", "/opt/hermes/skills/mlops/axolotl"]
+        result = _compact_skill_dirs(entries)
+        self.assertEqual(result, ["/opt/hermes/skills/**"])
 
 
 class TestRememberSkillDir(unittest.TestCase):

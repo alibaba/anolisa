@@ -20,8 +20,12 @@ _DEPRECATED_SKILL_DIRS_KEY = "skillDirs"
 DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
+    "~/.hermes/skills/**",
     "/usr/share/anolisa/skills/*",
 ]
+_IGNORED_RECURSIVE_DIRS = frozenset(
+    {".git", ".github", ".hub", ".archive", ".skill-meta"}
+)
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "signingBackend": "ed25519",
@@ -149,9 +153,11 @@ def load_config() -> dict[str, Any]:
 def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
     """Expand effective skill dir entries into concrete directories.
 
-    Supports two formats per entry:
+    Supports three formats per entry:
     - ``"path/*"`` — glob pattern: each matching subdirectory **that contains
       SKILL.md** is included.
+    - ``"path/**"`` — recursive pattern: every descendant directory containing
+      SKILL.md is included, with hidden/internal metadata dirs skipped.
     - ``"path/to/skill"`` — single skill directory; must also contain
       ``SKILL.md`` to be included.
 
@@ -168,7 +174,18 @@ def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
         entry = str(entry)
         expanded = Path(entry).expanduser()
 
-        if entry.endswith("/*"):
+        if entry.endswith("/**"):
+            parent = expanded.parent
+            if parent.is_dir():
+                for skill_file in sorted(parent.rglob(_SKILL_MANIFEST)):
+                    skill_dir = skill_file.parent
+                    if _is_ignored_recursive_skill_dir(skill_dir, parent):
+                        continue
+                    resolved = skill_dir.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        skill_dirs.append(skill_dir)
+        elif entry.endswith("/*"):
             # Glob mode: parent directory, each child with SKILL.md is a skill
             parent = expanded.parent
             if parent.is_dir():
@@ -205,8 +222,11 @@ def _compact_skill_dirs(entries: list[str]) -> list[str]:
     Preserves order; keeps the glob, drops the specifics.
     """
     glob_parents: set[str] = set()
+    recursive_parents: set[Path] = set()
     for entry in entries:
-        if entry.endswith("/*"):
+        if entry.endswith("/**"):
+            recursive_parents.add(Path(entry[:-3]).expanduser().resolve())
+        elif entry.endswith("/*"):
             # Normalise: resolve ~ so "/home/user/.copilot-shell/skills/*"
             # and "~/.copilot-shell/skills/*" are treated as the same parent.
             glob_parents.add(str(Path(entry[:-2]).expanduser().resolve()))
@@ -219,14 +239,27 @@ def _compact_skill_dirs(entries: list[str]) -> list[str]:
         seen.add(entry)
 
         # Skip specific paths whose parent is covered by a glob
-        if not entry.endswith("/*"):
+        if not entry.endswith(("/*", "/**")):
             expanded = Path(entry).expanduser().resolve()
             parent_str = str(expanded.parent)
             if parent_str in glob_parents:
                 continue
+            if any(expanded.is_relative_to(parent) for parent in recursive_parents):
+                continue
 
         compacted.append(entry)
     return compacted
+
+
+def _is_ignored_recursive_skill_dir(skill_dir: Path, root: Path) -> bool:
+    """Return True when *skill_dir* is under a hidden/internal subtree."""
+    try:
+        parts = skill_dir.relative_to(root).parts
+    except ValueError:
+        return True
+    return any(
+        part.startswith(".") or part in _IGNORED_RECURSIVE_DIRS for part in parts
+    )
 
 
 def is_covered(skill_dir: Path, config: dict[str, Any] | None = None) -> bool:

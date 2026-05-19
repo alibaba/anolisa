@@ -5,9 +5,11 @@ from __future__ import annotations
 from .code_scan import CodeScanCapability
 from .observability import ObservabilityCapability
 from .pii_scan import PiiScanCapability
+from .skill_ledger import SkillLedgerCapability
 
 ALL_CAPABILITIES = [
     CodeScanCapability(),
     ObservabilityCapability(),
     PiiScanCapability(),
+    SkillLedgerCapability(),
 ]
