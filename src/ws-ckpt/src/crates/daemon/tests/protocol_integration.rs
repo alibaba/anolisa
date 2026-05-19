@@ -94,7 +94,6 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 auto_cleanup_keep: CleanupRetention::Count(20),
                 auto_cleanup_interval_secs: 86_400,
                 health_check_interval_secs: 300,
-                img_path: "/var/lib/ws-ckpt/btrfs-data.img".to_string(),
                 img_size: 30,
                 img_max_percent: 40.0,
             },

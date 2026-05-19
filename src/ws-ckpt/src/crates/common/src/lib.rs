@@ -443,7 +443,6 @@ pub struct ConfigReport {
     pub auto_cleanup_keep: CleanupRetention,
     pub auto_cleanup_interval_secs: u64,
     pub health_check_interval_secs: u64,
-    pub img_path: String,
     pub img_size: u64,
     pub img_max_percent: f64,
 }
@@ -463,8 +462,6 @@ pub struct DaemonConfig {
     pub health_check_interval_secs: u64,
     /// Backend type string from config: "auto" | "btrfs-base" | "btrfs-loop"
     pub backend_type: String,
-    /// Loop image file path (runtime-only; always `BTRFS_IMG_PATH`, not user-configurable)
-    pub img_path: String,
     /// Target image size in GB. The on-disk image is grown/shrunk to match this at bootstrap.
     pub img_size: u64,
     /// Initial-creation cap as percentage of host partition capacity (0-100).
@@ -606,7 +603,6 @@ impl Default for DaemonConfig {
             auto_cleanup_interval_secs: DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
             backend_type: "auto".to_string(),
-            img_path: BTRFS_IMG_PATH.to_string(),
             img_size: DEFAULT_IMG_SIZE_GB,
             img_max_percent: DEFAULT_IMG_MAX_PERCENT * 100.0, // stored as 0-100
             min_free_bytes: 512 * 1024 * 1024,                // 512 MB
@@ -1332,7 +1328,6 @@ mod tests {
                 auto_cleanup_keep: CleanupRetention::Count(20),
                 auto_cleanup_interval_secs: 86_400,
                 health_check_interval_secs: 300,
-                img_path: "/var/lib/ws-ckpt/btrfs-data.img".to_string(),
                 img_size: 30,
                 img_max_percent: 40.0,
             },

@@ -10,7 +10,7 @@ use tokio::net::UnixStream;
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
     ChangeType, CleanupRetention, DaemonConfig, ErrorCode, Request, Response,
-    ADVISORY_SNAPSHOT_LIMIT, BTRFS_IMG_PATH, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
+    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
 };
@@ -254,7 +254,6 @@ async fn run(cli: Cli) -> Result<()> {
                     .health_check_interval_secs
                     .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
                 backend_type: file_config.backend.r#type.clone(),
-                img_path: BTRFS_IMG_PATH.to_string(),
                 img_size: file_config
                     .backend
                     .btrfs_loop
@@ -931,10 +930,6 @@ fn handle_config_view() -> Result<()> {
         } else {
             ""
         }
-    );
-    println!(
-        "  Image path:              {} (fixed, not configurable)",
-        BTRFS_IMG_PATH
     );
     println!(
         "  Image size:              {} GB{}",
