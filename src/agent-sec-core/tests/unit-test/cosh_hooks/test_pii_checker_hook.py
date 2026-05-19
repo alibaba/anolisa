@@ -159,6 +159,61 @@ class TestCoshHookMain:
         assert output["decision"] == "allow"
         assert "phone_cn" in output["reason"]
 
+    def test_injects_trace_context_into_scan_pii_command(self, monkeypatch, capsys):
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass", "findings": []}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
+
+        output = self._run_main(
+            monkeypatch,
+            capsys,
+            json.dumps(
+                {
+                    "prompt": "Phone: 13800138000",
+                    "trace_id": "",
+                    "traceId": "trace-1",
+                    "session_id": "session-1",
+                    "sessionId": "wrong-session",
+                    "run_id": "run-1",
+                    "tool_use_id": "tool-1",
+                }
+            ),
+        )
+
+        expected_context = json.dumps(
+            {
+                "trace_id": "trace-1",
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "tool_call_id": "tool-1",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        assert output == {"decision": "allow"}
+        assert captured["args"] == [
+            "agent-sec-cli",
+            "--trace-context",
+            expected_context,
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--source",
+            "user_input",
+        ]
+        assert captured["kwargs"]["check"] is False
+
     def test_cli_nonzero_allows(self, monkeypatch, capsys):
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(

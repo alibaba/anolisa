@@ -18,14 +18,20 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Any
+
+from trace_context import with_trace_context
 
 
-def _log_sandbox_event(action: str = "log-sandbox", **kwargs) -> None:
+def _log_sandbox_event(
+    input_data: dict[str, Any], action: str = "log-sandbox", **kwargs: Any
+) -> None:
     """Log security event via agent-sec-cli CLI (subprocess call).
 
     Falls back silently if agent-sec-cli is not installed.
 
     Args:
+        input_data: Hook payload used to extract optional trace context.
         action: CLI subcommand name (default: 'log_sandbox')
         **kwargs: Action-specific parameters
     """
@@ -42,6 +48,8 @@ def _log_sandbox_event(action: str = "log-sandbox", **kwargs) -> None:
             if value is not None:
                 cmd.append(f"--{key.replace('_', '-')}")
                 cmd.append(str(value))
+
+        cmd = with_trace_context(cmd, input_data)
 
         # Execute asynchronously to avoid blocking the hook.
         # start_new_session=True detaches the child into its own session so
@@ -289,6 +297,7 @@ def main():
         }
         # --- middleware prehook logging (additive) ---
         _log_sandbox_event(
+            input_data,
             decision="block",
             command=command,
             reasons=", ".join(block_reasons),
@@ -368,6 +377,7 @@ def main():
 
     # --- middleware prehook logging (additive) ---
     _log_sandbox_event(
+        input_data,
         decision="sandbox",
         command=command,
         reasons=", ".join(all_reasons),

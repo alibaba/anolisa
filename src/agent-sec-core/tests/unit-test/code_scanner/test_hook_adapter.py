@@ -1,12 +1,11 @@
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest  # noqa: F401  (used by pytest parametrize, keep for linting)
-from agent_sec_cli.code_scanner.engine.code_extractor import (
-    extract_inline_code,
-)
+from agent_sec_cli.code_scanner.engine.code_extractor import extract_inline_code
 from agent_sec_cli.code_scanner.models import Language
 
 # Path to the standalone cosh hook script
@@ -17,6 +16,9 @@ _COSH_HOOK = str(
     / "hooks"
     / "code_scanner_hook.py"
 )
+
+sys.path.insert(0, str(Path(_COSH_HOOK).parent))
+import code_scanner_hook  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Tests for utils/code_extractor.py
@@ -573,6 +575,7 @@ class TestCoshHook:
             [sys.executable, _COSH_HOOK],
             input=json.dumps(input_data),
             capture_output=True,
+            check=False,
             text=True,
             timeout=15,
         )
@@ -615,12 +618,74 @@ class TestCoshHook:
             [sys.executable, _COSH_HOOK],
             input="not-json",
             capture_output=True,
+            check=False,
             text=True,
             timeout=15,
         )
         assert proc.returncode == 0
         output = json.loads(proc.stdout)
         assert output["decision"] == "allow"
+
+    def test_injects_trace_context_into_scan_code_command(
+        self, monkeypatch, capsys
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass", "findings": []}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(code_scanner_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            code_scanner_hook.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "tool_name": "run_shell_command",
+                        "tool_input": {"command": "echo hello"},
+                        "session_id": "session-1",
+                        "sessionId": "wrong-session",
+                        "run_id": "run-1",
+                        "toolUseId": "tool-1",
+                        "trace": {"callId": "nested-call-is-not-hook-input"},
+                    }
+                )
+            ),
+        )
+
+        code_scanner_hook.main()
+
+        output = json.loads(capsys.readouterr().out)
+        expected_context = json.dumps(
+            {
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "tool_call_id": "tool-1",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        assert output == {"decision": "allow"}
+        assert captured["args"] == [
+            "agent-sec-cli",
+            "--trace-context",
+            expected_context,
+            "scan-code",
+            "--code",
+            "echo hello",
+            "--language",
+            "bash",
+        ]
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        assert kwargs["check"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +710,7 @@ class TestOpenClawHook:
                 "bash",
             ],
             capture_output=True,
+            check=False,
             text=True,
             timeout=15,
         )

@@ -11,13 +11,12 @@ Tests cover:
 4. Subprocess integration: pipe JSON into the hook and verify stdout
 """
 
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 # Path to the standalone cosh hook script
 _COSH_HOOK = str(
@@ -30,7 +29,8 @@ _COSH_HOOK = str(
 
 # Import helpers for direct unit testing
 sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-from prompt_scanner_hook import (
+import prompt_scanner_hook  # noqa: E402
+from prompt_scanner_hook import (  # noqa: E402
     _cleanup_warmup_marker,
     _format_cosh,
     _is_model_downloaded,
@@ -253,6 +253,7 @@ class TestCoshHookSubprocess:
             [sys.executable, _COSH_HOOK],
             input=json.dumps(input_data),
             capture_output=True,
+            check=False,
             text=True,
             timeout=15,
         )
@@ -270,6 +271,7 @@ class TestCoshHookSubprocess:
             [sys.executable, _COSH_HOOK],
             input="not-json",
             capture_output=True,
+            check=False,
             text=True,
             timeout=15,
         )
@@ -280,3 +282,66 @@ class TestCoshHookSubprocess:
     def test_missing_prompt_key_allows(self):
         output = self._run_hook({"session_id": "abc"})
         assert output["decision"] == "allow"
+
+    def test_injects_trace_context_into_scan_prompt_command(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        model_dir = tmp_path / "org" / "model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(prompt_scanner_hook, "_MODEL_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            prompt_scanner_hook.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "prompt": "hello",
+                        "sessionId": "session-1",
+                        "run_id": "run-1",
+                        "trace": {"callId": "nested-call-is-not-hook-input"},
+                    }
+                )
+            ),
+        )
+
+        prompt_scanner_hook.main()
+
+        output = json.loads(capsys.readouterr().out)
+        expected_context = json.dumps(
+            {
+                "session_id": "session-1",
+                "run_id": "run-1",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        assert output == {"decision": "allow"}
+        assert captured["args"] == [
+            "agent-sec-cli",
+            "--trace-context",
+            expected_context,
+            "scan-prompt",
+            "--text",
+            "hello",
+            "--mode",
+            "standard",
+            "--format",
+            "json",
+            "--source",
+            "user_input",
+        ]
+        assert captured["kwargs"]["check"] is False

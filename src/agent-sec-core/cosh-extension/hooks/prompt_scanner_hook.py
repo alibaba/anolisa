@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from trace_context import with_trace_context
+
 # -- config ----------------------------------------------------------------
 
 _DEFAULT_MODE = "standard"
@@ -178,7 +180,7 @@ def main() -> None:
     # 4. Model exists — clean up stale warmup marker, then call CLI
     _cleanup_warmup_marker()
     try:
-        proc = subprocess.run(
+        cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-prompt",
@@ -191,7 +193,12 @@ def main() -> None:
                 "--source",
                 _DEFAULT_SOURCE,
             ],
+            input_data,
+        )
+        proc = subprocess.run(
+            cmd,
             capture_output=True,
+            check=False,
             text=True,
             timeout=10,
         )

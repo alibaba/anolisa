@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 # -- extract config (mirrors cosh/extractors.py TOOL_EXTRACTORS) ----------
+from trace_context import with_trace_context
 
 # cosh tool_name -> field in tool_input that carries the command
 _TOOL_FIELD = {
@@ -81,7 +82,7 @@ def main() -> None:
 
     # 3. Call CLI via subprocess
     try:
-        proc = subprocess.run(
+        cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-code",
@@ -90,7 +91,12 @@ def main() -> None:
                 "--language",
                 _DEFAULT_LANGUAGE,
             ],
+            input_data,
+        )
+        proc = subprocess.run(
+            cmd,
             capture_output=True,
+            check=False,
             text=True,
             timeout=10,
         )

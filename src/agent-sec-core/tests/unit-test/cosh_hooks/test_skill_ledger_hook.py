@@ -13,6 +13,7 @@ Tests are grouped into three categories:
    hook's decision/reason output for every known status.
 """
 
+import io
 import json
 import os
 import stat
@@ -33,6 +34,8 @@ _COSH_HOOK = str(
     / "skill_ledger_hook.py"
 )
 
+sys.path.insert(0, str(Path(_COSH_HOOK).parent))
+import skill_ledger_hook  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -91,6 +94,71 @@ def _create_skill_dir(parent, name="test-skill", manifest_name=None):
         f"---\nname: {manifest_name}\ndescription: A test skill\n---\nHello\n"
     )
     return str(skill_dir)
+
+
+def test_injects_trace_context_into_skill_ledger_check_command(monkeypatch, capsys):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"status": "pass"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda _input_data: None)
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_resolve_skill_dir",
+        lambda _skill_name, _cwd: ("/project/.copilot-shell/skills/test-skill", False),
+    )
+    monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        skill_ledger_hook.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "skill",
+                    "tool_input": {"skill": "test-skill"},
+                    "cwd": "/project",
+                    "trace_id": 42,
+                    "traceId": "trace-1",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "tool_use_id": "tool-1",
+                }
+            )
+        ),
+    )
+
+    skill_ledger_hook.main()
+
+    output = json.loads(capsys.readouterr().out)
+    expected_context = json.dumps(
+        {
+            "trace_id": "trace-1",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "tool_call_id": "tool-1",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert output == {"decision": "allow"}
+    assert captured["args"] == [
+        "agent-sec-cli",
+        "--trace-context",
+        expected_context,
+        "skill-ledger",
+        "check",
+        "/project/.copilot-shell/skills/test-skill",
+    ]
+    assert captured["kwargs"]["check"] is False
 
 
 # ---------------------------------------------------------------------------

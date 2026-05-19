@@ -15,6 +15,8 @@ import subprocess
 import sys
 from typing import Any
 
+from trace_context import with_trace_context
+
 _DEFAULT_SOURCE = "user_input"
 _MAX_EVIDENCE_ITEMS = 3
 _MAX_EVIDENCE_CHARS = 80
@@ -116,7 +118,7 @@ def main() -> None:
         return
 
     try:
-        proc = subprocess.run(
+        cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-pii",
@@ -126,6 +128,10 @@ def main() -> None:
                 "--source",
                 _DEFAULT_SOURCE,
             ],
+            input_data,
+        )
+        proc = subprocess.run(
+            cmd,
             capture_output=True,
             check=False,
             input=prompt_text,

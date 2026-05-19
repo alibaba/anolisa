@@ -52,6 +52,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
+
+from trace_context import with_trace_context
 
 # -- constants ---------------------------------------------------------------
 
@@ -229,13 +232,17 @@ def _keys_exist() -> bool:
     return (data_dir / "key.pub").is_file() and (data_dir / "key.enc").is_file()
 
 
-def _ensure_keys() -> None:
+def _ensure_keys(input_data: dict[str, Any]) -> None:
     """Auto-initialize signing keys if missing (fire-and-forget)."""
     if _keys_exist():
         return
     try:
-        subprocess.run(
+        cmd = with_trace_context(
             ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
+            input_data,
+        )
+        subprocess.run(
+            cmd,
             capture_output=True,
             check=False,
             text=True,
@@ -340,12 +347,16 @@ def main() -> None:
         return
 
     # 4. Ensure signing keys exist (auto-init if missing)
-    _ensure_keys()
+    _ensure_keys(input_data)
 
     # 5. Call agent-sec-cli skill-ledger check <skill_dir>
     try:
-        proc = subprocess.run(
+        cmd = with_trace_context(
             ["agent-sec-cli", "skill-ledger", "check", skill_dir],
+            input_data,
+        )
+        proc = subprocess.run(
+            cmd,
             capture_output=True,
             check=False,
             text=True,
