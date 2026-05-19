@@ -1,5 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import { callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli } from "../utils.js";
 
 export const codeScan: SecurityCapability = {
   id: "scan-code",
@@ -20,7 +20,7 @@ export const codeScan: SecurityCapability = {
 
         const result = await callAgentSecCli(
           ["scan-code", "--code", command, "--language", "bash"],
-          { timeout: 10000 },
+          { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
         );
 
         if (result.exitCode !== 0) {

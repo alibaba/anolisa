@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import type { SecurityCapability } from "../types.js";
-import { callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli, type TraceContext } from "../utils.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,7 +121,7 @@ export const skillLedger: SecurityCapability = {
     /** Ensure signing keys exist; auto-init if missing. */
     let ensureKeysPromise: Promise<void> | null = null;
 
-    function ensureKeys(): Promise<void> {
+    function ensureKeys(traceContext?: TraceContext): Promise<void> {
       if (ensureKeysPromise) return ensureKeysPromise;
 
       ensureKeysPromise = (async () => {
@@ -130,7 +130,7 @@ export const skillLedger: SecurityCapability = {
         api.logger.info("[skill-ledger] signing keys not found — running init --no-baseline");
         const result = await callAgentSecCli(
           ["skill-ledger", "init", "--no-baseline"],
-          { timeout: DEFAULT_TIMEOUT_MS },
+          { timeout: DEFAULT_TIMEOUT_MS, traceContext },
         );
 
         if (result.exitCode === 0) {
@@ -157,14 +157,15 @@ export const skillLedger: SecurityCapability = {
 
         const skillDir = resolveSkillDir(skillMdPath);
         const skillName = basename(skillDir);
+        const traceContext = buildTraceContext(event, ctx);
 
         // Ensure keys are ready
-        await ensureKeys();
+        await ensureKeys(traceContext);
 
         // Invoke CLI
         const result = await callAgentSecCli(
           ["skill-ledger", "check", skillDir],
-          { timeout: DEFAULT_TIMEOUT_MS },
+          { timeout: DEFAULT_TIMEOUT_MS, traceContext },
         );
 
         // Parse JSON output — CLI may return exit code 1 for deny/tampered states,

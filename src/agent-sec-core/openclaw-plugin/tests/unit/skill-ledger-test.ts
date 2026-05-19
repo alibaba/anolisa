@@ -57,10 +57,17 @@ function createMockApi() {
 
 let checkCallCount = 0;
 let lastCheckArgs: string[] | undefined;
+let lastInitArgs: string[] | undefined;
+
+function agentSecCommandOffset(args: string[]): number {
+  return args[0] === "--trace-context" ? 2 : 0;
+}
 
 function mockSkillLedgerCheck(result: CliResult): void {
   _setCliMock(async (args) => {
-    if (args[0] === "skill-ledger" && args[1] === "init" && args[2] === "--no-baseline") {
+    const offset = agentSecCommandOffset(args);
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
+      lastInitArgs = args;
       return {
         exitCode: 0,
         stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
@@ -68,7 +75,7 @@ function mockSkillLedgerCheck(result: CliResult): void {
       };
     }
 
-    if (args[0] === "skill-ledger" && args[1] === "check") {
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
       checkCallCount++;
       lastCheckArgs = args;
       return result;
@@ -80,7 +87,9 @@ function mockSkillLedgerCheck(result: CliResult): void {
 
 function mockSkillLedgerInitFailure(stderr: string): void {
   _setCliMock(async (args) => {
-    if (args[0] === "skill-ledger" && args[1] === "init" && args[2] === "--no-baseline") {
+    const offset = agentSecCommandOffset(args);
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
+      lastInitArgs = args;
       return {
         exitCode: 1,
         stdout: "",
@@ -88,7 +97,7 @@ function mockSkillLedgerInitFailure(stderr: string): void {
       };
     }
 
-    if (args[0] === "skill-ledger" && args[1] === "check") {
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
       return {
         exitCode: 0,
         stdout: JSON.stringify({ status: "pass" }),
@@ -150,6 +159,7 @@ assert(hooks[0].priority === 80, "priority is 80");
   const previousXdgDataHome = process.env.XDG_DATA_HOME;
   process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
   mockSkillLedgerInitFailure("init exploded");
+  lastInitArgs = undefined;
 
   try {
     const failureRegistration = createMockApi();
@@ -159,6 +169,96 @@ assert(hooks[0].priority === 80, "priority is 80");
       failureRegistration.logs.some((l) => l.includes("init --no-baseline failed: init exploded")),
       "init failure → emits WARN with init failure details",
     );
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    mockSkillLedgerStatus("pass");
+  }
+}
+
+{
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+  mockSkillLedgerStatus("pass");
+  lastInitArgs = undefined;
+
+  try {
+    const initRegistration = createMockApi();
+    skillLedger.register(initRegistration.api);
+    await new Promise((r) => setTimeout(r, 300));
+    assert(lastInitArgs?.[0] === "skill-ledger", "eager init → does not prepend trace context");
+    assert(lastInitArgs?.[1] === "init", "eager init → calls skill-ledger init");
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    mockSkillLedgerStatus("pass");
+  }
+}
+
+{
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+  let initAttempts = 0;
+  lastInitArgs = undefined;
+  _setCliMock(async (args) => {
+    const offset = agentSecCommandOffset(args);
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
+      initAttempts++;
+      lastInitArgs = args;
+      return initAttempts === 1
+        ? { exitCode: 1, stdout: "", stderr: "eager init failed" }
+        : {
+            exitCode: 0,
+            stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
+            stderr: "",
+          };
+    }
+
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
+      checkCallCount++;
+      lastCheckArgs = args;
+      return { exitCode: 0, stdout: JSON.stringify({ status: "pass" }), stderr: "" };
+    }
+
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+
+  try {
+    const retryRegistration = createMockApi();
+    skillLedger.register(retryRegistration.api);
+    await new Promise((r) => setTimeout(r, 300));
+    const retryHook = retryRegistration.hooks.find((h) => h.hookName === "before_tool_call")!;
+    lastInitArgs = undefined;
+
+    await retryHook.handler(
+      {
+        toolName: "read",
+        params: { file_path: "/skills/retry/SKILL.md" },
+        sessionId: "session-1",
+        runId: "run-1",
+        toolCallId: "tool-1",
+        trace: { traceId: "nested-trace-is-not-hook-input" },
+      },
+      {},
+    );
+
+    assert(lastInitArgs?.[0] === "--trace-context", "hook retry init → prepends trace context");
+    assert(
+      lastInitArgs?.[1] ===
+        JSON.stringify({
+          session_id: "session-1",
+          run_id: "run-1",
+          tool_call_id: "tool-1",
+        }),
+      "hook retry init → serializes only direct hook tracing fields",
+    );
+    assert(lastInitArgs?.[2] === "skill-ledger", "hook retry init → keeps subcommand after trace context");
   } finally {
     if (previousXdgDataHome === undefined) {
       delete process.env.XDG_DATA_HOME;
@@ -372,6 +472,31 @@ console.log("\n[6] Path param priority (file_path before path)");
   // but the fact it proceeds confirms at least one matched)
   assert(checkCallCount === 1, "both params present → handler proceeds");
   assert(lastCheckArgs?.includes("/skills/alpha"), "both params present → file_path takes priority");
+}
+
+// ── 6b. Trace context injection ─────────────────────────────────────────────
+console.log("\n[6b] Trace context injection");
+
+{
+  mockSkillLedgerStatus("pass");
+  await fire({
+    toolName: "read",
+    params: { file_path: "/skills/traced/SKILL.md" },
+    sessionId: "session-1",
+    runId: "run-1",
+    toolUseId: "tool-1",
+    trace: { traceId: "nested-trace-is-not-hook-input" },
+  });
+  assert(lastCheckArgs?.[0] === "--trace-context", "check call → prepends --trace-context");
+  assert(
+    lastCheckArgs?.[1] === JSON.stringify({
+      session_id: "session-1",
+      run_id: "run-1",
+      tool_call_id: "tool-1",
+    }),
+    "check call → serializes canonical snake_case trace context",
+  );
+  assert(lastCheckArgs?.[2] === "skill-ledger", "check call → keeps subcommand after trace context");
 }
 
 // ── 7. Status policy ────────────────────────────────────────────────────────

@@ -113,6 +113,32 @@ describe("scan-code", () => {
       assert.equal(lastCliOpts?.timeout, 10000);
     });
 
+    it("exec tool with trace context → injects trace context before scan-code", async () => {
+      const { handler } = registerAndGetHandler();
+      mockCli({ exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" });
+
+      await handler(
+        {
+          ...execEvent("pwd"),
+          sessionId: "session-1",
+          runId: "run-1",
+          toolCallId: "tool-1",
+          trace: { traceId: "nested-trace-is-not-hook-input" },
+        },
+        {},
+      );
+
+      assert.deepEqual(lastCliArgs?.slice(0, 2), [
+        "--trace-context",
+        JSON.stringify({
+          session_id: "session-1",
+          run_id: "run-1",
+          tool_call_id: "tool-1",
+        }),
+      ]);
+      assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", "pwd", "--language", "bash"]);
+    });
+
     it("non-exec tool (read_file) → no CLI call", async () => {
       const { handler } = registerAndGetHandler();
       mockCliNoCall();
