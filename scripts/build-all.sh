@@ -45,6 +45,8 @@ DEPS_ONLY=false
 DO_INSTALL=true
 DO_UNINSTALL=false
 DRY_RUN=false
+INTERACTIVE=false
+NON_INTERACTIVE=false
 INSTALL_MODE="user"
 COMPONENTS=()
 
@@ -74,6 +76,17 @@ SEC_CORE_RUST_TOOLCHAIN="1.93.0"
 
 OUTPUT_DIR="$PROJECT_ROOT/target"
 LOG_FILE="$OUTPUT_DIR/build.log"
+
+if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    BOLD=''
+    DIM=''
+    NC=''
+fi
 
 # ─── helpers ───
 
@@ -445,6 +458,43 @@ detect_distro() {
 # capabilities only; use --component sight to include it explicitly).
 DEFAULT_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt)
 ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt sight)
+
+active_components() {
+    if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
+        printf '%s\n' "${DEFAULT_COMPONENTS[@]}"
+    else
+        printf '%s\n' "${COMPONENTS[@]}"
+    fi
+}
+
+join_by() {
+    local sep="$1"; shift
+    local first=true item
+    for item in "$@"; do
+        if $first; then
+            printf '%s' "$item"
+            first=false
+        else
+            printf '%s%s' "$sep" "$item"
+        fi
+    done
+}
+
+selected_components_text() {
+    local items=()
+    while IFS= read -r item; do
+        items+=("$item")
+    done < <(active_components)
+    join_by ", " "${items[@]}"
+}
+
+is_valid_component() {
+    local c="$1" v
+    for v in "${ALL_COMPONENTS[@]}"; do
+        [[ "$v" == "$c" ]] && return 0
+    done
+    return 1
+}
 
 want_component() {
     local c="$1"
@@ -1676,6 +1726,118 @@ print_output_summary() {
     done
 }
 
+prompt_choice() {
+    # `read -p` writes the prompt to stderr, so command substitution
+    # ($(prompt_choice ...)) only captures the printf'd answer below.
+    local prompt="$1" default="$2" answer
+    read -r -p "$prompt [$default]: " answer
+    printf '%s' "${answer:-$default}"
+}
+
+run_interactive_wizard() {
+    [[ -t 0 ]] || die "--interactive requires a TTY. Use --non-interactive for automation."
+
+    echo -e "${BOLD}ANOLISA interactive setup${NC}"
+    echo "Choose the build flow. Press Enter to accept defaults."
+    echo ""
+
+    local choice comps confirm
+    echo "1) Build and install"
+    echo "2) Build only"
+    echo "3) Install dependencies only"
+    echo "4) Uninstall"
+    choice="$(prompt_choice "Action" "1")"
+    case "$choice" in
+        1)
+            DO_INSTALL=true
+            DEPS_ONLY=false
+            DO_UNINSTALL=false
+            ;;
+        2)
+            DO_INSTALL=false
+            DEPS_ONLY=false
+            DO_UNINSTALL=false
+            ;;
+        3)
+            DO_INSTALL=false
+            DEPS_ONLY=true
+            INSTALL_DEPS=true
+            DO_UNINSTALL=false
+            ;;
+        4)
+            DO_UNINSTALL=true
+            ;;
+        *) die "Invalid action choice: $choice" ;;
+    esac
+
+    echo ""
+    echo "1) User install (~/.local, ~/.copilot-shell)"
+    echo "2) System install (/usr/local/bin, /usr/share/anolisa)"
+    choice="$(prompt_choice "Install mode" "$([[ "$INSTALL_MODE" == "system" ]] && echo 2 || echo 1)")"
+    case "$choice" in
+        1) INSTALL_MODE="user" ;;
+        2) INSTALL_MODE="system" ;;
+        *) die "Invalid install mode choice: $choice" ;;
+    esac
+
+    echo ""
+    echo "1) Default components: $(join_by ", " "${DEFAULT_COMPONENTS[@]}")"
+    echo "2) All components: $(join_by ", " "${ALL_COMPONENTS[@]}")"
+    echo "3) Custom list"
+    choice="$(prompt_choice "Components" "$([[ ${#COMPONENTS[@]} -gt 0 ]] && echo 3 || echo 1)")"
+    case "$choice" in
+        1) COMPONENTS=("${DEFAULT_COMPONENTS[@]}") ;;
+        2) COMPONENTS=("${ALL_COMPONENTS[@]}") ;;
+        3)
+            comps="$(prompt_choice "Comma-separated components" "$(selected_components_text)")"
+            COMPONENTS=()
+            comps="${comps//,/ }"
+            for comp in $comps; do
+                if is_valid_component "$comp"; then
+                    COMPONENTS+=("$comp")
+                else
+                    die "Unknown component: $comp"
+                fi
+            done
+            [[ ${#COMPONENTS[@]} -gt 0 ]] || die "No components selected"
+            ;;
+        *) die "Invalid component choice: $choice" ;;
+    esac
+
+    if ! $DO_UNINSTALL && ! $DEPS_ONLY; then
+        echo ""
+        choice="$(prompt_choice "Install/check dependencies" "$($INSTALL_DEPS && echo y || echo n)")"
+        case "$choice" in
+            y|Y|yes|YES) INSTALL_DEPS=true ;;
+            n|N|no|NO) INSTALL_DEPS=false ;;
+            *) die "Invalid dependency choice: $choice" ;;
+        esac
+    fi
+
+    echo ""
+    ensure_user_mode
+    step "Selected flow"
+    if $DO_UNINSTALL; then
+        info "Action: uninstall"
+    elif $DEPS_ONLY; then
+        info "Action: dependencies only"
+    elif $DO_INSTALL; then
+        info "Action: build and install"
+    else
+        info "Action: build only"
+    fi
+    info "Mode: ${INSTALL_MODE}"
+    info "Components: $(selected_components_text)"
+    info "Dependencies: $($INSTALL_DEPS && echo enabled || echo skipped)"
+    info "Install: $($DO_INSTALL && echo enabled || echo skipped)"
+    echo ""
+    confirm="$(prompt_choice "Continue" "y")"
+    case "$confirm" in
+        y|Y|yes|YES) ;;
+        *) ok "Cancelled"; exit 0 ;;
+    esac
+}
+
 # ─── usage ───
 
 usage() {
@@ -1688,11 +1850,13 @@ $(echo -e "${BOLD}Usage:${NC}")
 $(echo -e "${BOLD}Options:${NC}")
     --no-install            Skip installing built components
     --install-mode <mode>   Install mode: user or system (default: user)
-    --usr, --system         Use system install mode (required for sec-core install)
+    --usr, --system         Use system install mode
     --ignore-deps           Skip dependency installation
     --deps-only             Install dependencies only, do not build
     --uninstall             Remove installed files (skips build; combine with --component to target one)
     --dry-run               Print actions without changing files or systemd state
+    --interactive           Open a guided terminal flow before running
+    --non-interactive       Explicit no-prompt mode; same as default, useful in CI to assert intent
     --all                   Include optional components such as sight
     --component <name>      Build/uninstall specific component (can be repeated).
                                                     Valid names: cosh, skills, sec-core, sight, tokenless, ws-ckpt
@@ -1702,6 +1866,8 @@ $(echo -e "${BOLD}Options:${NC}")
 
 $(echo -e "${BOLD}Examples:${NC}")
     $0                                             # Install deps + build + install to user paths
+    $0 --interactive                               # Guided terminal flow
+    $0 --non-interactive                           # Explicit automation mode (same as default)
     $0 --install-mode user                         # Explicit user install mode
     $0 --no-install                                # Install deps + build (skip installation)
     $0 --ignore-deps                               # Build + install (skip dep install)
@@ -1774,6 +1940,14 @@ parse_args() {
                 DRY_RUN=true
                 shift
                 ;;
+            --interactive)
+                INTERACTIVE=true
+                shift
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=true
+                shift
+                ;;
             --deps-only)
                 DEPS_ONLY=true
                 INSTALL_DEPS=true
@@ -1784,11 +1958,12 @@ parse_args() {
                 shift
                 ;;
             --component)
-                [[ -n "${2:-}" ]] || die "--component requires a value (cosh, skills, sec-core, sight, tokenless, ws-ckpt)"
-                case "$2" in
-                    cosh|skills|sec-core|sight|tokenless|ws-ckpt) COMPONENTS+=("$2") ;;
-                    *) die "Unknown component: $2. Valid: cosh, skills, sec-core, sight, tokenless, ws-ckpt" ;;
-                esac
+                [[ -n "${2:-}" ]] || die "--component requires a value ($(join_by ", " "${ALL_COMPONENTS[@]}"))"
+                if is_valid_component "$2"; then
+                    COMPONENTS+=("$2")
+                else
+                    die "Unknown component: $2. Valid: $(join_by ", " "${ALL_COMPONENTS[@]}")"
+                fi
                 shift 2
                 ;;
             --uninstall)
@@ -1807,13 +1982,20 @@ parse_args() {
     if $DEPS_ONLY; then
         INSTALL_DEPS=true
     fi
+    if $INTERACTIVE && $NON_INTERACTIVE; then
+        die "--interactive and --non-interactive cannot be used together"
+    fi
 }
 
 # ─── main ───
 
 main() {
     parse_args "$@"
-    ensure_user_mode
+    if $INTERACTIVE; then
+        run_interactive_wizard
+    else
+        ensure_user_mode
+    fi
 
     echo -e "${BOLD}ANOLISA Build Script${NC}"
     echo -e "${DIM}Project root: ${PROJECT_ROOT}${NC}"
