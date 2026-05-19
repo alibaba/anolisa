@@ -239,6 +239,16 @@ AGENT_SEC_LIVE=1 npm run smoke
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read         |
 | `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
 
+### Configuring `code-scan`
+
+The `scan-code` capability intercepts `exec` tool calls and scans commands via `agent-sec-cli scan-code`. By default, security issues are logged (`api.logger.warn`) but the tool call is allowed to proceed. This avoids blocking TUI users who cannot see Dashboard approval cards.
+
+Set `codeScanRequireApproval: true` to enable approval mode, which pops a confirmation card on the Dashboard for `warn` and `deny` verdicts:
+
+```bash
+openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
+```
+
 ### Configuring `pii-scan-user-input`
 
 The `pii-scan-user-input` capability scans only `event.prompt` in `before_prompt_build`. It intentionally does not scan `event.messages`, because that list may include history, tool results, memory, or RAG context and can repeatedly warn on older PII that was not submitted in the current turn.
@@ -282,6 +292,7 @@ Supported OpenClaw plugin entry config:
       "agent-sec": {
         "config": {
           "promptScanBlock": false,
+          "codeScanRequireApproval": false,
           "piiScanUserInput": true,
           "piiIncludeLowConfidence": false,
           "piiWarningTtlMs": 300000,

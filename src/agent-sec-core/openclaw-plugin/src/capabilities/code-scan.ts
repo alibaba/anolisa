@@ -6,6 +6,9 @@ export const codeScan: SecurityCapability = {
   name: "Code Scanner",
   hooks: ["before_tool_call"],
   register(api) {
+    const cfg = (api.pluginConfig as Record<string, any>) ?? {};
+    const requireApprovalEnabled = cfg.codeScanRequireApproval === true;
+
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
 
@@ -38,25 +41,31 @@ export const codeScan: SecurityCapability = {
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
 
         if (verdict === "deny") {
-          api.logger.info(`[scan-code] 🚫 DENY — requiring user approval`);
-          return {
-            requireApproval: {
-              title: "Code Scanner Security Warning",
-              description: msg,
-              severity: "warning" as const,
-            },
-          };
+          api.logger.warn(`[scan-code] DENY (requireApproval=${requireApprovalEnabled}) — ${msg}`);
+          if (requireApprovalEnabled) {
+            return {
+              requireApproval: {
+                title: "Code Scanner Security Warning",
+                description: msg,
+                severity: "warning" as const,
+              },
+            };
+          }
+          return undefined;
         }
 
         if (verdict === "warn") {
-          api.logger.info(`[scan-code] ⚠️ WARN — requiring user approval`);
-          return {
-            requireApproval: {
-              title: "Code Scanner Security Warning",
-              description: msg,
-              severity: "warning" as const,
-            },
-          };
+          api.logger.warn(`[scan-code] WARN (requireApproval=${requireApprovalEnabled}) — ${msg}`);
+          if (requireApprovalEnabled) {
+            return {
+              requireApproval: {
+                title: "Code Scanner Security Warning",
+                description: msg,
+                severity: "warning" as const,
+              },
+            };
+          }
+          return undefined;
         }
 
         return undefined;

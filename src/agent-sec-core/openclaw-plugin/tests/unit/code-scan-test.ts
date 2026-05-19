@@ -16,11 +16,11 @@ type RegisteredHook = {
 };
 
 /** Create a minimal mock OpenClaw API and capture hook registrations. */
-function createMockApi() {
+function createMockApi(pluginConfig: Record<string, any> = {}) {
   const hooks: RegisteredHook[] = [];
   const logs: string[] = [];
   const api = {
-    pluginConfig: {},
+    pluginConfig,
     logger: {
       info: (msg: string) => logs.push(msg),
       error: (msg: string) => logs.push(msg),
@@ -35,8 +35,8 @@ function createMockApi() {
 }
 
 /** Register scan-code and return the single captured handler. */
-function registerAndGetHandler() {
-  const { api, hooks, logs } = createMockApi();
+function registerAndGetHandler(pluginConfig: Record<string, any> = {}) {
+  const { api, hooks, logs } = createMockApi(pluginConfig);
   codeScan.register(api);
   assert.equal(hooks.length, 1, "scan-code should register exactly 1 hook");
   return { handler: hooks[0].handler, hooks, logs };
@@ -175,8 +175,20 @@ describe("scan-code", () => {
       assert.equal(result, undefined);
     });
 
-    it("deny with 1 finding → { requireApproval } (unified ask strategy)", async () => {
+    it("deny with 1 finding, default config → undefined (log only)", async () => {
       const { handler } = registerAndGetHandler();
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险命令"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("rm -rf /"), {});
+      assert.equal(result, undefined);
+    });
+
+    it("deny with 1 finding, codeScanRequireApproval=true → { requireApproval }", async () => {
+      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
       mockCli({
         exitCode: 0,
         stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险命令"}]}',
@@ -193,8 +205,8 @@ describe("scan-code", () => {
       assert.ok(result.requireApproval.description.includes("Command: rm -rf /"));
     });
 
-    it("deny with 2 findings → requireApproval.description contains both", async () => {
-      const { handler } = registerAndGetHandler();
+    it("deny with 2 findings, codeScanRequireApproval=true → requireApproval.description contains both", async () => {
+      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
       mockCli({
         exitCode: 0,
         stdout: '{"verdict":"deny","findings":[{"desc_zh":"A"},{"desc_zh":"B"}]}',
@@ -209,8 +221,20 @@ describe("scan-code", () => {
       assert.ok(result.requireApproval.description.includes("- B"));
     });
 
-    it("warn with findings → { requireApproval }", async () => {
+    it("warn with findings, default config → undefined (log only)", async () => {
       const { handler } = registerAndGetHandler();
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+      assert.equal(result, undefined);
+    });
+
+    it("warn with findings, codeScanRequireApproval=true → { requireApproval }", async () => {
+      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
       mockCli({
         exitCode: 0,
         stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',

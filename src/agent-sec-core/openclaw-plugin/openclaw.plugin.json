@@ -30,6 +30,11 @@
         "default": 300000,
         "minimum": 0,
         "description": "PII warning 按 runId 暂存的 TTL，避免未发送回复时残留"
+      },
+      "codeScanRequireApproval": {
+        "type": "boolean",
+        "default": false,
+        "description": "代码扫描检测到安全问题时是否要求用户审批（默认仅记录日志并放行）"
       }
 
     }
@@ -50,6 +55,10 @@
     "piiWarningTtlMs": {
       "label": "PII warning TTL",
       "description": "PII warning 按 runId 暂存的最长时间，单位毫秒"
+    },
+    "codeScanRequireApproval": {
+      "label": "代码扫描审批模式",
+      "description": "启用后，代码扫描检测到安全问题时在 Dashboard 上弹出审批卡片；关闭则仅记录日志并放行"
     }
 
   }
