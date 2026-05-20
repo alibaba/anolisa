@@ -13,6 +13,11 @@ timeout = 10
 include_low_confidence = false
 warning_ttl_seconds = 300
 
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 15
+warning_ttl_seconds = 300
+
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
