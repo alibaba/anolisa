@@ -50,6 +50,9 @@ export default {
   'to clear screen': '清屏',
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
+  '↑ to manage attachments': '↑ 管理附件',
+  '← → select, Delete to remove, ↓ to exit': '← → 选择，Delete 删除，↓ 退出',
+  'Attachments: ': '附件：',
   'for external editor': '外部编辑器',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':

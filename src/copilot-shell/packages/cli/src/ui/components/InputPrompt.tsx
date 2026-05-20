@@ -23,7 +23,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config } from '@copilot-shell/core';
-import { ApprovalMode } from '@copilot-shell/core';
+import { ApprovalMode, Storage } from '@copilot-shell/core';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -304,10 +304,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const handleClipboardImage = useCallback(async () => {
     try {
       if (await clipboardHasImage()) {
-        const imagePath = await saveClipboardImage(config.getTargetDir());
+        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
         if (imagePath) {
           // Clean up old images
-          cleanupOldClipboardImages(config.getTargetDir()).catch(() => {
+          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
             // Ignore cleanup errors
           });
 
@@ -324,7 +324,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     } catch (error) {
       console.error('Error handling clipboard image:', error);
     }
-  }, [config]);
+  }, []);
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {

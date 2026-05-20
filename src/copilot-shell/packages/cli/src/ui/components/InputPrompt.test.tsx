@@ -10,7 +10,7 @@ import type { InputPromptProps } from './InputPrompt.js';
 import { InputPrompt } from './InputPrompt.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@copilot-shell/core';
-import { ApprovalMode } from '@copilot-shell/core';
+import { ApprovalMode, Storage } from '@copilot-shell/core';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -395,12 +395,12 @@ describe('InputPrompt', () => {
 
       expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
+        Storage.getGlobalTempDir(),
       );
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
+        Storage.getGlobalTempDir(),
       );
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
+      // Attachment UI is used instead of inserting text directly
       unmount();
     });
 
@@ -438,20 +438,14 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should insert image path at cursor position with proper spacing', async () => {
+    it('should add attachment when clipboard has image', async () => {
       const imagePath = path.join(
-        'test',
-        '.qwen-clipboard',
+        Storage.getGlobalTempDir(),
+        'clipboard',
         'clipboard-456.png',
       );
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
-
-      // Set initial text and cursor position
-      mockBuffer.text = 'Hello world';
-      mockBuffer.cursor = [0, 5]; // Cursor after "Hello"
-      mockBuffer.lines = ['Hello world'];
-      mockBuffer.replaceRangeByOffset = vi.fn();
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -461,17 +455,12 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      // Should insert at cursor position with spaces
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
+      // Should call saveClipboardImage and create attachment
+      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+      expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
 
-      // Get the actual call to see what path was used
-      const actualCall = vi.mocked(mockBuffer.replaceRangeByOffset).mock
-        .calls[0];
-      expect(actualCall[0]).toBe(5); // start offset
-      expect(actualCall[1]).toBe(5); // end offset
-      expect(actualCall[2]).toBe(
-        ' @' + path.relative(path.join('test', 'project', 'src'), imagePath),
-      );
+      // Attachment UI is used instead of inserting text directly
+      // The attachment will be converted to @reference on submit
       unmount();
     });
 

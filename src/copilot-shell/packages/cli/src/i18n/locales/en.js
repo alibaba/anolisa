@@ -51,6 +51,10 @@ export default {
   'to clear screen': 'to clear screen',
   'to search history': 'to search history',
   'to paste images': 'to paste images',
+  '↑ to manage attachments': '↑ to manage attachments',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → select, Delete to remove, ↓ to exit',
+  'Attachments: ': 'Attachments: ',
   'for external editor': 'for external editor',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
