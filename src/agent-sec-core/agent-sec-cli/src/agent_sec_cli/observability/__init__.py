@@ -1,17 +1,22 @@
 """Observability payload schema and metric definitions."""
 
 import atexit
+from typing import TYPE_CHECKING
 
 from agent_sec_cli.observability.metrics import HOOK_METRIC_ALLOWLIST
 from agent_sec_cli.observability.schema import (
     ObservabilityMetadata,
     ObservabilityRecord,
 )
-from agent_sec_cli.observability.sqlite_writer import ObservabilitySqliteWriter
 from agent_sec_cli.observability.writer import ObservabilityWriter
 
+if TYPE_CHECKING:
+    from agent_sec_cli.observability.sqlite_writer import (
+        ObservabilitySqliteWriter,
+    )
+
 _writer: ObservabilityWriter | None = None
-_sqlite_writer: ObservabilitySqliteWriter | None = None
+_sqlite_writer: "ObservabilitySqliteWriter | None" = None
 
 
 def get_writer() -> ObservabilityWriter:
@@ -22,8 +27,12 @@ def get_writer() -> ObservabilityWriter:
     return _writer
 
 
-def get_sqlite_writer() -> ObservabilitySqliteWriter:
+def get_sqlite_writer() -> "ObservabilitySqliteWriter":
     """Return the module-level SQLite writer (created lazily)."""
+    from agent_sec_cli.observability.sqlite_writer import (  # noqa: PLC0415
+        ObservabilitySqliteWriter,
+    )
+
     global _sqlite_writer  # noqa: PLW0603
     if _sqlite_writer is None:
         _sqlite_writer = ObservabilitySqliteWriter()

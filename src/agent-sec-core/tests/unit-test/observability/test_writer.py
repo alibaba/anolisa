@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,33 @@ from agent_sec_cli.observability.models import (
 from agent_sec_cli.observability.schema import validate_observability_record
 from agent_sec_cli.observability.sqlite_writer import ObservabilitySqliteWriter
 from agent_sec_cli.observability.writer import ObservabilityWriter
+
+
+def test_observability_package_import_does_not_load_sqlalchemy() -> None:
+    probe = """
+import json
+import sys
+
+import agent_sec_cli.observability  # noqa: F401
+
+heavy_modules = [
+    "agent_sec_cli.observability.sqlite_writer",
+    "agent_sec_cli.security_events.sqlite_reader",
+    "agent_sec_cli.security_events.sqlite_writer",
+    "agent_sec_cli.security_events.orm_store",
+    "sqlalchemy",
+]
+print(json.dumps([name for name in heavy_modules if name in sys.modules]))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == []
 
 
 def _fresh_observed_at() -> str:

@@ -10,15 +10,18 @@ Public API
 """
 
 import atexit
+from typing import TYPE_CHECKING
 
 from agent_sec_cli.security_events.schema import SecurityEvent
-from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
-from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
 from agent_sec_cli.security_events.writer import SecurityEventWriter
 
+if TYPE_CHECKING:
+    from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
+    from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
+
 _writer: SecurityEventWriter | None = None
-_sqlite_writer: SqliteEventWriter | None = None
-_reader: SqliteEventReader | None = None
+_sqlite_writer: "SqliteEventWriter | None" = None
+_reader: "SqliteEventReader | None" = None
 
 
 def get_writer() -> SecurityEventWriter:
@@ -29,8 +32,12 @@ def get_writer() -> SecurityEventWriter:
     return _writer
 
 
-def get_sqlite_writer() -> SqliteEventWriter:
+def get_sqlite_writer() -> "SqliteEventWriter":
     """Return the module-level singleton SQLite writer (created lazily)."""
+    from agent_sec_cli.security_events.sqlite_writer import (  # noqa: PLC0415
+        SqliteEventWriter,
+    )
+
     global _sqlite_writer  # noqa: PLW0603
     if _sqlite_writer is None:
         _sqlite_writer = SqliteEventWriter()
@@ -38,8 +45,12 @@ def get_sqlite_writer() -> SqliteEventWriter:
     return _sqlite_writer
 
 
-def get_reader() -> SqliteEventReader:
+def get_reader() -> "SqliteEventReader":
     """Return the module-level singleton SQLite reader (created lazily)."""
+    from agent_sec_cli.security_events.sqlite_reader import (  # noqa: PLC0415
+        SqliteEventReader,
+    )
+
     global _reader  # noqa: PLW0603
     if _reader is None:
         _reader = SqliteEventReader()

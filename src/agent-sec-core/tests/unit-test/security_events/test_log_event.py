@@ -1,11 +1,40 @@
 """Unit tests for security_events — module-level log_event() and get_writer()."""
 
+import json
+import subprocess
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
 import agent_sec_cli.security_events as security_events
 from agent_sec_cli.security_events import log_event
 from agent_sec_cli.security_events.schema import SecurityEvent
+
+
+def test_security_events_package_import_does_not_load_sqlalchemy():
+    probe = """
+import json
+import sys
+
+import agent_sec_cli.security_events  # noqa: F401
+
+heavy_modules = [
+    "agent_sec_cli.security_events.sqlite_reader",
+    "agent_sec_cli.security_events.sqlite_writer",
+    "agent_sec_cli.security_events.orm_store",
+    "sqlalchemy",
+]
+print(json.dumps([name for name in heavy_modules if name in sys.modules]))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == []
 
 
 class TestGetWriter(unittest.TestCase):
