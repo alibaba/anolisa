@@ -35,6 +35,17 @@
         "type": "boolean",
         "default": false,
         "description": "代码扫描检测到安全问题时是否要求用户审批（默认仅记录日志并放行）"
+      },
+      "skillLedgerRequireApproval": {
+        "type": "boolean",
+        "default": false,
+        "description": "检测到未扫描、漂移、高风险或签名异常 skill 时是否要求用户确认"
+      },
+      "skillLedgerWarningTtlMs": {
+        "type": "number",
+        "default": 300000,
+        "minimum": 0,
+        "description": "skill-ledger warning 按 runId 暂存的最长时间，单位毫秒"
       }
 
     }
@@ -59,6 +70,14 @@
     "codeScanRequireApproval": {
       "label": "代码扫描审批模式",
       "description": "启用后，代码扫描检测到安全问题时在 Dashboard 上弹出审批卡片；关闭则仅记录日志并放行"
+    },
+    "skillLedgerRequireApproval": {
+      "label": "Skill Ledger 审批模式",
+      "description": "启用后，未扫描、漂移、高风险或签名异常 skill 会要求用户确认；关闭则发送同轮告警并继续处理"
+    },
+    "skillLedgerWarningTtlMs": {
+      "label": "Skill Ledger warning TTL",
+      "description": "skill-ledger warning 按 runId 暂存的最长时间，单位毫秒"
     }
 
   }

@@ -27,7 +27,7 @@ openclaw-plugin/
 │   ├── types.ts                # SecurityCapability interface
 │   ├── utils.ts                # CLI invocation utility (callAgentSecCli)
 │   ├── capabilities/           # Security capability entry files
-│   │   ├── skill-ledger.ts     #   before_tool_call
+│   │   ├── skill-ledger.ts     #   before_tool_call + reply_dispatch hooks
 │   │   ├── code-scan.ts        #   before_tool_call hook
 │   │   ├── prompt-scan.ts      #   before_dispatch hook
 │   │   ├── pii-scan.ts         #   before_prompt_build + reply_dispatch hooks
@@ -236,7 +236,7 @@ AGENT_SEC_LIVE=1 npm run smoke
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
 | `pii-scan-user-input` | `before_prompt_build`, `reply_dispatch` | 0 (default) | Scans current user prompt for PII/credentials and emits a non-blocking same-run warning |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
-| `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read         |
+| `skill-ledger`     | `before_tool_call`, `reply_dispatch` | 80 / 0 | Checks skill integrity when SKILL.md is read and emits configurable warnings or approval requests |
 | `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
 
 ### Configuring `code-scan`
@@ -293,6 +293,8 @@ Supported OpenClaw plugin entry config:
         "config": {
           "promptScanBlock": false,
           "codeScanRequireApproval": false,
+          "skillLedgerRequireApproval": false,
+          "skillLedgerWarningTtlMs": 300000,
           "piiScanUserInput": true,
           "piiIncludeLowConfidence": false,
           "piiWarningTtlMs": 300000,
@@ -320,6 +322,16 @@ Set a capability's `enabled` value to `false` to skip registering only that capa
 ### Configuring `skill-ledger`
 
 The `skill-ledger` capability checks skill integrity by invoking `agent-sec-cli skill-ledger check` when the agent reads a `SKILL.md` file. It automatically initializes signing keys on first use.
+
+By default, `skillLedgerRequireApproval` is `false`. In this mode, `none`, `drifted`, `deny`, and `tampered` statuses do not block the read. Instead, the capability caches a same-run warning under the current `runId`, then `reply_dispatch` queues it with `dispatcher.sendBlockReply({ text })` before the normal agent reply continues. `warn`, `error`, and unknown statuses are logged only.
+
+Set `skillLedgerRequireApproval: true` to restore approval-card behavior for `none`, `drifted`, `deny`, and `tampered` statuses:
+
+```bash
+openclaw config set plugins.entries.agent-sec.config.skillLedgerRequireApproval true
+```
+
+`skillLedgerWarningTtlMs` controls how long an undelivered warning remains cached. If `runId` is missing, the warning is not cached. If OpenClaw sets `sendPolicy: "deny"` or `suppressUserDelivery: true`, cached warnings are dropped without display.
 
 **Prerequisites**: `agent-sec-cli skill-ledger check` must be available. Signing keys are auto-initialized (no passphrase) if not present.
 

@@ -1,9 +1,5 @@
-// tests/skill-ledger-test.ts
-// Deep test for skill-ledger hook: event filtering, path resolution, fail-open, resilience.
-//
-// Run:  npx tsx tests/unit/skill-ledger-test.ts
-//       npm test
-
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -11,39 +7,23 @@ import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 import { _resetCliMock, _setCliMock } from "../../src/utils.js";
 import type { CliResult } from "../../src/utils.js";
 
-// ── Minimal test framework ──────────────────────────────────────────────────
-
-let passed = 0;
-let failed = 0;
-
-function assert(condition: boolean, message: string): void {
-  if (condition) {
-    passed++;
-    console.log(`  ✅ ${message}`);
-  } else {
-    failed++;
-    console.log(`  ❌ FAIL: ${message}`);
-  }
-}
-
-// ── Mock API factory ────────────────────────────────────────────────────────
-
 type RegisteredHook = {
   hookName: string;
   handler: (event: any, ctx: any) => Promise<any>;
   priority: number;
 };
 
-function createMockApi() {
+function createMockApi(pluginConfig: Record<string, any> = {}) {
   const hooks: RegisteredHook[] = [];
   const logs: string[] = [];
 
   const api = {
-    pluginConfig: {},
+    pluginConfig,
     logger: {
       info: (msg: string) => logs.push(`[INFO] ${msg}`),
       error: (msg: string) => logs.push(`[ERROR] ${msg}`),
       warn: (msg: string) => logs.push(`[WARN] ${msg}`),
+      debug: (msg: string) => logs.push(`[DEBUG] ${msg}`),
     },
     on: (hookName: string, handler: any, opts?: { priority?: number }) => {
       hooks.push({ hookName, handler, priority: opts?.priority ?? 0 });
@@ -53,7 +33,15 @@ function createMockApi() {
   return { api: api as any, hooks, logs };
 }
 
-// ── CLI mock helpers ───────────────────────────────────────────────────────
+function registerHandlers(pluginConfig: Record<string, any> = {}) {
+  const { api, hooks, logs } = createMockApi(pluginConfig);
+  skillLedger.register(api);
+  const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+  const replyDispatch = hooks.find((hook) => hook.hookName === "reply_dispatch");
+  assert.ok(beforeToolCall, "before_tool_call handler should be registered");
+  assert.ok(replyDispatch, "reply_dispatch handler should be registered");
+  return { beforeToolCall, replyDispatch, hooks, logs };
+}
 
 let checkCallCount = 0;
 let lastCheckArgs: string[] | undefined;
@@ -66,7 +54,11 @@ function agentSecCommandOffset(args: string[]): number {
 function mockSkillLedgerCheck(result: CliResult): void {
   _setCliMock(async (args) => {
     const offset = agentSecCommandOffset(args);
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
+    if (
+      args[offset] === "skill-ledger" &&
+      args[offset + 1] === "init" &&
+      args[offset + 2] === "--no-baseline"
+    ) {
       lastInitArgs = args;
       return {
         exitCode: 0,
@@ -88,7 +80,11 @@ function mockSkillLedgerCheck(result: CliResult): void {
 function mockSkillLedgerInitFailure(stderr: string): void {
   _setCliMock(async (args) => {
     const offset = agentSecCommandOffset(args);
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
+    if (
+      args[offset] === "skill-ledger" &&
+      args[offset + 1] === "init" &&
+      args[offset + 2] === "--no-baseline"
+    ) {
       lastInitArgs = args;
       return {
         exitCode: 1,
@@ -117,471 +113,396 @@ function mockSkillLedgerStatus(status: string, exitCode = 0): void {
   });
 }
 
-process.on("exit", () => _resetCliMock());
-
-// ── Setup: register capability, extract handler ─────────────────────────────
-
-mockSkillLedgerStatus("pass");
-
-const { api, hooks, logs } = createMockApi();
-skillLedger.register(api);
-
-// Wait for eager ensureKeys() fire-and-forget to settle
-await new Promise((r) => setTimeout(r, 300));
-
-const hook = hooks.find((h) => h.hookName === "before_tool_call")!;
-
-/** Clear captured logs between test cases. */
-function clearLogs(): void {
-  logs.length = 0;
+function readSkillEvent(path = "/skills/risky/SKILL.md", runId = "run-1") {
+  return {
+    toolName: "read",
+    params: { file_path: path },
+    runId,
+  };
 }
 
-/** Fire the handler with a given event and return { result, logs snapshot }. */
-async function fire(event: any, ctx: any = {}) {
-  clearLogs();
-  checkCallCount = 0;
-  lastCheckArgs = undefined;
-  const result = await hook.handler(event, ctx);
-  return { result, logs: [...logs] };
+function createReplyDispatchCtx(sendBlockReply?: (payload: any) => boolean) {
+  const blockReplies: any[] = [];
+  const dispatcher = {
+    sendToolResult: () => false,
+    sendBlockReply:
+      sendBlockReply ??
+      ((payload: any) => {
+        blockReplies.push(payload);
+        return true;
+      }),
+    sendFinalReply: () => false,
+    waitForIdle: async () => {},
+    getQueuedCounts: () => ({ tool: 0, block: blockReplies.length, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    markComplete: () => {},
+  };
+  return { ctx: { dispatcher }, blockReplies };
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-console.log("=== skill-ledger Deep Test ===\n");
-
-// ── 1. Hook registration metadata ──────────────────────────────────────────
-console.log("[1] Hook registration");
-
-assert(hooks.length === 1, "registers exactly one hook");
-assert(hooks[0].hookName === "before_tool_call", "hook name is before_tool_call");
-assert(hooks[0].priority === 80, "priority is 80");
-
-{
-  const previousXdgDataHome = process.env.XDG_DATA_HOME;
-  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
-  mockSkillLedgerInitFailure("init exploded");
-  lastInitArgs = undefined;
-
-  try {
-    const failureRegistration = createMockApi();
-    skillLedger.register(failureRegistration.api);
-    await new Promise((r) => setTimeout(r, 300));
-    assert(
-      failureRegistration.logs.some((l) => l.includes("init --no-baseline failed: init exploded")),
-      "init failure → emits WARN with init failure details",
-    );
-  } finally {
-    if (previousXdgDataHome === undefined) {
-      delete process.env.XDG_DATA_HOME;
-    } else {
-      process.env.XDG_DATA_HOME = previousXdgDataHome;
-    }
-    mockSkillLedgerStatus("pass");
-  }
-}
-
-{
-  const previousXdgDataHome = process.env.XDG_DATA_HOME;
-  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
-  mockSkillLedgerStatus("pass");
-  lastInitArgs = undefined;
-
-  try {
-    const initRegistration = createMockApi();
-    skillLedger.register(initRegistration.api);
-    await new Promise((r) => setTimeout(r, 300));
-    assert(lastInitArgs?.[0] === "skill-ledger", "eager init → does not prepend trace context");
-    assert(lastInitArgs?.[1] === "init", "eager init → calls skill-ledger init");
-  } finally {
-    if (previousXdgDataHome === undefined) {
-      delete process.env.XDG_DATA_HOME;
-    } else {
-      process.env.XDG_DATA_HOME = previousXdgDataHome;
-    }
-    mockSkillLedgerStatus("pass");
-  }
-}
-
-{
-  const previousXdgDataHome = process.env.XDG_DATA_HOME;
-  process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
-  let initAttempts = 0;
-  lastInitArgs = undefined;
-  _setCliMock(async (args) => {
-    const offset = agentSecCommandOffset(args);
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "init" && args[offset + 2] === "--no-baseline") {
-      initAttempts++;
-      lastInitArgs = args;
-      return initAttempts === 1
-        ? { exitCode: 1, stdout: "", stderr: "eager init failed" }
-        : {
-            exitCode: 0,
-            stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
-            stderr: "",
-          };
-    }
-
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
-      checkCallCount++;
-      lastCheckArgs = args;
-      return { exitCode: 0, stdout: JSON.stringify({ status: "pass" }), stderr: "" };
-    }
-
-    return { exitCode: 0, stdout: "", stderr: "" };
+describe("skill-ledger", () => {
+  beforeEach(() => {
+    checkCallCount = 0;
+    lastCheckArgs = undefined;
+    lastInitArgs = undefined;
   });
 
-  try {
-    const retryRegistration = createMockApi();
-    skillLedger.register(retryRegistration.api);
-    await new Promise((r) => setTimeout(r, 300));
-    const retryHook = retryRegistration.hooks.find((h) => h.hookName === "before_tool_call")!;
-    lastInitArgs = undefined;
+  afterEach(() => {
+    _resetCliMock();
+  });
 
-    await retryHook.handler(
-      {
-        toolName: "read",
-        params: { file_path: "/skills/retry/SKILL.md" },
-        sessionId: "session-1",
-        runId: "run-1",
-        toolCallId: "tool-1",
-        trace: { traceId: "nested-trace-is-not-hook-input" },
-      },
-      {},
+  it("registers before_tool_call and reply_dispatch", () => {
+    mockSkillLedgerStatus("pass");
+    const { hooks } = registerHandlers();
+
+    assert.deepEqual(
+      hooks.map((hook) => hook.hookName),
+      ["before_tool_call", "reply_dispatch"],
     );
+    assert.equal(hooks[0].priority, 80);
+    assert.equal(hooks[1].priority, 0);
+    assert.deepEqual(skillLedger.hooks, ["before_tool_call", "reply_dispatch"]);
+  });
 
-    assert(lastInitArgs?.[0] === "--trace-context", "hook retry init → prepends trace context");
-    assert(
-      lastInitArgs?.[1] ===
+  it("logs key init failures without blocking registration", async () => {
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+    mockSkillLedgerInitFailure("init exploded");
+
+    try {
+      const { logs } = registerHandlers();
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+      assert.ok(
+        logs.some((log) => log.includes("init --no-baseline failed: init exploded")),
+      );
+    } finally {
+      if (previousXdgDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdgDataHome;
+      }
+    }
+  });
+
+  it("eager key init does not prepend trace context", async () => {
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+    mockSkillLedgerStatus("pass");
+
+    try {
+      const { api } = createMockApi();
+      skillLedger.register(api);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+
+      assert.equal(lastInitArgs?.[0], "skill-ledger");
+      assert.equal(lastInitArgs?.[1], "init");
+    } finally {
+      if (previousXdgDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdgDataHome;
+      }
+    }
+  });
+
+  it("retries failed key init with hook trace context", async () => {
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+    let initAttempts = 0;
+    _setCliMock(async (args) => {
+      const offset = agentSecCommandOffset(args);
+      if (
+        args[offset] === "skill-ledger" &&
+        args[offset + 1] === "init" &&
+        args[offset + 2] === "--no-baseline"
+      ) {
+        initAttempts++;
+        lastInitArgs = args;
+        return initAttempts === 1
+          ? { exitCode: 1, stdout: "", stderr: "eager init failed" }
+          : {
+              exitCode: 0,
+              stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
+              stderr: "",
+            };
+      }
+
+      if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
+        checkCallCount++;
+        lastCheckArgs = args;
+        return { exitCode: 0, stdout: JSON.stringify({ status: "pass" }), stderr: "" };
+      }
+
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    try {
+      const { beforeToolCall } = registerHandlers();
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+      lastInitArgs = undefined;
+
+      await beforeToolCall.handler(
+        {
+          toolName: "read",
+          params: { file_path: "/skills/retry/SKILL.md" },
+          sessionId: "session-1",
+          runId: "run-1",
+          toolCallId: "tool-1",
+          trace: { traceId: "nested-trace-is-not-hook-input" },
+        },
+        {},
+      );
+
+      assert.equal(lastInitArgs?.[0], "--trace-context");
+      assert.equal(
+        lastInitArgs?.[1],
         JSON.stringify({
           session_id: "session-1",
           run_id: "run-1",
           tool_call_id: "tool-1",
         }),
-      "hook retry init → serializes only direct hook tracing fields",
-    );
-    assert(lastInitArgs?.[2] === "skill-ledger", "hook retry init → keeps subcommand after trace context");
-  } finally {
-    if (previousXdgDataHome === undefined) {
-      delete process.env.XDG_DATA_HOME;
-    } else {
-      process.env.XDG_DATA_HOME = previousXdgDataHome;
+      );
+      assert.equal(lastInitArgs?.[2], "skill-ledger");
+    } finally {
+      if (previousXdgDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdgDataHome;
+      }
     }
+  });
+
+  it("matches read SKILL.md calls and preserves file_path priority", async () => {
     mockSkillLedgerStatus("pass");
+    const { beforeToolCall } = registerHandlers();
+
+    await beforeToolCall.handler(
+      {
+        toolName: "read",
+        params: {
+          file_path: "/skills/alpha/SKILL.md",
+          path: "/skills/beta/SKILL.md",
+        },
+      },
+      {},
+    );
+
+    assert.equal(checkCallCount, 1);
+    assert.ok(lastCheckArgs?.includes("/skills/alpha"));
+  });
+
+  it("passes hook trace context to skill-ledger check", async () => {
+    mockSkillLedgerStatus("pass");
+    const { beforeToolCall } = registerHandlers();
+
+    await beforeToolCall.handler(
+      {
+        toolName: "read",
+        params: { file_path: "/skills/traced/SKILL.md" },
+        sessionId: "session-1",
+        runId: "run-1",
+        toolUseId: "tool-1",
+        trace: { traceId: "nested-trace-is-not-hook-input" },
+      },
+      {},
+    );
+
+    assert.equal(lastCheckArgs?.[0], "--trace-context");
+    assert.equal(
+      lastCheckArgs?.[1],
+      JSON.stringify({
+        session_id: "session-1",
+        run_id: "run-1",
+        tool_call_id: "tool-1",
+      }),
+    );
+    assert.equal(lastCheckArgs?.[2], "skill-ledger");
+  });
+
+  it("skips non-read tools and non-SKILL.md reads", async () => {
+    mockSkillLedgerStatus("pass");
+    const { beforeToolCall } = registerHandlers();
+
+    await beforeToolCall.handler(
+      { toolName: "exec", params: { command: "cat /skills/a/SKILL.md" } },
+      {},
+    );
+    await beforeToolCall.handler(
+      { toolName: "read", params: { file_path: "/skills/a/README.md" } },
+      {},
+    );
+
+    assert.equal(checkCallCount, 0);
+  });
+
+  it("fails open on CLI errors and malformed events", async () => {
+    mockSkillLedgerCheck({ exitCode: 1, stdout: "", stderr: "boom" });
+    const { beforeToolCall, logs } = registerHandlers();
+
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), {}), undefined);
+    assert.equal(await beforeToolCall.handler(null, {}), undefined);
+    assert.equal(await beforeToolCall.handler({ toolName: "read" }, {}), undefined);
+
+    assert.ok(logs.some((log) => log.includes("CLI error")));
+    assert.ok(logs.some((log) => log.includes("[skill-ledger] error:")));
+  });
+
+  it("pass allows silently", async () => {
+    mockSkillLedgerStatus("pass");
+    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
+    assert.equal(
+      await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx),
+      undefined,
+    );
+
+    assert.deepEqual(blockReplies, []);
+  });
+
+  for (const status of ["none", "drifted", "deny", "tampered"]) {
+    it(`${status} defaults to non-blocking same-run user warning`, async () => {
+      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
+      const { beforeToolCall, replyDispatch } = registerHandlers();
+      const { ctx, blockReplies } = createReplyDispatchCtx();
+
+      const result = await beforeToolCall.handler(
+        readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
+        { runId: "run-1" },
+      );
+      const firstDispatch = await replyDispatch.handler(
+        { runId: "run-1", sendPolicy: "allow" },
+        ctx,
+      );
+      const secondDispatch = await replyDispatch.handler(
+        { runId: "run-1", sendPolicy: "allow" },
+        ctx,
+      );
+
+      assert.equal(result, undefined);
+      assert.equal(firstDispatch, undefined);
+      assert.equal(secondDispatch, undefined);
+      assert.equal(blockReplies.length, 1);
+      assert.match(blockReplies[0].text, /\[skill-ledger\]/);
+      assert.match(blockReplies[0].text, new RegExp(status));
+      assert.match(blockReplies[0].text, /本轮请求将继续处理/);
+    });
   }
-}
 
-// ── 2. Positive filtering — events that SHOULD match ────────────────────────
-console.log("\n[2] Positive filtering (should match → CLI invoked)");
+  it("skillLedgerRequireApproval=true preserves approval behavior", async () => {
+    const cases: Array<[string, "warning" | "critical"]> = [
+      ["none", "warning"],
+      ["drifted", "warning"],
+      ["deny", "critical"],
+      ["tampered", "critical"],
+    ];
 
-{
-  const { result } = await fire({
-    toolName: "read",
-    params: { file_path: "/home/user/.openclaw/skills/github/SKILL.md" },
+    for (const [status, severity] of cases) {
+      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
+      const { beforeToolCall, replyDispatch } = registerHandlers({
+        skillLedgerRequireApproval: true,
+      });
+      const { ctx, blockReplies } = createReplyDispatchCtx();
+
+      const result = await beforeToolCall.handler(
+        readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
+        { runId: "run-1" },
+      );
+      await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+      assert.equal(result?.requireApproval?.title, "Skill Ledger Security Check");
+      assert.equal(result?.requireApproval?.severity, severity);
+      assert.deepEqual(blockReplies, []);
+    }
   });
-  assert(result === undefined, "absolute path → returns undefined (allow)");
-  assert(checkCallCount === 1, "absolute path → CLI check invoked");
-}
 
-{
-  const { result } = await fire({
-    toolName: "read",
-    params: { path: "/opt/skills/my-tool/SKILL.md" },
+  for (const status of ["warn", "error", "mystery"]) {
+    it(`${status} logs only in default and approval modes`, async () => {
+      for (const pluginConfig of [{}, { skillLedgerRequireApproval: true }]) {
+        mockSkillLedgerStatus(status, status === "error" ? 1 : 0);
+        const { beforeToolCall, replyDispatch, logs } = registerHandlers(pluginConfig);
+        const { ctx, blockReplies } = createReplyDispatchCtx();
+
+        const result = await beforeToolCall.handler(
+          readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
+          { runId: "run-1" },
+        );
+        await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+        assert.equal(result, undefined);
+        assert.deepEqual(blockReplies, []);
+        assert.ok(logs.some((log) => log.includes("[skill-ledger]")));
+      }
+    });
+  }
+
+  it("does not cache a user warning when runId is missing", async () => {
+    mockSkillLedgerStatus("none");
+    const { beforeToolCall, replyDispatch, logs } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+
+    await beforeToolCall.handler(
+      { toolName: "read", params: { file_path: "/skills/none/SKILL.md" } },
+      {},
+    );
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    assert.deepEqual(blockReplies, []);
+    assert.ok(logs.some((log) => log.includes("missing runId")));
   });
-  assert(result === undefined, "'path' param (alt name) → returns undefined");
-  assert(checkCallCount === 1, "'path' param → CLI check invoked");
-}
 
-{
-  await fire({
-    toolName: "read",
-    params: { file_path: "SKILL.md" },
+  it("retains warnings when sendBlockReply fails", async () => {
+    mockSkillLedgerStatus("drifted", 1);
+    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const failedCtx = createReplyDispatchCtx(() => false).ctx;
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+
+    await beforeToolCall.handler(readSkillEvent("/skills/drifted/SKILL.md", "run-1"), {
+      runId: "run-1",
+    });
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, failedCtx);
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    assert.equal(blockReplies.length, 1);
+    assert.match(blockReplies[0].text, /drifted/);
   });
-  assert(checkCallCount === 1, "bare 'SKILL.md' → CLI check invoked");
-}
 
-{
-  await fire({
-    toolName: "read",
-    params: { file_path: "  /skills/github/SKILL.md  " },
+  it("drops warnings when delivery is denied or suppressed", async () => {
+    mockSkillLedgerStatus("deny", 1);
+    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+
+    await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md", "run-1"), {
+      runId: "run-1",
+    });
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "deny" }, ctx);
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md", "run-2"), {
+      runId: "run-2",
+    });
+    await replyDispatch.handler(
+      { runId: "run-2", sendPolicy: "allow", suppressUserDelivery: true },
+      ctx,
+    );
+    await replyDispatch.handler({ runId: "run-2", sendPolicy: "allow" }, ctx);
+
+    assert.deepEqual(blockReplies, []);
   });
-  assert(checkCallCount === 1, "whitespace-padded path → CLI check invoked");
-}
 
-{
-  await fire({
-    toolName: "read",
-    params: { file_path: "/deeply/nested/dir/structure/skill-name/SKILL.md" },
+  it("expires undrained warnings by TTL", async () => {
+    mockSkillLedgerStatus("none");
+    const { beforeToolCall, replyDispatch } = registerHandlers({
+      skillLedgerWarningTtlMs: 0,
+    });
+    const { ctx, blockReplies } = createReplyDispatchCtx();
+
+    await beforeToolCall.handler(readSkillEvent("/skills/none/SKILL.md", "run-1"), {
+      runId: "run-1",
+    });
+    await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+    assert.deepEqual(blockReplies, []);
   });
-  assert(checkCallCount === 1, "deeply nested path → CLI check invoked");
-}
-
-// ── 3. Negative filtering — events that MUST be skipped ─────────────────────
-console.log("\n[3] Negative filtering (should skip → no logs)");
-
-{
-  const { result, logs } = await fire({
-    toolName: "exec",
-    params: { command: "cat /skills/github/SKILL.md" },
-  });
-  assert(result === undefined, "exec tool → returns undefined");
-  assert(logs.length === 0, "exec tool → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "shell",
-    params: { command: "ls" },
-  });
-  assert(result === undefined, "shell tool → returns undefined");
-  assert(logs.length === 0, "shell tool → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "write_file",
-    params: { file_path: "/skills/github/SKILL.md", content: "..." },
-  });
-  assert(result === undefined, "write_file + SKILL.md → returns undefined (not a read tool)");
-  assert(logs.length === 0, "write_file + SKILL.md → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/home/user/project/README.md" },
-  });
-  assert(result === undefined, "read + README.md → returns undefined");
-  assert(logs.length === 0, "read + README.md → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/SKILL.md.bak" },
-  });
-  assert(result === undefined, "SKILL.md.bak → returns undefined");
-  assert(logs.length === 0, "SKILL.md.bak → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/SKILL.markdown" },
-  });
-  assert(result === undefined, "SKILL.markdown → returns undefined");
-  assert(logs.length === 0, "SKILL.markdown → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: {},
-  });
-  assert(result === undefined, "read + no path param → returns undefined");
-  assert(logs.length === 0, "read + no path param → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "" },
-  });
-  assert(result === undefined, "read + empty path → returns undefined");
-  assert(logs.length === 0, "read + empty path → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "   " },
-  });
-  assert(result === undefined, "whitespace-only path → returns undefined");
-  assert(logs.length === 0, "whitespace-only path → no logs (skipped)");
-}
-
-{
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: 42 },
-  });
-  assert(result === undefined, "non-string file_path (number) → returns undefined");
-  assert(logs.length === 0, "non-string file_path → no logs (skipped)");
-}
-
-// ── 4. Fail-open guarantee ──────────────────────────────────────────────────
-console.log("\n[4] Fail-open (CLI unavailable → warn + allow)");
-
-{
-  mockSkillLedgerCheck({ exitCode: 1, stdout: "", stderr: "boom" });
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/test/SKILL.md" },
-  });
-  assert(result === undefined, "CLI failure → returns undefined (never blocks)");
-  assert(
-    logs.some((l) => l.includes("[WARN]") && l.includes("CLI error")),
-    "CLI failure → emits WARN with 'CLI error'",
-  );
-}
-
-// ── 5. Malformed event resilience (outer try-catch) ─────────────────────────
-console.log("\n[5] Malformed event resilience");
-
-{
-  // Completely empty object — toolName is undefined → extractSkillPath returns early
-  const { result, logs } = await fire({});
-  assert(result === undefined, "empty object {} → returns undefined");
-  // extractSkillPath: READ_TOOL_NAMES.includes(undefined) → false → returns undefined → no CLI
-  assert(logs.length === 0, "empty object {} → no logs (skipped by filter)");
-}
-
-{
-  // null event → event.toolName throws → caught by outer try-catch
-  const { result, logs } = await fire(null);
-  assert(result === undefined, "null event → returns undefined (fail-open catch)");
-  assert(logs.some((l) => l.includes("[WARN]")), "null event → emits WARN from catch block");
-}
-
-{
-  // read but params is missing → event.params[x] throws → caught by outer try-catch
-  const { result, logs } = await fire({ toolName: "read" });
-  assert(result === undefined, "missing params property → returns undefined (fail-open catch)");
-  assert(logs.some((l) => l.includes("[WARN]")), "missing params → emits WARN from catch block");
-}
-
-{
-  // params is null → event.params[x] throws → caught
-  const { result, logs } = await fire({ toolName: "read", params: null });
-  assert(result === undefined, "params: null → returns undefined (fail-open catch)");
-  assert(logs.some((l) => l.includes("[WARN]")), "params: null → emits WARN from catch block");
-}
-
-// ── 6. Path param priority ──────────────────────────────────────────────────
-console.log("\n[6] Path param priority (file_path before path)");
-
-{
-  mockSkillLedgerStatus("pass");
-  // When both file_path and path are present, file_path should win
-  await fire({
-    toolName: "read",
-    params: {
-      file_path: "/skills/alpha/SKILL.md",
-      path: "/skills/beta/SKILL.md",
-    },
-  });
-  // Handler proceeds (we can't see which path was chosen from logs alone in CLI-error mode,
-  // but the fact it proceeds confirms at least one matched)
-  assert(checkCallCount === 1, "both params present → handler proceeds");
-  assert(lastCheckArgs?.includes("/skills/alpha"), "both params present → file_path takes priority");
-}
-
-// ── 6b. Trace context injection ─────────────────────────────────────────────
-console.log("\n[6b] Trace context injection");
-
-{
-  mockSkillLedgerStatus("pass");
-  await fire({
-    toolName: "read",
-    params: { file_path: "/skills/traced/SKILL.md" },
-    sessionId: "session-1",
-    runId: "run-1",
-    toolUseId: "tool-1",
-    trace: { traceId: "nested-trace-is-not-hook-input" },
-  });
-  assert(lastCheckArgs?.[0] === "--trace-context", "check call → prepends --trace-context");
-  assert(
-    lastCheckArgs?.[1] === JSON.stringify({
-      session_id: "session-1",
-      run_id: "run-1",
-      tool_call_id: "tool-1",
-    }),
-    "check call → serializes canonical snake_case trace context",
-  );
-  assert(lastCheckArgs?.[2] === "skill-ledger", "check call → keeps subcommand after trace context");
-}
-
-// ── 7. Status policy ────────────────────────────────────────────────────────
-console.log("\n[7] Status policy");
-
-{
-  mockSkillLedgerStatus("pass");
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/pass/SKILL.md" },
-  });
-  assert(result === undefined, "pass → allow without approval");
-  assert(logs.length === 0, "pass → no user-visible log");
-}
-
-{
-  mockSkillLedgerStatus("warn");
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/warn/SKILL.md" },
-  });
-  assert(result === undefined, "warn → allow with warning log");
-  assert(logs.some((l) => l.includes("low-risk")), "warn → low-risk warning");
-}
-
-{
-  mockSkillLedgerStatus("error", 1);
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/error/SKILL.md" },
-  });
-  assert(result === undefined, "error → allow with warning log");
-  assert(logs.some((l) => l.includes("check failed")), "error → check-failed warning");
-}
-
-{
-  mockSkillLedgerStatus("mystery");
-  const { result, logs } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/mystery/SKILL.md" },
-  });
-  assert(result === undefined, "unknown status → allow with warning log");
-  assert(logs.some((l) => l.includes("unknown status 'mystery'")), "unknown status → unknown-status warning");
-}
-
-{
-  mockSkillLedgerStatus("none");
-  const { result } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/none/SKILL.md" },
-  });
-  assert(result?.requireApproval?.severity === "warning", "none → requireApproval warning");
-  assert(result.requireApproval.description.includes("not been security-scanned"), "none → explains unscanned status");
-}
-
-{
-  mockSkillLedgerStatus("drifted", 1);
-  const { result } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/drifted/SKILL.md" },
-  });
-  assert(result?.requireApproval?.severity === "warning", "drifted → requireApproval warning");
-  assert(result.requireApproval.description.includes("content has changed"), "drifted → explains changed content");
-}
-
-{
-  mockSkillLedgerStatus("deny", 1);
-  const { result } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/deny/SKILL.md" },
-  });
-  assert(result?.requireApproval?.severity === "critical", "deny → requireApproval critical");
-  assert(result.requireApproval.description.includes("high-risk findings"), "deny → explains high-risk findings");
-}
-
-{
-  mockSkillLedgerStatus("tampered", 1);
-  const { result } = await fire({
-    toolName: "read",
-    params: { file_path: "/skills/tampered/SKILL.md" },
-  });
-  assert(result?.requireApproval?.severity === "critical", "tampered → requireApproval critical");
-  assert(result.requireApproval.description.includes("signature verification failed"), "tampered → explains signature failure");
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
-if (failed > 0) process.exit(1);
+});

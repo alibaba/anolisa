@@ -19,6 +19,17 @@ type CheckResult = {
   [key: string]: unknown;
 };
 
+type SkillLedgerConfig = {
+  requireApproval: boolean;
+  warningTtlMs: number;
+};
+
+type WarningBucket = {
+  warnings: string[];
+  createdAt: number;
+  lastTouchedAt: number;
+};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -26,6 +37,7 @@ type CheckResult = {
 const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_WARNING_TTL_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Status messages and confirmation policy
@@ -109,6 +121,73 @@ function confirmationSeverity(status: string): "warning" | "critical" | undefine
   return CONFIRMATION_SEVERITY[status];
 }
 
+function readConfig(pluginConfig: Record<string, any>): SkillLedgerConfig {
+  const ttl = Number(pluginConfig.skillLedgerWarningTtlMs);
+  return {
+    requireApproval: pluginConfig.skillLedgerRequireApproval === true,
+    warningTtlMs:
+      Number.isFinite(ttl) && ttl >= 0 ? ttl : DEFAULT_WARNING_TTL_MS,
+  };
+}
+
+function getRunId(event: any, ctx: any): string | undefined {
+  const ctxRunId = typeof ctx?.runId === "string" ? ctx.runId.trim() : "";
+  if (ctxRunId) return ctxRunId;
+  const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
+  return eventRunId || undefined;
+}
+
+function cleanupExpired(
+  warningsByRun: Map<string, WarningBucket>,
+  warningTtlMs: number,
+): void {
+  const now = Date.now();
+  for (const [runId, bucket] of warningsByRun) {
+    if (now - bucket.lastTouchedAt >= warningTtlMs) {
+      warningsByRun.delete(runId);
+    }
+  }
+}
+
+function pushWarning(
+  warningsByRun: Map<string, WarningBucket>,
+  runId: string,
+  warning: string,
+  warningTtlMs: number,
+): void {
+  cleanupExpired(warningsByRun, warningTtlMs);
+  const now = Date.now();
+  const bucket =
+    warningsByRun.get(runId) ??
+    {
+      warnings: [],
+      createdAt: now,
+      lastTouchedAt: now,
+    };
+  if (!bucket.warnings.includes(warning)) {
+    bucket.warnings.push(warning);
+  }
+  bucket.lastTouchedAt = now;
+  warningsByRun.set(runId, bucket);
+}
+
+function readWarnings(
+  warningsByRun: Map<string, WarningBucket>,
+  runId: string,
+  warningTtlMs: number,
+): string[] {
+  cleanupExpired(warningsByRun, warningTtlMs);
+  const bucket = warningsByRun.get(runId);
+  return bucket ? [...bucket.warnings] : [];
+}
+
+function deleteWarnings(
+  warningsByRun: Map<string, WarningBucket>,
+  runId: string,
+): void {
+  warningsByRun.delete(runId);
+}
+
 // ---------------------------------------------------------------------------
 // Capability
 // ---------------------------------------------------------------------------
@@ -116,8 +195,11 @@ function confirmationSeverity(status: string): "warning" | "critical" | undefine
 export const skillLedger: SecurityCapability = {
   id: "skill-ledger",
   name: "Skill Ledger",
-  hooks: ["before_tool_call"],
+  hooks: ["before_tool_call", "reply_dispatch"],
   register(api) {
+    const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
+    const warningsByRun = new Map<string, WarningBucket>();
+
     /** Ensure signing keys exist; auto-init if missing. */
     let ensureKeysPromise: Promise<void> | null = null;
 
@@ -149,9 +231,11 @@ export const skillLedger: SecurityCapability = {
     // Eager key initialization (fire-and-forget from register)
     ensureKeys().catch(() => {});
 
-    // ── Hook handler ───────────────────────────────────────────────
+    // ── Hook handlers ───────────────────────────────────────────────
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
+        cleanupExpired(warningsByRun, cfg.warningTtlMs);
+
         const skillMdPath = extractSkillPath(event);
         if (!skillMdPath) return undefined;
 
@@ -186,16 +270,16 @@ export const skillLedger: SecurityCapability = {
 
         const status = checkResult.status ?? "unknown";
 
-        // Emit warnings for non-pass statuses and require confirmation for
-        // unscanned, changed, high-risk, or tampered skills.
         if (status === "pass") {
           return undefined;
-        } else {
-          const message = formatSkillLedgerMessage(status, skillName);
-          api.logger.warn(`[skill-ledger] ${message}`);
+        }
 
-          const severity = confirmationSeverity(status);
-          if (severity) {
+        const message = formatSkillLedgerMessage(status, skillName);
+        api.logger.warn(`[skill-ledger] ${message}`);
+
+        const severity = confirmationSeverity(status);
+        if (severity) {
+          if (cfg.requireApproval) {
             return {
               requireApproval: {
                 title: "Skill Ledger Security Check",
@@ -204,6 +288,15 @@ export const skillLedger: SecurityCapability = {
               },
             };
           }
+
+          const runId = getRunId(event, ctx);
+          if (!runId) {
+            api.logger.warn("[skill-ledger] missing runId, warning not cached");
+            return undefined;
+          }
+
+          pushWarning(warningsByRun, runId, `[skill-ledger] status=${status}; ${message}`, cfg.warningTtlMs);
+          api.logger.warn(`[skill-ledger] ${status.toUpperCase()} — warning cached for runId=${runId}`);
         }
 
         // For warn/error/unknown states, log and allow. Fail-open behavior for
@@ -215,5 +308,40 @@ export const skillLedger: SecurityCapability = {
         return undefined;
       }
     }, { priority: 80 });
+
+    api.on(
+      "reply_dispatch",
+      async (event: any, ctx: any) => {
+        try {
+          const runId = getRunId(event, ctx);
+          if (!runId) {
+            cleanupExpired(warningsByRun, cfg.warningTtlMs);
+            return undefined;
+          }
+
+          if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
+            deleteWarnings(warningsByRun, runId);
+            return undefined;
+          }
+
+          const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
+          if (warnings.length === 0) {
+            return undefined;
+          }
+
+          const queued = ctx?.dispatcher?.sendBlockReply?.({
+            text: `${warnings.join("\n")}\n本轮请求将继续处理。`,
+          });
+          if (queued) {
+            deleteWarnings(warningsByRun, runId);
+          }
+          return undefined;
+        } catch (err) {
+          api.logger.warn(`[skill-ledger] reply_dispatch failed open: ${err instanceof Error ? err.message : String(err)}`);
+          return undefined;
+        }
+      },
+      { priority: 0 },
+    );
   },
 };

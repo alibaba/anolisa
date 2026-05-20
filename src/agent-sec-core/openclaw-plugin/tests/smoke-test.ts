@@ -177,11 +177,25 @@ const skillLedgerMockEvents: Record<string, Record<string, unknown>> = {
     sessionId: "session-001",
     toolCallId: "tc-002",
   },
+  reply_dispatch: {
+    runId: "run-002",
+    sessionId: "session-001",
+    sendPolicy: "allow",
+    inboundAudio: false,
+    shouldRouteToOriginating: false,
+    shouldSendToolSummaries: true,
+  },
 };
 const skillLedgerMockCtx: Record<string, Record<string, unknown>> = {
   ...mockCtx,
   before_tool_call: {
     sessionKey: "sk-001", sessionId: "session-001", runId: "run-002", toolName: "read", toolCallId: "tc-002",
+  },
+  reply_dispatch: {
+    ...mockCtx.reply_dispatch,
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-002",
   },
 };
 
