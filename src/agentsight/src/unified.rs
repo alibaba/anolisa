@@ -19,7 +19,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,17 +30,15 @@ use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
-use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
 use crate::genai::semantic::GenAISemanticEvent;
-use crate::interruption::{InterruptionDetector, DetectorConfig};
+use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
+use crate::interruption::{DetectorConfig, InterruptionDetector};
 use crate::parser::Parser;
-use crate::probes::{Probes, ProbesPoller, FileWatchEvent, FileWriteEvent};
-use crate::storage::{
-    SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult,
-};
-use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
-use crate::tokenizer::LlmTokenizer;
+use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
+use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
+use crate::tokenizer::LlmTokenizer;
 
 /// Main AgentSight struct for tracing AI agent activity
 ///
@@ -136,11 +134,19 @@ impl AgentSight {
             };
             match load_result {
                 Ok(()) => {
-                    log::info!("Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
-                        config.cmdline_rules.len(), config.domain_rules.len(), path);
+                    log::info!(
+                        "Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
+                        config.cmdline_rules.len(),
+                        config.domain_rules.len(),
+                        path
+                    );
                 }
                 Err(e) => {
-                    log::warn!("Failed to load config from {:?}: {}, using embedded defaults", path, e);
+                    log::warn!(
+                        "Failed to load config from {:?}: {}, using embedded defaults",
+                        path,
+                        e
+                    );
                     config.cmdline_rules = crate::config::default_cmdline_rules();
                 }
             }
@@ -150,8 +156,13 @@ impl AgentSight {
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.domain_rules.is_empty();
-        let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns).context("Failed to create probes")?;
+        let mut probes = Probes::new(
+            &[],
+            config.target_uid,
+            config.enable_filewatch,
+            enable_udpdns,
+        )
+        .context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -165,10 +176,30 @@ impl AgentSight {
             Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
         }
 
+        // Connection scan: find processes with established connections to domain_rules IPs
+        let already_traced: HashSet<u32> = existing_agents.iter().map(|a| a.pid).collect();
+        let conn_results = if scanner.has_domain_rules() {
+            let conn_scanner = crate::discovery::ConnectionScanner::new(&scanner);
+            conn_scanner.scan(&already_traced)
+        } else {
+            Vec::new()
+        };
+
         // Build pid → agent_name cache from existing agents (persists after process exit)
         let mut pid_agent_name_cache = HashMap::new();
         for agent in &existing_agents {
             pid_agent_name_cache.insert(agent.pid, agent.agent_info.name.clone());
+        }
+        for result in &conn_results {
+            let agent_name = format!("domain:{}", result.domain);
+            Self::attach_process_internal(&mut probes, result.pid, &agent_name);
+            pid_agent_name_cache.insert(result.pid, agent_name);
+        }
+        if !conn_results.is_empty() {
+            log::info!(
+                "Connection scan: attached {} process(es) via established connections",
+                conn_results.len()
+            );
         }
 
         // Start polling (non-blocking)
@@ -193,7 +224,11 @@ impl AgentSight {
                      Cannot upload logs without uid. Aborting."
                 );
             }
-            log::info!("Logtail file exporter enabled ({}), uid={}", exporter.path().display(), uid);
+            log::info!(
+                "Logtail file exporter enabled ({}), uid={}",
+                exporter.path().display(),
+                uid
+            );
             genai_exporters.push(Box::new(exporter));
         } else {
             // No Logtail: use local JSONL + SQLite
@@ -220,22 +255,26 @@ impl AgentSight {
                     .parent()
                     .map(|p| p.join("tokenizer_config.json"))
                     .unwrap_or_else(|| Path::new("tokenizer_config.json").to_path_buf());
-                
+
                 match LlmTokenizer::from_file(tokenizer_path, &config_path) {
                     Ok(tokenizer) => {
-                        log::info!(
-                            "Tokenizer loaded from: {:?}",
-                            tokenizer_path
-                        );
+                        log::info!("Tokenizer loaded from: {:?}", tokenizer_path);
                         Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
                     }
                     Err(e) => {
-                        log::warn!("Failed to load tokenizer from {:?}: {}. Using analyzer without tokenizer.", tokenizer_path, e);
+                        log::warn!(
+                            "Failed to load tokenizer from {:?}: {}. Using analyzer without tokenizer.",
+                            tokenizer_path,
+                            e
+                        );
                         Analyzer::new()
                     }
                 }
             } else {
-                log::warn!("Tokenizer file not found: {:?}. Using analyzer without tokenizer.", tokenizer_path);
+                log::warn!(
+                    "Tokenizer file not found: {:?}. Using analyzer without tokenizer.",
+                    tokenizer_path
+                );
                 Analyzer::new()
             }
         } else {
@@ -398,12 +437,19 @@ impl AgentSight {
 
         // Handle UDP DNS events (domain-based attachment)
         if let Event::UdpDns(ref dns_event) = event {
-            log::debug!("[UDP-DNS] pid={} comm={} domain={}",
-                dns_event.pid, dns_event.comm, dns_event.domain);
+            log::debug!(
+                "[UDP-DNS] pid={} comm={} domain={}",
+                dns_event.pid,
+                dns_event.comm,
+                dns_event.domain
+            );
 
             if self.scanner.on_dns_event(dns_event.pid, &dns_event.domain) {
-                log::info!("[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
-                    dns_event.pid, dns_event.domain);
+                log::info!(
+                    "[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
+                    dns_event.pid,
+                    dns_event.domain
+                );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
                 }
@@ -422,7 +468,11 @@ impl AgentSight {
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper, &self.pid_agent_name_cache);
+            let (output, pending_info) = self.genai_builder.build_with_pending(
+                &analysis_results,
+                &self.response_mapper,
+                &self.pid_agent_name_cache,
+            );
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {
@@ -451,7 +501,11 @@ impl AgentSight {
                             for exporter in &self.genai_exporters {
                                 if exporter.name() != "sqlite" {
                                     exporter.export(&output.events);
-                                    log::debug!("Exported {} GenAI events via '{}'", output.events.len(), exporter.name());
+                                    log::debug!(
+                                        "Exported {} GenAI events via '{}'",
+                                        output.events.len(),
+                                        exporter.name()
+                                    );
                                 }
                             }
                         } else {
@@ -496,11 +550,15 @@ impl AgentSight {
         match event {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
-                let cmdline_args = crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+                let cmdline_args =
+                    crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {
-                    log::debug!("ProcMon: pid={} denied by cmdline rule, skipping attach", pid);
+                    log::debug!(
+                        "ProcMon: pid={} denied by cmdline rule, skipping attach",
+                        pid
+                    );
                     return;
                 }
 
@@ -539,10 +597,14 @@ impl AgentSight {
 
     /// Handle FileWrite event: extract responseId→sessionId mapping, then call callback
     fn handle_filewrite_event(&mut self, event: &FileWriteEvent) {
-        log::debug!("FileWrite: pid={} file={} size={}", event.pid, event.filename, event.write_size);
+        log::debug!(
+            "FileWrite: pid={} file={} size={}",
+            event.pid,
+            event.filename,
+            event.write_size
+        );
         self.response_mapper.process_filewrite(event);
     }
-
 
     /// Run the event loop (blocking)
     pub fn run(&mut self) -> Result<u64> {
@@ -594,7 +656,11 @@ impl AgentSight {
             // Normal mode: export to all registered exporters.
             for exporter in &self.genai_exporters {
                 exporter.export(events);
-                log::debug!("Exported {} GenAI events via '{}'", events.len(), exporter.name());
+                log::debug!(
+                    "Exported {} GenAI events via '{}'",
+                    events.len(),
+                    exporter.name()
+                );
             }
         }
     }
@@ -613,10 +679,13 @@ impl AgentSight {
                         // 1 interruption; different errors each get 1.
                         if let Some(ref cid) = ie.conversation_id {
                             let error_msg = llm_call.error.as_deref();
-                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg) {
+                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
+                            {
                                 log::debug!(
                                     "Skipping duplicate {:?} for conversation_id={} error={:?}",
-                                    ie.interruption_type, cid, error_msg
+                                    ie.interruption_type,
+                                    cid,
+                                    error_msg
                                 );
                                 // Still stamp the genai_events row so the call is marked
                                 if let Some(ref sqlite) = self.genai_sqlite_store {
@@ -664,16 +733,20 @@ impl AgentSight {
         for (conn_id, state) in drained {
             // Destructure to capture both request AND sse_events
             let (state_name, request, sse_events) = match state {
-                ConnectionState::RequestPending { request } => {
-                    ("RequestPending", request, vec![])
-                }
-                ConnectionState::SseActive { request: Some(req), sse_events, .. } => {
-                    ("SseActive", req, sse_events)
-                }
+                ConnectionState::RequestPending { request } => ("RequestPending", request, vec![]),
+                ConnectionState::SseActive {
+                    request: Some(req),
+                    sse_events,
+                    ..
+                } => ("SseActive", req, sse_events),
                 _ => continue,
             };
 
-            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id, &self.pid_agent_name_cache) {
+            if let Some(pending) = self.genai_builder.build_pending_from_request(
+                &request,
+                &conn_id,
+                &self.pid_agent_name_cache,
+            ) {
                 if let Some(ref store) = self.genai_sqlite_store {
                     let call_id = pending.call_id.clone();
                     let pid = pending.pid;
@@ -703,26 +776,49 @@ impl AgentSight {
                     // ── SSE enrichment ────────────────────────────────────
                     // Parse captured SSE events for model, trace_id, tokens, output content
                     if !sse_events.is_empty() {
-                        if let Some(mut enrichment) = GenAIBuilder::extract_sse_enrichment(&sse_events) {
+                        if let Some(mut enrichment) =
+                            GenAIBuilder::extract_sse_enrichment(&sse_events)
+                        {
                             // If SSE didn't carry usage data (stream was interrupted before
                             // the final chunk), compute tokens via the real tokenizer.
-                            if enrichment.input_tokens.is_none() || enrichment.output_tokens.is_none() {
-                                let model_name = enrichment.model.as_deref()
+                            if enrichment.input_tokens.is_none()
+                                || enrichment.output_tokens.is_none()
+                            {
+                                let model_name = enrichment
+                                    .model
+                                    .as_deref()
                                     .or(pending.model.as_deref())
                                     .unwrap_or("unknown");
-                                if let Ok(tokenizer) = crate::tokenizer::get_global_tokenizer(model_name) {
+                                if let Ok(tokenizer) =
+                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
                                         if let Some(body) = request.json_body() {
-                                            if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+                                            if let Some(messages) =
+                                                body.get("messages").and_then(|m| m.as_array())
+                                            {
                                                 let mut msgs = messages.clone();
                                                 // Parse tool_calls.arguments from string to object
                                                 for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                                                    if let Some(tcs) = msg
+                                                        .get_mut("tool_calls")
+                                                        .and_then(|tc| tc.as_array_mut())
+                                                    {
                                                         for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function") {
-                                                                if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
-                                                                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
+                                                            if let Some(f) = tc.get_mut("function")
+                                                            {
+                                                                if let Some(a) = f
+                                                                    .get("arguments")
+                                                                    .and_then(|a| a.as_str())
+                                                                {
+                                                                    if let Ok(p) =
+                                                                        serde_json::from_str::<
+                                                                            serde_json::Value,
+                                                                        >(
+                                                                            a
+                                                                        )
+                                                                    {
                                                                         f["arguments"] = p;
                                                                     }
                                                                 }
@@ -730,14 +826,28 @@ impl AgentSight {
                                                         }
                                                     }
                                                 }
-                                                let tools_json: Option<Vec<serde_json::Value>> = body.get("tools")
-                                                    .and_then(|t| t.as_array()).map(|a| a.to_vec());
-                                                let count = match tokenizer.apply_chat_template_with_tools(&msgs, tools_json.as_deref(), true) {
-                                                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+                                                let tools_json: Option<Vec<serde_json::Value>> =
+                                                    body.get("tools")
+                                                        .and_then(|t| t.as_array())
+                                                        .map(|a| a.to_vec());
+                                                let count = match tokenizer
+                                                    .apply_chat_template_with_tools(
+                                                        &msgs,
+                                                        tools_json.as_deref(),
+                                                        true,
+                                                    ) {
+                                                    Ok(formatted) => {
+                                                        tokenizer.count(&formatted).unwrap_or(0)
+                                                    }
                                                     Err(_) => {
                                                         // Fallback: raw message count
-                                                        msgs.iter().filter_map(|m| serde_json::to_string(m).ok())
-                                                            .map(|s| tokenizer.count(&s).unwrap_or(0))
+                                                        msgs.iter()
+                                                            .filter_map(|m| {
+                                                                serde_json::to_string(m).ok()
+                                                            })
+                                                            .map(|s| {
+                                                                tokenizer.count(&s).unwrap_or(0)
+                                                            })
                                                             .sum()
                                                     }
                                                 };
@@ -755,31 +865,48 @@ impl AgentSight {
                                         let mut all_tool_calls = Vec::new();
                                         for ev in &sse_events {
                                             if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(&chunk)) {
-                                                    if !content.is_empty() { all_content.push_str(&content); }
-                                                    if let Some(r) = reasoning { if !r.is_empty() { all_reasoning.push_str(&r); } }
-                                                    for tc in tool_calls { if !tc.is_empty() { all_tool_calls.push(tc); } }
+                                                if let Some((content, reasoning, tool_calls)) =
+                                                    extract_response_content(Some(&chunk))
+                                                {
+                                                    if !content.is_empty() {
+                                                        all_content.push_str(&content);
+                                                    }
+                                                    if let Some(r) = reasoning {
+                                                        if !r.is_empty() {
+                                                            all_reasoning.push_str(&r);
+                                                        }
+                                                    }
+                                                    for tc in tool_calls {
+                                                        if !tc.is_empty() {
+                                                            all_tool_calls.push(tc);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
-                                            let wrapped = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                                            let wrapped =
+                                                format!("<think>\n{}\n</think>\n\n", all_reasoning);
                                             total += tokenizer.count(&wrapped).unwrap_or(0);
                                         }
                                         if !all_content.is_empty() {
                                             total += tokenizer.count(&all_content).unwrap_or(0);
                                         }
                                         if !all_tool_calls.is_empty() {
-                                            total += tokenizer.count(&all_tool_calls.join("")).unwrap_or(0);
+                                            total += tokenizer
+                                                .count(&all_tool_calls.join(""))
+                                                .unwrap_or(0);
                                         }
                                         if total > 0 {
                                             enrichment.output_tokens = Some(total as i64);
                                         }
                                     }
                                 } else {
-                                    log::warn!("[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref()));
+                                    log::warn!(
+                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
+                                        enrichment.model.as_deref().or(pending.model.as_deref())
+                                    );
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
@@ -789,8 +916,12 @@ impl AgentSight {
                     }
                 }
             } else {
-                log::debug!("[DrainCheck] build_pending returned None: pid={} path={} body_len={}",
-                    conn_id.pid, request.path, request.body_len);
+                log::debug!(
+                    "[DrainCheck] build_pending returned None: pid={} path={} body_len={}",
+                    conn_id.pid,
+                    request.path,
+                    request.body_len
+                );
             }
         }
     }
@@ -807,18 +938,21 @@ impl AgentSight {
         let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
 
         for mut pending in pending_items {
-            if let Some(session_id) = self.response_mapper
+            if let Some(session_id) = self
+                .response_mapper
                 .get_session_by_response_id(&pending.response_id)
                 .map(|s| s.to_string())
             {
                 // Resolved — update session_id in all event metadata
                 log::debug!(
                     "Deferred session_id resolved: response_id={} → session_id={}",
-                    pending.response_id, session_id
+                    pending.response_id,
+                    session_id
                 );
                 for event in &mut pending.events {
                     if let GenAISemanticEvent::LLMCall(call) = event {
-                        call.metadata.insert("session_id".to_string(), session_id.clone());
+                        call.metadata
+                            .insert("session_id".to_string(), session_id.clone());
                     }
                 }
                 to_export.push(pending.events);

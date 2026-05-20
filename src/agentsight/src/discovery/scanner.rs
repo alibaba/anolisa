@@ -33,10 +33,7 @@ impl AgentScanner {
     ///
     /// Separates cmdline_rules into allow matchers and deny matchers,
     /// and stores domain patterns for DNS-based matching.
-    pub fn from_rules(
-        cmdline_rules: &[CmdlineRule],
-        domain_rules: &[DomainRule],
-    ) -> Self {
+    pub fn from_rules(cmdline_rules: &[CmdlineRule], domain_rules: &[DomainRule]) -> Self {
         let matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
             .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
@@ -45,10 +42,7 @@ impl AgentScanner {
             .iter()
             .filter_map(|r| CmdlineGlobMatcher::from_deny_rule(r))
             .collect();
-        let domain_patterns: Vec<String> = domain_rules
-            .iter()
-            .map(|r| r.pattern.clone())
-            .collect();
+        let domain_patterns: Vec<String> = domain_rules.iter().map(|r| r.pattern.clone()).collect();
         Self {
             matchers,
             deny_matchers,
@@ -77,6 +71,11 @@ impl AgentScanner {
         !self.domain_patterns.is_empty()
     }
 
+    /// Get a reference to the domain patterns (used by ConnectionScanner)
+    pub fn domain_patterns(&self) -> &[String] {
+        &self.domain_patterns
+    }
+
     /// Handle DNS query event: check domain match + deny check.
     ///
     /// Returns `true` if the process should be attached (domain matches and
@@ -89,7 +88,10 @@ impl AgentScanner {
         // Fail-closed: if cmdline is empty (process already exited or unreadable),
         // do NOT attach — deny rules cannot be evaluated reliably.
         if cmdline.is_empty() {
-            log::debug!("on_dns_event: pid={} cmdline empty (process exited?), skipping attach", pid);
+            log::debug!(
+                "on_dns_event: pid={} cmdline empty (process exited?), skipping attach",
+                pid
+            );
             return false;
         }
         !self.is_denied(&cmdline)
@@ -126,7 +128,8 @@ impl AgentScanner {
 
             // Try to read process info and match against known agents
             if let Some(discovered_agent) = self.try_match_process(pid) {
-                self.tracked_agents.insert(discovered_agent.pid, discovered_agent.clone());
+                self.tracked_agents
+                    .insert(discovered_agent.pid, discovered_agent.clone());
                 discovered.push(discovered_agent);
             }
         }
@@ -162,7 +165,12 @@ impl AgentScanner {
 
         // Read full command line from /proc/[pid]/cmdline
         let cmdline_args = read_cmdline(&format!("/proc/{}/cmdline", pid));
-        log::debug!("Process created: pid={}, comm='{}', cmdline={:?}", pid, comm, cmdline_args);
+        log::debug!(
+            "Process created: pid={}, comm='{}', cmdline={:?}",
+            pid,
+            comm,
+            cmdline_args
+        );
 
         // Read executable path from /proc/[pid]/exe (symlink)
         let exe_path_str = format!("/proc/{}/exe", pid);
@@ -323,13 +331,11 @@ mod tests {
 
     #[test]
     fn test_is_denied() {
-        let rules = vec![
-            CmdlineRule {
-                patterns: vec!["*spam*".to_string()],
-                agent_name: None,
-                allow: false,
-            },
-        ];
+        let rules = vec![CmdlineRule {
+            patterns: vec!["*spam*".to_string()],
+            agent_name: None,
+            allow: false,
+        }];
         let scanner = AgentScanner::from_rules(&rules, &[]);
 
         assert!(scanner.is_denied(&["spam-process".to_string()]));
@@ -339,8 +345,12 @@ mod tests {
     #[test]
     fn test_matches_domain() {
         let domain_rules = vec![
-            DomainRule { pattern: "*.openai.com".to_string() },
-            DomainRule { pattern: "*.anthropic.com".to_string() },
+            DomainRule {
+                pattern: "*.openai.com".to_string(),
+            },
+            DomainRule {
+                pattern: "*.anthropic.com".to_string(),
+            },
         ];
         let scanner = AgentScanner::from_rules(&[], &domain_rules);
 
