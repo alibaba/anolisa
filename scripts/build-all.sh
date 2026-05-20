@@ -60,11 +60,11 @@ USER_LIB_DIR="$INSTALL_PREFIX/lib"
 USER_LIBEXEC_DIR="$INSTALL_PREFIX/libexec"
 USER_SHARE_DIR="$INSTALL_PREFIX/share"
 USER_DOC_DIR="$INSTALL_PREFIX/share/doc"
-USER_EXTENSIONS_DIR="$USER_SHARE_DIR/anolisa/extensions"
 
 USER_COSH_DIR="$HOME/.copilot-shell"
 USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
 USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
+INSTALL_EXTENSIONS_DIR="$USER_COSH_EXTENSIONS_DIR"
 
 # sec-core install paths are loaded from src/agent-sec-core/Makefile after
 # INSTALL_PROFILE is resolved, so build-all does not duplicate its defaults.
@@ -141,6 +141,14 @@ stage_component_make_install() {
     stage_root="$(component_target_dir "$component")"
 
     [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: rm -rf $stage_root"
+        echo "DRY-RUN: mkdir -p $stage_root"
+        echo "DRY-RUN: (cd $dir && make install DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX= BINDIR=/bin $*)"
+        return 0
+    fi
+
     rm -rf "$stage_root"
     mkdir -p "$stage_root"
 
@@ -165,6 +173,21 @@ system_staged_install() {
 run_component_make_install() {
     local component="$1" dir="$2"; shift 2
     [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    if $DRY_RUN; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            local stage_root
+            stage_root="$(component_install_root "$component")"
+            echo "DRY-RUN: rm -rf $stage_root"
+            echo "DRY-RUN: mkdir -p $stage_root"
+            echo "DRY-RUN: (cd $dir && make install DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX=$SYSTEM_PREFIX BINDIR=$SYSTEM_BIN_DIR SERVICE_BINDIR=$SYSTEM_BIN_DIR $*)"
+            echo "DRY-RUN: cp -a $stage_root/. /"
+        else
+            echo "DRY-RUN: (cd $dir && make install INSTALL_PROFILE=user PREFIX=$INSTALL_PREFIX $*)"
+        fi
+        return 0
+    fi
+
     cd "$dir"
 
     if [[ "$INSTALL_MODE" == "system" ]]; then
@@ -186,6 +209,16 @@ run_component_make_install() {
 run_component_make_uninstall() {
     local component="$1" dir="$2"; shift 2
     [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    if $DRY_RUN; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            echo "DRY-RUN: (cd $dir && sudo make uninstall INSTALL_PROFILE=system PREFIX=$SYSTEM_PREFIX BINDIR=$SYSTEM_BIN_DIR SERVICE_BINDIR=$SYSTEM_BIN_DIR $*)"
+        else
+            echo "DRY-RUN: (cd $dir && make uninstall INSTALL_PROFILE=user PREFIX=$INSTALL_PREFIX $*)"
+        fi
+        return 0
+    fi
+
     cd "$dir"
 
     if [[ "$INSTALL_MODE" == "system" ]]; then
@@ -210,6 +243,10 @@ sec_core_cmd() {
 copy_tree() {
     local src="$1" dst="$2"
     [[ -d "$src" ]] || die "Directory not found: $src"
+    if $DRY_RUN; then
+        echo "DRY-RUN: copy tree $src -> $dst"
+        return 0
+    fi
     mkdir -p "$dst"
     cp -rp "$src/." "$dst/"
 }
@@ -217,6 +254,10 @@ copy_tree() {
 copy_file() {
     local src="$1" dst="$2" mode="${3:-0644}"
     [[ -f "$src" ]] || die "File not found: $src"
+    if $DRY_RUN; then
+        echo "DRY-RUN: install -p -m $mode $src $dst"
+        return 0
+    fi
     mkdir -p "$(dirname "$dst")"
     install -p -m "$mode" "$src" "$dst"
 }
@@ -224,6 +265,10 @@ copy_file() {
 stage_skill_dirs() {
     local src_root="$1" dst_root="$2" skill_dir skill_name
     [[ -d "$src_root" ]] || die "Directory not found: $src_root"
+    if $DRY_RUN; then
+        echo "DRY-RUN: stage flattened skills from $src_root -> $dst_root"
+        return 0
+    fi
     mkdir -p "$dst_root"
     while IFS= read -r skill_file; do
         skill_dir="$(dirname "$skill_file")"
@@ -236,6 +281,10 @@ stage_skill_dirs() {
 install_skill_dirs_flat() {
     local src_root="$1" dst_root="$2" skill_dir skill_name
     [[ -d "$src_root" ]] || die "Directory not found: $src_root"
+    if $DRY_RUN; then
+        echo "DRY-RUN: install flattened skills from $src_root -> $dst_root"
+        return 0
+    fi
     sec_core_cmd install -d -m 0755 "$dst_root"
     while IFS= read -r skill_file; do
         skill_dir="$(dirname "$skill_file")"
@@ -249,6 +298,10 @@ install_skill_dirs_flat() {
 remove_skill_dirs_flat() {
     local src_root="$1" dst_root="$2" skill_dir skill_name
     [[ -d "$src_root" ]] || return 0
+    if $DRY_RUN; then
+        echo "DRY-RUN: remove flattened skills from $dst_root using $src_root"
+        return 0
+    fi
     while IFS= read -r skill_file; do
         skill_dir="$(dirname "$skill_file")"
         skill_name="$(basename "$skill_dir")"
@@ -259,6 +312,10 @@ remove_skill_dirs_flat() {
 stage_adapter_manifest() {
     local comp="$1" src="$2"
     [[ -f "$src" ]] || return 0
+    if $DRY_RUN; then
+        echo "DRY-RUN: stage adapter manifest $src -> target/$comp"
+        return 0
+    fi
     copy_file "$src" "$(component_target_dir "$comp")/share/anolisa/adapters/$comp/manifest.json" 0644
     copy_file "$src" "$(component_target_dir "$comp")/adapter-manifest.json" 0644
 }
@@ -268,6 +325,11 @@ stage_adapter_manifest() {
 # then replaces it with ok / FAILED.
 run_logged() {
     local desc="$1"; shift
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: $desc: $*"
+        return 0
+    fi
 
     mkdir -p "$(dirname "$LOG_FILE")"
     "$@" >> "$LOG_FILE" 2>&1 &
@@ -342,11 +404,12 @@ ensure_user_mode() {
     USER_LIBEXEC_DIR="$INSTALL_PREFIX/libexec"
     USER_SHARE_DIR="$INSTALL_PREFIX/share"
     USER_DOC_DIR="$INSTALL_PREFIX/share/doc"
-    USER_EXTENSIONS_DIR="$USER_SHARE_DIR/anolisa/extensions"
 
     USER_COSH_DIR="$HOME/.copilot-shell"
     USER_COSH_EXTENSIONS_DIR="$USER_COSH_DIR/extensions"
     USER_COSH_SKILLS_DIR="$USER_COSH_DIR/skills"
+    INSTALL_EXTENSIONS_DIR="$USER_COSH_EXTENSIONS_DIR"
+    [[ "$INSTALL_MODE" == "system" ]] && INSTALL_EXTENSIONS_DIR="/usr/share/anolisa/extensions"
 
     load_sec_core_make_paths
 }
@@ -367,15 +430,15 @@ refresh_systemd_service() {
     local service="$1"
 
     [[ "$INSTALL_MODE" == "system" ]] || return 0
-    if ! systemd_is_available; then
-        warn "systemd is not active; installed ${service} but skipped enable/restart"
-        return 0
-    fi
-
     if $DRY_RUN; then
         echo "DRY-RUN: systemctl daemon-reload"
         echo "DRY-RUN: systemctl enable $service"
         echo "DRY-RUN: systemctl restart $service"
+        return 0
+    fi
+
+    if ! systemd_is_available; then
+        warn "systemd is not active; installed ${service} but skipped enable/restart"
         return 0
     fi
 
@@ -388,14 +451,14 @@ stop_systemd_service() {
     local service="$1"
 
     [[ "$INSTALL_MODE" == "system" ]] || return 0
-    if ! systemd_is_available; then
-        return 0
-    fi
-
     if $DRY_RUN; then
         echo "DRY-RUN: systemctl stop $service"
         echo "DRY-RUN: systemctl disable $service"
         echo "DRY-RUN: systemctl daemon-reload"
+        return 0
+    fi
+
+    if ! systemd_is_available; then
         return 0
     fi
 
@@ -408,12 +471,12 @@ stop_systemd_service_for_install() {
     local service="$1"
 
     [[ "$INSTALL_MODE" == "system" ]] || return 0
-    if ! systemd_is_available; then
+    if $DRY_RUN; then
+        echo "DRY-RUN: systemctl stop $service"
         return 0
     fi
 
-    if $DRY_RUN; then
-        echo "DRY-RUN: systemctl stop $service"
+    if ! systemd_is_available; then
         return 0
     fi
 
@@ -1248,6 +1311,25 @@ check_ebpf_deps() {
 # ─── top-level dep installer ───
 
 do_install_deps() {
+    if $DRY_RUN; then
+        step "Dependency plan"
+        echo "DRY-RUN: detect Linux distribution and package manager"
+        if want_component cosh || want_component sec-core; then
+            echo "DRY-RUN: check/install Node.js and build tools if needed"
+        fi
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+            echo "DRY-RUN: check/install Rust toolchain if needed"
+        fi
+        if want_component sec-core; then
+            echo "DRY-RUN: check/install uv and configure Python mirrors if needed"
+        fi
+        if want_component sight; then
+            echo "DRY-RUN: check agentsight eBPF dependencies"
+        fi
+        ok "Dependency setup plan generated"
+        return 0
+    fi
+
     step "Detecting system"
     detect_distro
 
@@ -1284,6 +1366,12 @@ build_cosh() {
     run_logged "npm install (deps)" make deps
     run_logged "esbuild + bundle" make build
 
+    if $DRY_RUN; then
+        stage_component_make_install "copilot-shell" "$dir"
+        ok "copilot-shell build plan generated"
+        return 0
+    fi
+
     if [[ -f dist/cli.js ]]; then
         stage_component_make_install "copilot-shell" "$dir"
         ok "copilot-shell built successfully"
@@ -1306,6 +1394,11 @@ build_skills() {
 
     stage_component_make_install "os-skills" "$dir"
 
+    if $DRY_RUN; then
+        ok "os-skills stage plan generated for $(component_target_dir os-skills)"
+        return 0
+    fi
+
     stage_adapter_manifest "os-skills" "$PROJECT_ROOT/src/os-skills/adapter-manifest.json"
     ok "os-skills staged to $(component_target_dir os-skills)"
 }
@@ -1319,6 +1412,15 @@ build_sec_core() {
     local component_root build_dir
     component_root="$(component_target_dir sec-core)"
     build_dir="$component_root/build"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: rm -rf $component_root"
+        echo "DRY-RUN: mkdir -p $component_root"
+        echo "DRY-RUN: (cd $dir && make build-all BUILD_DIR=$build_dir)"
+        ok "agent-sec-core build plan generated"
+        return 0
+    fi
+
     rm -rf "$component_root"
     mkdir -p "$component_root"
 
@@ -1345,8 +1447,17 @@ build_sight() {
         stage_component_make_install "agentsight" "$dir" \
             SERVICE_BINDIR="$SYSTEM_BIN_DIR" SETCAP=0 \
             NPM_REGISTRY="$NPM_REGISTRY" NPM_REPLACE_REGISTRY_HOST=always
+        if $DRY_RUN; then
+            ok "agentsight build plan generated"
+            return 0
+        fi
     else
         run_logged "cargo build (agentsight)" cargo build --release
+        if $DRY_RUN; then
+            echo "DRY-RUN: copy target/release/agentsight -> $(component_target_dir agentsight)/bin/agentsight"
+            ok "agentsight build plan generated"
+            return 0
+        fi
         copy_file target/release/agentsight "$(component_target_dir agentsight)/bin/agentsight" 0755
     fi
 
@@ -1366,12 +1477,20 @@ build_tokenless() {
 
     if [ ! -d "third_party/rtk/.git" ]; then
         info "Initializing git submodules..."
-        _configure_git_mirror "$dir"
+        if $DRY_RUN; then
+            echo "DRY-RUN: configure git mirror for $dir"
+        else
+            _configure_git_mirror "$dir"
+        fi
         run_logged "git submodule update --init" git submodule update --init --recursive
     fi
 
     info "make install (tokenless workspace) ..."
     stage_component_make_install "tokenless" "$dir"
+    if $DRY_RUN; then
+        ok "tokenless build plan generated"
+        return 0
+    fi
 
     local component_root bin rtk_bin toon_bin
     component_root="$(component_target_dir tokenless)"
@@ -1401,6 +1520,10 @@ build_wsckpt() {
     cd "$dir"
 
     stage_component_make_install "ws-ckpt" "$dir"
+    if $DRY_RUN; then
+        ok "ws-ckpt build plan generated"
+        return 0
+    fi
 
     local component_root bin
     component_root="$(component_target_dir ws-ckpt)"
@@ -1420,24 +1543,41 @@ do_build() {
     [[ -s "$HOME/.nvm/nvm.sh" ]] && { export NVM_DIR="$HOME/.nvm"; source "$HOME/.nvm/nvm.sh"; }
     export PATH="$HOME/.local/bin:$PATH"
 
-    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
-        _configure_cargo_mirror
-    fi
-    if want_component cosh || want_component sec-core || want_component sight; then
-        _configure_npm_mirror
-    fi
-    if want_component sec-core; then
-        _configure_uv_mirror
-    fi
-    if want_component tokenless; then
-        _configure_git_mirror "$PROJECT_ROOT"
-    fi
+    if $DRY_RUN; then
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+            echo "DRY-RUN: configure cargo mirror for this build"
+        fi
+        if want_component cosh || want_component sec-core || want_component sight; then
+            echo "DRY-RUN: configure npm registry for this build"
+        fi
+        if want_component sec-core; then
+            echo "DRY-RUN: configure uv mirrors for this build"
+        fi
+        if want_component tokenless; then
+            echo "DRY-RUN: configure git mirror for this build"
+        fi
+        echo "DRY-RUN: rm -rf $OUTPUT_DIR"
+        echo "DRY-RUN: mkdir -p $OUTPUT_DIR"
+    else
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+            _configure_cargo_mirror
+        fi
+        if want_component cosh || want_component sec-core || want_component sight; then
+            _configure_npm_mirror
+        fi
+        if want_component sec-core; then
+            _configure_uv_mirror
+        fi
+        if want_component tokenless; then
+            _configure_git_mirror "$PROJECT_ROOT"
+        fi
 
-    rm -rf "$OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR"
+        rm -rf "$OUTPUT_DIR"
+        mkdir -p "$OUTPUT_DIR"
 
-    : > "$LOG_FILE"
-    info "Build log → $LOG_FILE"
+        : > "$LOG_FILE"
+        info "Build log → $LOG_FILE"
+    fi
 
     if want_component cosh;      then build_cosh;      fi
     if want_component skills;    then build_skills;    fi
@@ -1453,7 +1593,11 @@ install_cosh() {
     step "Installing copilot-shell"
     local dir="$PROJECT_ROOT/src/copilot-shell"
     run_component_make_install "copilot-shell" "$dir"
-    ok "copilot-shell installed to ${INSTALL_BIN_DIR}/{cosh,co,copilot}"
+    if $DRY_RUN; then
+        ok "copilot-shell install plan generated"
+    else
+        ok "copilot-shell installed to ${INSTALL_BIN_DIR}/{cosh,co,copilot}"
+    fi
 }
 
 install_skills() {
@@ -1462,7 +1606,11 @@ install_skills() {
     run_component_make_install "os-skills" "$dir"
     local skills_dir="/usr/share/anolisa/skills"
     [[ "$INSTALL_MODE" == "user" ]] && skills_dir="$USER_COSH_SKILLS_DIR"
-    ok "os-skills installed to ${skills_dir}"
+    if $DRY_RUN; then
+        ok "os-skills install plan generated for ${skills_dir}"
+    else
+        ok "os-skills installed to ${skills_dir}"
+    fi
 }
 
 install_sec_core_runtime_deps() {
@@ -1509,6 +1657,17 @@ install_sec_core() {
     local dir="$PROJECT_ROOT/src/agent-sec-core"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
 
+    if $DRY_RUN; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=system"
+        else
+            echo "DRY-RUN: make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=user"
+        fi
+        echo "DRY-RUN: check/install sec-core runtime dependencies"
+        ok "agent-sec-core install plan generated for $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
+        return 0
+    fi
+
     [[ -d "$build_dir" ]] || die "Build directory not found: $build_dir"
     [[ -f "$build_dir/linux-sandbox" ]] || die "Built linux-sandbox not found: $build_dir/linux-sandbox"
     [[ -d "$build_dir/cosh-extension" ]] || die "Built cosh extension not found: $build_dir/cosh-extension"
@@ -1519,17 +1678,6 @@ install_sec_core() {
     cmd_exists uv || die "uv not found; install dependencies first or run without --ignore-deps"
 
     _configure_uv_mirror
-
-    if $DRY_RUN; then
-        if [[ "$INSTALL_MODE" == "system" ]]; then
-            echo "DRY-RUN: sudo env PATH=\$PATH UV_PYTHON_INSTALL_MIRROR=\${UV_PYTHON_INSTALL_MIRROR:-} make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=system"
-        else
-            echo "DRY-RUN: make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=user"
-        fi
-        echo "DRY-RUN: check/install sec-core runtime dependencies"
-        ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
-        return 0
-    fi
 
     if [[ "$INSTALL_MODE" == "system" ]]; then
         run_logged "make install (agent-sec-core)" \
@@ -1571,18 +1719,31 @@ install_sight() {
     else
         warn "agentsight user install skips systemd/setcap; trace/audit may need sudo or manual setcap."
     fi
-    ok "agentsight installed to ${INSTALL_BIN_DIR}/agentsight"
+    if $DRY_RUN; then
+        ok "agentsight install plan generated for ${INSTALL_BIN_DIR}/agentsight"
+    else
+        ok "agentsight installed to ${INSTALL_BIN_DIR}/agentsight"
+    fi
 }
 
 install_tokenless() {
     step "Installing tokenless"
     local dir="$PROJECT_ROOT/src/tokenless"
     run_component_make_install "tokenless" "$dir"
-    ok "tokenless installed to ${INSTALL_BIN_DIR}/"
+    if $DRY_RUN; then
+        ok "tokenless install plan generated for ${INSTALL_BIN_DIR}/"
+    else
+        ok "tokenless installed to ${INSTALL_BIN_DIR}/"
+    fi
 }
 
 install_wsckpt_runtime_deps() {
     [[ "$INSTALL_MODE" == "system" ]] || return 0
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: check/install ws-ckpt runtime dependency: btrfs-progs"
+        return 0
+    fi
 
     if cmd_exists mkfs.btrfs; then
         return 0
@@ -1610,7 +1771,11 @@ install_wsckpt() {
     else
         info "Skipping ws-ckpt systemd service in user mode; use --system for service management."
     fi
-    ok "ws-ckpt installed to ${INSTALL_BIN_DIR}/"
+    if $DRY_RUN; then
+        ok "ws-ckpt install plan generated for ${INSTALL_BIN_DIR}/"
+    else
+        ok "ws-ckpt installed to ${INSTALL_BIN_DIR}/"
+    fi
 }
 
 do_install() {
@@ -1629,14 +1794,22 @@ uninstall_cosh() {
     step "Uninstalling copilot-shell"
     local dir="$PROJECT_ROOT/src/copilot-shell"
     run_component_make_uninstall "copilot-shell" "$dir" || true
-    ok "copilot-shell uninstalled"
+    if $DRY_RUN; then
+        ok "copilot-shell uninstall plan generated"
+    else
+        ok "copilot-shell uninstalled"
+    fi
 }
 
 uninstall_skills() {
     step "Uninstalling os-skills"
     local dir="$PROJECT_ROOT/src/os-skills"
     run_component_make_uninstall "os-skills" "$dir" || true
-    ok "os-skills uninstalled"
+    if $DRY_RUN; then
+        ok "os-skills uninstall plan generated"
+    else
+        ok "os-skills uninstalled"
+    fi
 }
 
 uninstall_sec_core() {
@@ -1650,7 +1823,7 @@ uninstall_sec_core() {
         else
             echo "DRY-RUN: make -C $dir uninstall INSTALL_PROFILE=user"
         fi
-        ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
+        ok "agent-sec-core uninstall plan generated (mode=${INSTALL_MODE})"
         return 0
     fi
 
@@ -1669,14 +1842,22 @@ uninstall_sight() {
     stop_systemd_service agentsight.service
     local dir="$PROJECT_ROOT/src/agentsight"
     run_component_make_uninstall "agentsight" "$dir" || true
-    ok "agentsight uninstalled"
+    if $DRY_RUN; then
+        ok "agentsight uninstall plan generated"
+    else
+        ok "agentsight uninstalled"
+    fi
 }
 
 uninstall_tokenless() {
     step "Uninstalling tokenless"
     local dir="$PROJECT_ROOT/src/tokenless"
     run_component_make_uninstall "tokenless" "$dir" || true
-    ok "tokenless, rtk, and toon uninstalled"
+    if $DRY_RUN; then
+        ok "tokenless, rtk, and toon uninstall plan generated"
+    else
+        ok "tokenless, rtk, and toon uninstalled"
+    fi
 }
 
 uninstall_wsckpt() {
@@ -1684,7 +1865,11 @@ uninstall_wsckpt() {
     stop_systemd_service ws-ckpt.service
     local dir="$PROJECT_ROOT/src/ws-ckpt"
     run_component_make_uninstall "ws-ckpt" "$dir" || true
-    ok "ws-ckpt uninstalled"
+    if $DRY_RUN; then
+        ok "ws-ckpt uninstall plan generated"
+    else
+        ok "ws-ckpt uninstalled"
+    fi
 }
 
 do_uninstall() {
@@ -1696,18 +1881,29 @@ do_uninstall() {
     if want_component ws-ckpt;   then uninstall_wsckpt;    fi
     if want_component sight;     then uninstall_sight;     fi
 
-    if [[ -d "$USER_EXTENSIONS_DIR" ]] && [[ -z "$(ls -A "$USER_EXTENSIONS_DIR" 2>/dev/null)" ]]; then
-        if [[ "$INSTALL_MODE" == "system" ]]; then
-            as_root rm -rf "$USER_EXTENSIONS_DIR"
+    if [[ -d "$INSTALL_EXTENSIONS_DIR" ]] && [[ -z "$(ls -A "$INSTALL_EXTENSIONS_DIR" 2>/dev/null)" ]]; then
+        if $DRY_RUN; then
+            echo "DRY-RUN: remove empty $INSTALL_EXTENSIONS_DIR"
+        elif [[ "$INSTALL_MODE" == "system" ]]; then
+            as_root rm -rf "$INSTALL_EXTENSIONS_DIR"
         else
-            rm -rf "$USER_EXTENSIONS_DIR"
+            rm -rf "$INSTALL_EXTENSIONS_DIR"
         fi
-        info "Removed empty $USER_EXTENSIONS_DIR"
+        if $DRY_RUN; then
+            info "Empty $INSTALL_EXTENSIONS_DIR would be removed"
+        else
+            info "Removed empty $INSTALL_EXTENSIONS_DIR"
+        fi
     fi
 }
 
 print_output_summary() {
     step "Output"
+
+    if $DRY_RUN; then
+        info "Dry-run mode: target/ is not changed."
+        return 0
+    fi
 
     if [[ ! -d "$OUTPUT_DIR" ]]; then
         warn "No target/ directory found"
@@ -1900,7 +2096,7 @@ $(echo -e "${BOLD}What this script does:${NC}")
   5. Installs components to the selected profile layout
          - prefix: ${INSTALL_PREFIX}
          - binaries: ${INSTALL_BIN_DIR}
-         - shared extensions: ${USER_EXTENSIONS_DIR}
+         - cosh extensions: ${INSTALL_EXTENSIONS_DIR}
          - docs (component-native): ${USER_DOC_DIR}
   6. Reports artifact locations at the end
 
