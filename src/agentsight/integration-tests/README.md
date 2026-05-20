@@ -12,3 +12,4 @@
 | `TEMPLATE.md` | 新建测试用例的模板 |
 | `test_sni.md` | TLS SNI 探针加载与域名匹配 |
 | `test_hermes_sni.md` | 通过 SNI 捕获 Hermes agent（dashscope.aliyuncs.com） |
+| `test_claude_code.md` | Claude Code BoringSSL 探针、SSE thinking/tool_use 解析、msg_id 会话关联 |
