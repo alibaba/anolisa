@@ -4,7 +4,10 @@ from pathlib import Path
 
 from agent_sec_cli.security_events.config import get_db_path
 from agent_sec_cli.security_events.orm_store import SqliteStore
-from agent_sec_cli.security_events.repositories import SecurityEventRepository
+from agent_sec_cli.security_events.repositories import (
+    CorrelationCandidate,
+    SecurityEventRepository,
+)
 from agent_sec_cli.security_events.schema import SecurityEvent
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -56,6 +59,26 @@ class SqliteEventReader:
             until=until,
             limit=limit,
             offset=offset,
+        )
+
+    def query_correlation_candidates(
+        self,
+        *,
+        session_id: str,
+        categories: tuple[str, ...] | list[str],
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        since_epoch: float | None = None,
+        until_epoch: float | None = None,
+    ) -> list[CorrelationCandidate]:
+        """Query read-only security event candidates for observability correlation."""
+        return self._repository.query_correlation_candidates(
+            session_id=session_id,
+            categories=categories,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            since_epoch=since_epoch,
+            until_epoch=until_epoch,
         )
 
     def count(

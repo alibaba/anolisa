@@ -106,17 +106,31 @@ def review() -> None:
 
     # Lazy-import Textual so the hot `record` / `schema` paths don't pay its
     # import cost.
+    from agent_sec_cli.observability.correlation import (  # noqa: PLC0415
+        SecurityCorrelationService,
+    )
     from agent_sec_cli.observability.review import (  # noqa: PLC0415
         ObservabilityReviewApp,
     )
     from agent_sec_cli.observability.sqlite_reader import (  # noqa: PLC0415
         ObservabilityReader,
     )
+    from agent_sec_cli.security_events.sqlite_reader import (  # noqa: PLC0415
+        SqliteEventReader,
+    )
 
     reader = ObservabilityReader()
+    security_reader = None
     try:
-        ObservabilityReviewApp(reader=reader).run()
+        security_reader = SqliteEventReader()
+        security_correlation = SecurityCorrelationService(security_reader)
+        ObservabilityReviewApp(
+            reader=reader,
+            security_correlation=security_correlation,
+        ).run()
     finally:
+        if security_reader is not None:
+            security_reader.close()
         reader.close()
 
 

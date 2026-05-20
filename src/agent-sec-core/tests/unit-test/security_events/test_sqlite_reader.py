@@ -13,6 +13,8 @@ from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
 from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
 
+CORRELATION_BASE_EPOCH = 1_800_000_000.0
+
 
 def _make_event(
     event_type: str = "test_event", category: str = "test", **kwargs: Any
@@ -22,6 +24,28 @@ def _make_event(
         category=category,
         details=kwargs.get("details", {"key": "value"}),
         trace_id=kwargs.get("trace_id", ""),
+    )
+
+
+def _make_correlated_event(
+    *,
+    event_id: str,
+    category: str,
+    timestamp_epoch: float,
+    session_id: str,
+    run_id: str | None = None,
+    tool_call_id: str | None = None,
+) -> SecurityEvent:
+    return SecurityEvent(
+        event_id=event_id,
+        event_type=f"{category}_event",
+        category=category,
+        timestamp=datetime.fromtimestamp(timestamp_epoch, timezone.utc).isoformat(),
+        trace_id="trace",
+        session_id=session_id,
+        run_id=run_id,
+        tool_call_id=tool_call_id,
+        details={"event_id": event_id},
     )
 
 
@@ -441,3 +465,178 @@ class TestSqliteEventReader:
         reader.close()
         assert reader._engine is None
         assert reader._session_factory is None
+
+
+class TestCorrelationCandidateQuery:
+    def test_candidates_match_session_run_tool_call_and_category(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        writer.write(
+            _make_correlated_event(
+                event_id="match-code",
+                category="code_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH,
+                session_id="session-1",
+                run_id="run-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="match-skill",
+                category="skill_ledger",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 1.0,
+                session_id="session-1",
+                run_id="run-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="wrong-tool",
+                category="code_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 2.0,
+                session_id="session-1",
+                run_id="run-1",
+                tool_call_id="tool-2",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="wrong-run",
+                category="code_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 3.0,
+                session_id="session-1",
+                run_id="run-2",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="wrong-session",
+                category="code_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 4.0,
+                session_id="session-2",
+                run_id="run-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="wrong-category",
+                category="sandbox",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 5.0,
+                session_id="session-1",
+                run_id="run-1",
+                tool_call_id="tool-1",
+            )
+        )
+        writer.close()
+
+        candidates = reader.query_correlation_candidates(
+            session_id="session-1",
+            categories=("code_scan", "skill_ledger"),
+            run_id="run-1",
+            tool_call_id="tool-1",
+        )
+
+        assert [candidate.event.event_id for candidate in candidates] == [
+            "match-code",
+            "match-skill",
+        ]
+        assert [candidate.timestamp_epoch for candidate in candidates] == [
+            CORRELATION_BASE_EPOCH,
+            CORRELATION_BASE_EPOCH + 1.0,
+        ]
+
+    def test_candidates_filter_inclusive_epoch_window(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        for event_id, timestamp_epoch in (
+            ("too-early", 997.99),
+            ("lower-bound", 998.0),
+            ("center", 1000.0),
+            ("upper-bound", 1002.0),
+            ("too-late", 1002.01),
+        ):
+            writer.write(
+                _make_correlated_event(
+                    event_id=event_id,
+                    category="prompt_scan",
+                    timestamp_epoch=CORRELATION_BASE_EPOCH + timestamp_epoch,
+                    session_id="session-1",
+                    run_id="run-1",
+                )
+            )
+        writer.close()
+
+        candidates = reader.query_correlation_candidates(
+            session_id="session-1",
+            categories=["prompt_scan"],
+            run_id="run-1",
+            since_epoch=CORRELATION_BASE_EPOCH + 998.0,
+            until_epoch=CORRELATION_BASE_EPOCH + 1002.0,
+        )
+
+        assert [candidate.event.event_id for candidate in candidates] == [
+            "lower-bound",
+            "center",
+            "upper-bound",
+        ]
+
+    def test_candidates_do_not_filter_run_when_run_id_omitted(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        writer.write(
+            _make_correlated_event(
+                event_id="run-1-match",
+                category="pii_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH,
+                session_id="session-1",
+                run_id="run-1",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="run-2-match",
+                category="pii_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 1.0,
+                session_id="session-1",
+                run_id="run-2",
+            )
+        )
+        writer.write(
+            _make_correlated_event(
+                event_id="wrong-session",
+                category="pii_scan",
+                timestamp_epoch=CORRELATION_BASE_EPOCH + 2.0,
+                session_id="session-2",
+                run_id="run-1",
+            )
+        )
+        writer.close()
+
+        candidates = reader.query_correlation_candidates(
+            session_id="session-1",
+            categories=("pii_scan",),
+            since_epoch=CORRELATION_BASE_EPOCH - 1.0,
+            until_epoch=CORRELATION_BASE_EPOCH + 2.0,
+        )
+
+        assert [candidate.event.event_id for candidate in candidates] == [
+            "run-1-match",
+            "run-2-match",
+        ]
+
+    def test_candidates_return_empty_when_schema_unavailable(
+        self, tmp_path: Path
+    ) -> None:
+        reader = SqliteEventReader(path=str(tmp_path / "missing.db"))
+
+        assert (
+            reader.query_correlation_candidates(
+                session_id="session-1",
+                categories=("code_scan",),
+            )
+            == []
+        )

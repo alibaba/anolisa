@@ -10,8 +10,13 @@ module never owns the reader's lifecycle.
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
+from agent_sec_cli.observability.correlation import (
+    CorrelatedSecurityEvent,
+    ObservabilityRecordFields,
+    SecurityCorrelationService,
+)
 from agent_sec_cli.observability.models import ObservabilityEventRecord
 from agent_sec_cli.observability.repositories import RunSummary, SessionSummary
 from agent_sec_cli.observability.sqlite_reader import ObservabilityReader
@@ -21,6 +26,13 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Static
+
+
+class _SecurityCorrelation(Protocol):
+    def find_correlated(
+        self, record: ObservabilityRecordFields
+    ) -> list[CorrelatedSecurityEvent]:
+        pass
 
 
 def _format_epoch(epoch: float) -> str:
@@ -182,15 +194,23 @@ class EventListScreen(_ListScreenBase):
         self._run_id = run_id
         # Cache rows so action_drill can recover the full record by row key.
         self._rows_by_key: dict[str, ObservabilityEventRecord] = {}
+        self._security_results_by_key: dict[str, str] = {}
 
     def _columns(self) -> tuple[str, ...]:
-        return ("Time", "Hook", "Call / Tool", "Summary")
+        return ("Time", "Hook", "Call / Tool", "Security Result")
 
     def _load_rows(self) -> list[ObservabilityEventRecord]:
         rows = self.app.reader.list_events(  # type: ignore[attr-defined]
             self._session_id, self._run_id
         )
         self._rows_by_key = {str(row.id): row for row in rows}
+        security_correlation = getattr(self.app, "security_correlation", None)
+        self._security_results_by_key = {
+            str(row.id): _format_security_result(
+                _find_correlated_security_events(row, security_correlation)
+            )
+            for row in rows
+        }
         return rows
 
     def _row_values(self, row: ObservabilityEventRecord) -> tuple[str, ...]:  # type: ignore[override]
@@ -200,7 +220,7 @@ class EventListScreen(_ListScreenBase):
             _format_epoch(row.observed_at_epoch),
             row.hook,
             _truncate(ident, 18),
-            _truncate(_summarize_metrics(row.hook, row.metrics_json), 50),
+            _truncate(self._security_results_by_key.get(str(row.id), "-"), 50),
         )
 
     def _row_key(self, row: ObservabilityEventRecord) -> str:  # type: ignore[override]
@@ -210,7 +230,12 @@ class EventListScreen(_ListScreenBase):
         record = self._rows_by_key.get(key)
         if record is None:
             return
-        self.app.push_screen(EventDetailScreen(record=record))
+        self.app.push_screen(
+            EventDetailScreen(
+                record=record,
+                security_correlation=getattr(self.app, "security_correlation", None),
+            )
+        )
 
 
 class EventDetailScreen(Screen):
@@ -221,11 +246,17 @@ class EventDetailScreen(Screen):
         Binding("q", "app.pop_screen", "Back", show=False),
     ]
 
-    def __init__(self, record: ObservabilityEventRecord) -> None:
+    def __init__(
+        self,
+        record: ObservabilityEventRecord,
+        security_correlation: _SecurityCorrelation | None = None,
+    ) -> None:
         super().__init__()
         self._record = record
+        self._security_correlation = security_correlation
 
     def compose(self) -> ComposeResult:
+        security_events = self._correlated_security_events()
         yield Header()
         with VerticalScroll():
             yield Static(self._render_header(), markup=True)
@@ -233,6 +264,9 @@ class EventDetailScreen(Screen):
             yield Static(_safe_pretty_json(self._record.metadata_json), markup=False)
             yield Static("\n[b]Metrics[/b]:", markup=True)
             yield Static(_safe_pretty_json(self._record.metrics_json), markup=False)
+            if security_events:
+                yield Static("\n[b]Security Events[/b]:", markup=True)
+                yield Static(_render_security_events(security_events), markup=False)
         yield Footer()
 
     def _render_header(self) -> str:
@@ -262,6 +296,12 @@ class EventDetailScreen(Screen):
 
         return "\n".join(header_lines)
 
+    def _correlated_security_events(self) -> list[CorrelatedSecurityEvent]:
+        return _find_correlated_security_events(
+            self._record,
+            self._security_correlation,
+        )
+
 
 class ObservabilityReviewApp(App):
     """Drill-down TUI over recorded observability events."""
@@ -269,10 +309,15 @@ class ObservabilityReviewApp(App):
     BINDINGS = [Binding("q", "quit", "Quit", show=True)]
     TITLE = "agent-sec-cli observability review"
 
-    def __init__(self, reader: ObservabilityReader) -> None:
+    def __init__(
+        self,
+        reader: ObservabilityReader,
+        security_correlation: SecurityCorrelationService | None = None,
+    ) -> None:
         super().__init__()
         # Reader is owned by the CLI entry — App must not close it.
         self.reader = reader
+        self.security_correlation = security_correlation
 
     def on_mount(self) -> None:
         self.push_screen(SessionListScreen())
@@ -319,6 +364,93 @@ def _safe_pretty_json(raw: str) -> str:
         snippet = raw[:500]
         return f"Failed to parse JSON:\n{snippet}"
     return json.dumps(parsed, indent=2, ensure_ascii=False)
+
+
+def _find_correlated_security_events(
+    record: ObservabilityEventRecord,
+    security_correlation: _SecurityCorrelation | None,
+) -> list[CorrelatedSecurityEvent]:
+    if security_correlation is None:
+        return []
+    try:
+        return security_correlation.find_correlated(
+            ObservabilityRecordFields(
+                hook=record.hook,
+                session_id=record.session_id,
+                run_id=record.run_id,
+                tool_call_id=record.tool_call_id,
+                observed_at_epoch=record.observed_at_epoch,
+            )
+        )
+    except Exception:
+        # TODO(logging): warn with error type, session_id, and run_id once logging is wired.
+        return []
+
+
+def _format_security_result(events: list[CorrelatedSecurityEvent]) -> str:
+    if not events:
+        return "-"
+    return ", ".join(
+        f"{correlated.event.category}:{_security_result_value(correlated)}"
+        for correlated in events
+    )
+
+
+def _security_result_value(correlated: CorrelatedSecurityEvent) -> str:
+    event = correlated.event
+    result = _value_from_result_object(event.details.get("result"))
+    if result is not None:
+        return result
+
+    result = _value_from_result_object(event.details)
+    if result is not None:
+        return result
+
+    return event.result
+
+
+def _value_from_result_object(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+
+    for key in ("verdict", "status"):
+        result_value = value.get(key)
+        if result_value is not None and result_value != "":
+            return str(result_value)
+
+    valid = value.get("valid")
+    if valid is True:
+        return "pass"
+    if valid is False:
+        return "fail"
+    if valid is not None and valid != "":
+        return str(valid)
+    return None
+
+
+def _render_security_events(events: list[CorrelatedSecurityEvent]) -> str:
+    lines: list[str] = []
+    for index, correlated in enumerate(events, start=1):
+        event = correlated.event
+        if index > 1:
+            lines.append("")
+        lines.append(
+            f"{index}. {event.category} / {event.event_type} result={event.result}"
+        )
+        lines.append(
+            "   "
+            f"match={correlated.match_reason} "
+            f"delta={correlated.time_delta_seconds:+.3f}s "
+            f"security_at={_format_epoch(correlated.security_timestamp_epoch)}"
+        )
+        lines.append("   details:")
+        detail_lines = json.dumps(
+            event.details,
+            indent=2,
+            ensure_ascii=False,
+        ).splitlines()
+        lines.extend(f"     {line}" for line in detail_lines)
+    return "\n".join(lines)
 
 
 __all__ = [

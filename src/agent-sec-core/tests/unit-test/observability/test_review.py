@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+from agent_sec_cli.observability.correlation import CorrelatedSecurityEvent
 from agent_sec_cli.observability.models import ObservabilityEventRecord
 from agent_sec_cli.observability.repositories import RunSummary, SessionSummary
 from agent_sec_cli.observability.review import (
@@ -11,9 +12,11 @@ from agent_sec_cli.observability.review import (
     ObservabilityReviewApp,
     SessionListScreen,
     TurnListScreen,
+    _format_security_result,
     _safe_pretty_json,
     _summarize_metrics,
 )
+from agent_sec_cli.security_events.schema import SecurityEvent
 from textual.app import App
 from textual.widgets import DataTable, Static
 
@@ -48,6 +51,24 @@ class _FakeReader:
         return self.events_by_run.get((session_id, run_id), [])
 
 
+class _FakeCorrelationService:
+    def __init__(
+        self,
+        results: list[CorrelatedSecurityEvent] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.results = results or []
+        self.error = error
+        self.calls: list[ObservabilityEventRecord] = []
+
+    def find_correlated(self, record_fields: object) -> list[CorrelatedSecurityEvent]:
+        self.calls.append(record_fields)  # type: ignore[arg-type]
+        if self.error is not None:
+            raise self.error
+        return self.results
+
+
 def _record(
     *,
     record_id: int = 1,
@@ -74,11 +95,42 @@ def _record(
     )
 
 
-def _render_detail_text(record: ObservabilityEventRecord) -> str:
+def _security_event(
+    *,
+    event_id: str = "security-event-1",
+    category: str = "code_scan",
+    event_type: str = "code_scan",
+    details: dict[str, object] | None = None,
+) -> SecurityEvent:
+    return SecurityEvent(
+        event_id=event_id,
+        event_type=event_type,
+        category=category,
+        result="succeeded",
+        timestamp="2026-05-16T12:00:01+00:00",
+        trace_id="trace-ignored",
+        pid=1,
+        uid=1,
+        session_id="session-A",
+        run_id="run-A",
+        tool_call_id="tool-call-1",
+        details=details or {"summary": "dangerous command"},
+    )
+
+
+def _render_detail_text(
+    record: ObservabilityEventRecord,
+    correlation_service: _FakeCorrelationService | None = None,
+) -> str:
     async def render() -> str:
         app = App()
         async with app.run_test() as pilot:
-            await app.push_screen(EventDetailScreen(record=record))
+            await app.push_screen(
+                EventDetailScreen(
+                    record=record,
+                    security_correlation=correlation_service,
+                )
+            )
             await pilot.pause()
             return "\n".join(
                 str(widget.render()) for widget in app.screen.query(Static)
@@ -124,6 +176,51 @@ def test_event_detail_renders_optional_call_identifiers() -> None:
 
     assert "call-1" in text
     assert "tool-call-1" in text
+
+
+def test_event_detail_renders_correlated_security_events_when_present() -> None:
+    details = {"summary": "dangerous command", "action": "scan"}
+    correlation = _FakeCorrelationService(
+        [
+            CorrelatedSecurityEvent(
+                event=_security_event(details=details),
+                match_reason="tool_call_id",
+                time_delta_seconds=1.25,
+                security_timestamp_epoch=1778932801.25,
+            )
+        ]
+    )
+
+    text = _render_detail_text(
+        _record(hook="before_tool_call", tool_call_id="tool-call-1"),
+        correlation,
+    )
+
+    assert correlation.calls
+    assert "Security Events" in text
+    assert "code_scan" in text
+    assert "tool_call_id" in text
+    assert "1.250s" in text
+    assert "security_at=" in text
+    assert "observed=" not in text
+    assert "dangerous command" in text
+    assert text.index('"summary"') < text.index('"action"')
+
+
+def test_event_detail_omits_security_events_section_when_no_correlations() -> None:
+    text = _render_detail_text(_record(), _FakeCorrelationService())
+
+    assert "Security Events" not in text
+
+
+def test_event_detail_omits_security_events_section_when_correlation_fails() -> None:
+    text = _render_detail_text(
+        _record(),
+        _FakeCorrelationService(error=RuntimeError("database unavailable")),
+    )
+
+    assert "before_agent_run" in text
+    assert "Security Events" not in text
 
 
 def test_review_app_drills_from_session_to_event_detail() -> None:
@@ -290,6 +387,103 @@ def test_event_list_ignores_stale_row_key() -> None:
             return isinstance(app.screen, EventListScreen)
 
     assert asyncio.run(run()) is True
+
+
+def test_event_list_uses_security_result_column_name() -> None:
+    screen = EventListScreen(session_id="session-A", run_id="run-A")
+
+    assert screen._columns() == ("Time", "Hook", "Call / Tool", "Security Result")
+
+
+def test_event_list_renders_security_result_from_correlation() -> None:
+    async def run() -> tuple[str, list[object]]:
+        record = _record(
+            record_id=7,
+            hook="before_tool_call",
+            metrics={"tool_name": "grep"},
+            metadata={
+                "sessionId": "session-A",
+                "runId": "run-A",
+                "toolCallId": "tool-call-1",
+            },
+            tool_call_id="tool-call-1",
+        )
+        reader = _FakeReader(events_by_run={("session-A", "run-A"): [record]})
+        correlation = _FakeCorrelationService(
+            [
+                CorrelatedSecurityEvent(
+                    event=_security_event(details={"result": {"verdict": "warn"}}),
+                    match_reason="tool_call_id",
+                    time_delta_seconds=0.1,
+                    security_timestamp_epoch=1778932800.1,
+                )
+            ]
+        )
+        app = ObservabilityReviewApp(
+            reader=reader,  # type: ignore[arg-type]
+            security_correlation=correlation,
+        )
+        async with app.run_test() as pilot:
+            await app.push_screen(
+                EventListScreen(session_id="session-A", run_id="run-A")
+            )
+            await pilot.pause()
+            table = app.screen.query_one(DataTable)
+            return str(table.get_row_at(0)[3]), correlation.calls
+
+    security_result, calls = asyncio.run(run())
+
+    assert security_result == "code_scan:warn"
+    assert len(calls) == 1
+
+
+def test_format_security_result_uses_correlated_scan_verdicts() -> None:
+    events = [
+        CorrelatedSecurityEvent(
+            event=_security_event(
+                event_id="code-scan-1",
+                category="code_scan",
+                details={"result": {"verdict": "warn"}},
+            ),
+            match_reason="tool_call_id",
+            time_delta_seconds=0.1,
+            security_timestamp_epoch=1778932800.1,
+        ),
+        CorrelatedSecurityEvent(
+            event=_security_event(
+                event_id="skill-ledger-1",
+                category="skill_ledger",
+                event_type="skill_ledger",
+                details={"result": {"status": "pass"}},
+            ),
+            match_reason="tool_call_id",
+            time_delta_seconds=0.2,
+            security_timestamp_epoch=1778932800.2,
+        ),
+    ]
+
+    assert _format_security_result(events) == "code_scan:warn, skill_ledger:pass"
+
+
+def test_format_security_result_handles_missing_or_boolean_results() -> None:
+    assert _format_security_result([]) == "-"
+    assert (
+        _format_security_result(
+            [
+                CorrelatedSecurityEvent(
+                    event=_security_event(
+                        category="skill_ledger",
+                        event_type="skill_ledger",
+                        details={"result": {"valid": False}},
+                    ),
+                    match_reason="tool_call_id",
+                    time_delta_seconds=0.1,
+                    security_timestamp_epoch=1778932800.1,
+                )
+            ]
+        )
+        == "skill_ledger:fail"
+    )
 
 
 def test_summarize_metrics_renders_hook_specific_timeline_text() -> None:

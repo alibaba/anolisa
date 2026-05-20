@@ -3,8 +3,9 @@
 import json
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from agent_sec_cli.security_events.models import SecurityEventRecord
 from agent_sec_cli.security_events.orm_store import SqliteStore
@@ -12,6 +13,14 @@ from agent_sec_cli.security_events.schema import SecurityEvent
 from sqlalchemy import Select, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
+
+
+@dataclass(frozen=True)
+class CorrelationCandidate:
+    """Security event row plus the original epoch used for correlation sorting."""
+
+    event: SecurityEvent
+    timestamp_epoch: float
 
 
 class SecurityEventRepository:
@@ -112,6 +121,66 @@ class SecurityEventRepository:
             if event is not None:
                 events.append(event)
         return events
+
+    def query_correlation_candidates(
+        self,
+        *,
+        session_id: str,
+        categories: Sequence[str],
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        since_epoch: float | None = None,
+        until_epoch: float | None = None,
+    ) -> list[CorrelationCandidate]:
+        """Query read-only security event candidates for observability correlation."""
+        if not categories:
+            return []
+
+        conditions: list[Any] = [
+            SecurityEventRecord.session_id == session_id,
+            SecurityEventRecord.category.in_(tuple(categories)),
+        ]
+        if run_id is not None:
+            conditions.append(SecurityEventRecord.run_id == run_id)
+        if tool_call_id is not None:
+            conditions.append(SecurityEventRecord.tool_call_id == tool_call_id)
+        if since_epoch is not None:
+            conditions.append(SecurityEventRecord.timestamp_epoch >= since_epoch)
+        if until_epoch is not None:
+            conditions.append(SecurityEventRecord.timestamp_epoch <= until_epoch)
+
+        stmt = (
+            select(SecurityEventRecord)
+            .where(*conditions)
+            .order_by(
+                SecurityEventRecord.timestamp_epoch.asc(),
+                SecurityEventRecord.event_id.asc(),
+            )
+        )
+
+        session_factory = self._store.session_factory()
+        if session_factory is None:
+            return []
+
+        try:
+            with session_factory() as session:
+                records = list(session.scalars(stmt).all())
+        except SQLAlchemyError:
+            # TODO(logging): warn with error type, session_id, and run_id once logging is wired.
+            self._store.dispose()
+            return []
+
+        candidates: list[CorrelationCandidate] = []
+        for record in records:
+            event = self._record_to_event(record)
+            if event is not None:
+                candidates.append(
+                    CorrelationCandidate(
+                        event=event,
+                        timestamp_epoch=record.timestamp_epoch,
+                    )
+                )
+        return candidates
 
     def count(
         self,

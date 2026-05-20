@@ -6,8 +6,10 @@ from typing import Any
 
 import agent_sec_cli.observability as observability
 import agent_sec_cli.observability.cli as observability_cli
+import agent_sec_cli.observability.correlation as observability_correlation
 import agent_sec_cli.observability.review as observability_review
 import agent_sec_cli.observability.sqlite_reader as observability_sqlite_reader
+import agent_sec_cli.security_events.sqlite_reader as security_sqlite_reader
 import pytest
 import typer
 from agent_sec_cli.cli import app
@@ -354,9 +356,27 @@ def test_review_closes_reader_after_tui_exits(
         def close(self) -> None:
             events.append("reader-close")
 
+    class FakeSecurityReader:
+        def __init__(self) -> None:
+            events.append("security-reader-init")
+
+        def close(self) -> None:
+            events.append("security-reader-close")
+
+    class FakeCorrelationService:
+        def __init__(self, reader: FakeSecurityReader) -> None:
+            events.append(f"correlation-init:{reader.__class__.__name__}")
+
     class FakeReviewApp:
-        def __init__(self, reader: FakeReader) -> None:
-            events.append(f"app-init:{reader.__class__.__name__}")
+        def __init__(
+            self,
+            reader: FakeReader,
+            security_correlation: FakeCorrelationService | None = None,
+        ) -> None:
+            events.append(
+                f"app-init:{reader.__class__.__name__}:"
+                f"{security_correlation.__class__.__name__}"
+            )
 
         def run(self) -> None:
             events.append("app-run")
@@ -364,14 +384,23 @@ def test_review_closes_reader_after_tui_exits(
     monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", FakeReader)
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", FakeSecurityReader)
+    monkeypatch.setattr(
+        observability_correlation,
+        "SecurityCorrelationService",
+        FakeCorrelationService,
+    )
     monkeypatch.setattr(observability_review, "ObservabilityReviewApp", FakeReviewApp)
 
     observability_cli.review()
 
     assert events == [
         "reader-init",
-        "app-init:FakeReader",
+        "security-reader-init",
+        "correlation-init:FakeSecurityReader",
+        "app-init:FakeReader:FakeCorrelationService",
         "app-run",
+        "security-reader-close",
         "reader-close",
     ]
 
@@ -385,9 +414,22 @@ def test_review_closes_reader_when_tui_raises(
         def close(self) -> None:
             events.append("reader-close")
 
-    class FailingReviewApp:
-        def __init__(self, reader: FakeReader) -> None:
+    class FakeSecurityReader:
+        def close(self) -> None:
+            events.append("security-reader-close")
+
+    class FakeCorrelationService:
+        def __init__(self, reader: FakeSecurityReader) -> None:
             self._reader = reader
+
+    class FailingReviewApp:
+        def __init__(
+            self,
+            reader: FakeReader,
+            security_correlation: FakeCorrelationService | None = None,
+        ) -> None:
+            self._reader = reader
+            self._security_correlation = security_correlation
 
         def run(self) -> None:
             events.append("app-run")
@@ -396,6 +438,12 @@ def test_review_closes_reader_when_tui_raises(
     monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", FakeReader)
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", FakeSecurityReader)
+    monkeypatch.setattr(
+        observability_correlation,
+        "SecurityCorrelationService",
+        FakeCorrelationService,
+    )
     monkeypatch.setattr(
         observability_review, "ObservabilityReviewApp", FailingReviewApp
     )
@@ -403,4 +451,36 @@ def test_review_closes_reader_when_tui_raises(
     with pytest.raises(RuntimeError, match="tui failed"):
         observability_cli.review()
 
-    assert events == ["app-run", "reader-close"]
+    assert events == ["app-run", "security-reader-close", "reader-close"]
+
+
+def test_review_closes_reader_when_security_reader_init_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeReader:
+        def __init__(self) -> None:
+            events.append("reader-init")
+
+        def close(self) -> None:
+            events.append("reader-close")
+
+    class FailingSecurityReader:
+        def __init__(self) -> None:
+            events.append("security-reader-init")
+            raise RuntimeError("security reader failed")
+
+    monkeypatch.setattr(observability_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(observability_cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(observability_sqlite_reader, "ObservabilityReader", FakeReader)
+    monkeypatch.setattr(
+        security_sqlite_reader,
+        "SqliteEventReader",
+        FailingSecurityReader,
+    )
+
+    with pytest.raises(RuntimeError, match="security reader failed"):
+        observability_cli.review()
+
+    assert events == ["reader-init", "security-reader-init", "reader-close"]
