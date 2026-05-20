@@ -23,7 +23,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config } from '@copilot-shell/core';
-import { ApprovalMode, Storage } from '@copilot-shell/core';
+import { ApprovalMode, Storage, createDebugLogger } from '@copilot-shell/core';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -72,6 +72,8 @@ export interface InputPromptProps {
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
 }
+
+const debugLogger = createDebugLogger('INPUT_PROMPT');
 
 // The input content, input container, and input suggestions list may have different widths
 export const calculatePromptWidths = (terminalWidth: number) => {
@@ -322,7 +324,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
     } catch (error) {
-      console.error('Error handling clipboard image:', error);
+      debugLogger.error('Error handling clipboard image:', error);
     }
   }, []);
 

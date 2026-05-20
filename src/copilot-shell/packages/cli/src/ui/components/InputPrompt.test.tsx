@@ -464,10 +464,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should handle errors during clipboard operations', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
+    it('should handle errors during clipboard operations gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockRejectedValue(
         new Error('Clipboard error'),
       );
@@ -480,13 +477,9 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Error handling clipboard image:',
-        expect.any(Error),
-      );
+      // Should not throw and should not modify buffer
       expect(mockBuffer.setText).not.toHaveBeenCalled();
 
-      consoleErrorSpy.mockRestore();
       unmount();
     });
   });
