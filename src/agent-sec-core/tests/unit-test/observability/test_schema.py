@@ -1,6 +1,10 @@
 """Unit tests for observability record payload validation."""
 
 import pytest
+from agent_sec_cli.correlation_context import (
+    MAX_CORRELATION_ID_LENGTH,
+    TRUNCATED_CORRELATION_ID_SUFFIX,
+)
 from agent_sec_cli.observability.metrics import HOOK_METRIC_ALLOWLIST
 from agent_sec_cli.observability.schema import (
     validate_observability_record,
@@ -68,6 +72,39 @@ def test_camel_case_payload_dumps_back_to_wire_aliases():
     assert "observedAt" in dumped
     assert dumped["metadata"]["sessionId"] == "session-123"
     assert dumped["metadata"]["runId"] == "run-123"
+
+
+def test_observability_metadata_truncates_long_correlation_ids_with_suffix():
+    long_value = "x" * (MAX_CORRELATION_ID_LENGTH + 10)
+    expected = (
+        "x" * (MAX_CORRELATION_ID_LENGTH - len(TRUNCATED_CORRELATION_ID_SUFFIX))
+        + TRUNCATED_CORRELATION_ID_SUFFIX
+    )
+
+    record = validate_observability_record(
+        _payload(
+            hook="before_tool_call",
+            metadata={
+                "sessionId": long_value,
+                "runId": long_value,
+                "callId": long_value,
+                "toolCallId": long_value,
+            },
+            metrics={"tool_name": "read_file"},
+        )
+    )
+
+    dumped_metadata = record.to_record()["metadata"]
+    assert dumped_metadata == {
+        "sessionId": expected,
+        "runId": expected,
+        "callId": expected,
+        "toolCallId": expected,
+    }
+    assert len(record.metadata.session_id) == MAX_CORRELATION_ID_LENGTH
+    assert len(record.metadata.run_id) == MAX_CORRELATION_ID_LENGTH
+    assert len(record.metadata.call_id or "") == MAX_CORRELATION_ID_LENGTH
+    assert len(record.metadata.tool_call_id) == MAX_CORRELATION_ID_LENGTH
 
 
 def test_all_allowed_metrics_are_not_required():

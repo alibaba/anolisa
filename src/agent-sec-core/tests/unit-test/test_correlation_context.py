@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from agent_sec_cli.correlation_context import (
+    MAX_CORRELATION_ID_LENGTH,
+    TRUNCATED_CORRELATION_ID_SUFFIX,
     TraceContext,
     clear_process_trace_context,
     get_current_trace_context,
@@ -65,6 +67,20 @@ def test_parse_trace_context_ignores_whitespace_only_values_and_strips_values():
     )
 
     assert ctx == TraceContext(run_id="run-1", call_id="call-1")
+
+
+def test_parse_trace_context_truncates_long_values_with_suffix():
+    long_session_id = "s" * (MAX_CORRELATION_ID_LENGTH + 10)
+
+    ctx = parse_trace_context(f'{{"session_id":"{long_session_id}"}}')
+
+    assert ctx == TraceContext(
+        session_id=(
+            "s" * (MAX_CORRELATION_ID_LENGTH - len(TRUNCATED_CORRELATION_ID_SUFFIX))
+            + TRUNCATED_CORRELATION_ID_SUFFIX
+        )
+    )
+    assert len(ctx.session_id or "") == MAX_CORRELATION_ID_LENGTH
 
 
 def test_parse_trace_context_rejects_invalid_json():

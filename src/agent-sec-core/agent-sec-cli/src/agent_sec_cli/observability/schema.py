@@ -4,12 +4,14 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, TypeAlias, get_args
 
+from agent_sec_cli.correlation_context import truncate_correlation_id
 from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -33,11 +35,23 @@ class ObservabilityMetadata(BaseModel):
     session_id: str = Field(alias="sessionId")
     run_id: str = Field(alias="runId")
 
+    @field_validator("session_id", "run_id")
+    @classmethod
+    def _truncate_common_correlation_id(cls, value: str, info: ValidationInfo) -> str:
+        return truncate_correlation_id(info.field_name, value)
+
 
 class ModelCallMetadata(ObservabilityMetadata):
     """Correlation metadata for model API call records."""
 
     call_id: str | None = Field(default=None, alias="callId")
+
+    @field_validator("call_id")
+    @classmethod
+    def _truncate_call_id(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        return truncate_correlation_id(info.field_name, value)
 
 
 class ToolCallMetadata(ObservabilityMetadata):
@@ -45,6 +59,15 @@ class ToolCallMetadata(ObservabilityMetadata):
 
     tool_call_id: str = Field(alias="toolCallId")
     call_id: str | None = Field(default=None, alias="callId")
+
+    @field_validator("tool_call_id", "call_id")
+    @classmethod
+    def _truncate_tool_correlation_id(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        return truncate_correlation_id(info.field_name, value)
 
 
 class ObservabilityMetrics(BaseModel):

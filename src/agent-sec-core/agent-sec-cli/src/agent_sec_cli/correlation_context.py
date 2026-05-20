@@ -6,6 +6,9 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
+MAX_CORRELATION_ID_LENGTH = 256
+TRUNCATED_CORRELATION_ID_SUFFIX = "...[truncated]"
+
 _FIELD_ALIASES: dict[str, tuple[str, str]] = {
     "trace_id": ("trace_id", "traceId"),
     "session_id": ("session_id", "sessionId"),
@@ -13,6 +16,15 @@ _FIELD_ALIASES: dict[str, tuple[str, str]] = {
     "call_id": ("call_id", "callId"),
     "tool_call_id": ("tool_call_id", "toolCallId"),
 }
+
+
+def truncate_correlation_id(_field_name: str, value: str) -> str:
+    """Return *value* capped to the persisted correlation ID length."""
+    if len(value) <= MAX_CORRELATION_ID_LENGTH:
+        return value
+
+    prefix_len = MAX_CORRELATION_ID_LENGTH - len(TRUNCATED_CORRELATION_ID_SUFFIX)
+    return value[:prefix_len] + TRUNCATED_CORRELATION_ID_SUFFIX
 
 
 @dataclass(frozen=True)
@@ -61,20 +73,22 @@ _trace_context_override: ContextVar[_TraceContextOverride] = ContextVar(
 )
 
 
-def _clean_string(value: Any) -> str | None:
+def _clean_string(field_name: str, value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        return None
+    return truncate_correlation_id(field_name, stripped)
 
 
 def _normalized_fields(payload: Mapping[str, Any]) -> dict[str, str]:
     fields: dict[str, str] = {}
     for field_name, aliases in _FIELD_ALIASES.items():
         snake_key, camel_key = aliases
-        value = _clean_string(payload.get(snake_key))
+        value = _clean_string(field_name, payload.get(snake_key))
         if value is None:
-            value = _clean_string(payload.get(camel_key))
+            value = _clean_string(field_name, payload.get(camel_key))
         if value is not None:
             fields[field_name] = value
     return fields
