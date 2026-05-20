@@ -234,7 +234,9 @@ export const skillLedger: SecurityCapability = {
     // ── Hook handlers ───────────────────────────────────────────────
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
-        cleanupExpired(warningsByRun, cfg.warningTtlMs);
+        if (!cfg.requireApproval) {
+          cleanupExpired(warningsByRun, cfg.warningTtlMs);
+        }
 
         const skillMdPath = extractSkillPath(event);
         if (!skillMdPath) return undefined;
@@ -309,39 +311,41 @@ export const skillLedger: SecurityCapability = {
       }
     }, { priority: 80 });
 
-    api.on(
-      "reply_dispatch",
-      async (event: any, ctx: any) => {
-        try {
-          const runId = getRunId(event, ctx);
-          if (!runId) {
-            cleanupExpired(warningsByRun, cfg.warningTtlMs);
+    if (!cfg.requireApproval) {
+      api.on(
+        "reply_dispatch",
+        async (event: any, ctx: any) => {
+          try {
+            const runId = getRunId(event, ctx);
+            if (!runId) {
+              cleanupExpired(warningsByRun, cfg.warningTtlMs);
+              return undefined;
+            }
+
+            if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
+              deleteWarnings(warningsByRun, runId);
+              return undefined;
+            }
+
+            const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
+            if (warnings.length === 0) {
+              return undefined;
+            }
+
+            const queued = ctx?.dispatcher?.sendBlockReply?.({
+              text: `${warnings.join("\n")}\n本轮请求将继续处理。`,
+            });
+            if (queued) {
+              deleteWarnings(warningsByRun, runId);
+            }
+            return undefined;
+          } catch (err) {
+            api.logger.warn(`[skill-ledger] reply_dispatch failed open: ${err instanceof Error ? err.message : String(err)}`);
             return undefined;
           }
-
-          if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
-            deleteWarnings(warningsByRun, runId);
-            return undefined;
-          }
-
-          const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
-          if (warnings.length === 0) {
-            return undefined;
-          }
-
-          const queued = ctx?.dispatcher?.sendBlockReply?.({
-            text: `${warnings.join("\n")}\n本轮请求将继续处理。`,
-          });
-          if (queued) {
-            deleteWarnings(warningsByRun, runId);
-          }
-          return undefined;
-        } catch (err) {
-          api.logger.warn(`[skill-ledger] reply_dispatch failed open: ${err instanceof Error ? err.message : String(err)}`);
-          return undefined;
-        }
-      },
-      { priority: 0 },
-    );
+        },
+        { priority: 0 },
+      );
+    }
   },
 };

@@ -39,8 +39,17 @@ function registerHandlers(pluginConfig: Record<string, any> = {}) {
   const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
   const replyDispatch = hooks.find((hook) => hook.hookName === "reply_dispatch");
   assert.ok(beforeToolCall, "before_tool_call handler should be registered");
-  assert.ok(replyDispatch, "reply_dispatch handler should be registered");
   return { beforeToolCall, replyDispatch, hooks, logs };
+}
+
+function registerWarningHandlers(
+  pluginConfig: Record<string, any> = {},
+): ReturnType<typeof registerHandlers> & { replyDispatch: RegisteredHook } {
+  const handlers = registerHandlers(pluginConfig);
+  assert.ok(handlers.replyDispatch, "reply_dispatch handler should be registered");
+  return handlers as ReturnType<typeof registerHandlers> & {
+    replyDispatch: RegisteredHook;
+  };
 }
 
 let checkCallCount = 0;
@@ -153,7 +162,7 @@ describe("skill-ledger", () => {
 
   it("registers before_tool_call and reply_dispatch", () => {
     mockSkillLedgerStatus("pass");
-    const { hooks } = registerHandlers();
+    const { hooks } = registerWarningHandlers();
 
     assert.deepEqual(
       hooks.map((hook) => hook.hookName),
@@ -349,7 +358,7 @@ describe("skill-ledger", () => {
 
   it("pass allows silently", async () => {
     mockSkillLedgerStatus("pass");
-    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const { beforeToolCall, replyDispatch } = registerWarningHandlers();
     const { ctx, blockReplies } = createReplyDispatchCtx();
 
     assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
@@ -364,7 +373,7 @@ describe("skill-ledger", () => {
   for (const status of ["none", "drifted", "deny", "tampered"]) {
     it(`${status} defaults to non-blocking same-run user warning`, async () => {
       mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
-      const { beforeToolCall, replyDispatch } = registerHandlers();
+      const { beforeToolCall, replyDispatch } = registerWarningHandlers();
       const { ctx, blockReplies } = createReplyDispatchCtx();
 
       const result = await beforeToolCall.handler(
@@ -400,20 +409,22 @@ describe("skill-ledger", () => {
 
     for (const [status, severity] of cases) {
       mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
-      const { beforeToolCall, replyDispatch } = registerHandlers({
+      const { beforeToolCall, replyDispatch, hooks } = registerHandlers({
         skillLedgerRequireApproval: true,
       });
-      const { ctx, blockReplies } = createReplyDispatchCtx();
 
       const result = await beforeToolCall.handler(
         readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
         { runId: "run-1" },
       );
-      await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
 
+      assert.deepEqual(
+        hooks.map((hook) => hook.hookName),
+        ["before_tool_call"],
+      );
+      assert.equal(replyDispatch, undefined);
       assert.equal(result?.requireApproval?.title, "Skill Ledger Security Check");
       assert.equal(result?.requireApproval?.severity, severity);
-      assert.deepEqual(blockReplies, []);
     }
   });
 
@@ -428,7 +439,13 @@ describe("skill-ledger", () => {
           readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
           { runId: "run-1" },
         );
-        await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+
+        if (pluginConfig.skillLedgerRequireApproval === true) {
+          assert.equal(replyDispatch, undefined);
+        } else {
+          assert.ok(replyDispatch);
+          await replyDispatch.handler({ runId: "run-1", sendPolicy: "allow" }, ctx);
+        }
 
         assert.equal(result, undefined);
         assert.deepEqual(blockReplies, []);
@@ -439,7 +456,7 @@ describe("skill-ledger", () => {
 
   it("does not cache a user warning when runId is missing", async () => {
     mockSkillLedgerStatus("none");
-    const { beforeToolCall, replyDispatch, logs } = registerHandlers();
+    const { beforeToolCall, replyDispatch, logs } = registerWarningHandlers();
     const { ctx, blockReplies } = createReplyDispatchCtx();
 
     await beforeToolCall.handler(
@@ -454,7 +471,7 @@ describe("skill-ledger", () => {
 
   it("retains warnings when sendBlockReply fails", async () => {
     mockSkillLedgerStatus("drifted", 1);
-    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const { beforeToolCall, replyDispatch } = registerWarningHandlers();
     const failedCtx = createReplyDispatchCtx(() => false).ctx;
     const { ctx, blockReplies } = createReplyDispatchCtx();
 
@@ -470,7 +487,7 @@ describe("skill-ledger", () => {
 
   it("drops warnings when delivery is denied or suppressed", async () => {
     mockSkillLedgerStatus("deny", 1);
-    const { beforeToolCall, replyDispatch } = registerHandlers();
+    const { beforeToolCall, replyDispatch } = registerWarningHandlers();
     const { ctx, blockReplies } = createReplyDispatchCtx();
 
     await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md", "run-1"), {
@@ -493,7 +510,7 @@ describe("skill-ledger", () => {
 
   it("expires undrained warnings by TTL", async () => {
     mockSkillLedgerStatus("none");
-    const { beforeToolCall, replyDispatch } = registerHandlers({
+    const { beforeToolCall, replyDispatch } = registerWarningHandlers({
       skillLedgerWarningTtlMs: 0,
     });
     const { ctx, blockReplies } = createReplyDispatchCtx();
