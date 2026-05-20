@@ -42,20 +42,35 @@ app = typer.Typer(
 def _extract_trace_context_arg(argv: list[str]) -> str | None:
     """Return hidden top-level trace context before Typer/logging setup.
 
-    This bootstrap parser intentionally mirrors only top-level CLI syntax so
-    future logging initialization can see caller correlation before Typer runs.
+    This bootstrap parser is the canonical trace-context parser. It only
+    recognizes process-level options before the first command token so command
+    arguments and downstream pass-through flags keep their own semantics.
     """
-    for index, arg in enumerate(argv):
+    trace_context: str | None = None
+    index = 1 if argv else 0
+    while index < len(argv):
+        arg = argv[index]
         if arg == "--":
-            return None
+            return trace_context
         if arg == "--trace-context":
             if index + 1 < len(argv):
-                return argv[index + 1]
-            return None
+                value = argv[index + 1]
+                if value.startswith("-"):
+                    raise ValueError("missing trace context value")
+                trace_context = value if value.strip() else None
+                index += 2
+                continue
+            raise ValueError("missing trace context value")
         prefix = "--trace-context="
         if arg.startswith(prefix):
-            return arg[len(prefix) :]
-    return None
+            value = arg[len(prefix) :]
+            trace_context = value if value.strip() else None
+            index += 1
+            continue
+        if not arg.startswith("-"):
+            return trace_context
+        index += 1
+    return trace_context
 
 
 def _init_trace_context(trace_context: str | None) -> None:

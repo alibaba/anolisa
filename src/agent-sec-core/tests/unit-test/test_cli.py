@@ -88,6 +88,37 @@ def test_extract_trace_context_arg_supports_equals_style():
     )
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["agent-sec-cli", "--trace-context", "", "scan-code"],
+        ["agent-sec-cli", "--trace-context=", "scan-code"],
+    ],
+)
+def test_extract_trace_context_arg_treats_empty_value_as_unset(argv):
+    assert _extract_trace_context_arg(argv) is None
+
+
+def test_extract_trace_context_arg_requires_value_before_another_option():
+    with pytest.raises(ValueError, match="missing trace context value"):
+        _extract_trace_context_arg(["agent-sec-cli", "--trace-context", "--version"])
+
+
+def test_extract_trace_context_arg_uses_last_top_level_value():
+    assert (
+        _extract_trace_context_arg(
+            [
+                "agent-sec-cli",
+                "--trace-context",
+                '{"session_id":"session-1"}',
+                '--trace-context={"session_id":"session-2"}',
+                "scan-code",
+            ]
+        )
+        == '{"session_id":"session-2"}'
+    )
+
+
 def test_extract_trace_context_arg_stops_at_posix_double_dash():
     assert (
         _extract_trace_context_arg(
@@ -101,6 +132,27 @@ def test_extract_trace_context_arg_stops_at_posix_double_dash():
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "agent-sec-cli",
+            "scan-code",
+            "--trace-context",
+            '{"session_id":"command-session"}',
+        ],
+        [
+            "agent-sec-cli",
+            "harden",
+            "--trace-context",
+            '{"session_id":"downstream-session"}',
+        ],
+    ],
+)
+def test_extract_trace_context_arg_ignores_command_arguments(argv):
+    assert _extract_trace_context_arg(argv) is None
 
 
 @patch("agent_sec_cli.cli.app")
