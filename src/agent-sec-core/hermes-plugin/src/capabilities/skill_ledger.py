@@ -19,7 +19,8 @@ _SKILL_MANIFEST = "SKILL.md"
 _DEFAULT_HERMES_SKILLS_DIR = Path("~/.hermes/skills")
 _DEFAULT_BLOCK_STATUSES = ["none", "drifted", "deny", "tampered"]
 _SKIP_DIRS = frozenset({".git", ".github", ".hub", ".archive", ".skill-meta"})
-_CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id", "conversation_id")
+_CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id")
+_HERMES_SESSION_ENV = "HERMES_SESSION_ID"
 
 _STATUS_MESSAGES = {
     "none": "Skill has not been security-scanned yet.",
@@ -136,16 +137,21 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         self._remember_warning(kwargs, skill_name, skill_dir, status, message)
         return None
 
-    def _on_transform_llm_output(self, response=None, **kwargs):
+    def _on_transform_llm_output(
+        self,
+        response_text: str = "",
+        session_id: str = "",
+        **kwargs,
+    ):
         """Prepend user-visible skill-ledger warnings to the final response."""
         if self._enable_block:
             return None
         if self._max_warnings_per_turn == 0:
             return None
-        if not isinstance(response, str):
+        if not isinstance(response_text, str) or not response_text:
             return None
 
-        warnings = self._pop_warnings(kwargs)
+        warnings = self._pop_warnings({"session_id": session_id, **kwargs})
         if not warnings:
             return None
 
@@ -162,7 +168,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
                 f"- ... {len(warnings) - self._max_warnings_per_turn} more warning(s)"
             )
         lines.append("")
-        lines.append(response)
+        lines.append(response_text)
         return "\n".join(lines)
 
     def _resolve_skill_dir(self, args: dict[str, Any]) -> Path | None:
@@ -314,10 +320,29 @@ class SkillLedgerCapability(AgentSecCoreCapability):
 
     @staticmethod
     def _context_key(kwargs: dict[str, Any]) -> str | None:
+        runtime_session_id = SkillLedgerCapability._runtime_session_id()
+        if runtime_session_id is not None:
+            return f"session_id:{runtime_session_id}"
+
         for field in _CONTEXT_KEY_FIELDS:
             value = kwargs.get(field)
             if isinstance(value, str) and value.strip():
                 return f"{field}:{value}"
+        return None
+
+    @staticmethod
+    def _runtime_session_id() -> str | None:
+        try:
+            from gateway.session_context import get_session_env
+        except Exception:
+            return None
+
+        try:
+            value = get_session_env(_HERMES_SESSION_ENV, "")
+        except Exception:
+            return None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         return None
 
     @staticmethod

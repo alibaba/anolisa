@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -58,6 +60,20 @@ def _cli_status(status: str, *, exit_code: int = 0) -> CliResult:
     return CliResult(
         stdout=json.dumps({"status": status}), stderr="", exit_code=exit_code
     )
+
+
+def _install_gateway_session_context(monkeypatch, session_id: str) -> None:
+    gateway_module = ModuleType("gateway")
+    session_context_module = ModuleType("gateway.session_context")
+
+    def get_session_env(name: str, default: str = "") -> str:
+        assert name == "HERMES_SESSION_ID"
+        return session_id or default
+
+    session_context_module.get_session_env = get_session_env
+    gateway_module.session_context = session_context_module
+    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context_module)
 
 
 class TestSkillLedgerHooks:
@@ -114,12 +130,83 @@ class TestSkillLedgerHooks:
         mock_cli.return_value = _cli_status(status, exit_code=1)
 
         result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
-        output = cap._on_transform_llm_output("assistant response", task_id="t1")
+        output = cap._on_transform_llm_output(
+            response_text="assistant response", task_id="t1"
+        )
 
         assert result is None
         assert output.startswith("[agent-sec-core skill-ledger warning]")
         assert f"status={status}" in output
         assert output.endswith("assistant response")
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_drifted_warning_uses_response_text_and_logs_status(
+        self, mock_cli, tmp_path, caplog
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/drifted")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("drifted", exit_code=1)
+        caplog.set_level(logging.WARNING, logger="agent-sec-core")
+
+        result = cap._on_pre_tool_call(
+            "skill_view", {"name": "drifted"}, session_id="s1"
+        )
+        output = cap._on_transform_llm_output(
+            response_text="assistant response", session_id="s1"
+        )
+
+        assert result is None
+        assert output.startswith("[agent-sec-core skill-ledger warning]")
+        assert "status=drifted" in output
+        assert output.endswith("assistant response")
+        assert any("status=drifted" in record.message for record in caplog.records)
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_runtime_hermes_session_context_bridges_missing_pre_session_id(
+        self, mock_cli, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("drifted", exit_code=1)
+        _install_gateway_session_context(monkeypatch, "hermes-session-1")
+
+        cap._on_pre_tool_call(
+            "skill_view", {"name": "risky"}, session_id="", task_id="t1"
+        )
+
+        assert list(cap._warnings_by_context) == ["session_id:hermes-session-1"]
+        output = cap._on_transform_llm_output(
+            response_text="assistant response", session_id="hermes-session-1"
+        )
+        second = cap._on_transform_llm_output(
+            response_text="assistant response", session_id="hermes-session-1"
+        )
+
+        assert output.startswith("[agent-sec-core skill-ledger warning]")
+        assert output.endswith("assistant response")
+        assert second is None
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_mismatched_keys_do_not_use_pending_warning_fallback(
+        self, mock_cli, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("drifted", exit_code=1)
+        _install_gateway_session_context(monkeypatch, "")
+
+        cap._on_pre_tool_call(
+            "skill_view", {"name": "risky"}, session_id="", task_id="t1"
+        )
+        output = cap._on_transform_llm_output(
+            response_text="assistant response", session_id="s1"
+        )
+
+        assert output is None
+        assert list(cap._warnings_by_context) == ["task_id:t1"]
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_enable_block_blocks_configured_status_without_warning(
