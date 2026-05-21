@@ -74,6 +74,16 @@ function keysExist(): boolean {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function expandHomePath(filePath: string): string {
+  if (filePath === "~") {
+    return homedir();
+  }
+  if (filePath.startsWith("~/")) {
+    return homedir() + filePath.slice(1);
+  }
+  return filePath;
+}
+
 /** Extract the file path from a before_tool_call event, or undefined if not a read-SKILL.md call. */
 function extractSkillPath(
   event: { toolName: string; params: Record<string, unknown> },
@@ -91,7 +101,7 @@ function extractSkillPath(
   if (!filePath) return undefined;
 
   // Resolve to canonical absolute path to neutralize ".." traversal
-  const resolved = resolve(filePath);
+  const resolved = resolve(expandHomePath(filePath));
 
   if (!resolved.endsWith("/SKILL.md")) return undefined;
 

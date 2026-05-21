@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 import { _resetCliMock, _setCliMock } from "../../src/utils.js";
@@ -275,6 +275,36 @@ describe("skill-ledger", () => {
 
     assert.equal(checkCallCount, 1);
     assert.ok(lastCheckArgs?.includes("/skills/alpha"));
+  });
+
+  it("expands leading ~/ before invoking skill-ledger check", async () => {
+    mockSkillLedgerStatus("pass");
+    const { beforeToolCall } = registerHandlers();
+
+    await beforeToolCall.handler(
+      readSkillEvent("~/openclaw/skills/session-logs/SKILL.md"),
+      {},
+    );
+
+    const expectedSkillDir = resolve(homedir(), "openclaw/skills/session-logs");
+    assert.equal(checkCallCount, 1);
+    assert.ok(lastCheckArgs?.includes(expectedSkillDir));
+    assert.ok(!lastCheckArgs?.some((arg) => arg.includes("/~/")));
+  });
+
+  it("keeps home prefix when ~/ is followed by repeated slashes", async () => {
+    mockSkillLedgerStatus("pass");
+    const { beforeToolCall } = registerHandlers();
+
+    await beforeToolCall.handler(
+      readSkillEvent("~//openclaw/skills/session-logs/SKILL.md"),
+      {},
+    );
+
+    const expectedSkillDir = resolve(homedir(), "openclaw/skills/session-logs");
+    assert.equal(checkCallCount, 1);
+    assert.ok(lastCheckArgs?.includes(expectedSkillDir));
+    assert.ok(!lastCheckArgs?.includes("/openclaw/skills/session-logs"));
   });
 
   it("passes hook trace context to skill-ledger check", async () => {
