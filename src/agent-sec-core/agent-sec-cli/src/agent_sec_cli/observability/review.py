@@ -205,11 +205,13 @@ class EventListScreen(_ListScreenBase):
         )
         self._rows_by_key = {str(row.id): row for row in rows}
         security_correlation = getattr(self.app, "security_correlation", None)
+        security_results = _find_correlated_security_events_many(
+            rows,
+            security_correlation,
+        )
         self._security_results_by_key = {
-            str(row.id): _format_security_result(
-                _find_correlated_security_events(row, security_correlation)
-            )
-            for row in rows
+            str(row.id): _format_security_result(security_results[index])
+            for index, row in enumerate(rows)
         }
         return rows
 
@@ -373,18 +375,53 @@ def _find_correlated_security_events(
     if security_correlation is None:
         return []
     try:
-        return security_correlation.find_correlated(
-            ObservabilityRecordFields(
-                hook=record.hook,
-                session_id=record.session_id,
-                run_id=record.run_id,
-                tool_call_id=record.tool_call_id,
-                observed_at_epoch=record.observed_at_epoch,
-            )
-        )
+        return security_correlation.find_correlated(_record_fields(record))
     except Exception:
         # TODO(logging): warn with error type, session_id, and run_id once logging is wired.
         return []
+
+
+def _find_correlated_security_events_many(
+    records: list[ObservabilityEventRecord],
+    security_correlation: _SecurityCorrelation | None,
+) -> list[list[CorrelatedSecurityEvent]]:
+    if security_correlation is None:
+        return [[] for _ in records]
+
+    find_many = getattr(security_correlation, "find_correlated_many", None)
+    if callable(find_many):
+        try:
+            results = find_many([_record_fields(record) for record in records])
+        except Exception:
+            return [[] for _ in records]
+        if len(results) == len(records):
+            return [list(result) for result in results]
+
+    return [
+        _find_correlated_security_events(record, security_correlation)
+        for record in records
+    ]
+
+
+def _record_fields(record: ObservabilityEventRecord) -> ObservabilityRecordFields:
+    return ObservabilityRecordFields(
+        hook=record.hook,
+        session_id=record.session_id,
+        run_id=record.run_id,
+        tool_call_id=record.tool_call_id,
+        observed_at_epoch=record.observed_at_epoch,
+        metrics=_safe_metrics_dict(record.metrics_json),
+    )
+
+
+def _safe_metrics_dict(raw: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def _format_security_result(events: list[CorrelatedSecurityEvent]) -> str:

@@ -14,6 +14,8 @@ from sqlalchemy import Select, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
+_CORRELATION_CANDIDATE_LIMIT = 1000
+
 
 @dataclass(frozen=True)
 class CorrelationCandidate:
@@ -129,10 +131,11 @@ class SecurityEventRepository:
         categories: Sequence[str],
         run_id: str | None = None,
         tool_call_id: str | None = None,
+        tool_call_ids: Sequence[str] | None = None,
         since_epoch: float | None = None,
         until_epoch: float | None = None,
     ) -> list[CorrelationCandidate]:
-        """Query read-only security event candidates for observability correlation."""
+        """Query up to 1000 read-only candidates for observability correlation."""
         if not categories:
             return []
 
@@ -142,7 +145,14 @@ class SecurityEventRepository:
         ]
         if run_id is not None:
             conditions.append(SecurityEventRecord.run_id == run_id)
-        if tool_call_id is not None:
+        if tool_call_ids is not None:
+            normalized_tool_call_ids = tuple(value for value in tool_call_ids if value)
+            if not normalized_tool_call_ids:
+                return []
+            conditions.append(
+                SecurityEventRecord.tool_call_id.in_(normalized_tool_call_ids)
+            )
+        elif tool_call_id is not None:
             conditions.append(SecurityEventRecord.tool_call_id == tool_call_id)
         if since_epoch is not None:
             conditions.append(SecurityEventRecord.timestamp_epoch >= since_epoch)
@@ -156,6 +166,7 @@ class SecurityEventRepository:
                 SecurityEventRecord.timestamp_epoch.asc(),
                 SecurityEventRecord.event_id.asc(),
             )
+            .limit(_CORRELATION_CANDIDATE_LIMIT)
         )
 
         session_factory = self._store.session_factory()

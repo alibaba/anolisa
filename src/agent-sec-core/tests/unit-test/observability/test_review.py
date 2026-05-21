@@ -69,6 +69,26 @@ class _FakeCorrelationService:
         return self.results
 
 
+class _FakeBatchCorrelationService(_FakeCorrelationService):
+    def __init__(
+        self,
+        batch_results: list[list[CorrelatedSecurityEvent]],
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        super().__init__(error=error)
+        self.batch_results = batch_results
+        self.batch_calls: list[list[object]] = []
+
+    def find_correlated_many(
+        self, record_fields: list[object]
+    ) -> list[list[CorrelatedSecurityEvent]]:
+        self.batch_calls.append(record_fields)
+        if self.error is not None:
+            raise self.error
+        return self.batch_results
+
+
 def _record(
     *,
     record_id: int = 1,
@@ -435,6 +455,71 @@ def test_event_list_renders_security_result_from_correlation() -> None:
 
     assert security_result == "code_scan:warn"
     assert len(calls) == 1
+    assert getattr(calls[0], "metrics") == {"tool_name": "grep"}
+
+
+def test_event_list_uses_batch_security_correlation_when_available() -> None:
+    async def run() -> tuple[list[str], list[list[object]], list[object]]:
+        records = [
+            _record(
+                record_id=7,
+                hook="before_tool_call",
+                metrics={"tool_name": "grep"},
+                metadata={
+                    "sessionId": "session-A",
+                    "runId": "run-A",
+                    "toolCallId": "tool-call-1",
+                },
+                tool_call_id="tool-call-1",
+            ),
+            _record(
+                record_id=8,
+                hook="after_tool_call",
+                metrics={"status": "ok"},
+                metadata={
+                    "sessionId": "session-A",
+                    "runId": "run-A",
+                    "toolCallId": "tool-call-1",
+                },
+                tool_call_id="tool-call-1",
+            ),
+        ]
+        reader = _FakeReader(events_by_run={("session-A", "run-A"): records})
+        correlation = _FakeBatchCorrelationService(
+            [
+                [
+                    CorrelatedSecurityEvent(
+                        event=_security_event(details={"result": {"verdict": "warn"}}),
+                        match_reason="tool_call_id",
+                        time_delta_seconds=0.1,
+                        security_timestamp_epoch=1778932800.1,
+                    )
+                ],
+                [],
+            ]
+        )
+        app = ObservabilityReviewApp(
+            reader=reader,  # type: ignore[arg-type]
+            security_correlation=correlation,
+        )
+        async with app.run_test() as pilot:
+            await app.push_screen(
+                EventListScreen(session_id="session-A", run_id="run-A")
+            )
+            await pilot.pause()
+            table = app.screen.query_one(DataTable)
+            return (
+                [str(table.get_row_at(index)[3]) for index in range(table.row_count)],
+                correlation.batch_calls,
+                correlation.calls,
+            )
+
+    security_results, batch_calls, single_calls = asyncio.run(run())
+
+    assert security_results == ["code_scan:warn", "-"]
+    assert len(batch_calls) == 1
+    assert len(batch_calls[0]) == 2
+    assert single_calls == []
 
 
 def test_format_security_result_uses_correlated_scan_verdicts() -> None:

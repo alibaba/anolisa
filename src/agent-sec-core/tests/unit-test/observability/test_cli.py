@@ -100,6 +100,46 @@ def test_record_accepts_before_llm_call_without_call_id(tmp_path: Path) -> None:
     assert records[0]["metrics"] == {"prompt": "assembled prompt"}
 
 
+def test_record_accepts_before_tool_call_with_zero_tool_call_id(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    zero_id = "00000000-0000-0000-0000-000000000000"
+    payload = _payload(
+        hook="before_tool_call",
+        metadata={
+            "sessionId": "session-123",
+            "runId": zero_id,
+            "toolCallId": zero_id,
+        },
+        metrics={
+            "tool_name": "terminal",
+            "parameters": {"command": "ls"},
+        },
+    )
+
+    result = runner.invoke(
+        app,
+        ["observability", "record", "--format", "json", "--stdin"],
+        input=json.dumps(payload),
+        env={"AGENT_SEC_DATA_DIR": str(tmp_path)},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(tmp_path / "observability.jsonl")
+    assert records[0]["hook"] == "before_tool_call"
+    assert records[0]["metadata"] == {
+        "sessionId": "session-123",
+        "runId": zero_id,
+        "toolCallId": zero_id,
+    }
+    assert records[0]["metrics"] == {
+        "tool_name": "terminal",
+        "parameters": {"command": "ls"},
+    }
+    assert (tmp_path / "observability.db").exists()
+
+
 def test_record_accepts_after_agent_run_llm_output_response(tmp_path: Path) -> None:
     runner = CliRunner()
     payload = _payload(

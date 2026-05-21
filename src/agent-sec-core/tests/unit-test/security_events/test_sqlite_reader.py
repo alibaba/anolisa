@@ -584,6 +584,65 @@ class TestCorrelationCandidateQuery:
             "upper-bound",
         ]
 
+    def test_candidates_filter_multiple_tool_call_ids(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        for event_id, tool_call_id in (
+            ("tool-1-match", "tool-1"),
+            ("tool-2-match", "tool-2"),
+            ("tool-3-skip", "tool-3"),
+        ):
+            writer.write(
+                _make_correlated_event(
+                    event_id=event_id,
+                    category="code_scan",
+                    timestamp_epoch=CORRELATION_BASE_EPOCH,
+                    session_id="session-1",
+                    run_id="run-1",
+                    tool_call_id=tool_call_id,
+                )
+            )
+        writer.close()
+
+        candidates = reader.query_correlation_candidates(
+            session_id="session-1",
+            categories=("code_scan",),
+            run_id="run-1",
+            tool_call_ids=("tool-1", "tool-2"),
+        )
+
+        assert [candidate.event.event_id for candidate in candidates] == [
+            "tool-1-match",
+            "tool-2-match",
+        ]
+
+    def test_candidates_are_limited_to_1000_rows(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        for index in range(1001):
+            writer.write(
+                _make_correlated_event(
+                    event_id=f"candidate-{index:04d}",
+                    category="code_scan",
+                    timestamp_epoch=CORRELATION_BASE_EPOCH + index,
+                    session_id="session-1",
+                    run_id="run-1",
+                    tool_call_id="tool-1",
+                )
+            )
+        writer.close()
+
+        candidates = reader.query_correlation_candidates(
+            session_id="session-1",
+            categories=("code_scan",),
+            run_id="run-1",
+            tool_call_id="tool-1",
+        )
+
+        assert len(candidates) == 1000
+        assert candidates[0].event.event_id == "candidate-0000"
+        assert candidates[-1].event.event_id == "candidate-0999"
+
     def test_candidates_do_not_filter_run_when_run_id_omitted(
         self, writer: SqliteEventWriter, reader: SqliteEventReader
     ) -> None:

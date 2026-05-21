@@ -68,15 +68,17 @@ class SqliteEventReader:
         categories: tuple[str, ...] | list[str],
         run_id: str | None = None,
         tool_call_id: str | None = None,
+        tool_call_ids: tuple[str, ...] | list[str] | None = None,
         since_epoch: float | None = None,
         until_epoch: float | None = None,
     ) -> list[CorrelationCandidate]:
-        """Query read-only security event candidates for observability correlation."""
+        """Query up to 1000 read-only candidates for observability correlation."""
         return self._repository.query_correlation_candidates(
             session_id=session_id,
             categories=categories,
             run_id=run_id,
             tool_call_id=tool_call_id,
+            tool_call_ids=tool_call_ids,
             since_epoch=since_epoch,
             until_epoch=until_epoch,
         )
