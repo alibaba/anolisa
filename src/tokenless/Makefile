@@ -19,9 +19,11 @@ SHARE_DIR ?= $(DATADIR)/anolisa/adapters/tokenless
 BIN_DIR ?= $(BINDIR)
 LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
+OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
 TOON_VER := 0.4.6
 
-.PHONY: build build-tokenless build-toon install uninstall test lint clean \
+.PHONY: build build-tokenless build-toon build-openclaw-plugin \
+        install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
         cosh-extension-install cosh-extension-uninstall \
@@ -34,7 +36,7 @@ TOON_VER := 0.4.6
 all: build
 
 # Build both projects
-build: build-tokenless build-toon
+build: build-tokenless build-toon build-openclaw-plugin
 
 build-tokenless:
 	@echo "==> Building tokenless + rtk..."
@@ -45,6 +47,18 @@ build-tokenless:
 build-toon:
 	@echo "==> Installing toon binary (v$(TOON_VER))..."
 	cargo install toon-format --version $(TOON_VER) --locked
+
+# Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
+# Produces $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js, which install-adapter-resources
+# then copies into $(SHARE_DIR)/openclaw/dist/index.js. This file is referenced by
+# the plugin's package.json ("main" / "openclaw.extensions") and must be present
+# for `openclaw plugins install` to succeed.
+build-openclaw-plugin:
+	@echo "==> Building tokenless OpenClaw plugin..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund --package-lock=false
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
+	@test -f $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
+	    || { echo "ERROR: $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js was not produced"; exit 1; }
 
 # Install binaries + adapter resources per FHS spec.
 install: build install-binaries install-helpers install-adapter-resources install-cosh-extension
@@ -62,12 +76,17 @@ install-helpers:
 	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
 	ln -sf $(LIBEXECDIR)/toon $(DESTDIR)$(BINDIR)/toon
 
-install-adapter-resources:
+install-adapter-resources: build-openclaw-plugin
 	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
 	rm -rf $(DESTDIR)$(SHARE_DIR)
 	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
 	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
+	# Strip build-only artifacts from the installed plugin tree.
+	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
+	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json
 	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources"; exit 1; }
 
 install-cosh-extension:
 	@echo "==> Installing tokenless cosh extension to $(DESTDIR)$(COSH_EXTENSION_DIR)..."
@@ -111,6 +130,8 @@ clean:
 	@echo "==> Cleaning..."
 	cargo clean
 	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
+	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
+	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
 
 # Create source tarball (excludes build artifacts)
 dist: clean
@@ -207,9 +228,10 @@ help:
 	@echo "Token-Less Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build             Build tokenless + rtk + toon (release mode)"
+	@echo "  build             Build tokenless + rtk + toon + openclaw plugin"
 	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
 	@echo "  build-toon        Install toon binary via cargo install toon-format"
+	@echo "  build-openclaw-plugin  Compile OpenClaw plugin TS -> dist/index.js"
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
 	@echo "  test              Run all tests"

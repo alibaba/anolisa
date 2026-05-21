@@ -3,14 +3,22 @@
   "version": "1.0.0",
   "description": "Unified OpenClaw plugin — RTK command rewriting + tokenless schema/response compression for 60-90% LLM token savings",
   "type": "module",
-  "main": "index.js",
+  "main": "dist/index.js",
   "openclaw": {
-    "extensions": ["./index.js"]
+    "extensions": ["./dist/index.js"]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc --project tsconfig.json"
   },
   "peerDependencies": {
     "rtk": ">=0.35.0",
     "tokenless": ">=0.1.0"
   },
-  "files": ["index.js", "openclaw.plugin.json"],
+  "devDependencies": {
+    "@types/node": ">=22",
+    "typescript": "^5.8.0"
+  },
+  "files": ["dist/", "openclaw.plugin.json", "scripts/"],
   "license": "MIT"
 }

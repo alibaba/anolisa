@@ -19,6 +19,11 @@ Source0:        %{name}-%{version}.tar.gz
 # RPM build environments must configure a crates.io mirror (e.g. sparse+https://mirrors.aliyun.com/crates.io-index/).
 BuildRequires:  cargo
 BuildRequires:  rust >= 1.89
+# nodejs/npm are required to compile the OpenClaw TS plugin -> dist/index.js
+# via `make build-openclaw-plugin`. Provided by CI; declared here for chroot
+# builds where they are not pre-installed.
+BuildRequires:  nodejs
+BuildRequires:  npm
 
 # Runtime dependencies
 Requires:       python3
@@ -66,13 +71,11 @@ cargo build --release --manifest-path third_party/rtk/Cargo.toml
 # Build toon (standalone binary for Python hooks)
 cargo install toon-format --version 0.4.6 --root %{_builddir}/toon-root --locked
 
-# Compile OpenClaw TypeScript plugin to JS (from adapters/ bundle)
-if command -v npx &>/dev/null; then
-    npx --yes esbuild adapters/tokenless/openclaw/index.ts --bundle --platform=node --format=esm --outfile=adapters/tokenless/openclaw/index.js 2>/dev/null || \
-    sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' adapters/tokenless/openclaw/index.ts > adapters/tokenless/openclaw/index.js
-else
-    sed 's/: any//g; s/: string//g; s/: boolean | null/: any/g; s/: Record<string, unknown>//g; s/: { [^}]*}//g' adapters/tokenless/openclaw/index.ts > adapters/tokenless/openclaw/index.js
-fi
+# Compile the OpenClaw TS plugin via the project Makefile.
+# Produces adapters/tokenless/openclaw/dist/index.js, which package.json
+# declares as both "main" and openclaw.extensions. Mirroring sec-core's
+# build-openclaw-plugin pattern — never hand-roll tsc/esbuild here.
+make build-openclaw-plugin
 
 %install
 rm -rf %{buildroot}
@@ -81,6 +84,7 @@ mkdir -p %{buildroot}%{_libexecdir}/anolisa/tokenless
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
@@ -110,7 +114,10 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 install -m 0755 adapters/tokenless/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
 install -m 0755 adapters/tokenless/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
 install -m 0755 adapters/tokenless/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
-install -m 0644 adapters/tokenless/openclaw/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
+# Install the compiled dist tree produced by `make build-openclaw-plugin`.
+# package.json declares main/openclaw.extensions = ./dist/index.js; OpenClaw
+# `plugins install` reads from this directory and requires dist/index.js to exist.
+install -m 0644 adapters/tokenless/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist/
 install -m 0644 adapters/tokenless/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
 install -m 0644 adapters/tokenless/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
 
@@ -151,6 +158,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/common/commands
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/manifest.json
@@ -163,7 +171,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/uninstall.sh
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/index.js
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/dist/index.js
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/openclaw.plugin.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/package.json
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/__init__.py
