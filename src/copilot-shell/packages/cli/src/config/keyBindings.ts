@@ -171,6 +171,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.PASTE_CLIPBOARD_IMAGE]:
     process.platform === 'win32'
       ? [
+          { key: 'v', ctrl: true },
           { key: 'v', command: true },
           { key: 'v', meta: true },
         ]

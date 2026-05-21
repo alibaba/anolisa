@@ -66,9 +66,10 @@ export async function saveClipboardImage(
     }
 
     // Create a temporary directory for clipboard images within the target directory
-    // This avoids security restrictions on paths outside the target directory
+    // Uses .copilot-shell/tmp/clipboard subdirectory to avoid polluting workspace root
+    // and to ensure paths are within workspace for @ file processor access
     const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, 'clipboard');
+    const tempDir = path.join(baseDir, '.copilot-shell', 'tmp', 'clipboard');
     await fs.mkdir(tempDir, { recursive: true });
 
     // Generate a unique filename with timestamp
@@ -102,7 +103,7 @@ export async function cleanupOldClipboardImages(
 ): Promise<void> {
   try {
     const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, 'clipboard');
+    const tempDir = path.join(baseDir, '.copilot-shell', 'tmp', 'clipboard');
     const files = await fs.readdir(tempDir);
     const MAX_IMAGES = 100;
     const CLEANUP_COUNT = 50;

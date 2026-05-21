@@ -51,7 +51,8 @@ describe('keyMatchers', () => {
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
-      (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
+      (isWindows ? key.ctrl || key.meta : key.ctrl || key.meta) &&
+      key.name === 'v',
     [Command.SHOW_ERROR_DETAILS]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
@@ -223,10 +224,10 @@ describe('keyMatchers', () => {
     {
       command: Command.PASTE_CLIPBOARD_IMAGE,
       positive: isWindows
-        ? [createKey('v', { meta: true })]
+        ? [createKey('v', { ctrl: true }), createKey('v', { meta: true })]
         : [createKey('v', { ctrl: true }), createKey('v', { meta: true })],
       negative: isWindows
-        ? [createKey('v', { ctrl: true }), createKey('v')]
+        ? [createKey('v')]
         : [createKey('v'), createKey('c', { ctrl: true })],
     },
 

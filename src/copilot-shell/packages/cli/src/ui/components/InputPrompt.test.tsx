@@ -10,7 +10,7 @@ import type { InputPromptProps } from './InputPrompt.js';
 import { InputPrompt } from './InputPrompt.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@copilot-shell/core';
-import { ApprovalMode, Storage } from '@copilot-shell/core';
+import { ApprovalMode } from '@copilot-shell/core';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -395,10 +395,10 @@ describe('InputPrompt', () => {
 
       expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalledWith(
-        Storage.getGlobalTempDir(),
+        path.join('test', 'project', 'src'),
       );
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalledWith(
-        Storage.getGlobalTempDir(),
+        path.join('test', 'project', 'src'),
       );
       // Attachment UI is used instead of inserting text directly
       unmount();
@@ -440,7 +440,11 @@ describe('InputPrompt', () => {
 
     it('should add attachment when clipboard has image', async () => {
       const imagePath = path.join(
-        Storage.getGlobalTempDir(),
+        'test',
+        'project',
+        'src',
+        '.copilot-shell',
+        'tmp',
         'clipboard',
         'clipboard-456.png',
       );
@@ -479,6 +483,56 @@ describe('InputPrompt', () => {
 
       // Should not throw and should not modify buffer
       expect(mockBuffer.setText).not.toHaveBeenCalled();
+
+      unmount();
+    });
+
+    it('should submit with only attachments and empty text', async () => {
+      const imagePath = path.join(
+        'test',
+        'project',
+        'src',
+        '.copilot-shell',
+        'tmp',
+        'clipboard',
+        'clipboard-789.png',
+      );
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
+
+      // Wait for paste protection timeout
+      vi.useFakeTimers();
+      vi.advanceTimersByTime(1000);
+      vi.useRealTimers();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // Paste image (Ctrl+V)
+      stdin.write('\x16');
+      await wait();
+
+      // Buffer is empty (no text input)
+      mockBuffer.setText('');
+      mockBuffer.text = '';
+
+      // Wait for paste protection timeout
+      vi.useFakeTimers();
+      vi.advanceTimersByTime(500);
+      vi.useRealTimers();
+
+      // Submit with Enter (should work with empty text + attachment)
+      stdin.write('\r'); // Enter
+      await wait();
+
+      // Should call onSubmit with the attachment reference
+      expect(props.onSubmit).toHaveBeenCalled();
+      const submittedValue = props.onSubmit.mock.calls[0][0];
+      expect(submittedValue).toContain(
+        '.copilot-shell/tmp/clipboard/clipboard-789.png',
+      );
 
       unmount();
     });

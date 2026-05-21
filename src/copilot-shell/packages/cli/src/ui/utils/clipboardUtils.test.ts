@@ -99,7 +99,7 @@ describe('clipboardUtils', () => {
 
     it('should use clipboard directory consistently with saveClipboardImage', () => {
       // This test verifies that both functions use the same directory structure
-      // The implementation uses 'clipboard' subdirectory for both functions
+      // The implementation uses '.copilot-shell/tmp/clipboard' subdirectory for both functions
       expect(true).toBe(true);
     });
   });

@@ -23,7 +23,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config } from '@copilot-shell/core';
-import { ApprovalMode, Storage, createDebugLogger } from '@copilot-shell/core';
+import { ApprovalMode, createDebugLogger } from '@copilot-shell/core';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -306,10 +306,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const handleClipboardImage = useCallback(async () => {
     try {
       if (await clipboardHasImage()) {
-        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
+        // Save to workspace directory so @ file processor can access it
+        const imagePath = await saveClipboardImage(config.getTargetDir());
         if (imagePath) {
           // Clean up old images
-          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+          cleanupOldClipboardImages(config.getTargetDir()).catch(() => {
             // Ignore cleanup errors
           });
 
@@ -326,7 +327,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     } catch (error) {
       debugLogger.error('Error handling clipboard image:', error);
     }
-  }, []);
+  }, [config]);
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
@@ -765,7 +766,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
-        if (buffer.text.trim()) {
+        if (buffer.text.trim() || attachments.length > 0) {
           // Check if a paste operation occurred recently to prevent accidental auto-submission
           if (recentPasteTime !== null) {
             // Paste occurred recently, ignore this submit to prevent auto-execution
