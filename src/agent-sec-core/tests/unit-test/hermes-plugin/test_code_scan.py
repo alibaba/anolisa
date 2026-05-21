@@ -72,6 +72,29 @@ class TestCodeScanPreToolCall:
         assert result is None
 
     @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    def test_passes_hermes_trace_context_to_cli(self, mock_cli, capability):
+        """Hermes tracing fields should be propagated to scan-code."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps({"verdict": "pass", "findings": []}),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = capability._on_pre_tool_call(
+            "terminal",
+            {"command": "pwd"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+
+        assert result is None
+        assert mock_cli.call_args.kwargs["trace_context"] == {
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+        }
+        assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
+
+    @patch("src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_deny_returns_block(self, mock_cli, capability):
         """verdict=deny with enable_block=True should return block action."""
         mock_cli.return_value = CliResult(

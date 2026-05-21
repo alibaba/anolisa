@@ -184,7 +184,6 @@ def test_skips_cli_call_when_record_cannot_be_built():
         result = cap._on_pre_tool_call(
             tool_name="terminal",
             args={"command": "ls"},
-            session_id="session-1",
         )
 
     assert result is None

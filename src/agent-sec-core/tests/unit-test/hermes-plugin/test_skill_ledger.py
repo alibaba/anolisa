@@ -79,6 +79,27 @@ class TestSkillLedgerHooks:
             cap._on_transform_llm_output("assistant response", session_id="s1") is None
         )
 
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_passes_hermes_trace_context_to_cli(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/pass-skill")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("pass")
+
+        result = cap._on_pre_tool_call(
+            "skill_view",
+            {"name": "pass-skill"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+
+        assert result is None
+        assert mock_cli.call_args.kwargs["trace_context"] == {
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+        }
+        assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
+
     @pytest.mark.parametrize(
         "status",
         ["none", "warn", "drifted", "deny", "tampered", "error", "unknown"],

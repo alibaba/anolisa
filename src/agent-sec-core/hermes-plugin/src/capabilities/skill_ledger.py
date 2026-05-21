@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..cli_runner import call_agent_sec_cli
+from ..cli_runner import call_agent_sec_cli, trace_context
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -93,6 +93,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         result = call_agent_sec_cli(
             ["skill-ledger", "check", str(skill_dir)],
             timeout=self._timeout,
+            trace_context=trace_context(kwargs),
         )
         if not result.stdout.strip():
             logger.warning(

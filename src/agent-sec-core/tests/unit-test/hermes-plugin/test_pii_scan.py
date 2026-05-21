@@ -100,6 +100,20 @@ class TestPiiScanCapability:
         assert transform_result is None
 
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_passes_hermes_trace_context_to_cli(self, mock_cli, capability):
+        """Hermes session tracing should be propagated to scan-pii."""
+        mock_cli.return_value = _scan_result("pass")
+
+        result = capability._on_pre_llm_call(
+            user_message="hello",
+            session_id="session-1",
+        )
+
+        assert result is None
+        assert mock_cli.call_args.kwargs["trace_context"] == {"session_id": "session-1"}
+        assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_warn_verdict_prepends_warning_once(self, mock_cli, capability):
         """Warn verdict should prepend one redacted warning to final output."""
         mock_cli.return_value = _scan_result(

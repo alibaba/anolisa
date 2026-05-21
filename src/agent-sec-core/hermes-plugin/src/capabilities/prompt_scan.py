@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..cli_runner import call_agent_sec_cli
+from ..cli_runner import call_agent_sec_cli, trace_context
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -77,7 +77,7 @@ class PromptScanCapability(AgentSecCoreCapability):
         # Drop any stale warning carried over from a previous turn under the
         # same correlation key — only the freshest scan should win.
         self._warnings_by_key.pop(cache_key, None)
-        scan = self._scan_text(user_text)
+        scan = self._scan_text(user_text, trace_context(kwargs))
         if scan is None:
             return None
 
@@ -141,7 +141,11 @@ class PromptScanCapability(AgentSecCoreCapability):
     # CLI invocation
     # ------------------------------------------------------------------
 
-    def _scan_text(self, text: str) -> dict[str, Any] | None:
+    def _scan_text(
+        self,
+        text: str,
+        security_trace_context: dict[str, str] | None,
+    ) -> dict[str, Any] | None:
         """Run agent-sec-cli scan-prompt and parse its JSON output.
 
         The prompt text is piped via stdin instead of being passed as an
@@ -161,7 +165,12 @@ class PromptScanCapability(AgentSecCoreCapability):
             _USER_INPUT_SOURCE,
         ]
 
-        result = call_agent_sec_cli(args, timeout=self._timeout, stdin=text)
+        result = call_agent_sec_cli(
+            args,
+            timeout=self._timeout,
+            stdin=text,
+            trace_context=security_trace_context,
+        )
         if result.exit_code != 0:
             logger.warning(
                 f"[agent-sec-core] {self.id} agent-sec-cli exit_code={result.exit_code}, fail-open"

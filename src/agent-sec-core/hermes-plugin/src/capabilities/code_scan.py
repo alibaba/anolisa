@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from ..cli_runner import call_agent_sec_cli
+from ..cli_runner import call_agent_sec_cli, trace_context
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -52,6 +52,7 @@ class CodeScanCapability(AgentSecCoreCapability):
         result = call_agent_sec_cli(
             ["scan-code", "--code", code, "--language", language],
             timeout=self._timeout,
+            trace_context=trace_context(kwargs),
         )
 
         # 4. Parse result (fail-open on errors)

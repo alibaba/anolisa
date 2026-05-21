@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cli_runner import call_agent_sec_cli
+from ..cli_runner import call_agent_sec_cli, trace_context
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -73,7 +73,7 @@ class PiiScanCapability(AgentSecCoreCapability):
             return None
 
         self._warnings_by_key.pop(cache_key, None)
-        scan = self._scan_text(user_text)
+        scan = self._scan_text(user_text, trace_context(kwargs))
         if scan is None:
             return None
 
@@ -129,7 +129,11 @@ class PiiScanCapability(AgentSecCoreCapability):
         self._cleanup_expired()
         return None
 
-    def _scan_text(self, text: str) -> dict[str, Any] | None:
+    def _scan_text(
+        self,
+        text: str,
+        security_trace_context: dict[str, str] | None,
+    ) -> dict[str, Any] | None:
         """Run agent-sec-cli scan-pii and parse its JSON output."""
         args = [
             "scan-pii",
@@ -142,7 +146,12 @@ class PiiScanCapability(AgentSecCoreCapability):
         if self._include_low_confidence:
             args.append("--include-low-confidence")
 
-        result = call_agent_sec_cli(args, timeout=self._timeout, stdin=text)
+        result = call_agent_sec_cli(
+            args,
+            timeout=self._timeout,
+            stdin=text,
+            trace_context=security_trace_context,
+        )
         if result.exit_code != 0:
             logger.warning(
                 f"[agent-sec-core] {self.id} agent-sec-cli exit_code={result.exit_code}, fail-open"
