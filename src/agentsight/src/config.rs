@@ -141,6 +141,8 @@ struct JsonFullConfig {
     cmdline: Option<JsonCmdline>,
     #[serde(default)]
     domain: Option<Vec<JsonDomainGroup>>,
+    #[serde(default)]
+    tcp_ports: Option<Vec<u16>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -282,6 +284,8 @@ pub struct AgentsightConfig {
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
+    /// TCP target ports for plain HTTP capture (empty = disabled)
+    pub tcp_target_ports: Vec<u16>,
 
     // --- HTTP/Aggregation Configuration ---
     /// LRU cache capacity for HTTP connections
@@ -336,6 +340,7 @@ impl Default for AgentsightConfig {
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
             enable_filewatch: false,
+            tcp_target_ports: vec![8080],
 
             // HTTP/Aggregation defaults
             connection_capacity: DEFAULT_CONNECTION_CAPACITY,
@@ -418,6 +423,12 @@ impl AgentsightConfig {
         self
     }
 
+    /// Set TCP target ports for plain HTTP traffic capture
+    pub fn set_tcp_target_ports(mut self, ports: Vec<u16>) -> Self {
+        self.tcp_target_ports = ports;
+        self
+    }
+
     /// Set connection capacity
     pub fn set_connection_capacity(mut self, capacity: usize) -> Self {
         self.connection_capacity = capacity;
@@ -441,6 +452,9 @@ impl AgentsightConfig {
         }
         if let Some(p) = parsed.log_path.take() {
             self.log_path = Some(p);
+        }
+        if let Some(ports) = parsed.tcp_ports.take() {
+            self.tcp_target_ports = ports;
         }
 
         let (cmdline_rules, domain_rules) = extract_rules(parsed);

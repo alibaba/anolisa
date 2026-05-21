@@ -22,6 +22,7 @@ use super::procmon::{ProcMon, ProcMonEvent};
 use super::filewatch::{FileWatch, RawFileWatchEvent};
 use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 use super::udpdns::{UdpDns, RawUdpDnsEvent};
+use super::tcpsniff::TcpSniff;
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -53,6 +54,8 @@ pub struct Probes {
     filewrite: FileWriteProbe,
     /// UDP DNS probe (reuses ring buffer, captures domains from DNS queries, optional)
     udpdns: Option<UdpDns>,
+    /// TCP sniff probe (captures plain HTTP traffic on configured ports, optional)
+    tcpsniff: Option<TcpSniff>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -66,7 +69,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_target_ports: &[u16]) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -110,6 +113,18 @@ impl Probes {
             None
         };
 
+        // Optionally create tcpsniff - captures plain HTTP traffic on configured ports
+        let tcpsniff = if !tcp_target_ports.is_empty() {
+            let mut tcp = TcpSniff::new_with_maps(&map_handle, &rb_handle)
+                .context("failed to create tcpsniff")?;
+            tcp.set_target_ports(tcp_target_ports)
+                .context("failed to set tcp target ports")?;
+            Some(tcp)
+        } else {
+            log::info!("TcpSniff probe disabled (no tcp_target_ports configured)");
+            None
+        };
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
         Ok(Self {
@@ -119,6 +134,7 @@ impl Probes {
             filewatch,
             filewrite,
             udpdns,
+            tcpsniff,
             rb_handle,
             event_tx,
             event_rx,
@@ -143,6 +159,11 @@ impl Probes {
         if let Some(ref mut dns) = self.udpdns {
             dns.attach()
                 .context("failed to attach udpdns")?;
+        }
+        // Attach tcpsniff for plain HTTP traffic capture (if enabled)
+        if let Some(ref mut tcp) = self.tcpsniff {
+            tcp.attach()
+                .context("failed to attach tcpsniff")?;
         }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())

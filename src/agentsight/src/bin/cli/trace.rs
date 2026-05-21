@@ -22,6 +22,11 @@ pub struct TraceCommand {
     #[structopt(long)]
     pub enable_filewatch: bool,
 
+    /// Capture plain-text TCP traffic on these ports (comma-separated, e.g. 8080,8443).
+    /// Useful when the agent routes through a local gateway (e.g. Higress) via HTTP.
+    #[structopt(long, use_delimiter = true)]
+    pub tcp_ports: Vec<u16>,
+
     /// Path to JSON configuration file
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
@@ -63,9 +68,14 @@ impl TraceCommand {
     /// Run the actual tracing logic using AgentSight
     fn run_tracing(&self) {
         // Build AgentSight config (empty target_pids means trace all processes)
-        let config = AgentsightConfig::new()
+        let mut config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch);
+
+        // Only override tcp_target_ports if explicitly specified on CLI
+        if !self.tcp_ports.is_empty() {
+            config = config.set_tcp_target_ports(self.tcp_ports.clone());
+        }
 
         // Set config_path for unified loading in AgentSight::new()
         let config = config.set_config_path(std::path::PathBuf::from(&self.config));

@@ -1,4 +1,5 @@
 {
+  "tcp_ports": [8080],
   "cmdline": {
     "allow": [
       {"rule": ["hermes*"], "agent_name": "Hermes"},

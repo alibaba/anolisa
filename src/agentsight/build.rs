@@ -58,6 +58,9 @@ fn main() {
     // Generate udpdns skeleton and bindings
     generate_skeleton(&mut out, "udpdns");
     generate_header(&mut out, "udpdns");
+
+    // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
+    generate_skeleton(&mut out, "tcpsniff");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
