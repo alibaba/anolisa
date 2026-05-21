@@ -30,6 +30,9 @@ const PROVIDER_MATCH_ORDER = [
   // DashScope Coding Plan 必须在所有 dashscope 之前（coding.子域名）
   'dashscope-coding-plan-intl', // coding.dashscope-intl
   'dashscope-coding-plan', // coding.dashscope
+  // DashScope Token Plan 走独立域名（token-plan.cn-beijing.maas.aliyuncs.com），
+  // 与 dashscope 主域无 hostname 重叠，但仍保持显式匹配以返回正确显示名。
+  'dashscope-token-plan',
   // DashScope 地区站：cn-hongkong/dashscope-us/dashscope-intl 必须在通用 dashscope 之前
   'dashscope-hk', // cn-hongkong.dashscope
   'dashscope-us', // dashscope-us

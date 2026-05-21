@@ -73,6 +73,7 @@ describe('OpenAIKeyPrompt', () => {
     const output = lastFrame()!;
     expect(output).toContain('DashScope');
     expect(output).toContain('DashScope Coding Plan');
+    expect(output).toContain('DashScope Token Plan');
     expect(output).toContain('DeepSeek');
     expect(output).toContain('GLM');
     expect(output).toContain('Kimi');
@@ -80,6 +81,28 @@ describe('OpenAIKeyPrompt', () => {
     // providers with subProviders show '›'
     expect(output).toContain('DashScope ›');
     expect(output).toContain('DashScope Coding Plan ›');
+    // Token Plan is a leaf provider (single endpoint, no '›')
+    expect(output).not.toContain('DashScope Token Plan ›');
+  });
+
+  it('should auto-select DashScope Token Plan matching defaultBaseUrl', () => {
+    const { lastFrame } = render(
+      <OpenAIKeyPrompt
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        defaultBaseUrl="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        defaultApiKey="sk-token-plan-key"
+      />,
+    );
+    const output = lastFrame()!;
+    // Token Plan is a leaf provider → selected directly without entering a sub-menu
+    expect(output).toContain('● DashScope Token Plan');
+    expect(output).toContain('API Key:');
+    expect(output).toContain('Base URL:');
+    expect(output).toContain('Model:');
+    expect(output).toContain(
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    );
   });
 
   // ─── subProviders provider 隐藏字段 ────────────────────────────────────────

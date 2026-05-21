@@ -93,6 +93,15 @@ export const OPENAI_PROVIDERS: OpenAIProvider[] = [
     ],
   },
   {
+    id: 'dashscope-token-plan',
+    name: 'DashScope Token Plan',
+    baseUrl:
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    defaultModel: 'qwen3-coder-plus',
+    apiKeyUrl:
+      'https://bailian.console.aliyun.com/?tab=plan#/efm/subscription/token-plan',
+  },
+  {
     id: 'deepseek',
     name: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',
