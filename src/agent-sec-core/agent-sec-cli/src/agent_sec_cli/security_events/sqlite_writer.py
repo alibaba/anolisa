@@ -28,7 +28,7 @@ class SqliteEventWriter:
     def __init__(
         self,
         path: str | Path | None = None,
-        max_age_days: int = 30,
+        max_age_days: int | None = 30,
     ) -> None:
         self._store = SqliteStore(path or get_db_path())
         self._repository = SecurityEventRepository(self._store)
@@ -79,5 +79,6 @@ class SqliteEventWriter:
 
     def _run_maintenance(self) -> None:
         """Run low-frequency SQLite maintenance for this writer."""
-        self._repository.prune(self._max_age_days)
+        if self._max_age_days is not None:
+            self._repository.prune(self._max_age_days)
         self._repository.checkpoint()

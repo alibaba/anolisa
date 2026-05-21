@@ -34,7 +34,7 @@ class ObservabilitySqliteWriter:
     def __init__(
         self,
         path: str | Path | None = None,
-        max_age_days: int = DEFAULT_OBSERVABILITY_RETENTION_DAYS,
+        max_age_days: int | None = DEFAULT_OBSERVABILITY_RETENTION_DAYS,
     ) -> None:
         self._store = SqliteStore(
             path or get_observability_db_path(),
@@ -90,7 +90,8 @@ class ObservabilitySqliteWriter:
 
     def _run_maintenance(self) -> None:
         """Run low-frequency SQLite maintenance for this writer."""
-        self._repository.prune(self._max_age_days)
+        if self._max_age_days is not None:
+            self._repository.prune(self._max_age_days)
         self._repository.checkpoint()
 
 

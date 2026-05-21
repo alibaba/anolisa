@@ -35,7 +35,7 @@ def _seed(writer: ObservabilitySqliteWriter, **kwargs: Any) -> None:
 
 def test_observability_reader_lists_sessions_runs_and_events(tmp_path: Path) -> None:
     db_path = tmp_path / "observability.db"
-    writer = ObservabilitySqliteWriter(path=db_path)
+    writer = ObservabilitySqliteWriter(path=db_path, max_age_days=None)
     _seed(writer, observed_at="2026-05-16T12:00:00Z")
     _seed(
         writer,
@@ -64,7 +64,7 @@ def test_observability_reader_lists_sessions_runs_and_events(tmp_path: Path) -> 
 
 def test_observability_reader_close_disposes_store(tmp_path: Path) -> None:
     db_path = tmp_path / "observability.db"
-    writer = ObservabilitySqliteWriter(path=db_path)
+    writer = ObservabilitySqliteWriter(path=db_path, max_age_days=None)
     _seed(writer)
     writer.close()
 

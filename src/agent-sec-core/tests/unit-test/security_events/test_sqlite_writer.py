@@ -106,7 +106,7 @@ class TestSqliteEventWriter:
         This is a critical data integrity test — validates the entire
         SecurityEvent conversion and INSERT correctness.
         """
-        writer = SqliteEventWriter(path=db_path)
+        writer = SqliteEventWriter(path=db_path, max_age_days=None)
 
         # Create a comprehensive event with all fields
         evt = SecurityEvent(

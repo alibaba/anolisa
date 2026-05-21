@@ -60,7 +60,9 @@ def db_path(tmp_path: Path) -> str:
 
 @pytest.fixture()
 def writer(db_path: str) -> ObservabilitySqliteWriter:
-    w = ObservabilitySqliteWriter(path=db_path)
+    # max_age_days=None disables retention prune so hardcoded-timestamp tests
+    # don't depend on the wall clock at run time.
+    w = ObservabilitySqliteWriter(path=db_path, max_age_days=None)
     yield w
     w.close()
 

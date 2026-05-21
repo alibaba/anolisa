@@ -38,7 +38,9 @@ def tilde_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
 
 @pytest.fixture()
 def writer(db_path: str) -> SqliteEventWriter:
-    w = SqliteEventWriter(path=db_path)
+    # max_age_days=None disables retention prune so hardcoded-timestamp tests
+    # don't depend on the wall clock at run time.
+    w = SqliteEventWriter(path=db_path, max_age_days=None)
     yield w
     w.close()
 
