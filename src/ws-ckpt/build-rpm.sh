@@ -35,8 +35,14 @@ cp -a "${SRC_DIR}/crates" "${STAGE_ROOT}/src/"
 cp -a "${SRC_DIR}/config.toml.sample" "${STAGE_ROOT}/src/"
 cp -a "${SRC_DIR}/systemd" "${STAGE_ROOT}/src/"
 cp -a "${SRC_DIR}/skills" "${STAGE_ROOT}/src/"
+cp -a "${SRC_DIR}/plugins" "${STAGE_ROOT}/src/"
+# Drop musl-libc native node modules: package targets glibc systems only.
+# Leaving them in would make RPM dep generator emit bogus libc.musl-x86_64.so.1 requires.
+find "${STAGE_ROOT}/src/plugins" -type d -name '*-musl' -prune -exec rm -rf {} + 2>/dev/null || true
+find "${STAGE_ROOT}/src/plugins" -type f -name '*.musl.node' -delete 2>/dev/null || true
 cp -f "${SCRIPT_DIR}/LICENSE" "${STAGE_ROOT}/"
 cp -f "${SCRIPT_DIR}/README.md" "${STAGE_ROOT}/"
+cp -f "${SCRIPT_DIR}/adapter-manifest.json" "${STAGE_ROOT}/"
 
 tar -czf "${RPMBUILD_DIR}/SOURCES/${TARBALL}" -C "${STAGING}" "${NAME}-${VERSION}"
 echo "    source: ${RPMBUILD_DIR}/SOURCES/${TARBALL}"

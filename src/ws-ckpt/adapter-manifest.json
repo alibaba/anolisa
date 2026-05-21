@@ -7,14 +7,32 @@
     "openclaw": {
       "compatibleVersions": "",
       "capabilities": {
-        "plugins": [],
-        "skills": [
+        "plugins": [
           "ws-ckpt"
         ],
+        "skills": [],
         "commands": [],
         "hooks": []
       },
-      "actions": {}
+      "actions": {
+        "install":   "scripts/install-openclaw.sh",
+        "uninstall": "scripts/uninstall-openclaw.sh"
+      }
+    },
+    "hermes": {
+      "compatibleVersions": "",
+      "capabilities": {
+        "plugins": [
+          "ws-ckpt"
+        ],
+        "skills": [],
+        "commands": [],
+        "hooks": []
+      },
+      "actions": {
+        "install":   "scripts/install-hermes.sh",
+        "uninstall": "scripts/uninstall-hermes.sh"
+      }
     }
   },
   "resources": {
@@ -25,9 +43,15 @@
     },
     "skill": {
       "source": "src/skills/ws-ckpt",
-      "stagePath": "target/share/anolisa/skills/ws-ckpt",
-      "installPath": "/usr/share/anolisa/skills/ws-ckpt",
-      "openclawPath": "~/.openclaw/skills/ws-ckpt"
+      "stagePath": "target/share/anolisa/runtime/skills/ws-ckpt",
+      "installPath": "/usr/share/anolisa/runtime/skills/ws-ckpt",
+      "openclawPath": "~/.openclaw/skills/ws-ckpt",
+      "hermesPath": "~/.hermes/skills/ws-ckpt"
+    },
+    "plugin": {
+      "source": "src/plugins",
+      "stagePath": "target/share/anolisa/runtime/ws-ckpt/plugins",
+      "installPath": "/usr/share/anolisa/runtime/ws-ckpt/plugins"
     },
     "systemd": {
       "source": "src/systemd/ws-ckpt.service",
