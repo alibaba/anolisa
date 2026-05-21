@@ -354,6 +354,143 @@ describe('HookAggregator', () => {
     });
   });
 
+  describe('mergeWithOrLogic - UserPromptSubmit safety-priority', () => {
+    it('should keep ask when ask precedes allow (ask + allow => ask)', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'prompt_scanner.py',
+            name: 'prompt-scanner',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'ask', reason: 'jailbreak detected' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'pii_checker.py',
+            name: 'pii-checker',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'allow', reason: 'no pii found' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.UserPromptSubmit,
+      );
+      expect(result.finalOutput?.decision).toBe('ask');
+      expect(result.finalOutput?.reason).toBe(
+        'jailbreak detected\nno pii found',
+      );
+    });
+
+    it('should keep ask when allow precedes ask (allow + ask => ask)', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'pii_checker.py',
+            name: 'pii-checker',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'allow', reason: 'no pii found' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'prompt_scanner.py',
+            name: 'prompt-scanner',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'ask', reason: 'jailbreak detected' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.UserPromptSubmit,
+      );
+      expect(result.finalOutput?.decision).toBe('ask');
+    });
+
+    it('should keep block when block precedes allow (block + allow => block)', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'prompt_scanner.py',
+            name: 'prompt-scanner',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'block', reason: 'forbidden content' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'pii_checker.py',
+            name: 'pii-checker',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'allow', reason: 'clean' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.UserPromptSubmit,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+    });
+
+    it('should concatenate ask reason and allow reason', () => {
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'prompt_scanner.py',
+            name: 'prompt-scanner',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'ask', reason: 'jailbreak suspected' },
+          duration: 10,
+        },
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'pii_checker.py',
+            name: 'pii-checker',
+          },
+          eventName: HookEventName.UserPromptSubmit,
+          success: true,
+          output: { decision: 'allow', reason: 'no pii' },
+          duration: 10,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.UserPromptSubmit,
+      );
+      expect(result.finalOutput?.reason).toBe('jailbreak suspected\nno pii');
+    });
+  });
+
   describe('mergePermissionRequestOutputs', () => {
     it('should prioritize deny over allow', () => {
       const outputs: HookOutput[] = [

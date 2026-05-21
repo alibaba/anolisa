@@ -159,6 +159,7 @@ export class HookAggregator {
     let merged: HookOutput;
 
     switch (eventName) {
+      case HookEventName.UserPromptSubmit:
       case HookEventName.PreToolUse:
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
