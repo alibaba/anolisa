@@ -65,6 +65,10 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/dist/
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/
+          echo "=== Hermes Plugin ==="
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
+          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
           echo "=== CLI venv ==="
           ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
       - name: Run E2E tests

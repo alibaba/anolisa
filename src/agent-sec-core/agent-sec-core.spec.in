@@ -48,6 +48,7 @@ BuildRequires:  make
 Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       agent-sec-cosh-hook = %{version}-%{release}
 Requires:       agent-sec-openclaw-hook = %{version}-%{release}
+Requires:       agent-sec-hermes-hook = %{version}-%{release}
 Requires:       agent-sec-skills = %{version}-%{release}
 
 %description
@@ -116,7 +117,24 @@ Hooks into OpenClaw to perform code scanning before tool execution.
 %license LICENSE
 
 # =============================================================================
-# Subpackage 4: agent-sec-skills
+# Subpackage 4: agent-sec-hermes-hook
+# =============================================================================
+%package -n agent-sec-hermes-hook
+Summary:        Hermes Agent plugin for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+
+%description -n agent-sec-hermes-hook
+Hermes Agent security plugin powered by agent-sec-core.
+Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
+
+%files -n agent-sec-hermes-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/hermes-plugin/scripts/deploy.sh
+/opt/agent-sec/hermes-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 5: agent-sec-skills
 # =============================================================================
 %package -n agent-sec-skills
 Summary:        Agent security skill definitions for copilot-shell

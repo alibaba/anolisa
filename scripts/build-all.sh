@@ -1672,6 +1672,7 @@ install_sec_core() {
     [[ -f "$build_dir/linux-sandbox" ]] || die "Built linux-sandbox not found: $build_dir/linux-sandbox"
     [[ -d "$build_dir/cosh-extension" ]] || die "Built cosh extension not found: $build_dir/cosh-extension"
     [[ -d "$build_dir/openclaw-plugin" ]] || die "Built OpenClaw plugin not found: $build_dir/openclaw-plugin"
+    [[ -d "$build_dir/hermes-plugin" ]] || die "Built hermes-plugin not found: $build_dir/hermes-plugin"
     [[ -d "$build_dir/skills" ]] || die "Built sec-core skills not found: $build_dir/skills"
     find "$build_dir/wheels" -maxdepth 1 -name 'agent_sec_cli-*.whl' -type f | grep -q . || \
         die "Built agent-sec-cli wheel not found under $build_dir/wheels"

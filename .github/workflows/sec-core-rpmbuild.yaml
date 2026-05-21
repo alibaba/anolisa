@@ -84,6 +84,10 @@ jobs:
           ls /opt/agent-sec/openclaw-plugin/
           ls /opt/agent-sec/openclaw-plugin/dist/
           ls /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+          echo "=== Verify hermes plugin ==="
+          ls /opt/agent-sec/hermes-plugin/src/
+          ls /opt/agent-sec/hermes-plugin/src/plugin.yaml
+          ls /opt/agent-sec/hermes-plugin/scripts/deploy.sh
           echo "=== Verify skills ==="
           ls /usr/share/anolisa/skills/
 

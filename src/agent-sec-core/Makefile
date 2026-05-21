@@ -156,6 +156,13 @@ build-openclaw-plugin: ## Build openclaw-plugin TypeScript sources
 	cp -r openclaw-plugin/dist/* $(BUILD_DIR)/openclaw-plugin/dist/
 	cp -r openclaw-plugin/scripts/* $(BUILD_DIR)/openclaw-plugin/scripts/
 
+.PHONY: build-hermes-plugin
+build-hermes-plugin: ## Stage hermes-plugin Python sources to BUILD_DIR
+	install -d -m 0755 $(BUILD_DIR)/hermes-plugin/src
+	install -d -m 0755 $(BUILD_DIR)/hermes-plugin/scripts
+	cp -rp hermes-plugin/src/. $(BUILD_DIR)/hermes-plugin/src/
+	cp -rp hermes-plugin/scripts/. $(BUILD_DIR)/hermes-plugin/scripts/
+
 .PHONY: stage-cosh-extension
 stage-cosh-extension: ## Stage cosh-extension hooks to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/cosh-extension
@@ -177,7 +184,7 @@ stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
 	install -p -m 0644 adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
 
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -214,12 +221,14 @@ ifeq ($(INSTALL_PROFILE),user)
   EXTENSIONDIR    ?= $(HOME)/.copilot-shell/extensions/agent-sec-core
   SKILLDIR        ?= $(HOME)/.copilot-shell/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
+  HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
 else
   PREFIX          ?= /usr/local
   ANOLISA_DATADIR ?= /usr/share/anolisa
   EXTENSIONDIR    ?= $(ANOLISA_DATADIR)/extensions/agent-sec-core
   SKILLDIR        ?= $(ANOLISA_DATADIR)/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
+  HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
 endif
 
 ADAPTER_DIR         ?= $(ANOLISA_DATADIR)/adapters/sec-core
@@ -233,6 +242,7 @@ WHEEL_DIR           ?= $(LIBDIR)/wheels
 CLI_STAGED_SITE     ?= $(BUILD_DIR)/site-packages
 CLI_PRIVATE_SITE    ?= /opt/agent-sec/lib/python3.11/site-packages
 RPM_OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
+RPM_HERMES_PLUGIN_DIR ?= /opt/agent-sec/hermes-plugin
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -295,6 +305,14 @@ install-openclaw-plugin: ## Install openclaw-plugin to target directory
 	cp -r $(BUILD_DIR)/openclaw-plugin/scripts/* $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)/scripts/
 	chmod 0755 $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)/scripts/*.sh
 
+.PHONY: install-hermes-plugin
+install-hermes-plugin: ## Install hermes-plugin to target directory
+	install -d -m 0755 $(DESTDIR)$(HERMES_PLUGIN_DIR)/src
+	install -d -m 0755 $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts
+	cp -rp $(BUILD_DIR)/hermes-plugin/src/. $(DESTDIR)$(HERMES_PLUGIN_DIR)/src/
+	cp -rp $(BUILD_DIR)/hermes-plugin/scripts/. $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts/
+	chmod 0755 $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts/*.sh
+
 .PHONY: install-cosh-hook
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
@@ -309,11 +327,12 @@ install-adapter-manifest: ## Install adapter-manifest.json from staged copy
 	install -p -m 0644 $(ADAPTER_STAGE_DIR)/manifest.json $(DESTDIR)$(ADAPTER_DIR)/manifest.json
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-skills install-adapter-manifest ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-skills ## Install all (RPM build)
+install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL
@@ -340,6 +359,10 @@ uninstall-cosh-hook: ## Remove linux-sandbox and cosh extension
 uninstall-openclaw-plugin: ## Remove openclaw plugin
 	rm -rf $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)
 
+.PHONY: uninstall-hermes-plugin
+uninstall-hermes-plugin: ## Remove hermes plugin
+	rm -rf $(DESTDIR)$(HERMES_PLUGIN_DIR)
+
 .PHONY: uninstall-skills
 uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
 	@for d in skills/*/; do \
@@ -353,7 +376,7 @@ uninstall-adapter-manifest: ## Remove installed adapter manifest directory
 	rm -rf $(DESTDIR)$(ADAPTER_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message

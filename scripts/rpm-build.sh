@@ -209,7 +209,7 @@ build_agent_sec_core() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,scripts,tools}
+    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,scripts,tools}
 
     # skills: use cp -rp dir/. to include hidden files/directories
     cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
@@ -228,6 +228,11 @@ build_agent_sec_core() {
         --exclude='node_modules' \
         --exclude='.tsbuildinfo' \
         openclaw-plugin/ | tar -xf - -C "$pkg_dir/"
+
+    # hermes-plugin (exclude __pycache__ and dev artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
 
     # Include agent-sec-cli source for maturin wheel build
     # Exclude development artifacts (.venv, target, __pycache__, .egg-info, dist)
