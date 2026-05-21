@@ -27,10 +27,10 @@ openclaw-plugin/
 │   ├── types.ts                # SecurityCapability interface
 │   ├── utils.ts                # CLI invocation utility (callAgentSecCli)
 │   ├── capabilities/           # Security capability entry files
-│   │   ├── skill-ledger.ts     #   before_tool_call + reply_dispatch hooks
+│   │   ├── skill-ledger.ts     #   before_tool_call hook
 │   │   ├── code-scan.ts        #   before_tool_call hook
 │   │   ├── prompt-scan.ts      #   before_dispatch hook
-│   │   ├── pii-scan.ts         #   before_prompt_build + reply_dispatch hooks
+│   │   ├── pii-scan.ts         #   before_dispatch hook
 │   │   └── observability.ts    #   observability hook registration
 │   └── helpers/                # Capability support code
 │       └── observability/      #   OpenClaw → agent-sec observability adapter
@@ -185,9 +185,8 @@ Version: 0.x.y
 Source: ~/path/to/openclaw-plugin/dist/index.js
 
 Typed hooks:
+before_dispatch (priority 200)
 before_dispatch (priority 190)
-before_prompt_build (priority 0)
-reply_dispatch (priority 0)
 llm_input (priority 1000)
 model_call_started (priority 1000)
 model_call_ended (priority 1000)
@@ -233,10 +232,10 @@ AGENT_SEC_LIVE=1 npm run smoke
 
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
+| `pii-scan-user-input` | `before_dispatch` | 200 | Scans inbound user text for PII/credentials before prompt-scan and optionally blocks on `deny` |
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
-| `pii-scan-user-input` | `before_prompt_build`, `reply_dispatch` | 0 (default) | Scans current user prompt for PII/credentials and emits a non-blocking same-run warning |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
-| `skill-ledger`     | `before_tool_call`, `reply_dispatch` | 80 / 0 | Checks skill integrity when SKILL.md is read and emits configurable warnings or approval requests |
+| `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read and optionally asks on risky states |
 | `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
 
 ### Configuring `code-scan`
@@ -251,9 +250,9 @@ openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval tru
 
 ### Configuring `pii-scan-user-input`
 
-The `pii-scan-user-input` capability scans only `event.prompt` in `before_prompt_build`. It intentionally does not scan `event.messages`, because that list may include history, tool results, memory, or RAG context and can repeatedly warn on older PII that was not submitted in the current turn.
+The `pii-scan-user-input` capability scans the current inbound user text in `before_dispatch`, preferring `event.content` and falling back to `event.body`. It intentionally does not scan assembled prompt history, tool results, memory, or RAG context, so older PII does not trigger repeated warnings on later turns.
 
-`warn` and `deny` verdicts never block OpenClaw in v1. The capability caches a minimal warning under the current `runId`, then `reply_dispatch` reads that warning and queues it with `dispatcher.sendBlockReply({ text })` before the default agent reply flow continues. In this context, block reply means OpenClaw's intermediate reply type, not a security block. The warning is removed only after it is successfully queued. This avoids consuming the warning in a generic outbound `message_sending` hook that may not represent the final user-visible reply. If `runId` is missing, the capability fails open and does not cache a session-level warning. If OpenClaw marks the turn with `sendPolicy: "deny"` or `suppressUserDelivery: true`, the warning is dropped without display so the plugin does not override host-level delivery policy.
+By default, `capabilities["pii-scan-user-input"].enableBlock` is `false`, so `warn` and `deny` verdicts are logged and the turn continues. Set `enableBlock: true` to block `deny` verdicts before prompt-scan runs by returning `{ handled: true, text }`. `warn` verdicts are always logged only. The block text uses redacted evidence and never includes raw PII values.
 
 ### Configuring `observability`
 
@@ -293,16 +292,13 @@ Supported OpenClaw plugin entry config:
         "config": {
           "promptScanBlock": false,
           "codeScanRequireApproval": false,
-          "skillLedgerRequireApproval": false,
-          "skillLedgerWarningTtlMs": 300000,
           "piiScanUserInput": true,
           "piiIncludeLowConfidence": false,
-          "piiWarningTtlMs": 300000,
           "capabilities": {
             "scan-code": { "enabled": true },
             "prompt-scan": { "enabled": true },
-            "pii-scan-user-input": { "enabled": true },
-            "skill-ledger": { "enabled": true },
+            "pii-scan-user-input": { "enabled": true, "enableBlock": false },
+            "skill-ledger": { "enabled": true, "enableBlock": true },
             "observability": { "enabled": true }
           }
         },
@@ -316,6 +312,7 @@ Supported OpenClaw plugin entry config:
 ```
 
 Set a capability's `enabled` value to `false` to skip registering only that capability while keeping the rest of the `agent-sec` plugin active.
+Set `enableBlock` on supported capabilities to control whether matching security findings block or ask the user for approval.
 
 `llm_input`, `llm_output`, and `agent_end` require OpenClaw to allow conversation access for this external plugin with `plugins.entries.agent-sec.hooks.allowConversationAccess=true`. Without that OpenClaw setting, those hooks are blocked by OpenClaw before this plugin sees them.
 
@@ -323,15 +320,13 @@ Set a capability's `enabled` value to `false` to skip registering only that capa
 
 The `skill-ledger` capability checks skill integrity by invoking `agent-sec-cli skill-ledger check` when the agent reads a `SKILL.md` file. It automatically initializes signing keys on first use.
 
-By default, `skillLedgerRequireApproval` is `false`. In this mode, `none`, `drifted`, `deny`, and `tampered` statuses do not block the read. Instead, the capability caches a same-run warning under the current `runId`, then `reply_dispatch` queues it with `dispatcher.sendBlockReply({ text })` before the normal agent reply continues. `warn`, `error`, and unknown statuses are logged only.
+By default, `capabilities["skill-ledger"].enableBlock` is `true`. In this mode, `none`, `drifted`, `deny`, and `tampered` statuses return an OpenClaw approval request. `warn`, `error`, and unknown statuses are logged only.
 
-Set `skillLedgerRequireApproval: true` to restore approval-card behavior for `none`, `drifted`, `deny`, and `tampered` statuses:
+Set `enableBlock: false` to log all non-`pass` statuses without asking:
 
 ```bash
-openclaw config set plugins.entries.agent-sec.config.skillLedgerRequireApproval true
+openclaw config set 'plugins.entries.agent-sec.config.capabilities.skill-ledger.enableBlock' false
 ```
-
-`skillLedgerWarningTtlMs` controls how long an undelivered warning remains cached. If `runId` is missing, the warning is not cached. If OpenClaw sets `sendPolicy: "deny"` or `suppressUserDelivery: true`, cached warnings are dropped without display.
 
 **Prerequisites**: `agent-sec-cli skill-ledger check` must be available. Signing keys are auto-initialized (no passphrase) if not present.
 

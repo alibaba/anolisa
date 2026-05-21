@@ -18,36 +18,64 @@
       "piiScanUserInput": {
         "type": "boolean",
         "default": true,
-        "description": "扫描本轮用户输入中的 PII 和凭据，并以非阻断 warning 提示"
+        "description": "扫描本轮用户输入中的 PII 和凭据"
       },
       "piiIncludeLowConfidence": {
         "type": "boolean",
         "default": false,
         "description": "是否包含低置信度 PII findings"
       },
-      "piiWarningTtlMs": {
-        "type": "number",
-        "default": 300000,
-        "minimum": 0,
-        "description": "PII warning 按 runId 暂存的 TTL，避免未发送回复时残留"
-      },
       "codeScanRequireApproval": {
         "type": "boolean",
         "default": false,
         "description": "代码扫描检测到安全问题时是否要求用户审批（默认仅记录日志并放行）"
       },
-      "skillLedgerRequireApproval": {
-        "type": "boolean",
-        "default": false,
-        "description": "检测到未扫描、漂移、高风险或签名异常 skill 时是否要求用户确认"
-      },
-      "skillLedgerWarningTtlMs": {
-        "type": "number",
-        "default": 300000,
-        "minimum": 0,
-        "description": "skill-ledger warning 按 runId 暂存的最长时间，单位毫秒"
+      "capabilities": {
+        "type": "object",
+        "description": "按能力配置启用状态和阻断策略",
+        "properties": {
+          "scan-code": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          },
+          "prompt-scan": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          },
+          "pii-scan-user-input": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "enableBlock": {
+                "type": "boolean",
+                "default": false,
+                "description": "检测到 deny 级别 PII/凭据时是否直接阻断本轮请求"
+              }
+            }
+          },
+          "skill-ledger": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "enableBlock": {
+                "type": "boolean",
+                "default": true,
+                "description": "检测到 none、drifted、deny 或 tampered skill 状态时是否要求用户确认"
+              }
+            }
+          },
+          "observability": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          }
+        }
       }
-
     }
   },
   "uiHints": {
@@ -57,28 +85,19 @@
     },
     "piiScanUserInput": {
       "label": "PII 用户输入扫描",
-      "description": "扫描本轮用户输入中的 PII 和凭据，并以非阻断 warning 提示"
+      "description": "扫描本轮用户输入中的 PII 和凭据"
     },
     "piiIncludeLowConfidence": {
       "label": "PII 低置信度 findings",
       "description": "展示低置信度 PII findings"
     },
-    "piiWarningTtlMs": {
-      "label": "PII warning TTL",
-      "description": "PII warning 按 runId 暂存的最长时间，单位毫秒"
-    },
     "codeScanRequireApproval": {
       "label": "代码扫描审批模式",
       "description": "启用后，代码扫描检测到安全问题时在 Dashboard 上弹出审批卡片；关闭则仅记录日志并放行"
     },
-    "skillLedgerRequireApproval": {
-      "label": "Skill Ledger 审批模式",
-      "description": "启用后，未扫描、漂移、高风险或签名异常 skill 会要求用户确认；关闭则发送同轮告警并继续处理"
-    },
-    "skillLedgerWarningTtlMs": {
-      "label": "Skill Ledger warning TTL",
-      "description": "skill-ledger warning 按 runId 暂存的最长时间，单位毫秒"
+    "capabilities": {
+      "label": "能力配置",
+      "description": "配置各安全能力的启用状态和阻断策略"
     }
-
   }
 }

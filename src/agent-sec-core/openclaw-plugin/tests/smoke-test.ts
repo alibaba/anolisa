@@ -106,13 +106,22 @@ const mockEvents: Record<string, Record<string, unknown>> = {
 // 每个 hook 的 mock ctx（提供代表性字段值）
 const mockCtx: Record<string, Record<string, unknown>> = {
   before_tool_call: {
-    sessionKey: "sk-001", sessionId: "session-001", runId: "run-001", toolName: "exec", toolCallId: "tc-001",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
+    toolName: "exec",
+    toolCallId: "tc-001",
   },
   before_dispatch: {
-    channelId: "telegram", sessionKey: "sk-001", senderId: "user-123",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    senderId: "user-123",
   },
   before_prompt_build: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   reply_dispatch: {
     dispatcher: {
@@ -128,22 +137,41 @@ const mockCtx: Record<string, Record<string, unknown>> = {
     markIdle: () => {},
   },
   llm_input: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   model_call_started: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   model_call_ended: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   llm_output: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   agent_end: {
-    channelId: "telegram", sessionKey: "sk-001", sessionId: "session-001", runId: "run-001",
+    channelId: "telegram",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
   },
   after_tool_call: {
-    sessionKey: "sk-001", sessionId: "session-001", runId: "run-001", toolName: "exec", toolCallId: "tc-001",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-001",
+    toolName: "exec",
+    toolCallId: "tc-001",
   },
 };
 
@@ -151,16 +179,36 @@ const caps = [codeScan, promptScan, piiScan, observability];
 
 if (!process.env.AGENT_SEC_LIVE) {
   _setCliMock(async (args) => {
-    if (args[0] === "scan-code") {
-      return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
+    const offset = args[0] === "--trace-context" ? 2 : 0;
+    if (args[offset] === "scan-code") {
+      return {
+        exitCode: 0,
+        stdout: '{"verdict":"pass","findings":[]}',
+        stderr: "",
+      };
     }
-    if (args[0] === "scan-prompt") {
-      return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
+    if (args[offset] === "scan-prompt") {
+      return {
+        exitCode: 0,
+        stdout: '{"verdict":"pass","findings":[]}',
+        stderr: "",
+      };
     }
-    if (args[0] === "scan-pii") {
-      return { exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" };
+    if (args[offset] === "scan-pii") {
+      return {
+        exitCode: 0,
+        stdout: '{"verdict":"pass","findings":[]}',
+        stderr: "",
+      };
     }
-    if (args[0] === "skill-ledger" && args[1] === "check") {
+    if (
+      args[offset] === "skill-ledger" &&
+      args[offset + 1] === "init" &&
+      args[offset + 2] === "--no-baseline"
+    ) {
+      return { exitCode: 0, stdout: '{"fingerprint":"mock"}', stderr: "" };
+    }
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
       return { exitCode: 0, stdout: '{"status":"pass"}', stderr: "" };
     }
     return { exitCode: 0, stdout: "", stderr: "" };
@@ -189,7 +237,11 @@ const skillLedgerMockEvents: Record<string, Record<string, unknown>> = {
 const skillLedgerMockCtx: Record<string, Record<string, unknown>> = {
   ...mockCtx,
   before_tool_call: {
-    sessionKey: "sk-001", sessionId: "session-001", runId: "run-002", toolName: "read", toolCallId: "tc-002",
+    sessionKey: "sk-001",
+    sessionId: "session-001",
+    runId: "run-002",
+    toolName: "read",
+    toolCallId: "tc-002",
   },
   reply_dispatch: {
     ...mockCtx.reply_dispatch,
@@ -200,7 +252,9 @@ const skillLedgerMockCtx: Record<string, Record<string, unknown>> = {
 };
 
 console.log("=== Agent-Sec Smoke Test ===");
-console.log(`Mode: ${process.env.AGENT_SEC_LIVE ? "LIVE (real CLI)" : "MOCK (no CLI needed)"}\n`);
+console.log(
+  `Mode: ${process.env.AGENT_SEC_LIVE ? "LIVE (real CLI)" : "MOCK (no CLI needed)"}\n`,
+);
 
 for (const cap of caps) {
   console.log(`[${cap.id}] hooks: [${cap.hooks.join(", ")}]`);
@@ -208,17 +262,26 @@ for (const cap of caps) {
   for (const r of results) {
     const status = r.error ? `FAIL: ${r.error.message}` : "OK";
     const detail = r.result ? ` → ${JSON.stringify(r.result)}` : "";
-    console.log(`  ${r.hookName}: ${status} (${r.durationMs.toFixed(0)}ms)${detail}`);
+    console.log(
+      `  ${r.hookName}: ${status} (${r.durationMs.toFixed(0)}ms)${detail}`,
+    );
   }
   console.log();
 }
 
 // ── skill-ledger (separate mock events) ──────────────────────────
 console.log(`[${skillLedger.id}] hooks: [${skillLedger.hooks.join(", ")}]`);
-const slResults = await testCapability(skillLedger, skillLedgerMockEvents, undefined, skillLedgerMockCtx);
+const slResults = await testCapability(
+  skillLedger,
+  skillLedgerMockEvents,
+  undefined,
+  skillLedgerMockCtx,
+);
 for (const r of slResults) {
   const status = r.error ? `FAIL: ${r.error.message}` : "OK";
   const detail = r.result ? ` → ${JSON.stringify(r.result)}` : "";
-  console.log(`  ${r.hookName}: ${status} (${r.durationMs.toFixed(0)}ms)${detail}`);
+  console.log(
+    `  ${r.hookName}: ${status} (${r.durationMs.toFixed(0)}ms)${detail}`,
+  );
 }
 console.log();

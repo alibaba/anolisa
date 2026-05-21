@@ -1,94 +1,25 @@
 import type { SecurityCapability } from "../types.js";
 import { callAgentSecCli } from "../utils.js";
 
-const DEFAULT_WARNING_TTL_MS = 300_000;
 const CLI_TIMEOUT_MS = 10_000;
 const MAX_EVIDENCE_ITEMS = 3;
 const MAX_EVIDENCE_CHARS = 80;
-
-type WarningBucket = {
-  warnings: string[];
-  createdAt: number;
-  lastTouchedAt: number;
-};
+const BEFORE_DISPATCH_PRIORITY = 200;
 
 type PiiScanConfig = {
   scanUserInput: boolean;
   includeLowConfidence: boolean;
-  warningTtlMs: number;
+  enableBlock: boolean;
 };
 
 function readConfig(pluginConfig: Record<string, any>): PiiScanConfig {
-  const ttl = Number(pluginConfig.piiWarningTtlMs);
+  const capabilityConfig =
+    pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
   return {
     scanUserInput: pluginConfig.piiScanUserInput !== false,
     includeLowConfidence: pluginConfig.piiIncludeLowConfidence === true,
-    warningTtlMs:
-      Number.isFinite(ttl) && ttl >= 0 ? ttl : DEFAULT_WARNING_TTL_MS,
+    enableBlock: capabilityConfig.enableBlock === true,
   };
-}
-
-function getRunId(event: any, ctx: any): string | undefined {
-  const ctxRunId = typeof ctx?.runId === "string" ? ctx.runId.trim() : "";
-  if (ctxRunId) {
-    return ctxRunId;
-  }
-  const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
-  return eventRunId || undefined;
-}
-
-function cleanupExpired(
-  warningsByRun: Map<string, WarningBucket>,
-  warningTtlMs: number,
-): void {
-  const now = Date.now();
-  for (const [runId, bucket] of warningsByRun) {
-    if (now - bucket.lastTouchedAt >= warningTtlMs) {
-      warningsByRun.delete(runId);
-    }
-  }
-}
-
-function pushWarning(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-  warning: string,
-  warningTtlMs: number,
-): void {
-  cleanupExpired(warningsByRun, warningTtlMs);
-  const now = Date.now();
-  const bucket =
-    warningsByRun.get(runId) ??
-    {
-      warnings: [],
-      createdAt: now,
-      lastTouchedAt: now,
-    };
-  if (!bucket.warnings.includes(warning)) {
-    bucket.warnings.push(warning);
-  }
-  bucket.lastTouchedAt = now;
-  warningsByRun.set(runId, bucket);
-}
-
-function readWarnings(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-  warningTtlMs: number,
-): string[] {
-  cleanupExpired(warningsByRun, warningTtlMs);
-  const bucket = warningsByRun.get(runId);
-  if (!bucket) {
-    return [];
-  }
-  return [...bucket.warnings];
-}
-
-function deleteWarnings(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-): void {
-  warningsByRun.delete(runId);
 }
 
 function shorten(value: string, limit = MAX_EVIDENCE_CHARS): string {
@@ -103,7 +34,11 @@ function safeString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function formatPiiWarning(verdict: string, findings: unknown[]): string {
+function formatPiiWarning(
+  verdict: string,
+  findings: unknown[],
+  finalMessage = "本轮请求将继续处理。",
+): string {
   const typedFindings = findings.filter(
     (finding): finding is Record<string, unknown> =>
       typeof finding === "object" && finding !== null && !Array.isArray(finding),
@@ -139,7 +74,7 @@ function formatPiiWarning(verdict: string, findings: unknown[]): string {
   if (evidence.length > 0) {
     parts.push(`脱敏示例：${evidence.join(", ")}`);
   }
-  parts.push("本轮请求将继续处理。");
+  parts.push(finalMessage);
   return parts.join("；");
 }
 
@@ -158,16 +93,24 @@ function buildScanArgs(includeLowConfidence: boolean): string[] {
   return args;
 }
 
+function getInboundText(event: any): string {
+  const content = typeof event?.content === "string" ? event.content : "";
+  if (content.trim()) {
+    return content;
+  }
+  return typeof event?.body === "string" ? event.body : "";
+}
+
 /**
  * 用户输入 PII / 凭据检测。
  *
- * v1 only scans event.prompt in before_prompt_build and shows non-blocking
- * warnings by queueing a same-run block reply in reply_dispatch.
+ * Scans the current inbound user text before dispatch. When enableBlock is
+ * true, a deny verdict handles the turn with a user-visible block message.
  */
 export const piiScan: SecurityCapability = {
   id: "pii-scan-user-input",
   name: "PII Checker",
-  hooks: ["before_prompt_build", "reply_dispatch"],
+  hooks: ["before_dispatch"],
   register(api) {
     const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
     if (!cfg.scanUserInput) {
@@ -175,22 +118,18 @@ export const piiScan: SecurityCapability = {
       return;
     }
 
-    const warningsByRun = new Map<string, WarningBucket>();
-
     api.on(
-      "before_prompt_build",
-      async (event: any, ctx: any) => {
+      "before_dispatch",
+      async (event: any) => {
         try {
-          cleanupExpired(warningsByRun, cfg.warningTtlMs);
-
-          const prompt = typeof event?.prompt === "string" ? event.prompt : "";
-          if (!prompt.trim()) {
+          const text = getInboundText(event);
+          if (!text.trim()) {
             return undefined;
           }
 
           const result = await callAgentSecCli(buildScanArgs(cfg.includeLowConfidence), {
             timeout: CLI_TIMEOUT_MS,
-            stdin: prompt,
+            stdin: text,
           });
           if (result.exitCode !== 0) {
             api.logger.warn(`[pii-checker] CLI failed: ${result.stderr || result.exitCode}`);
@@ -215,57 +154,29 @@ export const piiScan: SecurityCapability = {
             return undefined;
           }
 
-          const runId = getRunId(event, ctx);
-          if (!runId) {
-            api.logger.warn("[pii-checker] missing runId, warning not cached");
-            return undefined;
-          }
-
-          const warning = formatPiiWarning(verdict, findings);
-          pushWarning(warningsByRun, runId, warning, cfg.warningTtlMs);
-          api.logger.warn(`[pii-checker] ${verdict.toUpperCase()} — warning cached for runId=${runId}`);
-          return undefined;
-        } catch (error) {
-          api.logger.warn(`[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`);
-          return undefined;
-        }
-      },
-      { priority: 0 },
-    );
-
-    api.on(
-      "reply_dispatch",
-      async (event: any, ctx: any) => {
-        try {
-          const runId = getRunId(event, ctx);
-          if (!runId) {
-            cleanupExpired(warningsByRun, cfg.warningTtlMs);
-            return undefined;
-          }
-
-          if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
-            deleteWarnings(warningsByRun, runId);
-            return undefined;
-          }
-
-          const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
-          if (warnings.length === 0) {
-            return undefined;
-          }
-
-          const queued = ctx?.dispatcher?.sendBlockReply?.({
-            text: warnings.join("\n"),
-          });
-          if (queued) {
-            deleteWarnings(warningsByRun, runId);
+          const warning = formatPiiWarning(
+            verdict,
+            findings,
+            verdict === "deny" && cfg.enableBlock ? "本轮请求已被阻断。" : undefined,
+          );
+          api.logger.warn(
+            `[pii-checker] ${verdict.toUpperCase()} (enableBlock=${cfg.enableBlock}) — ${warning}`,
+          );
+          if (verdict === "deny" && cfg.enableBlock) {
+            return {
+              handled: true,
+              text: warning,
+            };
           }
           return undefined;
         } catch (error) {
-          api.logger.warn(`[pii-checker] reply_dispatch failed open: ${error instanceof Error ? error.message : String(error)}`);
+          api.logger.warn(
+            `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
+          );
           return undefined;
         }
       },
-      { priority: 0 },
+      { priority: BEFORE_DISPATCH_PRIORITY },
     );
   },
 };

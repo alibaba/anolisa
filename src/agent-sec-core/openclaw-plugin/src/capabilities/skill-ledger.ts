@@ -20,14 +20,7 @@ type CheckResult = {
 };
 
 type SkillLedgerConfig = {
-  requireApproval: boolean;
-  warningTtlMs: number;
-};
-
-type WarningBucket = {
-  warnings: string[];
-  createdAt: number;
-  lastTouchedAt: number;
+  enableBlock: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -37,7 +30,6 @@ type WarningBucket = {
 const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
-const DEFAULT_WARNING_TTL_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Status messages and confirmation policy
@@ -122,70 +114,10 @@ function confirmationSeverity(status: string): "warning" | "critical" | undefine
 }
 
 function readConfig(pluginConfig: Record<string, any>): SkillLedgerConfig {
-  const ttl = Number(pluginConfig.skillLedgerWarningTtlMs);
+  const capabilityConfig = pluginConfig.capabilities?.["skill-ledger"] ?? {};
   return {
-    requireApproval: pluginConfig.skillLedgerRequireApproval === true,
-    warningTtlMs:
-      Number.isFinite(ttl) && ttl >= 0 ? ttl : DEFAULT_WARNING_TTL_MS,
+    enableBlock: capabilityConfig.enableBlock !== false,
   };
-}
-
-function getRunId(event: any, ctx: any): string | undefined {
-  const ctxRunId = typeof ctx?.runId === "string" ? ctx.runId.trim() : "";
-  if (ctxRunId) return ctxRunId;
-  const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
-  return eventRunId || undefined;
-}
-
-function cleanupExpired(
-  warningsByRun: Map<string, WarningBucket>,
-  warningTtlMs: number,
-): void {
-  const now = Date.now();
-  for (const [runId, bucket] of warningsByRun) {
-    if (now - bucket.lastTouchedAt >= warningTtlMs) {
-      warningsByRun.delete(runId);
-    }
-  }
-}
-
-function pushWarning(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-  warning: string,
-  warningTtlMs: number,
-): void {
-  cleanupExpired(warningsByRun, warningTtlMs);
-  const now = Date.now();
-  const bucket =
-    warningsByRun.get(runId) ??
-    {
-      warnings: [],
-      createdAt: now,
-      lastTouchedAt: now,
-    };
-  if (!bucket.warnings.includes(warning)) {
-    bucket.warnings.push(warning);
-  }
-  bucket.lastTouchedAt = now;
-  warningsByRun.set(runId, bucket);
-}
-
-function readWarnings(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-  warningTtlMs: number,
-): string[] {
-  cleanupExpired(warningsByRun, warningTtlMs);
-  const bucket = warningsByRun.get(runId);
-  return bucket ? [...bucket.warnings] : [];
-}
-
-function deleteWarnings(
-  warningsByRun: Map<string, WarningBucket>,
-  runId: string,
-): void {
-  warningsByRun.delete(runId);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,10 +127,9 @@ function deleteWarnings(
 export const skillLedger: SecurityCapability = {
   id: "skill-ledger",
   name: "Skill Ledger",
-  hooks: ["before_tool_call", "reply_dispatch"],
+  hooks: ["before_tool_call"],
   register(api) {
     const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
-    const warningsByRun = new Map<string, WarningBucket>();
 
     /** Ensure signing keys exist; auto-init if missing. */
     let ensureKeysPromise: Promise<void> | null = null;
@@ -209,7 +140,9 @@ export const skillLedger: SecurityCapability = {
       ensureKeysPromise = (async () => {
         if (keysExist()) return;
 
-        api.logger.info("[skill-ledger] signing keys not found — running init --no-baseline");
+        api.logger.info(
+          "[skill-ledger] signing keys not found — running init --no-baseline",
+        );
         const result = await callAgentSecCli(
           ["skill-ledger", "init", "--no-baseline"],
           { timeout: DEFAULT_TIMEOUT_MS, traceContext },
@@ -218,7 +151,9 @@ export const skillLedger: SecurityCapability = {
         if (result.exitCode === 0) {
           api.logger.info("[skill-ledger] signing keys initialized successfully");
         } else if (!keysExist()) {
-          api.logger.warn(`[skill-ledger] init --no-baseline failed: ${result.stderr}`);
+          api.logger.warn(
+            `[skill-ledger] init --no-baseline failed: ${result.stderr}`,
+          );
           ensureKeysPromise = null; // allow retry on next call
         }
       })().catch(() => {
@@ -232,120 +167,82 @@ export const skillLedger: SecurityCapability = {
     ensureKeys().catch(() => {});
 
     // ── Hook handlers ───────────────────────────────────────────────
-    api.on("before_tool_call", async (event: any, ctx: any) => {
-      try {
-        if (!cfg.requireApproval) {
-          cleanupExpired(warningsByRun, cfg.warningTtlMs);
-        }
-
-        const skillMdPath = extractSkillPath(event);
-        if (!skillMdPath) return undefined;
-
-        const skillDir = resolveSkillDir(skillMdPath);
-        const skillName = basename(skillDir);
-        const traceContext = buildTraceContext(event, ctx);
-
-        // Ensure keys are ready
-        await ensureKeys(traceContext);
-
-        // Invoke CLI
-        const result = await callAgentSecCli(
-          ["skill-ledger", "check", skillDir],
-          { timeout: DEFAULT_TIMEOUT_MS, traceContext },
-        );
-
-        // Parse JSON output — CLI may return exit code 1 for deny/tampered states,
-        // but stdout still contains valid check result with status field.
-        // We should parse stdout even if exit code is non-zero.
-        let checkResult: CheckResult;
+    api.on(
+      "before_tool_call",
+      async (event: any, ctx: any) => {
         try {
-          checkResult = JSON.parse(result.stdout) as CheckResult;
-        } catch {
-          // Only log warning if parsing fails AND exit code is non-zero
-          if (result.exitCode !== 0) {
-            api.logger.warn(`[skill-ledger] CLI error (exit ${result.exitCode}): ${result.stderr}`);
-          } else {
-            api.logger.warn(`[skill-ledger] failed to parse CLI output: ${result.stdout}`);
-          }
-          return undefined;
-        }
+          const skillMdPath = extractSkillPath(event);
+          if (!skillMdPath) return undefined;
 
-        const status = checkResult.status ?? "unknown";
+          const skillDir = resolveSkillDir(skillMdPath);
+          const skillName = basename(skillDir);
+          const traceContext = buildTraceContext(event, ctx);
 
-        if (status === "pass") {
-          return undefined;
-        }
+          // Ensure keys are ready
+          await ensureKeys(traceContext);
 
-        const message = formatSkillLedgerMessage(status, skillName);
-        api.logger.warn(`[skill-ledger] ${message}`);
+          // Invoke CLI
+          const result = await callAgentSecCli(
+            ["skill-ledger", "check", skillDir],
+            { timeout: DEFAULT_TIMEOUT_MS, traceContext },
+          );
 
-        const severity = confirmationSeverity(status);
-        if (severity) {
-          if (cfg.requireApproval) {
-            return {
-              requireApproval: {
-                title: "Skill Ledger Security Check",
-                description: message,
-                severity,
-              },
-            };
-          }
-
-          const runId = getRunId(event, ctx);
-          if (!runId) {
-            api.logger.warn("[skill-ledger] missing runId, warning not cached");
-            return undefined;
-          }
-
-          pushWarning(warningsByRun, runId, `[skill-ledger] status=${status}; ${message}`, cfg.warningTtlMs);
-          api.logger.warn(`[skill-ledger] ${status.toUpperCase()} — warning cached for runId=${runId}`);
-        }
-
-        // For warn/error/unknown states, log and allow. Fail-open behavior for
-        // CLI/runtime failures remains handled by the catch/parse branches.
-        return undefined;
-      } catch (err) {
-        // Fail-open: uncaught errors must never block tool calls
-        api.logger.warn(`[skill-ledger] error: ${err}`);
-        return undefined;
-      }
-    }, { priority: 80 });
-
-    if (!cfg.requireApproval) {
-      api.on(
-        "reply_dispatch",
-        async (event: any, ctx: any) => {
+          // Parse JSON output. CLI may return exit code 1 for risky states,
+          // but stdout still contains valid check result with status field.
+          // We should parse stdout even if exit code is non-zero.
+          let checkResult: CheckResult;
           try {
-            const runId = getRunId(event, ctx);
-            if (!runId) {
-              cleanupExpired(warningsByRun, cfg.warningTtlMs);
-              return undefined;
+            checkResult = JSON.parse(result.stdout) as CheckResult;
+          } catch {
+            // Only log warning if parsing fails AND exit code is non-zero
+            if (result.exitCode !== 0) {
+              api.logger.warn(
+                `[skill-ledger] CLI error (exit ${result.exitCode}): ${result.stderr}`,
+              );
+            } else {
+              api.logger.warn(
+                `[skill-ledger] failed to parse CLI output: ${result.stdout}`,
+              );
             }
-
-            if (event?.sendPolicy === "deny" || event?.suppressUserDelivery === true) {
-              deleteWarnings(warningsByRun, runId);
-              return undefined;
-            }
-
-            const warnings = readWarnings(warningsByRun, runId, cfg.warningTtlMs);
-            if (warnings.length === 0) {
-              return undefined;
-            }
-
-            const queued = ctx?.dispatcher?.sendBlockReply?.({
-              text: `${warnings.join("\n")}\n本轮请求将继续处理。`,
-            });
-            if (queued) {
-              deleteWarnings(warningsByRun, runId);
-            }
-            return undefined;
-          } catch (err) {
-            api.logger.warn(`[skill-ledger] reply_dispatch failed open: ${err instanceof Error ? err.message : String(err)}`);
             return undefined;
           }
-        },
-        { priority: 0 },
-      );
-    }
+
+          const status = checkResult.status ?? "unknown";
+
+          if (status === "pass") {
+            return undefined;
+          }
+
+          const message = formatSkillLedgerMessage(status, skillName);
+          api.logger.warn(`[skill-ledger] ${message}`);
+
+          const severity = confirmationSeverity(status);
+          if (severity) {
+            if (cfg.enableBlock) {
+              return {
+                requireApproval: {
+                  title: "Skill Ledger Security Check",
+                  description: message,
+                  severity,
+                },
+              };
+            }
+
+            api.logger.warn(
+              `[skill-ledger] ${status.toUpperCase()} (enableBlock=false) — allowing`,
+            );
+          }
+
+          // For warn/error/unknown states, log and allow. Fail-open behavior for
+          // CLI/runtime failures remains handled by the catch/parse branches.
+          return undefined;
+        } catch (err) {
+          // Fail-open: uncaught errors must never block tool calls
+          api.logger.warn(`[skill-ledger] error: ${err}`);
+          return undefined;
+        }
+      },
+      { priority: 80 },
+    );
   },
 };
