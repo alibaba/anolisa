@@ -197,6 +197,7 @@ class SecurityEventRepository:
         self,
         event_type: str | None = None,
         category: str | None = None,
+        trace_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
         offset: int = 0,
@@ -205,6 +206,7 @@ class SecurityEventRepository:
         conditions = self._build_filters(
             event_type=event_type,
             category=category,
+            trace_id=trace_id,
             since=since,
             until=until,
         )
@@ -236,6 +238,9 @@ class SecurityEventRepository:
     def count_by(
         self,
         group_field: str,
+        event_type: str | None = None,
+        category: str | None = None,
+        trace_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
         offset: int = 0,
@@ -248,7 +253,13 @@ class SecurityEventRepository:
                 "Must be one of: category, event_type, trace_id"
             )
 
-        conditions = self._build_filters(since=since, until=until)
+        conditions = self._build_filters(
+            event_type=event_type,
+            category=category,
+            trace_id=trace_id,
+            since=since,
+            until=until,
+        )
         if offset == 0:
             stmt = select(column, func.count()).where(*conditions).group_by(column)
         else:

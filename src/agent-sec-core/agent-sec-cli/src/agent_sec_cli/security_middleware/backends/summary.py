@@ -33,8 +33,20 @@ class SummaryBackend(BaseBackend):
             since=since_iso,
             until=until_iso,
         )
-        by_category = reader.count_by("category", since=since_iso, until=until_iso)
-        by_event_type = reader.count_by("event_type", since=since_iso, until=until_iso)
+        by_category = reader.count_by(
+            "category",
+            category=category,
+            event_type=event_type,
+            since=since_iso,
+            until=until_iso,
+        )
+        by_event_type = reader.count_by(
+            "event_type",
+            category=category,
+            event_type=event_type,
+            since=since_iso,
+            until=until_iso,
+        )
 
         # Build summary data
         data = {

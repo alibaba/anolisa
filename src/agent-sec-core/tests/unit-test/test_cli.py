@@ -229,6 +229,93 @@ def test_main_invalid_trace_context_exits_before_app(mock_app, monkeypatch, caps
     mock_app.assert_not_called()
 
 
+def test_events_count_forwards_trace_id_filter():
+    captured = {}
+
+    class Reader:
+        def count(
+            self,
+            *,
+            event_type=None,
+            category=None,
+            trace_id=None,
+            since=None,
+            until=None,
+            offset=0,
+        ):
+            captured.update(
+                {
+                    "event_type": event_type,
+                    "category": category,
+                    "trace_id": trace_id,
+                    "since": since,
+                    "until": until,
+                    "offset": offset,
+                }
+            )
+            return 2
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=Reader()):
+        result = CliRunner().invoke(
+            app, ["events", "--trace-id", "trace-abc", "--count"]
+        )
+
+    assert result.exit_code == 0
+    assert result.output == "2\n"
+    assert captured["trace_id"] == "trace-abc"
+
+
+def test_events_count_by_forwards_filters():
+    captured = {}
+
+    class Reader:
+        def count_by(
+            self,
+            group_field,
+            *,
+            event_type=None,
+            category=None,
+            trace_id=None,
+            since=None,
+            until=None,
+            offset=0,
+        ):
+            captured.update(
+                {
+                    "group_field": group_field,
+                    "event_type": event_type,
+                    "category": category,
+                    "trace_id": trace_id,
+                    "since": since,
+                    "until": until,
+                    "offset": offset,
+                }
+            )
+            return {"sandbox": 1}
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=Reader()):
+        result = CliRunner().invoke(
+            app,
+            [
+                "events",
+                "--count-by",
+                "category",
+                "--event-type",
+                "alpha",
+                "--category",
+                "sandbox",
+                "--trace-id",
+                "trace-abc",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert captured["group_field"] == "category"
+    assert captured["event_type"] == "alpha"
+    assert captured["category"] == "sandbox"
+    assert captured["trace_id"] == "trace-abc"
+
+
 class TestHardenCli(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()

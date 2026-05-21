@@ -1,7 +1,6 @@
 """Unit tests for security_middleware.backends.summary — SummaryBackend."""
 
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -53,6 +52,24 @@ class TestSummaryBackend(unittest.TestCase):
         self.assertEqual(result.data["by_category"]["sandbox"], 5)
         self.assertEqual(result.data["by_category"]["hardening"], 3)
         self.assertIn("Total events: 8", result.stdout)
+
+    @patch("agent_sec_cli.security_middleware.backends.summary.get_reader")
+    def test_summary_breakdowns_respect_filters(self, mock_get_reader):
+        self.writer.write(_make_event(category="sandbox", event_type="alpha"))
+        self.writer.write(_make_event(category="sandbox", event_type="alpha"))
+        self.writer.write(_make_event(category="hardening", event_type="alpha"))
+        self.writer.write(_make_event(category="sandbox", event_type="beta"))
+
+        mock_get_reader.return_value = self.reader
+
+        backend = SummaryBackend()
+        ctx = RequestContext(action="summary")
+        result = backend.execute(ctx, hours=24, category="sandbox", event_type="alpha")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["total_events"], 2)
+        self.assertEqual(result.data["by_category"], {"sandbox": 2})
+        self.assertEqual(result.data["by_event_type"], {"alpha": 2})
 
     @patch("agent_sec_cli.security_middleware.backends.summary.get_reader")
     def test_summary_empty_db(self, mock_get_reader):

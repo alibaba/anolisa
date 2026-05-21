@@ -87,6 +87,7 @@ class SqliteEventReader:
         self,
         event_type: str | None = None,
         category: str | None = None,
+        trace_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
         offset: int = 0,
@@ -95,6 +96,7 @@ class SqliteEventReader:
         return self._repository.count(
             event_type=event_type,
             category=category,
+            trace_id=trace_id,
             since=since,
             until=until,
             offset=offset,
@@ -103,6 +105,9 @@ class SqliteEventReader:
     def count_by(
         self,
         group_field: str,
+        event_type: str | None = None,
+        category: str | None = None,
+        trace_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
         offset: int = 0,
@@ -110,6 +115,9 @@ class SqliteEventReader:
         """Count events grouped by a specific field."""
         return self._repository.count_by(
             group_field,
+            event_type=event_type,
+            category=category,
+            trace_id=trace_id,
             since=since,
             until=until,
             offset=offset,

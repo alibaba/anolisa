@@ -582,6 +582,7 @@ def events(
         result = reader.count(
             event_type=event_type,
             category=category,
+            trace_id=trace_id,
             since=resolved_since,
             until=resolved_until,
             offset=offset,
@@ -600,7 +601,13 @@ def events(
             raise typer.Exit(code=1)
 
         result = reader.count_by(
-            count_by, since=resolved_since, until=resolved_until, offset=offset
+            count_by,
+            event_type=event_type,
+            category=category,
+            trace_id=trace_id,
+            since=resolved_since,
+            until=resolved_until,
+            offset=offset,
         )
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(code=0)

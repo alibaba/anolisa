@@ -286,6 +286,15 @@ class TestSqliteEventReader:
         writer.write(_make_event(category="hardening"))
         assert reader.count(category="sandbox") == 2
 
+    def test_count_filter_by_trace_id(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        writer.write(_make_event(trace_id="trace-abc"))
+        writer.write(_make_event(trace_id="trace-abc"))
+        writer.write(_make_event(trace_id="trace-xyz"))
+
+        assert reader.count(trace_id="trace-abc") == 2
+
     def test_count_by_category(
         self, writer: SqliteEventWriter, reader: SqliteEventReader
     ) -> None:
@@ -305,6 +314,34 @@ class TestSqliteEventReader:
         result = reader.count_by("event_type")
         assert result["alpha"] == 2
         assert result["beta"] == 1
+
+    def test_count_by_filter_by_trace_id(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        writer.write(_make_event(category="sandbox", trace_id="trace-abc"))
+        writer.write(_make_event(category="hardening", trace_id="trace-abc"))
+        writer.write(_make_event(category="sandbox", trace_id="trace-xyz"))
+
+        result = reader.count_by("category", trace_id="trace-abc")
+
+        assert result == {"hardening": 1, "sandbox": 1}
+
+    def test_count_by_filter_by_event_type_and_category(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        writer.write(
+            _make_event(event_type="alpha", category="sandbox", trace_id="trace-1")
+        )
+        writer.write(
+            _make_event(event_type="alpha", category="hardening", trace_id="trace-2")
+        )
+        writer.write(
+            _make_event(event_type="beta", category="sandbox", trace_id="trace-3")
+        )
+
+        result = reader.count_by("trace_id", event_type="alpha", category="sandbox")
+
+        assert result == {"trace-1": 1}
 
     def test_count_by_invalid_field_raises(self, reader: SqliteEventReader) -> None:
         with pytest.raises(ValueError):
