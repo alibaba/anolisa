@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.5.0
+
+**PII Scanner — Personal information leak detection**
+
+- Added PIIChecker scan CLI with text/file input, regex/validator-based detection, redaction, and security middleware integration. (#525)
+- Added PIIChecker hooks for cosh and OpenClaw with stdin-based input passing. (#539)
+- Added Hermes PII checker hook. (#556)
+- Fixed scan-pii module mode detection via subprocess. (#540)
+
+**Security Observability — Agent run metrics & posture insights**
+
+- Added security observability schema, metrics definition, and CLI with jsonl writer for agent runs. (#488)
+- Added openclaw plugin for security observability. (#515)
+- Added cosh hook for security observability. (#528)
+- Persisted observability records to sqldb with CLI review command. (#544)
+- Added observability plugin for hermes. (#553)
+- Correlated security events with observability events and supported batch query. (#578)
+- Respected trace-id filter in count queries. (#595)
+
+**Hermes Plugin — AI Agent integration framework**
+
+- Added hermes-plugin framework with abstract hook class and code scan capability. (#536)
+- Added Hermes prompt-scan capability. (#579)
+- Added Hermes PII checker hook. (#556)
+- Added Hermes skill ledger hook. (#565)
+- Added observability plugin for hermes. (#553)
+- Supported correlation context in hermes agent plugin. (#590)
+- Added hermes plugin install for rpmbuild and build from scratch. (#577)
+- Stabilized Hermes skill-ledger warning delivery for non-pass skill checks. (#600)
+
+**Correlation & Tracing Context**
+
+- Unified caller tracing context across CLI, OpenClaw, and cosh with `--trace-context` JSON and SQLite schema v2. (#569)
+- Supported correlation context in hermes agent plugin. (#590)
+- Correlated security events with observability events. (#578)
+
+**Skill Ledger**
+
+- Integrated code-scanner with skill-ledger for unified security assessment. (#505)
+- Updated skill ledger security interactions. (#529)
+- Made openclaw skill ledger approval configurable. (#575)
+- Added Hermes skill ledger hook. (#565)
+- Refined skill ledger scan workflow and aligned documentation. (#529)
+- Included skill-ledger e2e in install flows. (#573)
+- Fixed skill-ledger hook scope limitation. (#497)
+- Fixed managed skill dirs for discovery. (#510)
+- Expanded home paths for skill-ledger. (#596)
+- Hardened skill ledger recovery and key UX. (#575)
+
+**Code Scanner**
+
+- Added code-scan requireApproval config for openclaw. (#560)
+- Added OpenClaw enableBlock hook policies. (#586)
+
+**Security Middleware & Event System**
+
+- Fixed TOCTOU race condition at sqldb read path. (#546)
+- Made SQLAlchemy lazy import for non-DB subcommands. (#581)
+- Lowered frequency for SQL maintenance operations. (#546)
+
+**Prompt Scanner**
+
+- Added Hermes prompt-scan capability via hermes plugin. (#579)
+- Fixed warmup detection from error-string matching to file-based check. (#500)
+- Fixed prompt text passing via stdin instead of argv. (#579)
+
+**Toolchain & CI**
+
+- Added build-all support with local space install for sec-core. (#527)
+- Added hermes plugin install for rpmbuild and from-scratch build. (#577)
+- Included skill-ledger e2e in install flows. (#573)
+- Added adapter manifest for capability discovery. (#577)
+
 ## 0.4.0
 
 **Prompt Scanner**
