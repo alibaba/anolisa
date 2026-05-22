@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 SKILL_DST="${HOME}/.openclaw/skills/ws-ckpt"
 PLUGIN_ID="ws-ckpt"
 

@@ -27,10 +27,12 @@ CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
 build:
 	cd src && cargo build --release --workspace
+	cd src/plugins/openclaw && npm install --ignore-scripts && npm run build
 
 install: build
 ifeq ($(INSTALL_PROFILE),user)
-	@echo "User mode: ws-ckpt daemon requires root, skipping install."
+	@echo "User mode: ws-ckpt requires a systemd/root daemon; skipping install."
+	@echo "Use INSTALL_PROFILE=system to install ws-ckpt service and CLI."
 else
 	@# 1. Install files
 	install -d -m 0755 "$(DESTDIR)$(BINDIR)"
@@ -41,8 +43,16 @@ else
 	cp -pr src/skills/ws-ckpt/. "$(DESTDIR)$(COSH_SKILLS_DIR)"
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
 	install -p -m 0644 adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
-	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)"
-	cp -pr src/plugins/. "$(DESTDIR)$(PLUGINS_DIR)/"
+	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/scripts"
+	install -p -m 0644 scripts/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -p -m 0755 scripts/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -p -m 0755 scripts/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -p -m 0755 scripts/install-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -p -m 0755 scripts/uninstall-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)/openclaw"
+	install -p -m 0644 src/plugins/openclaw/package.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
+	install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
+	cp -pr src/plugins/openclaw/dist "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
 	install -d -m 0755 "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)"
 	install -p -m 0644 src/systemd/ws-ckpt.service \
 		"$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"
@@ -62,7 +72,7 @@ endif
 
 uninstall:
 ifeq ($(INSTALL_PROFILE),user)
-	@echo "User mode: nothing was installed, skipping uninstall."
+	@echo "User mode: ws-ckpt was not installed (requires systemd/root daemon); skipping uninstall."
 else
 	@# 1. Pre-removal: recover workspaces and stop daemon (skip when staging)
 	@if [ -z "$(DESTDIR)" ]; then \

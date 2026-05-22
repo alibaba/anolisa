@@ -1,13 +1,15 @@
 #!/bin/bash
 
-PLUGIN_SRC=/usr/share/anolisa/runtime/ws-ckpt/plugins/hermes
+set -euo pipefail
+
+# shellcheck source=lib-discover.sh
+source "$(dirname "$0")/lib-discover.sh"
+
 PLUGIN_DST="${HOME}/.hermes/plugins/ws-ckpt"
-SKILL_SRC=/usr/share/anolisa/runtime/skills/ws-ckpt
 SKILL_DST="${HOME}/.hermes/skills/ws-ckpt"
 
-# 1. Check plugin source
-if [ -d "$PLUGIN_SRC" ]; then
-    # Plugin available, install via symlink
+# 1. Try plugin install (preferred)
+if PLUGIN_SRC=$(find_plugin_src hermes); then
     mkdir -p "$(dirname "$PLUGIN_DST")"
     ln -sfn "$PLUGIN_SRC" "$PLUGIN_DST"
     echo "hermes ws-ckpt plugin linked: $PLUGIN_DST -> $PLUGIN_SRC"
@@ -15,11 +17,11 @@ if [ -d "$PLUGIN_SRC" ]; then
 fi
 
 # 2. Fallback to skill install
-if [ -d "$SKILL_SRC" ]; then
+if SKILL_SRC=$(find_skill_src); then
     mkdir -p "$SKILL_DST"
     cp -pr "$SKILL_SRC"/. "$SKILL_DST/"
-    echo "skill installed to $SKILL_DST"
+    echo "skill installed to $SKILL_DST (from $SKILL_SRC)"
 else
-    echo "ERROR: neither $PLUGIN_SRC nor $SKILL_SRC exists, please install ws-ckpt via RPM or make install first"
+    print_search_error
     exit 1
 fi

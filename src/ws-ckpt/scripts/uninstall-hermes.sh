@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 PLUGIN_DST="${HOME}/.hermes/plugins/ws-ckpt"
 SKILL_DST="${HOME}/.hermes/skills/ws-ckpt"
 

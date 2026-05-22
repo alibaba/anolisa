@@ -31,7 +31,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/src/index.js"
     ]
   }
 }

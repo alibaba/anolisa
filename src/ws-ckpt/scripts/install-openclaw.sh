@@ -1,7 +1,10 @@
 #!/bin/bash
 
-PLUGIN_SRC=/usr/share/anolisa/runtime/ws-ckpt/plugins/openclaw
-SKILL_SRC=/usr/share/anolisa/runtime/skills/ws-ckpt
+set -euo pipefail
+
+# shellcheck source=lib-discover.sh
+source "$(dirname "$0")/lib-discover.sh"
+
 SKILL_DST="${HOME}/.openclaw/skills/ws-ckpt"
 
 # 1. Check openclaw availability
@@ -11,19 +14,19 @@ if ! command -v openclaw &>/dev/null; then
 fi
 
 # 2. Try plugin install (preferred)
-if [ -d "$PLUGIN_SRC" ]; then
+if PLUGIN_SRC=$(find_plugin_src openclaw); then
     openclaw plugins install "$PLUGIN_SRC"
     openclaw plugins enable ws-ckpt 2>/dev/null || true
-    echo "openclaw ws-ckpt plugin installed and enabled successfully"
+    echo "openclaw ws-ckpt plugin installed and enabled successfully (from $PLUGIN_SRC)"
     exit 0
 fi
 
 # 3. Fallback to skill install
-if [ -d "$SKILL_SRC" ]; then
+if SKILL_SRC=$(find_skill_src); then
     mkdir -p "$SKILL_DST"
     cp -pr "$SKILL_SRC"/. "$SKILL_DST/"
-    echo "skill installed to $SKILL_DST"
+    echo "skill installed to $SKILL_DST (from $SKILL_SRC)"
 else
-    echo "ERROR: neither $PLUGIN_SRC nor $SKILL_SRC exists, please install ws-ckpt via RPM or make install first"
+    print_search_error
     exit 1
 fi
