@@ -22,6 +22,7 @@ use super::procmon::{ProcMon, ProcMonEvent};
 use super::filewatch::{FileWatch, RawFileWatchEvent};
 use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 use super::udpdns::{UdpDns, RawUdpDnsEvent};
+use crate::config::TcpTarget;
 use super::tcpsniff::TcpSniff;
 
 const POLL_TIMEOUT_MS: u64 = 100;
@@ -69,7 +70,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_target_ports: &[u16]) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_targets: &[TcpTarget]) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -113,15 +114,15 @@ impl Probes {
             None
         };
 
-        // Optionally create tcpsniff - captures plain HTTP traffic on configured ports
-        let tcpsniff = if !tcp_target_ports.is_empty() {
-            let mut tcp = TcpSniff::new_with_maps(&map_handle, &rb_handle)
+        // Optionally create tcpsniff - captures plain HTTP traffic to configured IP/port targets
+        let tcpsniff = if !tcp_targets.is_empty() {
+            let mut tcp = TcpSniff::new_with_maps(&rb_handle)
                 .context("failed to create tcpsniff")?;
-            tcp.set_target_ports(tcp_target_ports)
-                .context("failed to set tcp target ports")?;
+            tcp.set_targets(tcp_targets)
+                .context("failed to set tcp targets")?;
             Some(tcp)
         } else {
-            log::info!("TcpSniff probe disabled (no tcp_target_ports configured)");
+            log::info!("TcpSniff probe disabled (no tcp_targets configured)");
             None
         };
 

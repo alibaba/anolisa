@@ -3,9 +3,11 @@
 //
 // TCP plain-text traffic capture BPF program.
 // Hooks tcp_sendmsg (fentry) and tcp_recvmsg (fentry+fexit) to capture
-// HTTP traffic on configurable ports. Emits probe_SSL_data_t events
+// HTTP traffic on configurable IP/port targets. Emits probe_SSL_data_t events
 // (same format as sslsniff) so the entire downstream pipeline works unchanged.
+// Filters by destination IP/port only; no process-level filtering.
 
+#define NO_TRACED_PROCESSES_MAP
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
@@ -76,13 +78,20 @@ static __always_inline struct msg_buf_info get_msg_buf_info(struct msghdr *msg)
     return info;
 }
 
-// --- Port filter map (populated from userspace) ---
+// --- IP/port filter map (populated from userspace) ---
+// Key: destination IP + port, 0 = wildcard (any IP or any port).
+struct tcp_target_key {
+    __be32 ip;    // destination IPv4, network byte order; 0 = any IP
+    __be16 port;  // destination port, network byte order; 0 = any port
+    __u16  pad;   // alignment padding
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
-    __type(key, __u16);   // port in network byte order
-    __type(value, __u8);  // dummy
-} tcp_target_ports SEC(".maps");
+    __type(key, struct tcp_target_key);
+    __type(value, __u8);
+} tcp_targets SEC(".maps");
 
 // --- Stash map for tcp_recvmsg entry → exit ---
 struct tcp_recv_args {
@@ -99,11 +108,32 @@ struct {
     __type(value, struct tcp_recv_args);
 } tcp_recv_stash SEC(".maps");
 
-// Check if destination port is in the target list
-static __always_inline bool is_target_port(struct sock *sk)
+// Check if the connection's destination matches any configured target.
+// Lookup priority (most-specific first):
+//   1. exact ip+port match
+//   2. ip-only match (port=0 means any port)
+//   3. port-only match (ip=0 means any ip)
+static __always_inline bool is_target_conn(struct sock *sk)
 {
-    __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);
-    return bpf_map_lookup_elem(&tcp_target_ports, &dport) != NULL;
+    struct tcp_target_key key = {};
+    __be32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    __be16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);
+
+    // 1. exact ip+port
+    key.ip = daddr;
+    key.port = dport;
+    if (bpf_map_lookup_elem(&tcp_targets, &key))
+        return true;
+
+    // 2. ip-only (port wildcard)
+    key.port = 0;
+    if (bpf_map_lookup_elem(&tcp_targets, &key))
+        return true;
+
+    // 3. port-only (ip wildcard)
+    key.ip = 0;
+    key.port = dport;
+    return bpf_map_lookup_elem(&tcp_targets, &key) != NULL;
 }
 
 // Emit a probe_SSL_data_t event given a pre-resolved user buffer pointer.
@@ -112,8 +142,7 @@ static __always_inline int emit_tcp_event_buf(
     void *user_buf,
     u32 data_len,
     int rw,           // 1=send(request), 0=recv(response)
-    u64 start_ns,
-    u32 ns_pid)
+    u64 start_ns)
 {
     if (data_len == 0 || !user_buf)
         return 0;
@@ -124,12 +153,13 @@ static __always_inline int emit_tcp_event_buf(
         return 0;
 
     u64 now = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
 
     data->source = EVENT_SOURCE_SSL;  // reuse SSL source for seamless pipeline
     data->timestamp_ns = now;
     data->delta_ns = (start_ns > 0) ? (now - start_ns) : 0;
-    data->pid = ns_pid;
-    data->tid = (u32)bpf_get_current_pid_tgid();
+    data->pid = (u32)(pid_tgid >> 32);
+    data->tid = (u32)pid_tgid;
     data->uid = bpf_get_current_uid_gid();
     data->len = data_len;
     data->rw = rw;
@@ -173,14 +203,7 @@ static __always_inline const struct iovec *get_iov_ptr(struct iov_iter *iter)
 SEC("fentry/tcp_sendmsg")
 int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
-        return 0;
-
-    if (!is_target_port(sk))
+    if (!is_target_conn(sk))
         return 0;
 
     struct iov_iter *iter = &msg->msg_iter;
@@ -194,7 +217,7 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
             u32 count = (u32)BPF_CORE_READ(iter, count);
             if (count > (u32)size)
                 count = (u32)size;
-            return emit_tcp_event_buf(sk, ubuf, count, 1, 0, ns_pid);
+            return emit_tcp_event_buf(sk, ubuf, count, 1, 0);
         }
     }
 
@@ -215,11 +238,12 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         return 0;
 
     u64 now = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = now;
     data->delta_ns = 0;
-    data->pid = ns_pid;
-    data->tid = (u32)bpf_get_current_pid_tgid();
+    data->pid = (u32)(pid_tgid >> 32);
+    data->tid = (u32)pid_tgid;
     data->uid = bpf_get_current_uid_gid();
     data->len = (u32)size;
     data->rw = 1;
@@ -276,14 +300,7 @@ SEC("fentry/tcp_recvmsg")
 int BPF_PROG(trace_tcp_recvmsg_entry, struct sock *sk, struct msghdr *msg,
              size_t size, int flags)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
-        return 0;
-
-    if (!is_target_port(sk))
+    if (!is_target_conn(sk))
         return 0;
 
     // Peek flag means data won't be consumed — skip
@@ -295,7 +312,7 @@ int BPF_PROG(trace_tcp_recvmsg_entry, struct sock *sk, struct msghdr *msg,
     if (!bi.buf)
         return 0;
 
-    u32 tid = (u32)pid_tgid;
+    u32 tid = (u32)bpf_get_current_pid_tgid();
     struct tcp_recv_args args = {
         .sk = (u64)sk,
         .user_buf = (u64)bi.buf,
@@ -311,83 +328,7 @@ SEC("fexit/tcp_recvmsg")
 int BPF_PROG(trace_tcp_recvmsg_exit, struct sock *sk, struct msghdr *msg,
              size_t size, int flags, int *addr_len, int ret)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    u32 tid = (u32)pid_tgid;
-
-    struct tcp_recv_args *args = bpf_map_lookup_elem(&tcp_recv_stash, &tid);
-    if (!args) 
-        return 0;
-
-    u64 stashed_sk = args->sk;
-    u64 stashed_buf = args->user_buf;
-    u64 stashed_len = args->buf_len;
-    u64 start_ns = args->start_ns;
-    bpf_map_delete_elem(&tcp_recv_stash, &tid);
-
-    if (ret <= 0)
-        return 0;
-
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
-        return 0;
-
-    // Clamp ret to buffer capacity
-    u32 copy_len = (u32)ret;
-    if ((u64)ret > stashed_len)
-        copy_len = (u32)stashed_len;
-
-    return emit_tcp_event_buf(
-        (struct sock *)stashed_sk,
-        (void *)stashed_buf,
-        copy_len, 0, start_ns, ns_pid);
-}
-
-// --- Kernel 5.8–5.17 variants ---
-// tcp_recvmsg had an extra `int nonblock` parameter before 5.18 (commit ec095263a965).
-// Signature: int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-//                            int nonblock, int flags, int *addr_len)
-// Userspace tries the new (5.18+) programs first; falls back to these on older kernels.
-
-SEC("fentry/tcp_recvmsg")
-int BPF_PROG(trace_tcp_recvmsg_entry_old, struct sock *sk, struct msghdr *msg,
-             size_t size, int nonblock, int flags)
-{
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
-        return 0;
-
-    if (!is_target_port(sk))
-        return 0;
-
-    if (flags & MSG_PEEK)
-        return 0;
-
-    struct msg_buf_info bi = get_msg_buf_info(msg);
-    if (!bi.buf)
-        return 0;
-
-    u32 tid = (u32)pid_tgid;
-    struct tcp_recv_args args = {
-        .sk = (u64)sk,
-        .user_buf = (u64)bi.buf,
-        .buf_len = bi.len,
-        .start_ns = bpf_ktime_get_ns(),
-    };
-    bpf_map_update_elem(&tcp_recv_stash, &tid, &args, BPF_ANY);
-    return 0;
-}
-
-SEC("fexit/tcp_recvmsg")
-int BPF_PROG(trace_tcp_recvmsg_exit_old, struct sock *sk, struct msghdr *msg,
-             size_t size, int nonblock, int flags, int *addr_len, int ret)
-{
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    u32 tid = (u32)pid_tgid;
+    u32 tid = (u32)bpf_get_current_pid_tgid();
 
     struct tcp_recv_args *args = bpf_map_lookup_elem(&tcp_recv_stash, &tid);
     if (!args)
@@ -402,8 +343,65 @@ int BPF_PROG(trace_tcp_recvmsg_exit_old, struct sock *sk, struct msghdr *msg,
     if (ret <= 0)
         return 0;
 
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
+    // Clamp ret to buffer capacity
+    u32 copy_len = (u32)ret;
+    if ((u64)ret > stashed_len)
+        copy_len = (u32)stashed_len;
+
+    return emit_tcp_event_buf(
+        (struct sock *)stashed_sk,
+        (void *)stashed_buf,
+        copy_len, 0, start_ns);
+}
+
+// --- Kernel 5.8–5.17 variants ---
+// tcp_recvmsg had an extra `int nonblock` parameter before 5.18 (commit ec095263a965).
+// Signature: int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+//                            int nonblock, int flags, int *addr_len)
+// Userspace tries the new (5.18+) programs first; falls back to these on older kernels.
+
+SEC("fentry/tcp_recvmsg")
+int BPF_PROG(trace_tcp_recvmsg_entry_old, struct sock *sk, struct msghdr *msg,
+             size_t size, int nonblock, int flags)
+{
+    if (!is_target_conn(sk))
+        return 0;
+
+    if (flags & MSG_PEEK)
+        return 0;
+
+    struct msg_buf_info bi = get_msg_buf_info(msg);
+    if (!bi.buf)
+        return 0;
+
+    u32 tid = (u32)bpf_get_current_pid_tgid();
+    struct tcp_recv_args args = {
+        .sk = (u64)sk,
+        .user_buf = (u64)bi.buf,
+        .buf_len = bi.len,
+        .start_ns = bpf_ktime_get_ns(),
+    };
+    bpf_map_update_elem(&tcp_recv_stash, &tid, &args, BPF_ANY);
+    return 0;
+}
+
+SEC("fexit/tcp_recvmsg")
+int BPF_PROG(trace_tcp_recvmsg_exit_old, struct sock *sk, struct msghdr *msg,
+             size_t size, int nonblock, int flags, int *addr_len, int ret)
+{
+    u32 tid = (u32)bpf_get_current_pid_tgid();
+
+    struct tcp_recv_args *args = bpf_map_lookup_elem(&tcp_recv_stash, &tid);
+    if (!args)
+        return 0;
+
+    u64 stashed_sk = args->sk;
+    u64 stashed_buf = args->user_buf;
+    u64 stashed_len = args->buf_len;
+    u64 start_ns = args->start_ns;
+    bpf_map_delete_elem(&tcp_recv_stash, &tid);
+
+    if (ret <= 0)
         return 0;
 
     u32 copy_len = (u32)ret;
@@ -413,7 +411,7 @@ int BPF_PROG(trace_tcp_recvmsg_exit_old, struct sock *sk, struct msghdr *msg,
     return emit_tcp_event_buf(
         (struct sock *)stashed_sk,
         (void *)stashed_buf,
-        copy_len, 0, start_ns, ns_pid);
+        copy_len, 0, start_ns);
 }
 
 char LICENSE[] SEC("license") = "GPL";

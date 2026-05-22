@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 // Copyright (c) 2025 AgentSight Project
 //
-// TCP plain-text traffic probe - captures HTTP traffic on configurable ports
+// TCP plain-text traffic probe - captures HTTP traffic to configured IP/port targets
 // by hooking tcp_sendmsg (fentry) and tcp_recvmsg (fentry+fexit).
 //
+// Filters by destination IP/port only (no process-level filtering).
 // Emits probe_SSL_data_t events (same format as sslsniff) so the entire
 // downstream pipeline (parser, aggregator, analyzer, storage) works unchanged.
 //
@@ -12,7 +13,7 @@
 //   - Kernel 5.8–5.17: tcp_recvmsg(sk, msg, size, nonblock, flags, addr_len)
 //   Userspace tries the new signature first and falls back to old on attach failure.
 
-use crate::config;
+use crate::config::{self, TcpTarget};
 use anyhow::{Context, Result};
 use libbpf_rs::{
     Link, MapHandle, MapFlags,
@@ -20,6 +21,7 @@ use libbpf_rs::{
 };
 use std::{
     mem::MaybeUninit,
+    net::Ipv4Addr,
     os::fd::AsFd,
 };
 
@@ -43,7 +45,6 @@ impl TcpSniff {
     ///
     /// `use_old_sig`: true → load old (5.8-5.17) programs, false → new (5.18+)
     fn load_skel(
-        traced_processes: &MapHandle,
         rb: &MapHandle,
         use_old_sig: bool,
     ) -> Result<(
@@ -56,12 +57,7 @@ impl TcpSniff {
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open tcpsniff BPF object")?;
 
-        // Reuse external maps
-        open_skel
-            .maps_mut()
-            .traced_processes()
-            .reuse_fd(traced_processes.as_fd())
-            .context("failed to reuse traced_processes map for tcpsniff")?;
+        // Reuse the shared ring buffer
         open_skel
             .maps_mut()
             .rb()
@@ -106,11 +102,12 @@ impl TcpSniff {
         Ok((open_object, skel))
     }
 
-    /// Create a new TcpSniff that reuses existing traced_processes and ring buffer maps.
+    /// Create a new TcpSniff that reuses the shared ring buffer map.
     /// Automatically detects the tcp_recvmsg signature for the running kernel.
-    pub fn new_with_maps(traced_processes: &MapHandle, rb: &MapHandle) -> Result<Self> {
+    /// Does NOT require traced_processes — filtering is by destination IP/port only.
+    pub fn new_with_maps(rb: &MapHandle) -> Result<Self> {
         // Try new signature first (5.18+), fall back to old (5.8-5.17) on load failure
-        let (open_object, skel, use_old_sig) = match Self::load_skel(traced_processes, rb, false) {
+        let (open_object, skel, use_old_sig) = match Self::load_skel(rb, false) {
             Ok((obj, skel)) => {
                 log::info!("TcpSniff: loaded with new tcp_recvmsg signature (5.18+)");
                 (obj, skel, false)
@@ -120,7 +117,7 @@ impl TcpSniff {
                     "TcpSniff: new tcp_recvmsg signature failed ({}), trying old (5.8-5.17)",
                     e
                 );
-                let (obj, skel) = Self::load_skel(traced_processes, rb, true)
+                let (obj, skel) = Self::load_skel(rb, true)
                     .context("failed to load tcpsniff with old tcp_recvmsg signature")?;
                 log::info!("TcpSniff: loaded with old tcp_recvmsg signature (5.8-5.17)");
                 (obj, skel, true)
@@ -135,22 +132,39 @@ impl TcpSniff {
         })
     }
 
-    /// Populate the BPF tcp_target_ports map with the given ports.
+    /// Populate the BPF tcp_targets map with the given targets.
     /// Must be called after new_with_maps() and before attach().
-    pub fn set_target_ports(&mut self, ports: &[u16]) -> Result<()> {
+    ///
+    /// Key layout (8 bytes): ip (4 bytes BE) | port (2 bytes BE) | pad (2 bytes zero)
+    pub fn set_targets(&mut self, targets: &[TcpTarget]) -> Result<()> {
         let binding = self.skel.maps();
-        let map = binding.tcp_target_ports();
+        let map = binding.tcp_targets();
         let dummy: u8 = 1;
-        for &port in ports {
-            let net_port = port.to_be(); // convert to network byte order
-            map.update(
-                &net_port.to_ne_bytes(),
-                &[dummy],
-                MapFlags::ANY,
-            )
-            .with_context(|| format!("failed to add port {} to tcp_target_ports map", port))?;
+
+        for target in targets {
+            let ip_be: u32 = match target.ip {
+                Some(Ipv4Addr::UNSPECIFIED) | None => 0u32,
+                Some(ip) => u32::from(ip).to_be(),
+            };
+            let port_be: u16 = match target.port {
+                None => 0u16,
+                Some(p) => p.to_be(),
+            };
+            // Serialize key as [ip_be(4)] [port_be(2)] [pad(2)]
+            let mut key = [0u8; 8];
+            key[0..4].copy_from_slice(&ip_be.to_ne_bytes());
+            key[4..6].copy_from_slice(&port_be.to_ne_bytes());
+            // key[6..8] = 0 (pad)
+
+            map.update(&key, &[dummy], MapFlags::ANY)
+                .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
         }
-        log::info!("TcpSniff: configured {} target port(s): {:?}", ports.len(), ports);
+
+        log::info!(
+            "TcpSniff: configured {} target(s): {:?}",
+            targets.len(),
+            targets
+        );
         Ok(())
     }
 

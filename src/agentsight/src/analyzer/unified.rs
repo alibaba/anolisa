@@ -459,11 +459,6 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
-            // Extract audit from HttpRecord (only for SSE responses / LLM calls)
-            if let Some(audit_record) = self.audit.analyze_http(&http_record) {
-                results.push(AnalysisResult::Audit(audit_record));
-            }
-
             if token_result.is_none() && http_record.is_sse {
                 if let Some(body) = &http_record.response_body {
                     if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
@@ -489,8 +484,14 @@ impl Analyzer {
                     }
                 }
             }
-            results.push(AnalysisResult::Http(http_record));
 
+            // Extract audit from HttpRecord (only for SSE responses / LLM calls)
+            // Pass token_result so audit record gets populated token counts
+            if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref()) {
+                results.push(AnalysisResult::Audit(audit_record));
+            }
+
+            results.push(AnalysisResult::Http(http_record));
         }
 
 

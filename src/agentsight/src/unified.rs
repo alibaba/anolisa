@@ -157,7 +157,7 @@ impl AgentSight {
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.domain_rules.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &config.tcp_target_ports).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &config.tcp_targets).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -323,7 +323,8 @@ impl AgentSight {
             parser: Parser::new(),
             aggregator: Aggregator::new(),
             analyzer,
-            genai_builder: GenAIBuilder::new(),
+            genai_builder: GenAIBuilder::new()
+                .with_user_agent_rules(config.user_agent_rules.clone()),
             genai_exporters,
             genai_sqlite_store,
             interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
@@ -461,14 +462,25 @@ impl AgentSight {
 
         // Analyze and store results
         for agg_result in &aggregated_results {
-            let analysis_results = self.analyzer.analyze_aggregated(agg_result);
+            let mut analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
             let (output, pending_info) = self.genai_builder.build_with_pending(
                 &analysis_results,
                 &self.response_mapper,
-                &self.pid_agent_name_cache,
+                &mut self.pid_agent_name_cache,
             );
+
+            // Backfill TokenRecord.agent from pid_agent_name_cache
+            for ar in &mut analysis_results {
+                if let crate::analyzer::AnalysisResult::Token(t) = ar {
+                    if t.agent.is_none() {
+                        if let Some(name) = self.pid_agent_name_cache.get(&t.pid) {
+                            t.agent = Some(name.clone());
+                        }
+                    }
+                }
+            }
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {

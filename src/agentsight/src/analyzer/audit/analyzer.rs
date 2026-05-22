@@ -6,6 +6,7 @@ use crate::aggregator::HttpPair;
 use crate::aggregator::AggregatedProcess;
 use crate::aggregator::AggregatedResult;
 use crate::analyzer::HttpRecord;
+use crate::analyzer::token::TokenRecord;
 use super::record::{AuditEventType, AuditExtra, AuditRecord};
 
 /// Analyzes aggregated results and extracts audit records
@@ -41,7 +42,7 @@ impl AuditAnalyzer {
     /// Only creates llm_call for SSE responses, which are LLM streaming API calls.
     /// Non-SSE requests (like npm package queries) are filtered out.
     /// This method works for both HTTP/1.1 and HTTP/2 uniformly.
-    pub fn analyze_http(&self, http_record: &HttpRecord) -> Option<AuditRecord> {
+    pub fn analyze_http(&self, http_record: &HttpRecord, token_record: Option<&TokenRecord>) -> Option<AuditRecord> {
         // Only create llm_call for SSE responses
         if !http_record.is_sse {
             return None;
@@ -52,6 +53,17 @@ impl AuditAnalyzer {
             .as_ref()
             .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
             .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));
+
+        let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) =
+            match token_record {
+                Some(t) => (
+                    t.input_tokens,
+                    t.output_tokens,
+                    t.cache_creation_tokens.unwrap_or(0),
+                    t.cache_read_tokens.unwrap_or(0),
+                ),
+                None => (0, 0, 0, 0),
+            };
 
         Some(AuditRecord {
             id: None,
@@ -67,10 +79,10 @@ impl AuditAnalyzer {
                 request_method: Some(http_record.method.clone()),
                 request_path: Some(http_record.path.clone()),
                 response_status: Some(http_record.status_code),
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
                 is_sse: true,
             },
         })
