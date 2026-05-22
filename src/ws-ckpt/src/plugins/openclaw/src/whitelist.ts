@@ -6,6 +6,10 @@
  * written to openclaw.json (triggering a one-time Gateway restart).
  */
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import type { OpenClawPluginApi } from "../types-shim.js";
 
 // ---------------------------------------------------------------------------
@@ -83,11 +87,8 @@ function resolveOpenClawConfigPath(): string | null {
     const env = process.env;
     const explicitPath = env.OPENCLAW_CONFIG_PATH?.trim();
     if (explicitPath) {
-      const path = require("node:path");
       return path.resolve(explicitPath);
     }
-    const os = require("node:os");
-    const path = require("node:path");
     const stateDir =
       env.OPENCLAW_STATE_DIR?.trim() ||
       path.join(os.homedir(), ".openclaw");
@@ -103,7 +104,6 @@ function resolveOpenClawConfigPath(): string | null {
  */
 function readAlsoAllowFromDisk(configPath: string): string[] | null {
   try {
-    const fs = require("node:fs");
     if (!fs.existsSync(configPath)) return null;
     const raw = fs.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw);
@@ -118,8 +118,6 @@ function readAlsoAllowFromDisk(configPath: string): string[] | null {
  * Write the tools.alsoAllow array to openclaw.json.
  */
 function writeToolsAlsoAllow(configPath: string, alsoAllow: string[]): void {
-  const fs = require("node:fs");
-  const path = require("node:path");
   let config: Record<string, unknown> = {};
   try {
     if (fs.existsSync(configPath)) {

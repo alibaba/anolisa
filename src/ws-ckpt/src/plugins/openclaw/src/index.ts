@@ -84,12 +84,21 @@ function register(api: OpenClawPluginApi): void {
     }
 
     try {
-      await pluginState.manager!.ensureWorkspace(config.workspace);
+      const ok = await pluginState.manager!.ensureWorkspace(config.workspace);
+      if (!ok) {
+        pluginState.environmentReady = false;
+        console.warn(
+          `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace})`,
+        );
+        return;
+      }
     } catch (err) {
+      pluginState.environmentReady = false;
       console.warn(
-        `[ws-ckpt] Workspace setup failed (${config.workspace}):`,
+        `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace}):`,
         err instanceof Error ? err.message : String(err),
       );
+      return;
     }
 
     // Query daemon auto-cleanup config to align in-memory state.

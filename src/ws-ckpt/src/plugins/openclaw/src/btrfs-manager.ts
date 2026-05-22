@@ -299,18 +299,23 @@ export class BtrfsManager {
   /**
    * Check whether there are file changes between two snapshots.
    *
-   * @returns `true` if changes exist, `false` if identical.
+   * Fail-closed: when the diff cannot be determined (diff command fails,
+   * daemon error, exception), assume changes exist so callers that gate
+   * checkpoint creation on this do not silently skip a checkpoint.
+   *
+   * @returns `true` if changes exist or cannot be determined, `false` only
+   *          when the diff was successfully produced and shows no changes.
    */
   public async hasChanges(from: string, to: string): Promise<boolean> {
     if (!this.workspacePath) return false;
     try {
       const output = await this.executor.diff(this.workspacePath, from, to);
-      if (output.exitCode !== 0) return false;
+      if (output.exitCode !== 0) return true;
       const stdout = output.stdout.replace(/\x1b\[[0-9;]*m/g, '').trim();
       // CLI outputs "No differences found." when identical
       return stdout.length > 0 && !stdout.startsWith("No differences");
     } catch {
-      return false;
+      return true;
     }
   }
 

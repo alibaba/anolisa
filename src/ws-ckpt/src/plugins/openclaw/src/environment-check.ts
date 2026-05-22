@@ -120,8 +120,9 @@ export class EnvironmentChecker {
   /**
    * Check daemon health via `ws-ckpt status`.
    *
-   * - Exit code 0 → daemon running
-   * - Non-zero → parse stdout/stderr to determine if daemon is down
+   * Fail-closed: only exit code 0 is treated as healthy. Any non-zero exit
+   * (connection refused, timeout, protocol error, daemon-side failure, …)
+   * means the daemon is not usable from the plugin's perspective.
    */
   private async checkDaemonHealth(): Promise<boolean> {
     try {
@@ -129,22 +130,9 @@ export class EnvironmentChecker {
         timeout: 10000,
         encoding: "utf-8",
       });
-      // Exit code 0 means daemon is running and healthy
       return true;
-    } catch (err: unknown) {
-      // Non-zero exit — try to parse output for details
-      const error = err as { stdout?: string; stderr?: string };
-      const stdout = error.stdout ?? "";
-      const stderr = error.stderr ?? "";
-      const combined = `${stdout}\n${stderr}`.toLowerCase();
-
-      // If output mentions connection refused or socket, daemon is not running
-      return (
-        !combined.includes("connection refused") &&
-        !combined.includes("not running") &&
-        !combined.includes("could not connect") &&
-        !combined.includes("no such file")
-      );
+    } catch {
+      return false;
     }
   }
 }
