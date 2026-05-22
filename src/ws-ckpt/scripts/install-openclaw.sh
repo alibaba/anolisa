@@ -13,10 +13,12 @@ if ! command -v openclaw &>/dev/null; then
     exit 1
 fi
 
-# 2. Try plugin install (preferred)
+# 2. Try plugin install (preferred).
+#    Strip inherited OPENCLAW_HOME so the CLI uses its own default home —
+#    leaving it set causes plugins to land under ~/.openclaw/.openclaw/extensions.
 if PLUGIN_SRC=$(find_plugin_src openclaw); then
-    openclaw plugins install "$PLUGIN_SRC"
-    openclaw plugins enable ws-ckpt 2>/dev/null || true
+    env -u OPENCLAW_HOME openclaw plugins install "$PLUGIN_SRC" --force
+    env -u OPENCLAW_HOME openclaw plugins enable ws-ckpt 2>/dev/null || true
     echo "openclaw ws-ckpt plugin installed and enabled successfully (from $PLUGIN_SRC)"
     exit 0
 fi

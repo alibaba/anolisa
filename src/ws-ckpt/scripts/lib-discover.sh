@@ -17,7 +17,7 @@ discover_dir() {
 find_plugin_src() {
     local component="${1:?usage: find_plugin_src COMPONENT}"
     local candidates=()
-    [ -n "${TARGET_DIR:-}" ] && candidates+=("${TARGET_DIR}/share/anolisa/runtime/ws-ckpt/plugins/${component}")
+    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     candidates+=("${HOME}/.local/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     candidates+=("/usr/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     discover_dir "${candidates[@]}"
@@ -27,7 +27,7 @@ find_plugin_src() {
 #   Searches skill source paths in priority order.
 find_skill_src() {
     local candidates=()
-    [ -n "${TARGET_DIR:-}" ] && candidates+=("${TARGET_DIR}/share/anolisa/runtime/skills/ws-ckpt")
+    [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/skills/ws-ckpt")
     candidates+=("${HOME}/.local/share/anolisa/runtime/skills/ws-ckpt")
     candidates+=("/usr/share/anolisa/runtime/skills/ws-ckpt")
     discover_dir "${candidates[@]}"
@@ -37,8 +37,8 @@ find_skill_src() {
 #   Prints a standard error message listing all searched paths.
 print_search_error() {
     echo "ERROR: no plugin or skill source found. Searched paths:"
-    echo "  - \${TARGET_DIR}/share/anolisa/runtime/... (TARGET_DIR=${TARGET_DIR:-<unset>})"
+    echo "  - \${ANOLISA_TARGET_DIR}/share/anolisa/runtime/... (ANOLISA_TARGET_DIR=${ANOLISA_TARGET_DIR:-<unset>})"
     echo "  - ~/.local/share/anolisa/runtime/..."
     echo "  - /usr/share/anolisa/runtime/..."
-    echo "Please install ws-ckpt via RPM, make install, or set TARGET_DIR to staged output."
+    echo "Please install ws-ckpt via RPM, make install, or set ANOLISA_TARGET_DIR to staged output."
 }

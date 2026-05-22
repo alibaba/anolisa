@@ -9,14 +9,14 @@ COSH_SKILLS_DIR ?= $(HOME)/.copilot-shell/skills/ws-ckpt
 else
 PREFIX ?= /usr
 BINDIR ?= /usr/local/bin
-COSH_SKILLS_DIR ?= /usr/share/anolisa/skills/ws-ckpt
 endif
 
 LIBDIR ?= $(PREFIX)/lib
 DATADIR ?= $(PREFIX)/share
 SYSCONFDIR ?= /etc
-RUNTIME_DIR ?= /usr/share/anolisa/runtime
+RUNTIME_DIR ?= $(DATADIR)/anolisa/runtime
 RUNTIME_SKILLS_DIR ?= $(RUNTIME_DIR)/skills/ws-ckpt
+COSH_SKILLS_DIR ?= $(DATADIR)/anolisa/skills/ws-ckpt
 
 ADAPTER_DIR ?= $(DATADIR)/anolisa/adapters/ws-ckpt
 PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
