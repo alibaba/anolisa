@@ -502,6 +502,41 @@ pub unsafe extern "C" fn agentsight_config_add_domain_rule(
     }
 }
 
+/// Add a TCP capture target for plain HTTP traffic capture (tcpsniff probe).
+///
+/// * `target` — string in one of the following formats:
+///   - `":8080"`          → port-only (any IP, port 8080)
+///   - `"10.0.0.1"`       → IP-only   (IP 10.0.0.1, any port)
+///   - `"10.0.0.1:8080"`  → exact     (IP 10.0.0.1, port 8080)
+///
+/// Returns 0 on success, <0 on parse error (call `agentsight_last_error()`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_add_tcp_target(
+    cfg: *mut AgentsightConfigHandle,
+    target: *const c_char,
+) -> c_int {
+    if cfg.is_null() || target.is_null() {
+        set_last_error("NULL config or target");
+        return -1;
+    }
+    let c = unsafe { &mut *cfg };
+    let s = unsafe { CStr::from_ptr(target).to_string_lossy().to_string() };
+    if s.is_empty() {
+        set_last_error("Empty TCP target string");
+        return -1;
+    }
+    match s.parse::<crate::config::TcpTarget>() {
+        Ok(t) => {
+            c.tcp_targets.push(t);
+            0
+        }
+        Err(e) => {
+            set_last_error(&e);
+            -1
+        }
+    }
+}
+
 /// Load configuration from a JSON string. Rules are appended to existing ones.
 /// Returns 0 on success, <0 on parse error.
 #[unsafe(no_mangle)]
