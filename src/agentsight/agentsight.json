@@ -1,11 +1,5 @@
 {
   "tcp_targets": [":8080"],
-  "user_agent": [
-    {"pattern": "*anthropic*", "agent_name": "Anthropic SDK"},
-    {"pattern": "*openai*", "agent_name": "OpenAI SDK"},
-    {"pattern": "*langchain*", "agent_name": "LangChain"},
-    {"pattern": "*cursor*", "agent_name": "Cursor"}
-  ],
   "cmdline": {
     "allow": [
       {"rule": ["hermes*"], "agent_name": "Hermes"},

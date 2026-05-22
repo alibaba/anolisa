@@ -9,8 +9,8 @@ use crate::analyzer::{
 use crate::analyzer::message::types::OpenAIChatMessage;
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::token::TokenParser;
-use crate::discovery::matcher::{ProcessContext, CmdlineGlobMatcher, match_user_agent};
-use crate::config::{default_cmdline_rules, UserAgentRule};
+use crate::discovery::matcher::{ProcessContext, CmdlineGlobMatcher};
+use crate::config::default_cmdline_rules;
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
 use crate::storage::sqlite::{PendingCallInfo, SseEnrichment};
@@ -39,8 +39,6 @@ pub struct GenAIBuilder {
     session_prefix: String,
     /// Counter for generating unique IDs within a session
     call_counter: AtomicU64,
-    /// User-Agent header matching rules for agent identification fallback
-    user_agent_rules: Vec<UserAgentRule>,
 }
 
 impl Default for GenAIBuilder {
@@ -60,14 +58,7 @@ impl GenAIBuilder {
         GenAIBuilder {
             session_prefix: format!("{:x}_{:x}", ts, pid),
             call_counter: AtomicU64::new(0),
-            user_agent_rules: Vec::new(),
         }
-    }
-
-    /// Set user-agent rules for HTTP-header-based agent detection
-    pub fn with_user_agent_rules(mut self, rules: Vec<UserAgentRule>) -> Self {
-        self.user_agent_rules = rules;
-        self
     }
 
     /// Build GenAI semantic events AND a `PendingCallInfo` to be written to DB
@@ -86,7 +77,7 @@ impl GenAIBuilder {
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
-        pid_agent_name_cache: &mut std::collections::HashMap<u32, String>,
+        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
@@ -291,12 +282,9 @@ impl GenAIBuilder {
         // Extract provider from request path
         let provider = self.extract_provider_from_path(&request.path);
 
-        // Resolve agent_name: check pid→name cache first (works for dead PIDs), then comm-based fallback, then User-Agent
+        // Resolve agent_name: check pid→name cache first, then comm-based matching, then comm as fallback
         let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache)
-            .or_else(|| {
-                request.headers.get("user-agent")
-                    .and_then(|ua| match_user_agent(ua, &self.user_agent_rules))
-            });
+            .or_else(|| Some(request.source_event.comm_str()));
 
         Some(PendingCallInfo {
             call_id,
@@ -415,7 +403,7 @@ impl GenAIBuilder {
     /// Build LLMCall from analysis results
     ///
     /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper, pid_agent_name_cache: &mut std::collections::HashMap<u32, String>) -> Option<LLMCall> {
+    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper, pid_agent_name_cache: &std::collections::HashMap<u32, String>) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
             AnalysisResult::Token(t) => Some(t.clone()),
@@ -561,18 +549,8 @@ impl GenAIBuilder {
             error,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: {
-                let name = Self::resolve_agent_name(
-                    &http.comm, http.pid, pid_agent_name_cache,
-                    Some(&http.request_headers), &self.user_agent_rules,
-                );
-                if let Some(ref n) = name {
-                    if http.pid > 0 {
-                        pid_agent_name_cache.entry(http.pid).or_insert_with(|| n.clone());
-                    }
-                }
-                name
-            },
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache)
+                .or_else(|| Some(http.comm.clone())),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -1262,13 +1240,7 @@ impl GenAIBuilder {
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    fn resolve_agent_name(
-        comm: &str,
-        pid: u32,
-        cache: &std::collections::HashMap<u32, String>,
-        request_headers: Option<&str>,
-        user_agent_rules: &[UserAgentRule],
-    ) -> Option<String> {
+    fn resolve_agent_name(comm: &str, pid: u32, cache: &std::collections::HashMap<u32, String>) -> Option<String> {
         // First check the pid→agent_name cache (works even for dead processes)
         if let Some(name) = cache.get(&pid) {
             return Some(name.clone());
@@ -1294,27 +1266,11 @@ impl GenAIBuilder {
             cmdline_args,
             exe_path,
         };
-        if let Some(name) = default_cmdline_rules()
+        default_cmdline_rules()
             .iter()
             .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
-        {
-            return Some(name);
-        }
-
-        // Fallback: match User-Agent header
-        if let Some(headers_json) = request_headers {
-            if let Ok(headers) = serde_json::from_str::<HashMap<String, String>>(headers_json) {
-                if let Some(ua) = headers.get("user-agent") {
-                    if let Some(name) = match_user_agent(ua, user_agent_rules) {
-                        return Some(name);
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     /// Convert OpenAI ChatMessage to parts-based InputMessage

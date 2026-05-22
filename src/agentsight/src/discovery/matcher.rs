@@ -63,24 +63,6 @@ pub fn match_domain_glob(domain: &str, patterns: &[String]) -> bool {
     false
 }
 
-/// Match a User-Agent header value against configured rules.
-/// Returns the agent_name of the first matching rule, or None.
-pub fn match_user_agent(user_agent: &str, rules: &[crate::config::UserAgentRule]) -> Option<String> {
-    let ua_lower = user_agent.to_lowercase();
-    for rule in rules {
-        let pat_lower = rule.pattern.to_lowercase();
-        match Pattern::new(&pat_lower) {
-            Ok(p) => {
-                if p.matches(&ua_lower) {
-                    return Some(rule.agent_name.clone());
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-    None
-}
-
 /// Matcher based on cmdline glob patterns (config-driven).
 pub struct CmdlineGlobMatcher {
     info: AgentInfo,
@@ -281,28 +263,5 @@ mod tests {
             allow: true,
         };
         assert!(CmdlineGlobMatcher::from_deny_rule(&rule).is_none());
-    }
-
-    #[test]
-    fn test_match_user_agent() {
-        let rules = vec![
-            crate::config::UserAgentRule {
-                pattern: "*anthropic*".to_string(),
-                agent_name: "Anthropic SDK".to_string(),
-            },
-            crate::config::UserAgentRule {
-                pattern: "*openai*".to_string(),
-                agent_name: "OpenAI SDK".to_string(),
-            },
-        ];
-        assert_eq!(
-            match_user_agent("anthropic-python/0.30.0", &rules),
-            Some("Anthropic SDK".to_string())
-        );
-        assert_eq!(
-            match_user_agent("OpenAI/Node 4.52.0", &rules),
-            Some("OpenAI SDK".to_string())
-        );
-        assert_eq!(match_user_agent("curl/7.81.0", &rules), None);
     }
 }

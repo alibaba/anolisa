@@ -123,15 +123,6 @@ pub struct DomainRule {
     pub pattern: String,
 }
 
-/// User-Agent header matching rule for agent identification
-#[derive(Debug, Clone)]
-pub struct UserAgentRule {
-    /// Glob pattern matched against the User-Agent header value (case-insensitive)
-    pub pattern: String,
-    /// Agent name to assign when matched
-    pub agent_name: String,
-}
-
 // ==================== Agent Discovery Configuration ====================
 
 /// Default agents configuration JSON (embedded in binary).
@@ -203,8 +194,6 @@ struct JsonFullConfig {
     #[serde(default)]
     domain: Option<Vec<JsonDomainGroup>>,
     #[serde(default)]
-    user_agent: Option<Vec<JsonUserAgentEntry>>,
-    #[serde(default)]
     tcp_ports: Option<Vec<u16>>,
     #[serde(default)]
     tcp_targets: Option<Vec<String>>,
@@ -230,17 +219,10 @@ struct JsonDomainGroup {
     rule: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
-struct JsonUserAgentEntry {
-    pattern: String,
-    agent_name: String,
-}
-
-/// Extract cmdline, domain, and user-agent rules from a parsed JsonFullConfig.
-fn extract_rules(parsed: JsonFullConfig) -> (Vec<CmdlineRule>, Vec<DomainRule>, Vec<UserAgentRule>) {
+/// Extract cmdline and domain rules from a parsed JsonFullConfig.
+fn extract_rules(parsed: JsonFullConfig) -> (Vec<CmdlineRule>, Vec<DomainRule>) {
     let mut cmdline_rules = Vec::new();
     let mut domain_rules = Vec::new();
-    let mut user_agent_rules = Vec::new();
 
     if let Some(cmdline) = parsed.cmdline {
         if let Some(allow_list) = cmdline.allow {
@@ -277,24 +259,13 @@ fn extract_rules(parsed: JsonFullConfig) -> (Vec<CmdlineRule>, Vec<DomainRule>, 
         }
     }
 
-    if let Some(ua_entries) = parsed.user_agent {
-        for entry in ua_entries {
-            if !entry.pattern.is_empty() {
-                user_agent_rules.push(UserAgentRule {
-                    pattern: entry.pattern,
-                    agent_name: entry.agent_name,
-                });
-            }
-        }
-    }
-
-    (cmdline_rules, domain_rules, user_agent_rules)
+    (cmdline_rules, domain_rules)
 }
 
-/// Parse a JSON config string into cmdline rules, domain rules, and user-agent rules.
+/// Parse a JSON config string into cmdline rules and domain rules.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
-pub fn parse_json_rules(json: &str) -> Result<(Vec<CmdlineRule>, Vec<DomainRule>, Vec<UserAgentRule>), String> {
+pub fn parse_json_rules(json: &str) -> Result<(Vec<CmdlineRule>, Vec<DomainRule>), String> {
     let parsed: JsonFullConfig = serde_json::from_str(json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
     Ok(extract_rules(parsed))
@@ -321,14 +292,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
 /// Load default cmdline rules (embedded), without touching the filesystem.
 pub fn default_cmdline_rules() -> Vec<CmdlineRule> {
-    let (rules, _, _) = parse_json_rules(DEFAULT_AGENTS_JSON)
-        .expect("embedded DEFAULT_AGENTS_JSON is valid");
-    rules
-}
-
-/// Load default user-agent rules (embedded), without touching the filesystem.
-pub fn default_user_agent_rules() -> Vec<UserAgentRule> {
-    let (_, _, rules) = parse_json_rules(DEFAULT_AGENTS_JSON)
+    let (rules, _) = parse_json_rules(DEFAULT_AGENTS_JSON)
         .expect("embedded DEFAULT_AGENTS_JSON is valid");
     rules
 }
@@ -409,8 +373,6 @@ pub struct AgentsightConfig {
     pub cmdline_rules: Vec<CmdlineRule>,
     /// User-defined domain rules for DNS-based SSL attachment
     pub domain_rules: Vec<DomainRule>,
-    /// User-Agent header matching rules for agent identification
-    pub user_agent_rules: Vec<UserAgentRule>,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -456,7 +418,6 @@ impl Default for AgentsightConfig {
             // FFI Rule defaults
             cmdline_rules: Vec::new(),
             domain_rules: Vec::new(),
-            user_agent_rules: Vec::new(),
 
             // Config file path default
             config_path: None,
@@ -564,10 +525,9 @@ impl AgentsightConfig {
                 .collect();
         }
 
-        let (cmdline_rules, domain_rules, user_agent_rules) = extract_rules(parsed);
+        let (cmdline_rules, domain_rules) = extract_rules(parsed);
         self.cmdline_rules.extend(cmdline_rules);
         self.domain_rules.extend(domain_rules);
-        self.user_agent_rules.extend(user_agent_rules);
         Ok(())
     }
 
@@ -865,10 +825,9 @@ mod tests {
     #[test]
     fn test_default_agents_json_valid() {
         // Verify the embedded JSON is valid and parses correctly
-        let (cmdline_rules, domain_rules, user_agent_rules) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
+        let (cmdline_rules, domain_rules) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
         assert!(domain_rules.is_empty()); // no domain rules in default config
-        assert!(!user_agent_rules.is_empty()); // has default user-agent rules
     }
 
     #[test]
@@ -879,7 +838,7 @@ mod tests {
                 "deny": [{"rule": ["node", "*webpack*"]}]
             }
         }"#;
-        let (cmdline_rules, domain_rules, _) = parse_json_rules(json).unwrap();
+        let (cmdline_rules, domain_rules) = parse_json_rules(json).unwrap();
         assert_eq!(cmdline_rules.len(), 2);
         assert!(cmdline_rules[0].allow);
         assert_eq!(cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
@@ -891,7 +850,7 @@ mod tests {
     #[test]
     fn test_parse_json_rules_domain() {
         let json = r#"{"domain": [{"rule": ["*.openai.com", "*.anthropic.com"]}]}"#;
-        let (cmdline_rules, domain_rules, _) = parse_json_rules(json).unwrap();
+        let (cmdline_rules, domain_rules) = parse_json_rules(json).unwrap();
         assert!(cmdline_rules.is_empty());
         assert_eq!(domain_rules.len(), 2);
     }
@@ -905,7 +864,7 @@ mod tests {
     #[test]
     fn test_parse_json_rules_empty_rule_skipped() {
         let json = r#"{"cmdline":{"allow":[{"rule":[],"agent_name":"Skipped"},{"rule":["node"],"agent_name":"Kept"}]}}"#;
-        let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
+        let (cmdline_rules, _) = parse_json_rules(json).unwrap();
         assert_eq!(cmdline_rules.len(), 1);
         assert_eq!(cmdline_rules[0].agent_name, Some("Kept".to_string()));
     }

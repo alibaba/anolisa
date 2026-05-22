@@ -323,8 +323,7 @@ impl AgentSight {
             parser: Parser::new(),
             aggregator: Aggregator::new(),
             analyzer,
-            genai_builder: GenAIBuilder::new()
-                .with_user_agent_rules(config.user_agent_rules.clone()),
+            genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
             interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
@@ -468,16 +467,15 @@ impl AgentSight {
             let (output, pending_info) = self.genai_builder.build_with_pending(
                 &analysis_results,
                 &self.response_mapper,
-                &mut self.pid_agent_name_cache,
+                &self.pid_agent_name_cache,
             );
 
-            // Backfill TokenRecord.agent from pid_agent_name_cache
+            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
-                        if let Some(name) = self.pid_agent_name_cache.get(&t.pid) {
-                            t.agent = Some(name.clone());
-                        }
+                        t.agent = self.pid_agent_name_cache.get(&t.pid).cloned()
+                            .or_else(|| Some(t.comm.clone()));
                     }
                 }
             }
