@@ -14,6 +14,7 @@ use std::io::{Write, BufWriter};
 use super::semantic::GenAISemanticEvent;
 use super::exporter::GenAIExporter;
 use super::instance_id;
+use super::encrypt::MessageEncryptor;
 
 /// 环境变量名称
 pub const LOGTAIL_ENV_VAR: &str = "SLS_LOGTAIL_FILE";
@@ -32,8 +33,10 @@ pub fn logtail_path() -> Option<String> {
 ///
 /// 将 GenAI 事件以扁平化 JSON 格式（每行一条记录）写入指定路径，
 /// 由 iLogtail 自动采集上传到 SLS。字段命名与 SLS PutLogs 完全一致。
+/// 敏感消息字段使用 RSA+AES 混合加密保护。
 pub struct LogtailExporter {
     path: PathBuf,
+    encryptor: Option<MessageEncryptor>,
 }
 
 impl LogtailExporter {
@@ -47,7 +50,8 @@ impl LogtailExporter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        Some(LogtailExporter { path })
+        let encryptor = MessageEncryptor::new();
+        Some(LogtailExporter { path, encryptor })
     }
 
     /// 返回导出文件路径
@@ -57,7 +61,7 @@ impl LogtailExporter {
 
     /// 将扁平化记录批量写入文件（append 模式）
     fn write_batch(&self, events: &[GenAISemanticEvent]) {
-        let records = events_to_flat_records(events);
+        let records = events_to_flat_records(events, self.encryptor.as_ref());
         if records.is_empty() {
             return;
         }
@@ -112,7 +116,8 @@ impl GenAIExporter for LogtailExporter {
 /// 包含 iLogtail 保留字段：`__time__`、`__source__`、`__topic__`。
 ///
 /// 此函数被 Logtail 文件导出器使用，由 iLogtail 采集后上传到 SLS。
-pub fn events_to_flat_records(events: &[GenAISemanticEvent]) -> Vec<BTreeMap<String, String>> {
+/// 敏感消息字段（system_instructions/input.messages/output.messages）使用混合加密保护。
+pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&MessageEncryptor>) -> Vec<BTreeMap<String, String>> {
     let hostname = instance_id::get_instance_id();
     let uid = instance_id::get_owner_account_id();
     let mut records = Vec::with_capacity(events.len());
@@ -195,6 +200,47 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent]) -> Vec<BTreeMap<Str
                     m.insert("server.address".to_string(), addr.clone());
                 }
                 m.insert("gen_ai.output.type".to_string(), "text".to_string());
+
+                // ── gen_ai.system_instructions (system role messages) ──
+                let system_msgs: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
+                    .filter(|msg| msg.role == "system")
+                    .collect();
+                if !system_msgs.is_empty() {
+                    if let Ok(json) = serde_json::to_string(&system_msgs) {
+                        m.insert("gen_ai.system_instructions".to_string(),
+                            MessageEncryptor::maybe_encrypt(encryptor, &json));
+                    }
+                }
+
+                // ── gen_ai.input.messages (增量：只取最新一轮) ──
+                // 从后往前找最后一条 user message，取它及之后的所有非 system 消息
+                let non_system: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
+                    .filter(|msg| msg.role != "system")
+                    .collect();
+                let latest_msgs: &[&super::semantic::InputMessage] = if let Some(last_user_idx) = non_system.iter().rposition(|m| m.role == "user") {
+                    &non_system[last_user_idx..]
+                } else {
+                    &non_system[..]
+                };
+                if !latest_msgs.is_empty() {
+                    if let Ok(json) = serde_json::to_string(&latest_msgs) {
+                        m.insert("gen_ai.input.messages".to_string(),
+                            MessageEncryptor::maybe_encrypt(encryptor, &json));
+                    }
+                }
+
+                // ── gen_ai.output.messages (parts-based with finish_reason) ──
+                if !call.response.messages.is_empty() {
+                    if let Ok(json) = serde_json::to_string(&call.response.messages) {
+                        m.insert("gen_ai.output.messages".to_string(),
+                            MessageEncryptor::maybe_encrypt(encryptor, &json));
+                    }
+                }
+
+                // ── 加密标记字段 ──
+                if encryptor.is_some() {
+                    m.insert("agentsight.encrypted".to_string(), "true".to_string());
+                }
 
                 // ── AgentSight extensions ──
                 m.insert("agentsight.pid".to_string(), call.pid.to_string());
