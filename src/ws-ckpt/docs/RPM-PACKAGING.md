@@ -18,8 +18,10 @@ bash ./build-rpm.sh
 ## 安装到系统
 
 ```bash
-rpm -ivh ws-ckpt-0.2.0-1.x86_64.rpm
+rpm -ivh ws-ckpt-<VERSION>-1.x86_64.rpm
 ```
+
+> 将 `<VERSION>` 替换为实际版本号(如 `0.3.0`),与 `src/Cargo.toml` 的 `version` 字段一致。
 
 安装过程会自动：
 

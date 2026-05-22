@@ -53,6 +53,11 @@ else
 	install -p -m 0644 src/plugins/openclaw/package.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
 	install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
 	cp -pr src/plugins/openclaw/dist "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
+	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)/hermes"
+	cp -pr src/plugins/hermes/. "$(DESTDIR)$(PLUGINS_DIR)/hermes/"
+	find "$(DESTDIR)$(PLUGINS_DIR)/hermes" \
+		\( -type d -name __pycache__ -o -type f -name '*.pyc' \) \
+		-exec rm -rf {} +
 	install -d -m 0755 "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)"
 	install -p -m 0644 src/systemd/ws-ckpt.service \
 		"$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"

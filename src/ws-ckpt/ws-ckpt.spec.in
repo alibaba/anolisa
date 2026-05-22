@@ -50,6 +50,7 @@ install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}/etc/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts
 
@@ -60,6 +61,10 @@ cp -pr src/skills/ws-ckpt/. %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ck
 cp -pr src/plugins/openclaw/dist %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
 install -p -m 0644 src/plugins/openclaw/package.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
 install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw/
+cp -pr src/plugins/hermes/. %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes/
+find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
+    \( -type d -name __pycache__ -o -type f -name '*.pyc' \) \
+    -exec rm -rf {} +
 install -p -m 0644 adapter-manifest.json %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/manifest.json
 install -p -m 0644 scripts/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 install -p -m 0755 scripts/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
@@ -122,6 +127,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri May 22 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.0-1
+- Added openclaw and hermes plugin scaffolding with RPM/Makefile packaging
+
 * Sun May 10 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.2.0-1
 - Added auto_cleanup and diff
 

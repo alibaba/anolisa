@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Added openclaw plugin scaffolding for ws-ckpt
+- Added hermes plugin scaffolding for ws-ckpt
+- Made ws-ckpt skill agent-agnostic and prompted for workspace at invocation
+- Followed `make install` contract for build-all integration
+- Fixed bugs in list and diff sub-commands
+- Made daemon stateful
+
 ## 0.2.0
 
 - Added auto_cleanup feature and switch
