@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+- Add Claude Code support including SSL probe attach for BoringSSL, Anthropic SSE thinking/tool_use content blocks, and `message.id`-based session correlation.
+- Add tcpsniff probe for plain HTTP traffic capture with configurable IP/port filtering (disabled by default with empty `tcp_targets`).
+- Add User-Agent based agent detection with `comm` fallback for simplified agent matching.
+- Add UDP DNS probe for agent discovery (replacing TLS SNI probe) with QNAME parsing moved to userspace.
+- Add TLS SNI probe module and refactor discovery to config-driven rules.
+- Add connection scanner for pre-established LLM API connections.
+- Add `tools` field to `AgentsightLLMData` FFI struct, passed through as raw JSON.
+- Add container PID namespace support in BPF traced process filtering and event emission.
+- Add agent matching rules and reduce BPF ring buffer to 32MB.
+- Add `uid` field to SLS logs with `OnceLock` cache and startup validation.
+- Support profile-based installs.
+- Fix `duration_ns` calculation in LLM data.
+- Fix SSL probe cleanup of stale inodes on process exit.
+- Fix BPF verifier `-E2BIG` issues by removing nested `#pragma unroll` in `udpdns.bpf.c` and masking `payload_len` on older kernels.
+- Fix skill extraction for Hermes agent architecture.
+- Fix Node.js `process.title` change handling in OpenClaw matcher.
+
 ## 0.4.0
 
 - Add HTTP/1.1 request body reassembly for fragmented SSL writes.
