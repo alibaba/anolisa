@@ -26,6 +26,7 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
     // System paths are always trusted
     if path.starts_with("/usr/share")
         || path.starts_with("/usr/libexec")
+        || path.starts_with("/usr/lib/anolisa")
         || path.starts_with("/usr/local/share")
     {
         return true;
@@ -37,6 +38,7 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
                 // System targets are always trusted
                 if resolved.starts_with("/usr/share")
                     || resolved.starts_with("/usr/libexec")
+                    || resolved.starts_with("/usr/lib/anolisa")
                     || resolved.starts_with("/usr/local/share")
                 {
                     return true;
@@ -77,6 +79,8 @@ struct DepEntry {
     binary: String,
     version: Option<String>,
     package: String,
+    apt_package: Option<String>,
+    apk_package: Option<String>,
     manager: String,
     pip_name: Option<String>,
     uv_name: Option<String>,
@@ -155,6 +159,8 @@ fn normalize_dep(value: &Value) -> DepEntry {
                     binary,
                     version,
                     package: s[..idx].to_string(),
+                    apt_package: None,
+                    apk_package: None,
                     manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,
@@ -167,6 +173,8 @@ fn normalize_dep(value: &Value) -> DepEntry {
                     binary: s.clone(),
                     version: None,
                     package: s.clone(),
+                    apt_package: None,
+                    apk_package: None,
                     manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,
@@ -191,6 +199,14 @@ fn normalize_dep(value: &Value) -> DepEntry {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&binary)
                 .to_string();
+            let apt_package = obj
+                .get("apt_package")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let apk_package = obj
+                .get("apk_package")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let manager = obj
                 .get("manager")
                 .and_then(|v| v.as_str())
@@ -267,6 +283,8 @@ fn normalize_dep(value: &Value) -> DepEntry {
                 binary,
                 version,
                 package,
+                apt_package,
+                apk_package,
                 manager,
                 pip_name,
                 uv_name,
@@ -279,6 +297,8 @@ fn normalize_dep(value: &Value) -> DepEntry {
             binary: "".to_string(),
             version: None,
             package: "".to_string(),
+            apt_package: None,
+            apk_package: None,
             manager: "rpm".to_string(),
             pip_name: None,
             uv_name: None,
@@ -356,6 +376,31 @@ fn resolve_manager(manager: &str) -> String {
     }
 }
 
+/// Resolve the actual package name for the detected system manager.
+/// When manager="rpm" (meaning auto-detect), the detected manager may be apt/apk,
+/// and those systems have different package names. apt_package/apk_package override
+/// the default package field when present.
+fn resolve_package(dep: &DepEntry) -> String {
+    let detected = resolve_manager(&dep.manager);
+    if dep.manager == "rpm" {
+        match detected.as_str() {
+            "apt" => dep
+                .apt_package
+                .as_deref()
+                .unwrap_or(&dep.package)
+                .to_string(),
+            "apk" => dep
+                .apk_package
+                .as_deref()
+                .unwrap_or(&dep.package)
+                .to_string(),
+            _ => dep.package.clone(),
+        }
+    } else {
+        dep.package.clone()
+    }
+}
+
 /// Extract the required version from a constraint string like ">=0.35".
 fn extract_required_version(version: &str) -> &str {
     version
@@ -406,11 +451,45 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
         .args(["-c", "command -v \"$1\"", "--", &dep.binary])
         .output();
 
-    match which_result {
+    let binary_path: Option<String> = match which_result {
         Ok(output) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+        _ => {
+            // PATH lookup failed — try known install paths
+            let home = super::get_home_dir();
+            let candidates = [
+                format!("/usr/libexec/anolisa/tokenless/{}", dep.binary),
+                format!("/usr/lib/anolisa/tokenless/{}", dep.binary),
+                format!("{}/.local/bin/{}", home, dep.binary),
+                format!("{}/.local/lib/anolisa/tokenless/{}", home, dep.binary),
+            ];
+            candidates
+                .iter()
+                .find(|p| {
+                    let path = std::path::Path::new(p);
+                    path.exists()
+                        && std::fs::metadata(path)
+                            .map(|m| {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    m.permissions().mode() & 0o111 != 0
+                                }
+                                #[cfg(not(unix))]
+                                true
+                            })
+                            .unwrap_or(false)
+                })
+                .cloned()
+        }
+    };
+
+    match binary_path {
+        Some(path) if !path.is_empty() => {
             if let Some(ref version) = dep.version {
                 let required_version = extract_required_version(version);
-                let version_output = Command::new(&dep.binary).arg("--version").output();
+                let version_output = Command::new(&path).arg("--version").output();
                 let installed_version = match version_output {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -475,8 +554,8 @@ fn check_permission(perm: &str) -> bool {
             }
             can_write
         }
-        "exec_shell" => Command::new("which")
-            .arg("bash")
+        "exec_shell" => Command::new("sh")
+            .args(["-c", "command -v bash"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false),
@@ -781,7 +860,13 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
             if let Some(ref v) = dep.version {
                 obj.insert("version".to_string(), Value::String(v.clone()));
             }
-            obj.insert("package".to_string(), Value::String(dep.package.clone()));
+            obj.insert("package".to_string(), Value::String(resolve_package(dep)));
+            if let Some(ref ap) = dep.apt_package {
+                obj.insert("apt_package".to_string(), Value::String(ap.clone()));
+            }
+            if let Some(ref akp) = dep.apk_package {
+                obj.insert("apk_package".to_string(), Value::String(akp.clone()));
+            }
             obj.insert("manager".to_string(), Value::String(dep.manager.clone()));
             if let Some(ref pn) = dep.pip_name {
                 obj.insert("pip_name".to_string(), Value::String(pn.clone()));
@@ -835,16 +920,34 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let json_str = serde_json::to_string(&deps_json)
         .map_err(|e| format!("Failed to serialize deps: {}", e))?;
 
-    let mut child = Command::new("timeout")
-        .arg("120")
-        .arg("bash")
-        .arg(&fix_script)
-        .arg("fix-all")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to run env-fix: {}", e))?;
+    // Use timeout if available (coreutils procps), otherwise run without timeout
+    let has_timeout = Command::new("sh")
+        .args(["-c", "command -v timeout"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let mut child = if has_timeout {
+        Command::new("timeout")
+            .arg("120")
+            .arg("bash")
+            .arg(&fix_script)
+            .arg("fix-all")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+    } else {
+        Command::new("bash")
+            .arg(&fix_script)
+            .arg("fix-all")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+    };
 
     let mut stdin_handle = child
         .stdin
@@ -1420,6 +1523,8 @@ mod tests {
                     binary: "fake".to_string(),
                     version: None,
                     package: "fake".to_string(),
+                    apt_package: None,
+                    apk_package: None,
                     manager: "rpm".to_string(),
                     pip_name: None,
                     uv_name: None,

@@ -27,14 +27,14 @@ is_trusted_file() {
   local f="$1"
   [ -f "$f" ] || return 1
   # System paths are always trusted
-  case "$f" in /usr/share/*|/usr/libexec/*|/usr/local/share/*) return 0 ;; esac
+  case "$f" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
   # Resolve symlink target before owner/perm checks
   local check_path="$f"
   if [ -L "$f" ]; then
     local target
     target=$(readlink -f "$f" 2>/dev/null || realpath "$f" 2>/dev/null || echo "")
     # System targets are always trusted
-    case "$target" in /usr/share/*|/usr/libexec/*|/usr/local/share/*) return 0 ;; esac
+    case "$target" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
     [ -z "$target" ] && return 1
     check_path="$target"
   fi
@@ -185,7 +185,18 @@ version_ge() {
   return 0
 }
 
-# --- Check a single dep (normalized object) ---
+# --- Resolve binary path ---
+# Tries command -v first, then known install paths.
+resolve_binary() {
+  local name="$1"
+  local found
+  found=$(command -v "$name" 2>/dev/null || true)
+  if [ -n "$found" ]; then echo "$found"; return 0; fi
+  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
+    if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
+  done
+  return 1
+}
 # Output: "available", "missing", "version_low:<installed>:<required>"
 check_dep() {
   local dep_json="$1"
@@ -193,10 +204,12 @@ check_dep() {
   binary=$(echo "$dep_json" | jq -r '.binary')
   version=$(echo "$dep_json" | jq -r '.version // empty')
 
-  if ! command -v "$binary" &>/dev/null; then
+  local resolved
+  if ! resolved=$(resolve_binary "$binary"); then
     echo "missing"
     return
   fi
+  binary="$resolved"
 
   if [ -z "$version" ]; then
     echo "available"
@@ -307,7 +320,7 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     HAS_REQUIRED_MISSING=false
     for i in $(seq 0 $((missing_count - 1))); do
         binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
-        if ! command -v "$binary" &>/dev/null; then
+        if ! resolve_binary "$binary" >/dev/null 2>&1; then
             STILL_MISSING="${STILL_MISSING} ${binary}"
             HAS_REQUIRED_MISSING=true
         fi

@@ -35,14 +35,17 @@ let tokenlessAvailable: boolean | null = null;
 
 // Resolved absolute paths — set by check*() functions so subprocess calls
 // use the correct path even when the binary is not on PATH (e.g. RPM installs
-// that place rtk/toon in /usr/libexec/anolisa/tokenless/).
+// that place rtk/toon in /usr/libexec/anolisa/tokenless/ or Debian installs
+// that use /usr/lib/anolisa/tokenless/).
 let rtkPath: string = "rtk";
 let tokenlessPath: string = "tokenless";
 
 const LIBEXEC_FALLBACK = "/usr/libexec/anolisa/tokenless";
+const LIB_FALLBACK = "/usr/lib/anolisa/tokenless";
 const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
-const LOCAL_SHARE = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
+const LOCAL_BIN = `${process.env.HOME || ""}/.local/bin`;
 const LOCAL_LIB = `${process.env.HOME || ""}/.local/lib/anolisa/tokenless`;
+const LOCAL_FALLBACK = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
 
 // Check both existence and execute permission (mirrors shell `-x` test).
 function isExecutable(path: string): boolean {
@@ -53,40 +56,22 @@ function isExecutable(path: string): boolean {
   }
 }
 
+function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null {
+  try {
+    const result = execSync(`sh -c 'command -v ${name}'`, { encoding: "utf-8" }).trim();
+    if (result && result !== "") return result;
+  } catch { /* not on PATH */ }
+  for (const fb of fallbacks) {
+    if (fb && isExecutable(fb)) return fb;
+  }
+  return null;
+}
+
 function checkRtk(): boolean {
   if (rtkAvailable !== null) return rtkAvailable;
-  try {
-    const result = execSync("which rtk 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
-    if (result && result !== "") {
-      rtkPath = result;
-      rtkAvailable = true;
-    } else if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
-      rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
-      rtkAvailable = true;
-    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/rtk`)) {
-      rtkPath = `${LOCAL_SHARE}/rtk`;
-      rtkAvailable = true;
-    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/rtk`)) {
-      rtkPath = `${LOCAL_LIB}/rtk`;
-      rtkAvailable = true;
-    } else {
-      rtkAvailable = false;
-    }
-  } catch {
-    if (isExecutable(`${LIBEXEC_FALLBACK}/rtk`)) {
-      rtkPath = `${LIBEXEC_FALLBACK}/rtk`;
-      rtkAvailable = true;
-    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/rtk`)) {
-      rtkPath = `${LOCAL_SHARE}/rtk`;
-      rtkAvailable = true;
-    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/rtk`)) {
-      rtkPath = `${LOCAL_LIB}/rtk`;
-      rtkAvailable = true;
-    } else {
-      rtkAvailable = false;
-    }
-    return rtkAvailable;
-  }
+  const resolved = resolveBinaryPath("rtk", `${LIBEXEC_FALLBACK}/rtk`, `${LIB_FALLBACK}/rtk`, `${LOCAL_FALLBACK}/rtk`, `${LOCAL_LIB}/rtk`, `${LOCAL_BIN}/rtk`);
+  if (resolved) { rtkPath = resolved; rtkAvailable = true; }
+  else { rtkAvailable = false; }
   return rtkAvailable;
 }
 
@@ -103,41 +88,11 @@ function isSkillContent(message: any): boolean {
 
 function checkTokenless(): boolean {
   if (tokenlessAvailable !== null) return tokenlessAvailable;
-  try {
-    const result = execSync("which tokenless 2>/dev/null || echo ''", { encoding: "utf-8" }).trim();
-    if (result && result !== "") {
-      tokenlessPath = result;
-      tokenlessAvailable = true;
-    } else if (isExecutable(TOKENLESS_FALLBACK)) {
-      tokenlessPath = TOKENLESS_FALLBACK;
-      tokenlessAvailable = true;
-    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/tokenless`)) {
-      tokenlessPath = `${LOCAL_SHARE}/tokenless`;
-      tokenlessAvailable = true;
-    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/tokenless`)) {
-      tokenlessPath = `${LOCAL_LIB}/tokenless`;
-      tokenlessAvailable = true;
-    } else {
-      tokenlessAvailable = false;
-    }
-  } catch {
-    if (isExecutable(TOKENLESS_FALLBACK)) {
-      tokenlessPath = TOKENLESS_FALLBACK;
-      tokenlessAvailable = true;
-    } else if (LOCAL_SHARE && isExecutable(`${LOCAL_SHARE}/tokenless`)) {
-      tokenlessPath = `${LOCAL_SHARE}/tokenless`;
-      tokenlessAvailable = true;
-    } else if (LOCAL_LIB && isExecutable(`${LOCAL_LIB}/tokenless`)) {
-      tokenlessPath = `${LOCAL_LIB}/tokenless`;
-      tokenlessAvailable = true;
-    } else {
-      tokenlessAvailable = false;
-    }
-    return tokenlessAvailable;
-  }
+  const resolved = resolveBinaryPath("tokenless", TOKENLESS_FALLBACK, `${LOCAL_FALLBACK}/tokenless`, `${LOCAL_LIB}/tokenless`, `${LOCAL_BIN}/tokenless`);
+  if (resolved) { tokenlessPath = resolved; tokenlessAvailable = true; }
+  else { tokenlessAvailable = false; }
   return tokenlessAvailable;
 }
-
 
 // ---- Subprocess helpers -------------------------------------------------------
 

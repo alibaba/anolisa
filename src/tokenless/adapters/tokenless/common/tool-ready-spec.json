@@ -15,6 +15,8 @@
         "binary": "CLI tool name for command -v detection",
         "version": "Version constraint, e.g. >=0.35",
         "package": "Package name in the manager",
+        "apt_package": "Override package name when detected manager is apt (Debian/Ubuntu). Optional; defaults to package.",
+        "apk_package": "Override package name when detected manager is apk (Alpine). Optional; defaults to package.",
         "manager": "Package manager type. Default rpm (auto-detects yum/dnf/apt/apk at runtime)",
         "pip_name": "pip package name (default = package)",
         "uv_name": "uv package name (default = package)",
@@ -50,30 +52,19 @@
       { "binary": "jq", "package": "jq", "manager": "rpm" }
     ],
     "recommended": [
-      { "binary": "rtk", "version": ">=0.35", "package": "tokenless", "manager": "rpm",
-        "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
-        ]
-      },
-      { "binary": "tokenless", "package": "tokenless", "manager": "rpm",
-        "fallback": [
-          { "method": "cargo", "binary": "tokenless", "package": "tokenless" }
-        ]
-      },
-      { "binary": "toon", "package": "tokenless", "manager": "rpm",
-        "fallback": [
-          { "method": "symlink", "binary": "toon", "source": "/usr/libexec/anolisa/tokenless/toon" },
-          { "method": "cargo", "binary": "toon", "package": "toon-format" }
-        ]
-      },
       { "binary": "git", "package": "git", "manager": "rpm" },
-      { "binary": "ssh", "package": "openssh-clients", "manager": "rpm" },
-      { "binary": "docker", "package": "docker-ce", "manager": "rpm",
+      { "binary": "ssh", "package": "openssh-clients", "apt_package": "openssh-client", "manager": "rpm" },
+      { "binary": "docker", "package": "docker-ce", "apt_package": "docker.io", "manager": "rpm",
         "fallback": [
           { "method": "rpm", "binary": "docker", "package": "docker" }
         ]
       },
-      { "binary": "uv", "package": "uv", "manager": "pip", "pip_name": "uv" },
+      { "binary": "uv", "package": "uv", "manager": "pip", "pip_name": "uv",
+        "fallback": [
+          { "method": "curl_pipe_sh", "binary": "uv", "url": "https://astral.sh/uv/install.sh" },
+          { "method": "cargo", "binary": "uv", "package": "uv" }
+        ]
+      },
       { "binary": "python3", "package": "python3", "manager": "rpm" },
       { "binary": "cargo", "package": "cargo", "manager": "rpm" },
       { "binary": "rustc", "package": "rustc", "manager": "rpm" }

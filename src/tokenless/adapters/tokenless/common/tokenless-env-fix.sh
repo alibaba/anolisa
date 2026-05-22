@@ -39,6 +39,9 @@ elif command -v apk &>/dev/null; then
   PACKAGE_MANAGER="apk"
 fi
 
+# Guard to avoid repeated apt-get update across multiple install_via_system calls
+_APT_UPDATED=false
+
 # --- Logging helpers ---
 
 log_fix() {
@@ -109,6 +112,10 @@ validate_name() {
 
 install_via_system() {
   local package="$1"
+  # Refresh package index before first install on apt-based systems
+  case "$PACKAGE_MANAGER" in
+    apt)  if [ "$_APT_UPDATED" != true ]; then $SUDO_PREFIX apt-get update -qq 2>/dev/null || log_fix "apt-get update failed (network issue?)"; _APT_UPDATED=true; fi ;;
+  esac
   # Try detected system manager first, then others as fallback (Alinux dnf/yum > apt > apk)
   case "$PACKAGE_MANAGER" in
     dnf)  $SUDO_PREFIX dnf install -y "$package" 2>/dev/null || $SUDO_PREFIX yum install -y "$package" 2>/dev/null || $SUDO_PREFIX apt-get install -y "$package" 2>/dev/null || $SUDO_PREFIX apk add "$package" 2>/dev/null ;;
@@ -203,7 +210,7 @@ install_via_symlink() {
   local source="$2"
   # Only allow symlinks from trusted installation directories
   case "$source" in
-    /usr/libexec/anolisa/*|/usr/share/anolisa/*|/usr/local/libexec/anolisa/*|/usr/local/share/anolisa/*)
+    /usr/lib/anolisa/*|/usr/libexec/anolisa/*|/usr/share/anolisa/*|/usr/local/lib/anolisa/*|/usr/local/libexec/anolisa/*|/usr/local/share/anolisa/*)
       ;;
     "$HOME"/.local/share/anolisa/*)
       ;;
@@ -271,6 +278,11 @@ fix_dep() {
 
   binary=$(echo "$dep_json" | jq -r '.binary // empty')
   package=$(echo "$dep_json" | jq -r '.package // empty')
+  # Resolve per-manager package overrides: apt_package/apk_package
+  case "$PACKAGE_MANAGER" in
+    apt)  apt_pkg=$(echo "$dep_json" | jq -r '.apt_package // empty'); [ -n "$apt_pkg" ] && package="$apt_pkg" ;;
+    apk)  apk_pkg=$(echo "$dep_json" | jq -r '.apk_package // empty'); [ -n "$apk_pkg" ] && package="$apk_pkg" ;;
+  esac
   manager=$(echo "$dep_json" | jq -r '.manager // "rpm"')
   version=$(echo "$dep_json" | jq -r '.version // empty')
   pip_name=$(echo "$dep_json" | jq -r '.pip_name // empty')
@@ -346,7 +358,7 @@ fix_dep() {
     npx)     install_via_npx "$package" && primary_ok=true ;;
     cargo)   install_via_cargo "$package" && primary_ok=true ;;
     symlink) local src; src=$(echo "$dep_json" | jq -r '.source // empty'); install_via_symlink "$binary" "$src" && primary_ok=true ;;
-    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // "/usr/libexec/anolisa/tokenless"'); install_via_path "$pdir" && primary_ok=true ;;
+    path)    local pdir; pdir=$(echo "$dep_json" | jq -r '.source // "/usr/libexec/anolisa/tokenless"'); if [ ! -d "$pdir" ]; then pdir="/usr/lib/anolisa/tokenless"; fi; install_via_path "$pdir" && primary_ok=true ;;
     dir)     local dpath; dpath=$(echo "$dep_json" | jq -r '.source // empty'); install_via_dir "$dpath" && primary_ok=true ;;
     curl_pipe_sh) [ -n "$url" ] && install_via_curl_pipe_sh "$url" "$args" && primary_ok=true ;;
     *)
@@ -392,7 +404,7 @@ fix_dep() {
         cargo)   [ -n "$fb_package" ] && install_via_cargo "$fb_package" && fb_ok=true ;;
         cargo_build) [ -n "$fb_manifest" ] && install_via_cargo_build "$fb_manifest" "$fb_binary" "$fb_features" && fb_ok=true ;;
         symlink) [ -n "$fb_source" ] && install_via_symlink "$fb_binary" "$fb_source" && fb_ok=true ;;
-        path)    install_via_path "${fb_source:-/usr/libexec/anolisa/tokenless}" && fb_ok=true ;;
+        path)    local _fb_pdir="${fb_source:-/usr/libexec/anolisa/tokenless}"; if [ ! -d "$_fb_pdir" ]; then _fb_pdir="/usr/lib/anolisa/tokenless"; fi; install_via_path "$_fb_pdir" && fb_ok=true ;;
         dir)     [ -n "$fb_source" ] && install_via_dir "$fb_source" && fb_ok=true ;;
         curl_pipe_sh) [ -n "$fb_url" ] && install_via_curl_pipe_sh "$fb_url" "$fb_args" && fb_ok=true ;;
         *) echo "[tokenless-env-fix] ${binary}: unknown fallback method '${fb_method}'" ;;
