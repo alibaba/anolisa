@@ -143,11 +143,34 @@ component_is_unsupported() {
     [[ "$1" == "agentsight" ]]
 }
 
+join_by() {
+    local sep="$1"; shift
+    local out=""
+    local item
+    for item in "$@"; do
+        if [[ -z "$out" ]]; then
+            out="$item"
+        else
+            out="${out}${sep}${item}"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 resolve_component_name() {
     case "$1" in
         skills)    echo "os-skills" ;;
         sight)     echo "agentsight" ;;
         os-skills|sec-core|tokenless|ws-ckpt|agentsight) echo "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_plugin_component() {
+    case "$1" in
+        agent-sec)           echo "sec-core" ;;
+        tokenless-openclaw)  echo "tokenless" ;;
+        ws-ckpt)             echo "ws-ckpt" ;;
         *) return 1 ;;
     esac
 }
@@ -158,12 +181,13 @@ ${BOLD}anolisa-for-openclaw${NC} — Unified OpenClaw adapter orchestrator
 
 Usage:
   $0 [--mode recommended|all] [--component <name>]... [options]
-  $0 --uninstall [--component <name>]... [options]
+  $0 --uninstall [--component <name>|--plugin <id>]... [options]
   $0 --status [options]
 
 Options:
   --mode recommended|all       Component preset (recommended = os-skills,sec-core,tokenless,ws-ckpt)
   --component <name>           Add component (repeatable). Aliases: skills→os-skills, sight→agentsight
+  --plugin <id>                Add component by OpenClaw plugin id (agent-sec, tokenless-openclaw, ws-ckpt)
   --uninstall                  Run uninstall action instead of install
   --status                     Print runtime/adapter/skill diagnostic and exit
   --dry-run                    Print plan, do not execute adapter scripts
@@ -177,6 +201,7 @@ Options:
   -h, --help                   Show this help
 
 Components: os-skills, sec-core, tokenless, ws-ckpt, agentsight
+Plugin IDs: agent-sec, tokenless-openclaw, ws-ckpt
 EOF
 }
 
@@ -190,6 +215,9 @@ parse_args() {
             --component)
                 [[ -n "${2:-}" ]] || die "--component requires a value"
                 COMPONENTS_INPUT+=("$2"); shift 2 ;;
+            --plugin)
+                [[ -n "${2:-}" ]] || die "--plugin requires a value"
+                COMPONENTS_INPUT+=("plugin:$2"); shift 2 ;;
             --uninstall)        ACTION="uninstall"; shift ;;
             --status)           DO_STATUS=true; shift ;;
             --dry-run)          DRY_RUN=true; shift ;;
@@ -266,7 +294,13 @@ build_component_list() {
         esac
     fi
     for raw in "${COMPONENTS_INPUT[@]+"${COMPONENTS_INPUT[@]}"}"; do
-        resolved="$(resolve_component_name "$raw")" || die "unknown component: $raw"
+        if [[ "$raw" == plugin:* ]]; then
+            local plugin_id="${raw#plugin:}"
+            resolved="$(resolve_plugin_component "$plugin_id")" || \
+                die "unknown plugin: $plugin_id (valid: agent-sec, tokenless-openclaw, ws-ckpt)"
+        else
+            resolved="$(resolve_component_name "$raw")" || die "unknown component: $raw"
+        fi
         selected+=("$resolved")
     done
     if [[ ${#selected[@]} -eq 0 ]]; then
@@ -400,6 +434,29 @@ sec_core_bin_dir() {
     fi
 }
 
+adapter_origin() {
+    local root="$1"
+    if [[ -n "$PROJECT_ROOT" && "$root" == "$PROJECT_ROOT/target/"* ]]; then
+        echo "staged target"
+    elif [[ -n "$PROJECT_ROOT" && "$root" == "$PROJECT_ROOT/"* ]]; then
+        echo "source checkout"
+    elif [[ "$root" == "$HOME/.local/share/anolisa/adapters/"* ]]; then
+        echo "user install"
+    elif [[ "$root" == "/usr/share/anolisa/adapters/"* ]]; then
+        echo "system install"
+    else
+        echo "adapter"
+    fi
+}
+
+plan_command() {
+    printf 'bash %s' "$ADAPTER_SCRIPT"
+    if [[ ${#ADAPTER_ACTION_ARGS[@]} -gt 0 ]]; then
+        printf ' %s' "${ADAPTER_ACTION_ARGS[@]}"
+    fi
+    printf '\n'
+}
+
 run_adapter() {
     local component="$1" action="$2"
     local dry_int=0
@@ -410,11 +467,12 @@ run_adapter() {
     fi
 
     if $DRY_RUN; then
-        echo "[plan] component=${component}"
-        echo "[plan]   adapter=${ADAPTER_ROOT}"
-        echo "[plan]   target=${ADAPTER_TARGET_DIR:-<empty>}"
-        echo "[plan]   action=${action}"
-        echo "[plan]   command: bash ${ADAPTER_SCRIPT}${ADAPTER_ACTION_ARGS[*]:+ ${ADAPTER_ACTION_ARGS[*]}}"
+        printf '%s%s%s %s%s%s\n' "$BOLD" "$component" "$NC" "$DIM" "($(adapter_origin "$ADAPTER_ROOT"))" "$NC"
+        printf '  %s%-8s%s %s\n' "$CYAN" "adapter" "$NC" "$ADAPTER_ROOT"
+        if [[ -n "$ADAPTER_TARGET_DIR" ]]; then
+            printf '  %s%-8s%s %s\n' "$CYAN" "target" "$NC" "$ADAPTER_TARGET_DIR"
+        fi
+        printf '  %s%-8s%s %s\n' "$CYAN" "command" "$NC" "$(plan_command)"
         return 0
     fi
 
@@ -808,9 +866,17 @@ cmd_dispatch() {
     fi
 
     if $DRY_RUN; then
-        echo "[plan] action=${ACTION} mode=${MODE:-<explicit>} install-mode=${INSTALL_MODE}"
-        echo "[plan] openclaw-home=${OPENCLAW_HOME}"
-        echo "[plan] project-root=${PROJECT_ROOT:-<empty>}"
+        step "Plan"
+        printf '  %s%-14s%s %s%s%s\n' "$CYAN" "action" "$NC" "$BOLD" "$ACTION" "$NC"
+        printf '  %s%-14s%s %s\n' "$CYAN" "install-mode" "$NC" "$INSTALL_MODE"
+        printf '  %s%-14s%s %s\n' "$CYAN" "components" "$NC" "$(join_by ', ' "${EFFECTIVE_COMPONENTS[@]}")"
+        printf '  %s%-14s%s %s\n' "$CYAN" "openclaw-home" "$NC" "$OPENCLAW_HOME"
+        if [[ -n "$PROJECT_ROOT" ]]; then
+            printf '  %s%-14s%s %s\n' "$CYAN" "project-root" "$NC" "$PROJECT_ROOT"
+        else
+            printf '  %s%-14s%s %s\n' "$CYAN" "project-root" "$NC" "<none; installed adapters only>"
+        fi
+        echo ""
     fi
 
     local restart_needed=false c r
