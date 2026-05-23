@@ -18,9 +18,9 @@ find_plugin_src() {
     local component="${1:?usage: find_plugin_src COMPONENT}"
     local candidates=()
     [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/ws-ckpt/plugins/${component}")
+    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/plugins/${component}")
     candidates+=("${HOME}/.local/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     candidates+=("/usr/share/anolisa/runtime/ws-ckpt/plugins/${component}")
-    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/plugins/${component}")
     discover_dir "${candidates[@]}"
 }
 
@@ -29,9 +29,9 @@ find_plugin_src() {
 find_skill_src() {
     local candidates=()
     [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/skills/ws-ckpt")
+    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/skills/ws-ckpt")
     candidates+=("${HOME}/.local/share/anolisa/runtime/skills/ws-ckpt")
     candidates+=("/usr/share/anolisa/runtime/skills/ws-ckpt")
-    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/skills/ws-ckpt")
     discover_dir "${candidates[@]}"
 }
 

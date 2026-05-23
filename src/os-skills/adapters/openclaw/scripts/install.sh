@@ -48,11 +48,13 @@ find_skill_dir() {
     if [ -n "$TARGET_DIR" ]; then
         roots+=("$TARGET_DIR/share/anolisa/skills")
     fi
+    if [ -n "$PROJECT_ROOT" ]; then
+        roots+=("$PROJECT_ROOT/src/os-skills")
+    fi
     roots+=(
         "$HOME/.copilot-shell/skills" \
         "$HOME/.local/share/anolisa/skills" \
-        "/usr/share/anolisa/skills" \
-        "$PROJECT_ROOT/src/os-skills"
+        "/usr/share/anolisa/skills"
     )
     for root in "${roots[@]}"; do
         [ -n "$root" ] && [ -d "$root" ] || continue

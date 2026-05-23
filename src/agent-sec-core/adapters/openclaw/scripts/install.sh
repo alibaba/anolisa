@@ -31,13 +31,15 @@ find_plugin_dir() {
             "$TARGET_DIR/lib/anolisa/sec-core/openclaw-plugin"
         )
     fi
+    if [ -n "$PROJECT_ROOT" ]; then
+        candidates+=("$PROJECT_ROOT/src/agent-sec-core/openclaw-plugin")
+    fi
     candidates+=(
         "$SEC_CORE_OPENCLAW_PLUGIN_DIR" \
         "$HOME/.local/lib/anolisa/sec-core/openclaw-plugin" \
         "/usr/local/lib/anolisa/sec-core/openclaw-plugin" \
         "/usr/lib/anolisa/sec-core/openclaw-plugin" \
-        "/opt/agent-sec/openclaw-plugin" \
-        "$PROJECT_ROOT/src/agent-sec-core/openclaw-plugin"
+        "/opt/agent-sec/openclaw-plugin"
     )
     for candidate in "${candidates[@]}"; do
         if [ -n "$candidate" ] && [ -d "$candidate" ]; then
@@ -57,10 +59,12 @@ find_skill_dir() {
             "$TARGET_DIR/share/anolisa/skills"
         )
     fi
+    if [ -n "$PROJECT_ROOT" ]; then
+        candidates+=("$PROJECT_ROOT/src/agent-sec-core/skills")
+    fi
     candidates+=(
         "$HOME/.copilot-shell/skills" \
-        "/usr/share/anolisa/skills" \
-        "$PROJECT_ROOT/src/agent-sec-core/skills"
+        "/usr/share/anolisa/skills"
     )
     for candidate in "${candidates[@]}"; do
         [ -n "$candidate" ] && [ -d "$candidate" ] || continue
