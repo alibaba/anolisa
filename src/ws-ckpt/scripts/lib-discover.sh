@@ -20,6 +20,7 @@ find_plugin_src() {
     [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     candidates+=("${HOME}/.local/share/anolisa/runtime/ws-ckpt/plugins/${component}")
     candidates+=("/usr/share/anolisa/runtime/ws-ckpt/plugins/${component}")
+    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/plugins/${component}")
     discover_dir "${candidates[@]}"
 }
 
@@ -30,6 +31,7 @@ find_skill_src() {
     [ -n "${ANOLISA_TARGET_DIR:-}" ] && candidates+=("${ANOLISA_TARGET_DIR}/share/anolisa/runtime/skills/ws-ckpt")
     candidates+=("${HOME}/.local/share/anolisa/runtime/skills/ws-ckpt")
     candidates+=("/usr/share/anolisa/runtime/skills/ws-ckpt")
+    [ -n "${ANOLISA_PROJECT_ROOT:-}" ] && candidates+=("${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/skills/ws-ckpt")
     discover_dir "${candidates[@]}"
 }
 
@@ -40,5 +42,6 @@ print_search_error() {
     echo "  - \${ANOLISA_TARGET_DIR}/share/anolisa/runtime/... (ANOLISA_TARGET_DIR=${ANOLISA_TARGET_DIR:-<unset>})"
     echo "  - ~/.local/share/anolisa/runtime/..."
     echo "  - /usr/share/anolisa/runtime/..."
+    echo "  - \${ANOLISA_PROJECT_ROOT}/src/ws-ckpt/src/... (ANOLISA_PROJECT_ROOT=${ANOLISA_PROJECT_ROOT:-<unset>})"
     echo "Please install ws-ckpt via RPM, make install, or set ANOLISA_TARGET_DIR to staged output."
 }

@@ -325,6 +325,9 @@ install-adapter-manifest: ## Install adapter-manifest.json from staged copy
 	test -f $(ADAPTER_STAGE_DIR)/manifest.json
 	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)
 	install -p -m 0644 $(ADAPTER_STAGE_DIR)/manifest.json $(DESTDIR)$(ADAPTER_DIR)/manifest.json
+	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts
+	install -p -m 0755 adapters/openclaw/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
+	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 
 .PHONY: install-all
 install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)

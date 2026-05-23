@@ -49,6 +49,7 @@ find_skill_dir() {
         roots+=("$TARGET_DIR/share/anolisa/skills")
     fi
     roots+=(
+        "$HOME/.copilot-shell/skills" \
         "$HOME/.local/share/anolisa/skills" \
         "/usr/share/anolisa/skills" \
         "$PROJECT_ROOT/src/os-skills"

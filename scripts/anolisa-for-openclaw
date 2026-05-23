@@ -55,6 +55,7 @@ SOURCE_REF=""                  # used in source mode; default = upstream/HEAD
 ADAPTER_ROOT=""
 ADAPTER_SCRIPT=""
 ADAPTER_TARGET_DIR=""
+ADAPTER_ACTION_ARGS=()
 
 # ─── component metadata ───
 # Stable order for output / dedupe.
@@ -67,14 +68,14 @@ RECOMMENDED_SET=(os-skills sec-core tokenless ws-ckpt)
 ALL_SET=("${RECOMMENDED_SET[@]}")
 
 # Components that need OpenClaw gateway restart after install.
-GATEWAY_RESTART_COMPONENTS=(sec-core tokenless)
+GATEWAY_RESTART_COMPONENTS=(sec-core tokenless ws-ckpt)
 
 # Skills expected under ~/.openclaw/skills after a recommended install
 # (sec-core ships 3, ws-ckpt ships 1). Used by --status presence checks.
 KNOWN_SKILLS=(ws-ckpt code-scanner prompt-scanner skill-ledger)
 
-# OpenClaw plugins registered by recommended install (tokenless + sec-core).
-KNOWN_PLUGINS=(tokenless-openclaw agent-sec)
+# OpenClaw plugins registered by recommended install.
+KNOWN_PLUGINS=(tokenless-openclaw agent-sec ws-ckpt)
 
 # Source-tree fallback path (relative to PROJECT_ROOT).
 component_src_subpath() {
@@ -82,7 +83,7 @@ component_src_subpath() {
         os-skills)  echo "src/os-skills/adapters" ;;
         sec-core)   echo "src/agent-sec-core/adapters" ;;
         tokenless)  echo "src/tokenless/adapters/tokenless" ;;
-        ws-ckpt)    echo "src/ws-ckpt/adapters" ;;
+        ws-ckpt)    echo "src/ws-ckpt" ;;
         agentsight) return 1 ;;
         *)          return 1 ;;
     esac
@@ -283,12 +284,72 @@ build_component_list() {
     done
 }
 
+# Read targets.openclaw.actions.<action> from a JSON manifest.
+manifest_action_command() {
+    local manifest="$1" action="$2"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$manifest" "$action" <<'PY'
+import json
+import sys
+
+manifest, action = sys.argv[1], sys.argv[2]
+try:
+    with open(manifest, encoding="utf-8") as fh:
+        data = json.load(fh)
+    cmd = data.get("targets", {}).get("openclaw", {}).get("actions", {}).get(action, "")
+except Exception:
+    cmd = ""
+if isinstance(cmd, str) and cmd.strip():
+    print(cmd.strip())
+PY
+        return 0
+    fi
+
+    # Minimal fallback for the repository's current manifest shape. This keeps
+    # curl|bash usage from depending on Python for simple action lookup.
+    sed -n "s/.*\"${action}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$manifest" | head -n 1
+}
+
+# Try manifest-declared OpenClaw action first, then the legacy
+# openclaw/scripts/<action>.sh layout used by older component adapters.
+resolve_action_script_in_root() {
+    local root="$1" action="$2"
+    local manifest cmd rel script
+    ADAPTER_ACTION_ARGS=()
+
+    for manifest in "$root/manifest.json" "$root/adapter-manifest.json"; do
+        [[ -f "$manifest" ]] || continue
+        cmd="$(manifest_action_command "$manifest" "$action" || true)"
+        [[ -n "$cmd" ]] || continue
+
+        # Current manifests use simple whitespace-separated command strings.
+        # Paths with spaces are not supported by this adapter contract.
+        read -r -a ADAPTER_ACTION_ARGS <<<"$cmd"
+        rel="${ADAPTER_ACTION_ARGS[0]}"
+        ADAPTER_ACTION_ARGS=("${ADAPTER_ACTION_ARGS[@]:1}")
+        script="$root/$rel"
+        if [[ -f "$script" ]]; then
+            ADAPTER_SCRIPT="$script"
+            return 0
+        fi
+    done
+
+    script="$root/openclaw/scripts/${action}.sh"
+    if [[ -f "$script" ]]; then
+        ADAPTER_SCRIPT="$script"
+        ADAPTER_ACTION_ARGS=()
+        return 0
+    fi
+
+    return 1
+}
+
 # Resolve the adapter root for $component+$action by checking candidates in order.
-# Sets ADAPTER_ROOT, ADAPTER_TARGET_DIR (may be empty), ADAPTER_SCRIPT.
+# Sets ADAPTER_ROOT, ADAPTER_TARGET_DIR (may be empty), ADAPTER_SCRIPT, and
+# ADAPTER_ACTION_ARGS.
 # Returns 0 if found, 1 otherwise.
 find_openclaw_adapter() {
     local component="$1" action="$2"
-    local script_rel="openclaw/scripts/${action}.sh"
     local candidates=()
 
     if [[ -n "$PROJECT_ROOT" ]]; then
@@ -305,9 +366,8 @@ find_openclaw_adapter() {
 
     local cand
     for cand in "${candidates[@]}"; do
-        if [[ -f "$cand/$script_rel" ]]; then
+        if resolve_action_script_in_root "$cand" "$action"; then
             ADAPTER_ROOT="$cand"
-            ADAPTER_SCRIPT="$cand/$script_rel"
             if [[ -n "$PROJECT_ROOT" && -d "$PROJECT_ROOT/target/$component" ]]; then
                 ADAPTER_TARGET_DIR="$PROJECT_ROOT/target/$component"
             else
@@ -320,6 +380,7 @@ find_openclaw_adapter() {
     ADAPTER_ROOT=""
     ADAPTER_SCRIPT=""
     ADAPTER_TARGET_DIR=""
+    ADAPTER_ACTION_ARGS=()
     return 1
 }
 
@@ -354,7 +415,7 @@ run_adapter() {
         echo "[plan]   adapter=${ADAPTER_ROOT}"
         echo "[plan]   target=${ADAPTER_TARGET_DIR:-<empty>}"
         echo "[plan]   action=${action}"
-        echo "[plan]   command: bash ${ADAPTER_SCRIPT}"
+        echo "[plan]   command: bash ${ADAPTER_SCRIPT}${ADAPTER_ACTION_ARGS[*]:+ ${ADAPTER_ACTION_ARGS[*]}}"
         return 0
     fi
 
@@ -375,7 +436,7 @@ run_adapter() {
         OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills" \
         SEC_CORE_OPENCLAW_PLUGIN_DIR="$(sec_core_plugin_dir)" \
         SEC_CORE_BIN_DIR="$(sec_core_bin_dir)" \
-        bash "$ADAPTER_SCRIPT"
+        bash "$ADAPTER_SCRIPT" "${ADAPTER_ACTION_ARGS[@]}"
 }
 
 RPM_TOOL=""        # dnf | yum | ""

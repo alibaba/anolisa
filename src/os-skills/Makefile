@@ -30,6 +30,9 @@ install:
 	done
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
 	install -p -m 0644 adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
+	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts"
+	install -p -m 0755 adapters/openclaw/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
+	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
 
 uninstall:
 	@echo "==> Removing os-skills from $(DESTDIR)$(SKILLS_DIR)"
