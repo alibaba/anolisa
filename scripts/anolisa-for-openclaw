@@ -70,9 +70,10 @@ ALL_SET=("${RECOMMENDED_SET[@]}")
 # Components that need OpenClaw gateway restart after install.
 GATEWAY_RESTART_COMPONENTS=(sec-core tokenless ws-ckpt)
 
-# Skills expected under ~/.openclaw/skills after a recommended install
-# (sec-core ships 3, ws-ckpt ships 1). Used by --status presence checks.
-KNOWN_SKILLS=(ws-ckpt code-scanner prompt-scanner skill-ledger)
+# Skills expected under ~/.openclaw/skills after a recommended install.
+# ws-ckpt is now delivered as an OpenClaw plugin; its skill fallback is not
+# required when plugin installation succeeds.
+KNOWN_SKILLS=(code-scanner prompt-scanner skill-ledger)
 
 # OpenClaw plugins registered by recommended install.
 KNOWN_PLUGINS=(tokenless-openclaw agent-sec ws-ckpt)
