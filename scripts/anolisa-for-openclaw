@@ -354,15 +354,13 @@ find_openclaw_adapter() {
 
     if [[ -n "$PROJECT_ROOT" ]]; then
         candidates+=("$PROJECT_ROOT/target/${component}/share/anolisa/adapters/${component}")
-    fi
-    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
-    candidates+=("/usr/share/anolisa/adapters/${component}")
-    if [[ -n "$PROJECT_ROOT" ]]; then
         local sub
         if sub="$(component_src_subpath "$component")"; then
             candidates+=("$PROJECT_ROOT/$sub")
         fi
     fi
+    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
+    candidates+=("/usr/share/anolisa/adapters/${component}")
 
     local cand
     for cand in "${candidates[@]}"; do
