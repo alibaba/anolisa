@@ -326,6 +326,7 @@ install-adapter-manifest: ## Install adapter-manifest.json from staged copy
 	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)
 	install -p -m 0644 $(ADAPTER_STAGE_DIR)/manifest.json $(DESTDIR)$(ADAPTER_DIR)/manifest.json
 	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts
+	install -p -m 0755 adapters/openclaw/scripts/detect.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 

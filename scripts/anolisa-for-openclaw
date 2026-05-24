@@ -70,14 +70,6 @@ ALL_SET=("${RECOMMENDED_SET[@]}")
 # Components that need OpenClaw gateway restart after install.
 GATEWAY_RESTART_COMPONENTS=(sec-core tokenless ws-ckpt)
 
-# Skills expected under ~/.openclaw/skills after a recommended install.
-# ws-ckpt is now delivered as an OpenClaw plugin; its skill fallback is not
-# required when plugin installation succeeds.
-KNOWN_SKILLS=(code-scanner prompt-scanner skill-ledger)
-
-# OpenClaw plugins registered by recommended install.
-KNOWN_PLUGINS=(tokenless-openclaw agent-sec ws-ckpt)
-
 # Source-tree fallback path (relative to PROJECT_ROOT).
 component_src_subpath() {
     case "$1" in
@@ -918,6 +910,113 @@ cmd_dispatch() {
     fi
 }
 
+# Probe OpenClaw plugins list (cached per status invocation).
+STATUS_PLUGINS_JSON_CACHED=false
+STATUS_PLUGINS_JSON=""
+STATUS_PLUGINS_TXT=""
+
+status_load_plugins() {
+    local openclaw_bin="$1"
+    $STATUS_PLUGINS_JSON_CACHED && return 0
+    STATUS_PLUGINS_JSON_CACHED=true
+    [[ -n "$openclaw_bin" ]] || return 0
+    STATUS_PLUGINS_JSON="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list --json 2>/dev/null || true)"
+    STATUS_PLUGINS_TXT="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list 2>/dev/null || true)"
+}
+
+status_plugin_listed() {
+    local plugin_id="$1"
+    if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${plugin_id}\"" <<<"$STATUS_PLUGINS_JSON"; then
+        return 0
+    fi
+    if grep -qE "(^|[[:space:]])${plugin_id}([[:space:]]|$)" <<<"$STATUS_PLUGINS_TXT"; then
+        return 0
+    fi
+    return 1
+}
+
+# status_run_detect <component>
+# Executes the component's detect.sh under the standard env contract.
+# Always prints output; never aborts cmd_status on non-zero exit.
+status_run_detect() {
+    local component="$1"
+    printf '  adapter: %s\n' "$ADAPTER_ROOT"
+    local openclaw_bin rc=0
+    openclaw_bin="$(resolve_openclaw_bin || true)"
+    set +e
+    env \
+        PATH="$(openclaw_search_path)" \
+        ANOLISA_COMPONENT="$component" \
+        ANOLISA_TARGET="openclaw" \
+        ANOLISA_ADAPTER_DIR="$ADAPTER_ROOT" \
+        ANOLISA_TARGET_DIR="${ADAPTER_TARGET_DIR}" \
+        ANOLISA_PROJECT_ROOT="${PROJECT_ROOT}" \
+        ANOLISA_INSTALL_MODE="$INSTALL_MODE" \
+        ANOLISA_DRY_RUN="0" \
+        OPENCLAW_HOME="$OPENCLAW_HOME" \
+        OPENCLAW_BIN="$openclaw_bin" \
+        OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills" \
+        SEC_CORE_OPENCLAW_PLUGIN_DIR="$(sec_core_plugin_dir)" \
+        SEC_CORE_BIN_DIR="$(sec_core_bin_dir)" \
+        bash "$ADAPTER_SCRIPT" ${ADAPTER_ACTION_ARGS[@]+"${ADAPTER_ACTION_ARGS[@]}"}
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+        printf '  result: %sready%s\n' "$GREEN" "$NC"
+    else
+        printf '  result: %snot ready%s (detect exit %s)\n' "$YELLOW" "$NC" "$rc"
+    fi
+}
+
+# status_fallback <component> <openclaw_bin>
+# Used when a component lacks detect.sh — prints adapter inventory and best-
+# effort plugin/skill probing so users still see something actionable.
+status_fallback() {
+    local component="$1" openclaw_bin="$2"
+    local install_state="missing" uninstall_state="missing" src_path="-"
+    if find_openclaw_adapter "$component" "install"; then
+        install_state="found"; src_path="$ADAPTER_ROOT"
+    fi
+    if find_openclaw_adapter "$component" "uninstall"; then
+        uninstall_state="found"
+    fi
+    printf '  adapters: install=%s uninstall=%s source=%s\n' \
+        "$install_state" "$uninstall_state" "$src_path"
+
+    local plugin_id=""
+    case "$component" in
+        sec-core)  plugin_id="agent-sec" ;;
+        tokenless) plugin_id="tokenless-openclaw" ;;
+        ws-ckpt)   plugin_id="ws-ckpt" ;;
+    esac
+    if [[ -n "$plugin_id" ]]; then
+        if [[ -n "$openclaw_bin" ]]; then
+            status_load_plugins "$openclaw_bin"
+            if status_plugin_listed "$plugin_id"; then
+                printf '  plugin %-20s listed\n' "$plugin_id"
+            elif [[ -d "${OPENCLAW_HOME%/}/extensions/$plugin_id" ]]; then
+                printf '  plugin %-20s installed (extensions dir)\n' "$plugin_id"
+            else
+                printf '  plugin %-20s not listed\n' "$plugin_id"
+            fi
+        else
+            printf '  plugin %-20s unknown (openclaw CLI missing)\n' "$plugin_id"
+        fi
+    fi
+
+    if [[ "$component" == "sec-core" ]]; then
+        local skill sf
+        for skill in code-scanner prompt-scanner skill-ledger; do
+            sf="${OPENCLAW_HOME%/}/skills/$skill/SKILL.md"
+            if [[ -f "$sf" ]]; then
+                printf '  skill  %-20s present (%s)\n' "$skill" "$sf"
+            else
+                printf '  skill  %-20s missing (%s)\n' "$skill" "$sf"
+            fi
+        done
+    fi
+}
+
 cmd_status() {
     step "OpenClaw runtime"
     local openclaw_bin=""
@@ -933,32 +1032,9 @@ cmd_status() {
         echo "  OpenClaw home:   $OPENCLAW_HOME (missing)"
     fi
 
-    step "Adapters"
-    local c install_state uninstall_state src_path
-    for c in "${KNOWN_COMPONENTS[@]}"; do
-        if component_is_unsupported "$c"; then
-            printf "  %-12s unsupported (no OpenClaw adapter)\n" "$c"
-            continue
-        fi
-        if find_openclaw_adapter "$c" "install"; then
-            install_state="found"
-            src_path="$ADAPTER_ROOT"
-        else
-            install_state="missing"
-            src_path="-"
-        fi
-        if find_openclaw_adapter "$c" "uninstall"; then
-            uninstall_state="found"
-        else
-            uninstall_state="missing"
-        fi
-        printf "  %-12s install=%s uninstall=%s source=%s\n" \
-            "$c" "$install_state" "$uninstall_state" "$src_path"
-    done
-
     step "State (${STATE_DIR})"
     if [[ -d "$STATE_DIR" ]]; then
-        local sf
+        local c sf
         for c in "${KNOWN_COMPONENTS[@]}"; do
             sf="$STATE_DIR/$c.json"
             if [[ -f "$sf" ]]; then
@@ -977,34 +1053,20 @@ cmd_status() {
         echo "  (state dir does not exist yet)"
     fi
 
-    step "OpenClaw skills (${OPENCLAW_HOME%/}/skills)"
-    local skill
-    for skill in "${KNOWN_SKILLS[@]}"; do
-        if [[ -f "${OPENCLAW_HOME%/}/skills/$skill/SKILL.md" ]]; then
-            printf "  %-24s present\n" "$skill/SKILL.md"
+    local c
+    for c in "${KNOWN_COMPONENTS[@]}"; do
+        step "${c} detect"
+        if component_is_unsupported "$c"; then
+            warn "${c}: unsupported (no OpenClaw adapter)"
+            continue
+        fi
+        if find_openclaw_adapter "$c" "detect"; then
+            status_run_detect "$c"
         else
-            printf "  %-24s missing\n" "$skill/SKILL.md"
+            warn "${c}: detect script not available; using fallback status"
+            status_fallback "$c" "$openclaw_bin"
         fi
     done
-
-    step "OpenClaw plugins"
-    if [[ -n "$openclaw_bin" ]]; then
-        local plugins plugins_json p
-        plugins_json="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list --json 2>/dev/null || true)"
-        plugins="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list 2>/dev/null || true)"
-        for p in "${KNOWN_PLUGINS[@]}"; do
-            if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${p}\"" <<<"$plugins_json"; then
-                printf "  %-24s listed\n" "$p"
-            # Fallback for older OpenClaw versions without --json.
-            elif grep -qE "(^|[[:space:]])${p}([[:space:]]|$)" <<<"$plugins"; then
-                printf "  %-24s listed\n" "$p"
-            else
-                printf "  %-24s not listed\n" "$p"
-            fi
-        done
-    else
-        echo "  N/A (openclaw CLI missing)"
-    fi
 }
 
 main() {

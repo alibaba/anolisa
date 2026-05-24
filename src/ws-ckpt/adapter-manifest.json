@@ -15,6 +15,7 @@
         "hooks": []
       },
       "actions": {
+        "detect":    "scripts/detect-openclaw.sh",
         "install":   "scripts/install-openclaw.sh",
         "uninstall": "scripts/uninstall-openclaw.sh"
       }
