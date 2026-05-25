@@ -1,6 +1,5 @@
 pub mod backend_detect;
 pub mod backends;
-pub mod btrfs_ops;
 pub mod dispatcher;
 pub mod fs_watcher;
 pub mod index_store;
