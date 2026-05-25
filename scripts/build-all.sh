@@ -729,6 +729,7 @@ install_build_tools() {
 
     local missing=()
     if ! cmd_exists make; then missing+=("make"); fi
+    if ! cmd_exists patch; then missing+=("patch"); fi
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
         if ! cmd_exists g++; then missing+=("gcc-c++"); fi
@@ -1459,6 +1460,14 @@ build_sec_core() {
     run_logged_timeout "${AGENT_SEC_BUILD_TIMEOUT:-1200}" \
         "make build-all (agent-sec-core)" \
         make build-all BUILD_DIR="$build_dir"
+
+    if [[ -d "$build_dir/share" ]]; then
+        local adapter_scripts="$build_dir/share/anolisa/adapters/sec-core/openclaw/scripts"
+        install -d -m 0755 "$adapter_scripts"
+        cp -a "$dir/adapters/openclaw/scripts/." "$adapter_scripts/"
+        rm -rf "$component_root/share"
+        cp -a "$build_dir/share" "$component_root/share"
+    fi
 
     local bin="$build_dir/linux-sandbox"
     if [[ -f "$bin" ]]; then
