@@ -238,6 +238,18 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun May 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.0-1
+- feat(tokenless): add hermes agent plugin
+- refactor(tokenless): align FHS paths, restructure adapter dir, remove install.sh
+- refactor(tokenless): support staged installs
+- fix(tokenless): correct 5 bugs in stats, naming, SQL, paths and permissions
+- fix(tokenless): address code review findings across schema, env-check, hooks, and plugin
+- fix(tokenless): security hardening & critical algorithm correctness
+- fix(tokenless): behavioral correctness & logic fixes
+- fix(tokenless): dedup, dead code removal & cosmetic cleanup
+- fix(tokenless): support Debian/Ubuntu FHS paths and harden binary resolution
+- fix(tokenless): build OpenClaw plugin to dist/index.js
+
 * Fri May 22 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.3.2-2
 - refactor(tokenless): replace submodules with crates.io deps and inline toon
 - fix(tokenless): use libc::getuid() syscall instead of spoofable home-dir uid

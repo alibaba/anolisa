@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- correct 5 bugs in stats, naming, SQL, paths and permissions
+- align FHS paths, restructure adapter dir, remove install.sh
+- address code review findings across schema, env-check, hooks, and plugin
+- add hermes agent plugin
+- security hardening & critical algorithm correctness
+- behavioral correctness & logic fixes
+- dedup, dead code removal & cosmetic cleanup
+- support staged installs
+- support Debian/Ubuntu FHS paths and harden binary resolution
+- build OpenClaw plugin to dist/index.js
+
 ## 0.3.2
 
 - replace spoofable home-dir uid derivation with libc::getuid() syscall for trust chain integrity
