@@ -36,8 +36,7 @@ find_plugin_dir() {
         "$HOME/.local/lib/anolisa/sec-core/openclaw-plugin" \
         "/usr/local/lib/anolisa/sec-core/openclaw-plugin" \
         "/usr/lib/anolisa/sec-core/openclaw-plugin" \
-        "/opt/agent-sec/openclaw-plugin" \
-        "$PROJECT_ROOT/src/agent-sec-core/openclaw-plugin"
+        "/opt/agent-sec/openclaw-plugin"
     )
     for candidate in "${candidates[@]}"; do
         if [ -n "$candidate" ] && [ -d "$candidate" ]; then
@@ -81,6 +80,8 @@ find_skill_dir() {
 
 plugin_dir="$(find_plugin_dir)" || {
     echo "[${COMPONENT}] OpenClaw plugin resource not found" >&2
+    echo "[${COMPONENT}] Searched source-build stage, user install, and system install paths." >&2
+    echo "[${COMPONENT}] Build/install sec-core first; the development source plugin is not installed directly." >&2
     exit 1
 }
 deploy_script="$plugin_dir/scripts/deploy.sh"

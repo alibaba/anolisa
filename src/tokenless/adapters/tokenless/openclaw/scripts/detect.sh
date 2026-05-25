@@ -19,8 +19,10 @@ PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
 
-MISSING=()
-note_missing() { MISSING+=("$1"); }
+PREREQ_MISSING=()
+INSTALL_MISSING=()
+note_prereq_missing() { PREREQ_MISSING+=("$1"); }
+note_install_missing() { INSTALL_MISSING+=("$1"); }
 
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
@@ -31,13 +33,14 @@ if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
     field "openclaw CLI" "present (${OPENCLAW_BIN})"
 else
     field "openclaw CLI" "missing"
-    note_missing "openclaw CLI"
+    note_prereq_missing "openclaw CLI"
 fi
 
 if [ -d "$OPENCLAW_HOME" ]; then
     field "openclaw home" "present (${OPENCLAW_HOME})"
 else
-    field "openclaw home" "missing (${OPENCLAW_HOME})"
+    field "openclaw home" "not installed (${OPENCLAW_HOME})"
+    note_install_missing "openclaw home"
 fi
 
 plugin_state="missing"
@@ -59,7 +62,7 @@ if [ "$plugin_state" != "missing" ]; then
     field "${PLUGIN_ID} plugin" "${plugin_state} (${plugin_detail})"
 else
     field "${PLUGIN_ID} plugin" "missing"
-    note_missing "${PLUGIN_ID} plugin"
+    note_install_missing "${PLUGIN_ID} plugin"
 fi
 
 runtime_bin="$(command -v tokenless 2>/dev/null || true)"
@@ -67,23 +70,29 @@ if [ -n "$runtime_bin" ]; then
     field "tokenless binary" "present (${runtime_bin})"
 else
     field "tokenless binary" "missing"
-    note_missing "tokenless binary"
+    note_prereq_missing "tokenless binary"
 fi
 
 if [ -d "$PLUGIN_SRC" ]; then
     field "adapter resource" "present (${PLUGIN_SRC})"
 else
     field "adapter resource" "missing (${PLUGIN_SRC})"
+    note_prereq_missing "adapter resource"
 fi
 
 if [ -f "$PLUGIN_SRC/dist/index.js" ]; then
     field "plugin build artifact" "present"
 else
     field "plugin build artifact" "missing (${PLUGIN_SRC}/dist/index.js)"
+    note_prereq_missing "plugin build artifact"
 fi
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-    line "${AGENT}: not ready (missing: ${MISSING[*]})"
+if [ ${#PREREQ_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: missing prerequisites (${PREREQ_MISSING[*]})"
+    exit 2
+fi
+if [ ${#INSTALL_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: not installed (ready to install)"
     exit 1
 fi
 line "${AGENT}: ready"

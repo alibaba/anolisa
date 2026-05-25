@@ -25,8 +25,10 @@ PLUGIN_ID="agent-sec"
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
 
-MISSING=()
-note_missing() { MISSING+=("$1"); }
+PREREQ_MISSING=()
+INSTALL_MISSING=()
+note_prereq_missing() { PREREQ_MISSING+=("$1"); }
+note_install_missing() { INSTALL_MISSING+=("$1"); }
 
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
@@ -37,7 +39,7 @@ if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
     field "openclaw CLI" "present (${OPENCLAW_BIN})"
 else
     field "openclaw CLI" "missing"
-    note_missing "openclaw CLI"
+    note_prereq_missing "openclaw CLI"
 fi
 
 # agent-sec plugin — check OpenClaw plugin listing first, then on-disk extension.
@@ -60,7 +62,7 @@ if [ "$plugin_state" != "missing" ]; then
     field "${PLUGIN_ID} plugin" "${plugin_state} (${plugin_detail})"
 else
     field "${PLUGIN_ID} plugin" "missing"
-    note_missing "${PLUGIN_ID} plugin"
+    note_install_missing "${PLUGIN_ID} plugin"
 fi
 
 # Runtime binary — sec-core ships agent-sec-cli under SEC_CORE_BIN_DIR / PATH.
@@ -69,10 +71,13 @@ if [ -n "$runtime_bin" ]; then
     field "agent-sec-cli" "present (${runtime_bin})"
 else
     field "agent-sec-cli" "missing"
-    note_missing "agent-sec-cli"
+    note_prereq_missing "agent-sec-cli"
 fi
 
-# Adapter resources — sec-core OpenClaw plugin source for re-install.
+# Adapter resources — prefer directly installable artifacts only:
+# source-build stage > user install > system install.  The development source
+# plugin is intentionally not used because it can contain node_modules from
+# local builds and break OpenClaw's peerDependency linking.
 plugin_sources=()
 [ -n "$TARGET_DIR" ] && plugin_sources+=(
     "$TARGET_DIR/build/openclaw-plugin"
@@ -85,7 +90,6 @@ plugin_sources+=(
     "/usr/lib/anolisa/sec-core/openclaw-plugin"
     "/opt/agent-sec/openclaw-plugin"
 )
-[ -n "$PROJECT_ROOT" ] && plugin_sources+=("$PROJECT_ROOT/src/agent-sec-core/openclaw-plugin")
 
 plugin_resource="-"
 for cand in "${plugin_sources[@]}"; do
@@ -95,6 +99,9 @@ for cand in "${plugin_sources[@]}"; do
     fi
 done
 field "plugin resource" "$plugin_resource"
+if [ "$plugin_resource" = "-" ]; then
+    note_prereq_missing "plugin resource"
+fi
 
 # sec-core skills — list each explicitly so users see exact install paths.
 missing_skills=()
@@ -108,11 +115,15 @@ for s in "${SEC_CORE_SKILLS[@]}"; do
     fi
 done
 if [ ${#missing_skills[@]} -gt 0 ]; then
-    note_missing "skills"
+    note_install_missing "skills"
 fi
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-    line "${AGENT}: not ready (missing: ${MISSING[*]})"
+if [ ${#PREREQ_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: missing prerequisites (${PREREQ_MISSING[*]})"
+    exit 2
+fi
+if [ ${#INSTALL_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: not installed (ready to install)"
     exit 1
 fi
 line "${AGENT}: ready"

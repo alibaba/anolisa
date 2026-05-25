@@ -46,8 +46,10 @@ OS_SKILLS=(
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
 
-MISSING=()
-note_missing() { MISSING+=("$1"); }
+PREREQ_MISSING=()
+INSTALL_MISSING=()
+note_prereq_missing() { PREREQ_MISSING+=("$1"); }
+note_install_missing() { INSTALL_MISSING+=("$1"); }
 
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
@@ -58,21 +60,21 @@ if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
     field "openclaw CLI" "present (${OPENCLAW_BIN})"
 else
     field "openclaw CLI" "missing"
-    note_missing "openclaw CLI"
+    note_prereq_missing "openclaw CLI"
 fi
 
 if [ -d "$OPENCLAW_HOME" ]; then
     field "openclaw home" "present (${OPENCLAW_HOME})"
 else
-    field "openclaw home" "missing (${OPENCLAW_HOME})"
-    note_missing "openclaw home"
+    field "openclaw home" "not installed (${OPENCLAW_HOME})"
+    note_install_missing "openclaw home"
 fi
 
 if [ -d "$OPENCLAW_SKILLS_DIR" ]; then
     field "skills dir" "present (${OPENCLAW_SKILLS_DIR})"
 else
-    field "skills dir" "missing (${OPENCLAW_SKILLS_DIR})"
-    note_missing "skills dir"
+    field "skills dir" "not installed (${OPENCLAW_SKILLS_DIR})"
+    note_install_missing "skills dir"
 fi
 
 # Adapter source resources (informational only — install path may differ when
@@ -87,12 +89,21 @@ adapter_sources+=(
 )
 adapter_resource="-"
 for cand in "${adapter_sources[@]}"; do
-    if [ -n "$cand" ] && [ -d "$cand" ] && [ -f "$cand/install-openclaw/SKILL.md" ]; then
+    [ -n "$cand" ] && [ -d "$cand" ] || continue
+    if [ -f "$cand/install-openclaw/SKILL.md" ]; then
+        adapter_resource="$cand"
+        break
+    fi
+    found="$(find "$cand" -path "*/install-openclaw/SKILL.md" -type f -print -quit)"
+    if [ -n "$found" ]; then
         adapter_resource="$cand"
         break
     fi
 done
 field "adapter resources" "$adapter_resource"
+if [ "$adapter_resource" = "-" ]; then
+    note_prereq_missing "adapter resources"
+fi
 
 present=0
 missing_skills=()
@@ -107,11 +118,15 @@ total=${#OS_SKILLS[@]}
 field "skills installed" "${present}/${total}"
 if [ ${#missing_skills[@]} -gt 0 ]; then
     line "missing skills: ${missing_skills[*]}"
-    note_missing "skills"
+    note_install_missing "skills"
 fi
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-    line "${AGENT}: not ready (missing: ${MISSING[*]})"
+if [ ${#PREREQ_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: missing prerequisites (${PREREQ_MISSING[*]})"
+    exit 2
+fi
+if [ ${#INSTALL_MISSING[@]} -gt 0 ]; then
+    line "${AGENT}: not installed (ready to install)"
     exit 1
 fi
 line "${AGENT}: ready"

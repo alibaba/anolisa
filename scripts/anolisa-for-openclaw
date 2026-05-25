@@ -381,13 +381,15 @@ find_openclaw_adapter() {
 
     if [[ -n "$PROJECT_ROOT" ]]; then
         candidates+=("$PROJECT_ROOT/target/${component}/share/anolisa/adapters/${component}")
+    fi
+    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
+    candidates+=("/usr/share/anolisa/adapters/${component}")
+    if [[ -n "$PROJECT_ROOT" ]]; then
         local sub
         if sub="$(component_src_subpath "$component")"; then
             candidates+=("$PROJECT_ROOT/$sub")
         fi
     fi
-    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
-    candidates+=("/usr/share/anolisa/adapters/${component}")
 
     local cand
     for cand in "${candidates[@]}"; do
@@ -961,11 +963,12 @@ status_run_detect() {
         bash "$ADAPTER_SCRIPT" ${ADAPTER_ACTION_ARGS[@]+"${ADAPTER_ACTION_ARGS[@]}"}
     rc=$?
     set -e
-    if [[ $rc -eq 0 ]]; then
-        printf '  result: %sready%s\n' "$GREEN" "$NC"
-    else
-        printf '  result: %snot ready%s (detect exit %s)\n' "$YELLOW" "$NC" "$rc"
-    fi
+    case "$rc" in
+        0) printf '  result: %sready%s\n' "$GREEN" "$NC" ;;
+        1) printf '  result: %snot installed%s (ready to install)\n' "$YELLOW" "$NC" ;;
+        2) printf '  result: %smissing prerequisites%s (detect exit %s)\n' "$RED" "$NC" "$rc" ;;
+        *) printf '  result: %sdetect failed%s (exit %s)\n' "$RED" "$NC" "$rc" ;;
+    esac
 }
 
 # status_fallback <component> <openclaw_bin>
