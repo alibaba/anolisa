@@ -634,12 +634,12 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    // NOTE: All btrfs_ops tests require:
+    // NOTE: All btrfs_common tests require:
     //   1. Root privileges (CAP_SYS_ADMIN)
     //   2. A mounted btrfs filesystem
     //   3. btrfs-progs installed
     // They are marked #[ignore] and must be run manually:
-    //   cargo test -p ws-ckpt-daemon btrfs_ops -- --ignored
+    //   cargo test -p ws-ckpt-daemon btrfs_common -- --ignored
 
     #[tokio::test]
     #[ignore = "requires root + btrfs filesystem"]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use crate::btrfs_ops;
+use crate::backends::btrfs_common;
 use crate::state::DaemonState;
 use ws_ckpt_common::CleanupRetention;
 
@@ -135,7 +135,7 @@ pub async fn cleanup_orphans(mount_path: &Path) -> Result<Vec<String>, anyhow::E
             info!("Cleaning up orphan directory: {:?}", path);
 
             // Try btrfs subvolume delete first, fall back to remove_dir_all
-            match btrfs_ops::delete_subvolume(&path).await {
+            match btrfs_common::delete_subvolume(&path).await {
                 Ok(()) => {
                     info!("Deleted orphan subvolume: {:?}", path);
                 }
@@ -236,7 +236,7 @@ async fn auto_cleanup(state: &DaemonState) {
         let mut removed_count = 0;
         for snap_id in &to_remove {
             let snap_path = snapshots_ws_dir.join(snap_id);
-            match btrfs_ops::delete_subvolume(&snap_path).await {
+            match btrfs_common::delete_subvolume(&snap_path).await {
                 Ok(()) => {
                     ws.index.snapshots.remove(snap_id);
                     removed_count += 1;
