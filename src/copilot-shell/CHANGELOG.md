@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.0
+
+- Added DashScope Token Plan provider entry to the OpenAI-compatible auth dialog. (#598)
+- Added UserPromptSubmit and PostToolUse hook reason surfacing in the UI. (#545)
+- Added run_id field to HookInput for per-run event correlation. (#482)
+- Fixed UserPromptSubmit hook decision merging to enforce safety priority over allow. (#597)
+- Fixed missing tool_use_id in PreToolUse hook input. (#559)
+- Fixed memory hooks lock takeover with atomic rename and async IO. (#550)
+- Fixed auto-memory workspace cleanup wiping user-added directories. (#548)
+- Fixed auto-memory session hook missing read_file events due to wrong arg key. (#547)
+- Fixed run_id ordering by setting it before UserPromptSubmit hook fires. (#537)
+- Fixed UserPromptSubmit hook firing on tool-result and Stop continuations. (#534)
+- Updated installer to support multiple install profiles. (#541)
+
 ## 2.3.0
 
 - **BREAKING** Removed qwen-oauth authentication support. (#455)
