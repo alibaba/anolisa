@@ -245,14 +245,22 @@ parse_args() {
     fi
 }
 
-# Detect a usable PROJECT_ROOT for source-tree fallback. Three tiers:
+# Detect a usable PROJECT_ROOT for source-tree fallback. Four tiers:
 #   1. --project-root override
-#   2. Script lives inside a checkout (BASH_SOURCE traceable, ../src/agent-sec-core/openclaw-plugin exists)
-#   3. Empty (curl|bash mode) — only installed paths will be scanned
+#   2. Current working directory is a checkout
+#   3. Script lives inside a checkout (BASH_SOURCE traceable)
+#   4. Empty (curl|bash mode) — only installed paths will be scanned
 resolve_project_root() {
     if [[ -n "$PROJECT_ROOT_OVERRIDE" ]]; then
         [[ -d "$PROJECT_ROOT_OVERRIDE" ]] || die "--project-root not a directory: $PROJECT_ROOT_OVERRIDE"
         PROJECT_ROOT="$(cd "$PROJECT_ROOT_OVERRIDE" && pwd)"
+        return 0
+    fi
+
+    local cwd
+    cwd="$(pwd -P)"
+    if [[ -f "$cwd/scripts/build-all.sh" && -d "$cwd/src" ]]; then
+        PROJECT_ROOT="$cwd"
         return 0
     fi
 
@@ -371,7 +379,8 @@ resolve_action_script_in_root() {
     return 1
 }
 
-# Resolve the adapter root for $component+$action by checking candidates in order.
+# Resolve the adapter root for $component+$action by checking candidates in order:
+# staged build target > source checkout > user install > system install.
 # Sets ADAPTER_ROOT, ADAPTER_TARGET_DIR (may be empty), ADAPTER_SCRIPT, and
 # ADAPTER_ACTION_ARGS.
 # Returns 0 if found, 1 otherwise.
@@ -381,15 +390,13 @@ find_openclaw_adapter() {
 
     if [[ -n "$PROJECT_ROOT" ]]; then
         candidates+=("$PROJECT_ROOT/target/${component}/share/anolisa/adapters/${component}")
-    fi
-    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
-    candidates+=("/usr/share/anolisa/adapters/${component}")
-    if [[ -n "$PROJECT_ROOT" ]]; then
         local sub
         if sub="$(component_src_subpath "$component")"; then
             candidates+=("$PROJECT_ROOT/$sub")
         fi
     fi
+    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
+    candidates+=("/usr/share/anolisa/adapters/${component}")
 
     local cand
     for cand in "${candidates[@]}"; do
@@ -457,7 +464,7 @@ run_adapter() {
     $DRY_RUN && dry_int=1
 
     if ! find_openclaw_adapter "$component" "$action"; then
-        die "${component}: OpenClaw adapter ${action}.sh not found (looked in target/, ~/.local/, /usr/share/, src/)"
+        die "${component}: OpenClaw adapter ${action}.sh not found (looked in target/, src/, ~/.local/, /usr/share/)"
     fi
 
     if $DRY_RUN; then
@@ -487,7 +494,7 @@ run_adapter() {
         OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills" \
         SEC_CORE_OPENCLAW_PLUGIN_DIR="$(sec_core_plugin_dir)" \
         SEC_CORE_BIN_DIR="$(sec_core_bin_dir)" \
-        bash "$ADAPTER_SCRIPT" "${ADAPTER_ACTION_ARGS[@]}"
+        bash "$ADAPTER_SCRIPT" ${ADAPTER_ACTION_ARGS[@]+"${ADAPTER_ACTION_ARGS[@]}"}
 }
 
 RPM_TOOL=""        # dnf | yum | ""
