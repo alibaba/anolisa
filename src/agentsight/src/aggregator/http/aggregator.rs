@@ -8,7 +8,7 @@ use lru::LruCache;
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
 use crate::probes::sslsniff::SslEvent;
 use crate::parser::http::{ParsedRequest, ParsedResponse};
-use crate::parser::sse::ParsedSseEvent;
+use crate::parser::sse::{ParsedSseEvent, SseParser};
 use super::response::AggregatedResponse;
 use super::pair::HttpPair;
 use super::super::result::AggregatedResult;
@@ -97,6 +97,36 @@ impl HttpConnectionAggregator {
                 );
             }
         }
+    }
+
+    /// Parse initial SSE body bytes from the first HTTP response packet.
+    ///
+    /// When HTTP response headers and the first SSE `data:` chunk arrive in the
+    /// same SSL_read buffer, the parser only emits `ParsedResponse`. Downstream
+    /// SSE analysis consumes `sse_events`, so we must convert the response body
+    /// into initial `ParsedSseEvent`s before entering `SseActive`.
+    fn initial_sse_events(response: &ParsedResponse) -> Vec<ParsedSseEvent> {
+        let body = response.body();
+        if body.is_empty() {
+            return Vec::new();
+        }
+
+        let synthetic_event = std::rc::Rc::new(SslEvent {
+            source: response.source_event.source,
+            timestamp_ns: response.source_event.timestamp_ns,
+            delta_ns: response.source_event.delta_ns,
+            pid: response.source_event.pid,
+            tid: response.source_event.tid,
+            uid: response.source_event.uid,
+            len: body.len() as u32,
+            rw: response.source_event.rw,
+            comm: response.source_event.comm.clone(),
+            buf: body.to_vec(),
+            is_handshake: response.source_event.is_handshake,
+            ssl_ptr: response.source_event.ssl_ptr,
+        });
+
+        SseParser::new().parse(synthetic_event)
     }
 
     /// Process HTTP Request (from HTTP Parser)
@@ -189,12 +219,15 @@ impl HttpConnectionAggregator {
                 completed_request.reassembled_body = Some(body_buffer);
 
                 if response.is_sse() {
+                    let mut response_headers = response;
+                    let sse_events = Self::initial_sse_events(&response_headers);
+                    response_headers.body_len = 0;
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: Some(completed_request),
-                            response_headers: response,
-                            sse_events: Vec::new(),
+                            response_headers,
+                            sse_events,
                         },
                     );
                     None
@@ -214,13 +247,16 @@ impl HttpConnectionAggregator {
                         connection_id,
                         response.status_code,
                     );
+                    let mut response_headers = response;
+                    let sse_events = Self::initial_sse_events(&response_headers);
+                    response_headers.body_len = 0;
                     // Transition to SSE active state, wait for SSE events
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: Some(request),
-                            response_headers: response,
-                            sse_events: Vec::new(),
+                            response_headers,
+                            sse_events,
                         },
                     );
                     
@@ -248,12 +284,15 @@ impl HttpConnectionAggregator {
                         connection_id,
                         response.status_code
                     );
+                    let mut response_headers = response;
+                    let sse_events = Self::initial_sse_events(&response_headers);
+                    response_headers.body_len = 0;
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: None,
-                            response_headers: response,
-                            sse_events: Vec::new(),
+                            response_headers,
+                            sse_events,
                         },
                     );
                     None
@@ -903,5 +942,72 @@ mod tests {
         assert!(result.is_none());
         let conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x6000 };
         assert!(aggregator.is_sse_active(&conn_id));
+    }
+
+    #[test]
+    fn test_sse_first_chunk_in_initial_response_body_is_preserved() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let req_event = create_mock_ssl_event_with_buf(
+            4321,
+            0x7000,
+            b"POST /stream HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            1,
+        );
+        let mut req_headers = HashMap::new();
+        req_headers.insert("content-length".to_string(), "2".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/stream".to_string(),
+            version: 1,
+            headers: req_headers,
+            body_offset: 43,
+            body_len: 2,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let resp_buf = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"3\"}}]}\n\n".to_vec();
+        let resp_event = create_mock_ssl_event_with_buf(4321, 0x7000, resp_buf.clone(), 0);
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("content-type".to_string(), "text/event-stream".to_string());
+                h
+            },
+            body_offset: resp_buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4,
+            body_len: resp_buf.len() - (resp_buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4),
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        assert!(result.is_none());
+
+        let done_event = create_mock_ssl_event_with_buf(
+            4321,
+            0x7000,
+            b"data: [DONE]\n\n".to_vec(),
+            0,
+        );
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let conn_id = ConnectionId { pid: 4321, ssl_ptr: 0x7000 };
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {:?}", other),
+        };
+
+        assert_eq!(pair.response.sse_event_count(), 2);
+        let chunks = pair.response.json_body();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0]["choices"][0]["delta"]["content"].as_str(),
+            Some("3")
+        );
+        assert!(pair.response.parsed.body_str().is_empty());
     }
 }
