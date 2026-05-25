@@ -44,13 +44,20 @@ impl LogtailExporter {
     ///
     /// 从环境变量 `SLS_LOGTAIL_FILE` 读取路径，自动创建父目录。
     /// 如果环境变量未设置，返回 `None`。
-    pub fn new() -> Option<Self> {
+    ///
+    /// `encryption_pem`：可选 RSA 公钥 PEM（通常来自 agentsight.json
+    /// 的 `encryption.public_key`）。有值且解析成功则启用加密；
+    /// 为 None 或解析失败则不加密。
+    pub fn new(encryption_pem: Option<&str>) -> Option<Self> {
         let path_str = logtail_path()?;
         let path = PathBuf::from(path_str);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let encryptor = MessageEncryptor::new();
+        let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
+        if encryptor.is_none() {
+            log::info!("Logtail exporter: encryption disabled (no public key configured)");
+        }
         Some(LogtailExporter { path, encryptor })
     }
 

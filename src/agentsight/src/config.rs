@@ -197,6 +197,17 @@ struct JsonFullConfig {
     tcp_ports: Option<Vec<u16>>,
     #[serde(default)]
     tcp_targets: Option<Vec<String>>,
+    #[serde(default)]
+    encryption: Option<JsonEncryption>,
+}
+
+/// 加密配置：可选公钥（PEM 字符串）或公钥文件路径
+#[derive(serde::Deserialize)]
+struct JsonEncryption {
+    #[serde(default)]
+    public_key: Option<String>,
+    #[serde(default)]
+    public_key_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -377,6 +388,11 @@ pub struct AgentsightConfig {
     // --- Config File Path ---
     /// Path to JSON configuration file
     pub config_path: Option<PathBuf>,
+
+    // --- Encryption Configuration ---
+    /// RSA 公钥（PEM 字符串）。从 agentsight.json `encryption.public_key`
+    /// 或 `encryption.public_key_path` 加载。若为 None，则不加密敏感消息字段。
+    pub encryption_public_key: Option<String>,
 }
 
 impl Default for AgentsightConfig {
@@ -421,6 +437,9 @@ impl Default for AgentsightConfig {
 
             // Config file path default
             config_path: None,
+
+            // Encryption defaults (loaded from config file)
+            encryption_public_key: None,
         }
     }
 }
@@ -523,6 +542,31 @@ impl AgentsightConfig {
                 .into_iter()
                 .map(|p| TcpTarget { ip: None, port: Some(p) })
                 .collect();
+        }
+
+        // 加载加密公钥：优先 public_key（内联 PEM），其次 public_key_path（文件路径）
+        if let Some(enc) = parsed.encryption.take() {
+            if let Some(pem) = enc.public_key {
+                let trimmed = pem.trim();
+                if !trimmed.is_empty() {
+                    self.encryption_public_key = Some(trimmed.to_string());
+                }
+            } else if let Some(path) = enc.public_key_path {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    match std::fs::read_to_string(trimmed) {
+                        Ok(content) => {
+                            self.encryption_public_key = Some(content);
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to read encryption public_key_path {:?}: {}, encryption disabled",
+                                trimmed, e
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         let (cmdline_rules, domain_rules) = extract_rules(parsed);

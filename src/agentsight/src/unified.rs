@@ -209,7 +209,7 @@ impl AgentSight {
 
         // When SLS_LOGTAIL_FILE is set, use Logtail file exporter only (skip local storage)
         // — the Logtail file will be collected by iLogtail and uploaded to SLS.
-        if let Some(exporter) = LogtailExporter::new() {
+        if let Some(exporter) = LogtailExporter::new(config.encryption_public_key.as_deref()) {
             // SLS 模式必须能获取到 uid (owner-account-id)，否则拒绝启动
             let uid = crate::genai::instance_id::get_owner_account_id();
             if uid.is_empty() {

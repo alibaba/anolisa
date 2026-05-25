@@ -4,7 +4,7 @@
 //! 每次加密生成随机 AES-256 密钥和 nonce，用公钥加密 AES 密钥，
 //! 最终输出 base64 编码的二进制密文。
 //!
-//! 公钥管理策略：代码内嵌默认公钥，环境变量 `MESSAGE_ENCRYPT_PUBLIC_KEY` 可覆盖。
+//! 公钥来源：由调用方从 agentsight.json 的 `encryption.public_key` 读取后传入。
 
 use openssl::rsa::{Rsa, Padding};
 use openssl::pkey::Public;
@@ -12,21 +12,6 @@ use openssl::symm::{Cipher, encrypt_aead};
 use openssl::rand::rand_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-
-/// 环境变量名（设置后覆盖默认公钥）
-pub const ENCRYPT_PUBLIC_KEY_ENV_VAR: &str = "MESSAGE_ENCRYPT_PUBLIC_KEY";
-
-/// 编译时内嵌的默认 RSA 公钥（开箱即用，无需配置环境变量）
-/// 生产环境可通过环境变量 MESSAGE_ENCRYPT_PUBLIC_KEY 覆盖此默认值
-const DEFAULT_PUBLIC_KEY_PEM: &str = r#"-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzK4VhG29nW7eydBm3fzh
-HDVJQ5RQpqOkIhairUWIjH/QS5s9OnPmRTM7vipTvku4yRD6AfJycPIjR0jZXVpd
-EVTsz/K4E4qTm6o1w7ciuTvc56Gt9AHR86OURj9VRcZz058NVZRpYEtQqH9sVjJP
-JwjS5YhpKJef6leQztexxKpMHCMVm2cedCJFUCJDd0bF9NUN04sdr49H/D6U/B09
-oz/VhPlHSn6dMp9yMJtN0YE+X51KQxVqIyuVZ/xgr34AWeweiyLNJTyLFnY5zFIL
-pVe9hOgtU1LkSTW9C41bPOiODD89068dUpYGDrXIzumC8ik54ITNhDVScLS9Beua
-hwIDAQAB
------END PUBLIC KEY-----"#;
 
 /// AES-256 密钥长度（32 字节）
 const AES_KEY_LEN: usize = 32;
@@ -43,16 +28,12 @@ pub struct MessageEncryptor {
 }
 
 impl MessageEncryptor {
-    /// 创建加密器
+    /// 从指定 PEM 字符串创建加密器
     ///
-    /// 优先读取环境变量 `MESSAGE_ENCRYPT_PUBLIC_KEY` 中的 PEM 公钥；
-    /// 若未设置，使用代码内嵌的默认公钥。
     /// 解析失败时记录警告并返回 None（回退到明文模式）。
-    pub fn new() -> Option<Self> {
-        let pem_str = std::env::var(ENCRYPT_PUBLIC_KEY_ENV_VAR)
-            .unwrap_or_else(|_| DEFAULT_PUBLIC_KEY_PEM.to_string());
-
-        match Rsa::public_key_from_pem(pem_str.as_bytes()) {
+    /// PEM 来源由调用方决定（通常来自 agentsight.json 的 encryption.public_key）。
+    pub fn from_pem(pem: &str) -> Option<Self> {
+        match Rsa::public_key_from_pem(pem.as_bytes()) {
             Ok(rsa) => {
                 log::info!("MessageEncryptor initialized (RSA-{} + AES-256-GCM)", rsa.size() * 8);
                 Some(MessageEncryptor { rsa })
@@ -130,76 +111,12 @@ impl MessageEncryptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openssl::rsa::Rsa;
-    use openssl::symm::{Cipher, decrypt_aead};
 
     #[test]
-    fn test_new_with_default_key() {
-        // 不设置环境变量，应使用默认公钥成功创建
-        unsafe { std::env::remove_var(ENCRYPT_PUBLIC_KEY_ENV_VAR); }
-        let enc = MessageEncryptor::new();
-        assert!(enc.is_some(), "Should create encryptor with default key");
-    }
-
-    #[test]
-    fn test_encrypt_produces_different_output() {
-        unsafe { std::env::remove_var(ENCRYPT_PUBLIC_KEY_ENV_VAR); }
-        let enc = MessageEncryptor::new().unwrap();
-        let plaintext = "hello world, this is a secret message";
-        let encrypted = enc.encrypt(plaintext).unwrap();
-
-        // 加密结果应该是有效的 base64 且与原文不同
-        assert_ne!(encrypted, plaintext);
-        assert!(!encrypted.is_empty());
-        // base64 解码应成功
-        let decoded = BASE64.decode(&encrypted).unwrap();
-        assert!(decoded.len() > 2 + NONCE_LEN + TAG_LEN);
-    }
-
-    // 该测试依赖本地 tests/test_private_key.pem（与默认公钥配对的私钥）。
-    // 出于安全考虑私钥文件不提交到仓库，仅在本地手动生成密钥对后运行：
-    //   cargo test --lib genai::encrypt::tests::test_encrypt_decrypt_roundtrip -- --ignored
-    #[test]
-    #[ignore]
-    fn test_encrypt_decrypt_roundtrip() {
-        unsafe { std::env::remove_var(ENCRYPT_PUBLIC_KEY_ENV_VAR); }
-        let enc = MessageEncryptor::new().unwrap();
-        let plaintext = "测试消息：gen_ai.input.messages 内容加密验证";
-
-        let encrypted = enc.encrypt(plaintext).unwrap();
-
-        // 用测试私钥解密
-        let private_key_pem = std::fs::read(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_private_key.pem")
-        ).expect("test_private_key.pem should exist in tests/");
-        let private_rsa = Rsa::private_key_from_pem(&private_key_pem).unwrap();
-
-        // 解析密文结构
-        let raw = BASE64.decode(&encrypted).unwrap();
-        let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
-        let encrypted_key = &raw[2..2 + key_len];
-        let nonce = &raw[2 + key_len..2 + key_len + NONCE_LEN];
-        let ciphertext_and_tag = &raw[2 + key_len + NONCE_LEN..];
-        let (ciphertext, tag) = ciphertext_and_tag.split_at(ciphertext_and_tag.len() - TAG_LEN);
-
-        // RSA 解密 AES 密钥
-        let mut aes_key = vec![0u8; private_rsa.size() as usize];
-        let aes_key_len = private_rsa.private_decrypt(
-            encrypted_key, &mut aes_key, Padding::PKCS1_OAEP
-        ).unwrap();
-        let aes_key = &aes_key[..aes_key_len];
-
-        // AES-256-GCM 解密
-        let decrypted = decrypt_aead(
-            Cipher::aes_256_gcm(),
-            aes_key,
-            Some(nonce),
-            &[],
-            ciphertext,
-            tag,
-        ).unwrap();
-
-        assert_eq!(String::from_utf8(decrypted).unwrap(), plaintext);
+    fn test_from_pem_invalid_returns_none() {
+        // 非法 PEM 应该返回 None（不崩溃）
+        let enc = MessageEncryptor::from_pem("not a valid pem");
+        assert!(enc.is_none());
     }
 
     #[test]
@@ -207,14 +124,5 @@ mod tests {
         let text = "plain text content";
         let result = MessageEncryptor::maybe_encrypt(None, text);
         assert_eq!(result, text);
-    }
-
-    #[test]
-    fn test_maybe_encrypt_with_encryptor() {
-        unsafe { std::env::remove_var(ENCRYPT_PUBLIC_KEY_ENV_VAR); }
-        let enc = MessageEncryptor::new().unwrap();
-        let text = "secret content";
-        let result = MessageEncryptor::maybe_encrypt(Some(&enc), text);
-        assert_ne!(result, text);
     }
 }

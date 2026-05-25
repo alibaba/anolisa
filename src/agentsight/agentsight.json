@@ -1,5 +1,8 @@
 {
   "tcp_targets": [],
+  "encryption": {
+    "public_key": ""
+  },
   "cmdline": {
     "allow": [
       {"rule": ["hermes*"], "agent_name": "Hermes"},
