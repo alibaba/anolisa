@@ -181,7 +181,7 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 .PHONY: stage-adapter-manifest
 stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
 	install -d -m 0755 $(ADAPTER_STAGE_DIR)
-	install -p -m 0644 adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
+	install -p -m 0644 adapters/adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
 
 .PHONY: build-all
 build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components

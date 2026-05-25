@@ -37,7 +37,11 @@
         "commands": [],
         "hooks": []
       },
-      "actions": {}
+      "actions": {
+        "detect":    "openclaw/scripts/detect.sh",
+        "install":   "openclaw/scripts/install.sh",
+        "uninstall": "openclaw/scripts/uninstall.sh"
+      }
     }
   },
   "resources": {

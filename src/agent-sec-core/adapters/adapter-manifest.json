@@ -22,7 +22,9 @@
         ]
       },
       "actions": {
-        "install": "openclaw-plugin/scripts/deploy.sh openclaw-plugin"
+        "detect":    "openclaw/scripts/detect.sh",
+        "install":   "openclaw/scripts/install.sh",
+        "uninstall": "openclaw/scripts/uninstall.sh"
       }
     }
   },

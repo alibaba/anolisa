@@ -1430,7 +1430,7 @@ build_skills() {
         return 0
     fi
 
-    stage_adapter_manifest "os-skills" "$PROJECT_ROOT/src/os-skills/adapter-manifest.json"
+    stage_adapter_manifest "os-skills" "$PROJECT_ROOT/src/os-skills/adapters/adapter-manifest.json"
     ok "os-skills staged to $(component_target_dir os-skills)"
 }
 

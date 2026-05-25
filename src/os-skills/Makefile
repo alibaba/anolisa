@@ -29,7 +29,7 @@ install:
 		cp -pr "$$skill_dir/." "$(DESTDIR)$(SKILLS_DIR)/$$skill_name/"; \
 	done
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
-	install -p -m 0644 adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
+	install -p -m 0644 adapters/adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts"
 	install -p -m 0755 adapters/openclaw/scripts/detect.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
 	install -p -m 0755 adapters/openclaw/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
