@@ -6,10 +6,10 @@
 
 验证通过 UDP DNS 方式捕获 Hermes agent（连接 `dashscope.aliyuncs.com`）的完整流程：
 
-1. 配置含 `domain_rules: ["*.dashscope.aliyuncs.com"]` 时，UDP DNS BPF 探针应被加载并 attach（判定依据：启动日志无 "UDP DNS probe disabled"）
+1. 配置含 `https: [{"rule": ["*.dashscope.aliyuncs.com"]}]` 时，UDP DNS BPF 探针应被加载并 attach（判定依据：启动日志无 "UDP DNS probe disabled"）
 2. Hermes 进程发起 DNS 查询 `dashscope.aliyuncs.com` 时，DNS 事件触发 SSL 探针 attach（判定依据：SQLite `genai_events` 表含 hermes pid 的记录；且**不含** cmdline 发现 hermes 的记录，证明 attach 仅由 DNS 触发）
 3. SSL 探针 attach 后，能捕获 hermes 对 `dashscope.aliyuncs.com/compatible-mode/v1` 的 LLM API 调用（判定依据：SQLite `http_records` 表含 path 为 `/compatible-mode/v1` 的记录）
-4. 不匹配 domain_rules 的域名不触发 attach（判定依据：日志中出现 DNS 事件但无 `Attaching via domain rule` 行）
+4. 不匹配 `https` 规则的域名不触发 attach（判定依据：日志中出现 DNS 事件但无 `Attaching via domain rule` 行）
 5. 被 cmdline deny 规则匹配的进程（如 `curl`），即使域名匹配也不 attach（判定依据：DNS 事件被捕获但无 `Attaching via domain rule` 行）
 
 ## 判定方法
@@ -36,7 +36,7 @@
       {"rule": ["*curl*"]}
     ]
   },
-  "domain": [
+  "https": [
     {"rule": ["*.dashscope.aliyuncs.com"]}
   ]
 }
@@ -74,7 +74,7 @@
 
 ### 步骤 4：验证不匹配域名不触发 attach
 
-核心验证：域名不匹配 domain_rules 时，SSL 探针**未 attach**。
+核心验证：域名不匹配 `https` 规则时，SSL 探针**未 attach**。
 
 1. 用任意进程发起 DNS 查询到不匹配域名（如 `nslookup example.com` 或 `curl https://example.com`）
 2. grep 日志确认 DNS 事件被捕获但**未触发 attach**：
@@ -83,7 +83,7 @@
 
 ### 步骤 5：验证 deny 规则阻止 attach
 
-核心验证：curl 的域名匹配 domain_rules，但被 cmdline deny 规则阻止，SSL 探针**未 attach**。
+核心验证：curl 的域名匹配 `https` 规则，但被 cmdline deny 规则阻止，SSL 探针**未 attach**。
 
 1. 运行 `curl https://dashscope.aliyuncs.com/compatible-mode/v1`（域名匹配但进程被 deny）
 2. grep 日志确认 curl 的 DNS 事件被捕获但**未触发 attach**：

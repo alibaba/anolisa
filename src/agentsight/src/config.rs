@@ -116,11 +116,20 @@ pub struct CmdlineRule {
     pub allow: bool,
 }
 
-/// Domain rule for DNS-based SSL attachment filtering
+/// HTTPS rule for DNS-based SSL attachment filtering
 #[derive(Debug, Clone)]
-pub struct DomainRule {
+pub struct HttpsRule {
     /// Glob pattern for domain matching
     pub pattern: String,
+}
+
+/// HTTP target entry — can be an IP/port endpoint or a domain name.
+/// Code auto-detects: entries parseable as TcpTarget are treated as endpoints;
+/// everything else is treated as a domain (resolved via DNS at startup + runtime).
+#[derive(Debug, Clone)]
+pub enum HttpTarget {
+    Endpoint(TcpTarget),
+    Domain(String),
 }
 
 // ==================== Agent Discovery Configuration ====================
@@ -192,11 +201,9 @@ struct JsonFullConfig {
     #[serde(default)]
     cmdline: Option<JsonCmdline>,
     #[serde(default)]
-    domain: Option<Vec<JsonDomainGroup>>,
+    https: Option<Vec<JsonDomainGroup>>,
     #[serde(default)]
-    tcp_ports: Option<Vec<u16>>,
-    #[serde(default)]
-    tcp_targets: Option<Vec<String>>,
+    http: Option<Vec<JsonHttpGroup>>,
     #[serde(default)]
     encryption: Option<JsonEncryption>,
 }
@@ -230,28 +237,34 @@ struct JsonDomainGroup {
     rule: Vec<String>,
 }
 
-/// Extract cmdline and domain rules from a parsed JsonFullConfig.
-fn extract_rules(parsed: JsonFullConfig) -> (Vec<CmdlineRule>, Vec<DomainRule>) {
-    let mut cmdline_rules = Vec::new();
-    let mut domain_rules = Vec::new();
+#[derive(serde::Deserialize)]
+struct JsonHttpGroup {
+    rule: Vec<String>,
+}
 
-    if let Some(cmdline) = parsed.cmdline {
-        if let Some(allow_list) = cmdline.allow {
+/// Extract cmdline, https, and http rules from a parsed JsonFullConfig.
+fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>) {
+    let mut cmdline_rules = Vec::new();
+    let mut https_rules = Vec::new();
+    let mut http_targets = Vec::new();
+
+    if let Some(ref cmdline) = parsed.cmdline {
+        if let Some(ref allow_list) = cmdline.allow {
             for entry in allow_list {
                 if !entry.rule.is_empty() {
                     cmdline_rules.push(CmdlineRule {
-                        patterns: entry.rule,
-                        agent_name: entry.agent_name,
+                        patterns: entry.rule.clone(),
+                        agent_name: entry.agent_name.clone(),
                         allow: true,
                     });
                 }
             }
         }
-        if let Some(deny_list) = cmdline.deny {
+        if let Some(ref deny_list) = cmdline.deny {
             for entry in deny_list {
                 if !entry.rule.is_empty() {
                     cmdline_rules.push(CmdlineRule {
-                        patterns: entry.rule,
+                        patterns: entry.rule.clone(),
                         agent_name: None,
                         allow: false,
                     });
@@ -260,26 +273,40 @@ fn extract_rules(parsed: JsonFullConfig) -> (Vec<CmdlineRule>, Vec<DomainRule>) 
         }
     }
 
-    if let Some(domain_groups) = parsed.domain {
-        for group in domain_groups {
-            for pat in group.rule {
+    if let Some(ref https_groups) = parsed.https {
+        for group in https_groups {
+            for pat in &group.rule {
                 if !pat.is_empty() {
-                    domain_rules.push(DomainRule { pattern: pat });
+                    https_rules.push(HttpsRule { pattern: pat.clone() });
                 }
             }
         }
     }
 
-    (cmdline_rules, domain_rules)
+    if let Some(ref http_groups) = parsed.http {
+        for group in http_groups {
+            for entry in &group.rule {
+                if entry.is_empty() {
+                    continue;
+                }
+                match entry.parse::<TcpTarget>() {
+                    Ok(t) => http_targets.push(HttpTarget::Endpoint(t)),
+                    Err(_) => http_targets.push(HttpTarget::Domain(entry.clone())),
+                }
+            }
+        }
+    }
+
+    (cmdline_rules, https_rules, http_targets)
 }
 
-/// Parse a JSON config string into cmdline rules and domain rules.
+/// Parse a JSON config string into cmdline rules, https rules, and http targets.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
-pub fn parse_json_rules(json: &str) -> Result<(Vec<CmdlineRule>, Vec<DomainRule>), String> {
+pub fn parse_json_rules(json: &str) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
     let parsed: JsonFullConfig = serde_json::from_str(json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
-    Ok(extract_rules(parsed))
+    Ok(extract_rules(&parsed))
 }
 
 
@@ -303,7 +330,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
 /// Load default cmdline rules (embedded), without touching the filesystem.
 pub fn default_cmdline_rules() -> Vec<CmdlineRule> {
-    let (rules, _) = parse_json_rules(DEFAULT_AGENTS_JSON)
+    let (rules, _, _) = parse_json_rules(DEFAULT_AGENTS_JSON)
         .expect("embedded DEFAULT_AGENTS_JSON is valid");
     rules
 }
@@ -382,8 +409,10 @@ pub struct AgentsightConfig {
     // --- FFI Rule Configuration ---
     /// User-defined cmdline rules for process allowlist/denylist
     pub cmdline_rules: Vec<CmdlineRule>,
-    /// User-defined domain rules for DNS-based SSL attachment
-    pub domain_rules: Vec<DomainRule>,
+    /// User-defined HTTPS rules for DNS-based SSL attachment
+    pub https_rules: Vec<HttpsRule>,
+    /// User-defined HTTP targets (IP/port endpoints + domains for tcpsniff)
+    pub http_targets: Vec<HttpTarget>,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -433,7 +462,8 @@ impl Default for AgentsightConfig {
 
             // FFI Rule defaults
             cmdline_rules: Vec::new(),
-            domain_rules: Vec::new(),
+            https_rules: Vec::new(),
+            http_targets: Vec::new(),
 
             // Config file path default
             config_path: None,
@@ -497,12 +527,6 @@ impl AgentsightConfig {
         self
     }
 
-    /// Set TCP capture targets for plain HTTP traffic capture
-    pub fn set_tcp_targets(mut self, targets: Vec<TcpTarget>) -> Self {
-        self.tcp_targets = targets;
-        self
-    }
-
     /// Set connection capacity
     pub fn set_connection_capacity(mut self, capacity: usize) -> Self {
         self.connection_capacity = capacity;
@@ -516,7 +540,7 @@ impl AgentsightConfig {
 
     /// Load configuration from a JSON string, appending rules to existing ones.
     ///
-    /// Parses `verbose`, `log_path`, `cmdline` and `domain` fields.
+    /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
         let mut parsed: JsonFullConfig = serde_json::from_str(json)
             .map_err(|e| format!("JSON parse error: {}", e))?;
@@ -526,22 +550,6 @@ impl AgentsightConfig {
         }
         if let Some(p) = parsed.log_path.take() {
             self.log_path = Some(p);
-        }
-        if let Some(targets) = parsed.tcp_targets.take() {
-            let mut result = Vec::new();
-            for s in &targets {
-                match s.parse::<TcpTarget>() {
-                    Ok(t) => result.push(t),
-                    Err(e) => log::warn!("Ignoring invalid tcp_targets entry '{}': {}", s, e),
-                }
-            }
-            self.tcp_targets = result;
-        } else if let Some(ports) = parsed.tcp_ports.take() {
-            // backward compat: "tcp_ports": [8080] → port-only targets
-            self.tcp_targets = ports
-                .into_iter()
-                .map(|p| TcpTarget { ip: None, port: Some(p) })
-                .collect();
         }
 
         // 加载加密公钥：优先 public_key（内联 PEM），其次 public_key_path（文件路径）
@@ -569,9 +577,10 @@ impl AgentsightConfig {
             }
         }
 
-        let (cmdline_rules, domain_rules) = extract_rules(parsed);
+        let (cmdline_rules, https_rules, http_targets) = extract_rules(&parsed);
         self.cmdline_rules.extend(cmdline_rules);
-        self.domain_rules.extend(domain_rules);
+        self.https_rules.extend(https_rules);
+        self.http_targets.extend(http_targets);
         Ok(())
     }
 
@@ -593,9 +602,15 @@ impl AgentsightConfig {
         self
     }
 
-    /// Add a domain rule
-    pub fn add_domain_rule(mut self, rule: DomainRule) -> Self {
-        self.domain_rules.push(rule);
+    /// Add an HTTPS rule (domain glob pattern for SSL attachment)
+    pub fn add_https_rule(mut self, rule: HttpsRule) -> Self {
+        self.https_rules.push(rule);
+        self
+    }
+
+    /// Add an HTTP target (IP/port endpoint or domain for tcpsniff)
+    pub fn add_http_target(mut self, target: HttpTarget) -> Self {
+        self.http_targets.push(target);
         self
     }
 
@@ -825,11 +840,11 @@ mod tests {
     }
 
     #[test]
-    fn test_add_domain_rule() {
-        let rule = DomainRule { pattern: "*.openai.com".to_string() };
-        let config = AgentsightConfig::new().add_domain_rule(rule);
-        assert_eq!(config.domain_rules.len(), 1);
-        assert_eq!(config.domain_rules[0].pattern, "*.openai.com");
+    fn test_add_https_rule() {
+        let rule = HttpsRule { pattern: "*.openai.com".to_string() };
+        let config = AgentsightConfig::new().add_https_rule(rule);
+        assert_eq!(config.https_rules.len(), 1);
+        assert_eq!(config.https_rules[0].pattern, "*.openai.com");
     }
 
     #[test]
@@ -845,10 +860,10 @@ mod tests {
                 agent_name: Some("Agent2".to_string()),
                 allow: true,
             })
-            .add_domain_rule(DomainRule { pattern: "*.openai.com".to_string() })
-            .add_domain_rule(DomainRule { pattern: "*.anthropic.com".to_string() });
+            .add_https_rule(HttpsRule { pattern: "*.openai.com".to_string() })
+            .add_https_rule(HttpsRule { pattern: "*.anthropic.com".to_string() });
         assert_eq!(config.cmdline_rules.len(), 2);
-        assert_eq!(config.domain_rules.len(), 2);
+        assert_eq!(config.https_rules.len(), 2);
     }
 
     #[test]
@@ -868,10 +883,10 @@ mod tests {
 
     #[test]
     fn test_default_agents_json_valid() {
-        // Verify the embedded JSON is valid and parses correctly
-        let (cmdline_rules, domain_rules) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
+        let (cmdline_rules, https_rules, http_targets) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
-        assert!(domain_rules.is_empty()); // no domain rules in default config
+        assert!(https_rules.is_empty());
+        assert!(http_targets.is_empty());
     }
 
     #[test]
@@ -882,21 +897,25 @@ mod tests {
                 "deny": [{"rule": ["node", "*webpack*"]}]
             }
         }"#;
-        let (cmdline_rules, domain_rules) = parse_json_rules(json).unwrap();
+        let (cmdline_rules, https_rules, http_targets) = parse_json_rules(json).unwrap();
         assert_eq!(cmdline_rules.len(), 2);
         assert!(cmdline_rules[0].allow);
         assert_eq!(cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
         assert!(!cmdline_rules[1].allow);
         assert!(cmdline_rules[1].agent_name.is_none());
-        assert!(domain_rules.is_empty());
+        assert!(https_rules.is_empty());
+        assert!(http_targets.is_empty());
     }
 
     #[test]
-    fn test_parse_json_rules_domain() {
-        let json = r#"{"domain": [{"rule": ["*.openai.com", "*.anthropic.com"]}]}"#;
-        let (cmdline_rules, domain_rules) = parse_json_rules(json).unwrap();
+    fn test_parse_json_rules_https() {
+        let json = r#"{"https": [{"rule": ["*.openai.com", "*.anthropic.com"]}]}"#;
+        let (cmdline_rules, https_rules, http_targets) = parse_json_rules(json).unwrap();
         assert!(cmdline_rules.is_empty());
-        assert_eq!(domain_rules.len(), 2);
+        assert_eq!(https_rules.len(), 2);
+        assert_eq!(https_rules[0].pattern, "*.openai.com");
+        assert_eq!(https_rules[1].pattern, "*.anthropic.com");
+        assert!(http_targets.is_empty());
     }
 
     #[test]
@@ -908,7 +927,7 @@ mod tests {
     #[test]
     fn test_parse_json_rules_empty_rule_skipped() {
         let json = r#"{"cmdline":{"allow":[{"rule":[],"agent_name":"Skipped"},{"rule":["node"],"agent_name":"Kept"}]}}"#;
-        let (cmdline_rules, _) = parse_json_rules(json).unwrap();
+        let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
         assert_eq!(cmdline_rules.len(), 1);
         assert_eq!(cmdline_rules[0].agent_name, Some("Kept".to_string()));
     }

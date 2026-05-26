@@ -6,8 +6,8 @@
 
 ### 探针加载与内核适配
 
-1. 配置含 `tcp_targets` 时，tcpsniff BPF 探针应被加载并 attach（日志含 "TcpSniff: attached 3 BPF programs"）
-2. 配置 `tcp_targets` 为空或不存在时，tcpsniff 探针不应被加载（日志含 "TcpSniff probe disabled"）
+1. 配置含 `http` 规则时，tcpsniff BPF 探针应被加载并 attach（日志含 "TcpSniff: attached 3 BPF programs"）
+2. 配置 `http` 为空或不存在时，tcpsniff 探针不应被加载（日志含 "TcpSniff probe disabled"）
 3. 在 kernel 5.18+ 上，应使用新签名（日志含 "loaded with new tcp_recvmsg signature (5.18+)"）
 4. 在 kernel 5.8–5.17 上，应自动回退到旧签名（日志含 "loaded with old tcp_recvmsg signature (5.8-5.17)"）
 
@@ -15,7 +15,7 @@
 
 5. 向目标 IP/端口发送 HTTP 请求时，应捕获并解析为 Request 事件（日志含 "Aggregating parsed results(1): Request"）
 6. 捕获的 Request 应包含完整 HTTP headers + body（判定：GenAI 事件中 `input_messages` 非空，`raw_body` 不含 `\x00\x00` 前缀乱码）
-7. 非目标的 TCP 流量不应被捕获（配置 `tcp_targets: [":8080"]`，向其他端口发请求不应产生事件）
+7. 非目标的 TCP 流量不应被捕获（配置 `http: [{"rule": [":8080"]}]`，向其他端口发请求不应产生事件）
 
 ### 响应捕获 (tcp_recvmsg)
 
@@ -31,8 +31,8 @@
 
 ### 配置
 
-14. JSON 配置文件中 `"tcp_targets": [":8080", "10.0.0.1:9090"]` 应正确设置目标（支持仅端口、仅 IP、IP+端口三种格式）
-15. `tcp_targets` 支持三级匹配：精确 IP+端口 → 仅 IP → 仅端口
+14. JSON 配置文件中 `"http": [{"rule": [":8080", "10.0.0.1:9090"]}]` 应正确设置目标（支持仅端口、仅 IP、IP+端口、域名四种格式）
+15. `http` 规则支持自动识别：IP/端口格式直接写入 BPF map，域名格式通过 DNS 解析后写入
 
 ## 运行条件
 

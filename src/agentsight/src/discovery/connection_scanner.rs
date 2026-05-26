@@ -5,7 +5,7 @@
 //! This module performs a one-time scan of established TCP connections to find such processes.
 //!
 //! Flow:
-//! 1. Resolve exact domains from `domain_rules` to IP addresses
+//! 1. Resolve exact domains from `https_rules` to IP addresses
 //! 2. Scan `/proc/net/tcp` for ESTABLISHED connections to those IPs
 //! 3. Map socket inodes back to PIDs
 //! 4. Filter through deny rules before attaching SSL probes
@@ -37,7 +37,7 @@ impl<'a> ConnectionScanner<'a> {
         Self { scanner }
     }
 
-    /// Main entry point: scan for processes with established connections to domain_rules IPs
+    /// Main entry point: scan for processes with established connections to https_rules IPs
     ///
     /// Filters out already-traced PIDs, applies deny rules to candidates.
     pub fn scan(&self, already_traced: &HashSet<u32>) -> Vec<ConnectionScanResult> {

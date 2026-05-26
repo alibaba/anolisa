@@ -485,10 +485,10 @@ pub unsafe extern "C" fn agentsight_config_add_cmdline_rule(
     });
 }
 
-/// Add a domain rule (whitelist for DNS-based attachment).
+/// Add an HTTPS rule (domain glob pattern for SSL/TLS probe attachment).
 /// * `rule` — domain glob pattern (e.g. "*.openai.com").
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn agentsight_config_add_domain_rule(
+pub unsafe extern "C" fn agentsight_config_add_https(
     cfg: *mut AgentsightConfigHandle,
     rule: *const c_char,
 ) {
@@ -498,20 +498,21 @@ pub unsafe extern "C" fn agentsight_config_add_domain_rule(
     let c = unsafe { &mut *cfg };
     let s = unsafe { CStr::from_ptr(rule).to_string_lossy().to_string() };
     if !s.is_empty() {
-        c.domain_rules.push(crate::config::DomainRule { pattern: s });
+        c.https_rules.push(crate::config::HttpsRule { pattern: s });
     }
 }
 
-/// Add a TCP capture target for plain HTTP traffic capture (tcpsniff probe).
+/// Add an HTTP capture target for plain HTTP traffic (tcpsniff probe).
 ///
-/// * `target` — string in one of the following formats:
-///   - `":8080"`          → port-only (any IP, port 8080)
-///   - `"10.0.0.1"`       → IP-only   (IP 10.0.0.1, any port)
-///   - `"10.0.0.1:8080"`  → exact     (IP 10.0.0.1, port 8080)
+/// * `target` — string that is auto-detected:
+///   - `":8080"`          → port-only endpoint
+///   - `"10.0.0.1"`       → IP-only endpoint
+///   - `"10.0.0.1:8080"`  → IP+port endpoint
+///   - `"model-svc.default.svc"` → domain (DNS-resolved at runtime)
 ///
-/// Returns 0 on success, <0 on parse error (call `agentsight_last_error()`).
+/// Returns 0 on success, <0 on error (call `agentsight_last_error()`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn agentsight_config_add_tcp_target(
+pub unsafe extern "C" fn agentsight_config_add_http(
     cfg: *mut AgentsightConfigHandle,
     target: *const c_char,
 ) -> c_int {
@@ -522,19 +523,14 @@ pub unsafe extern "C" fn agentsight_config_add_tcp_target(
     let c = unsafe { &mut *cfg };
     let s = unsafe { CStr::from_ptr(target).to_string_lossy().to_string() };
     if s.is_empty() {
-        set_last_error("Empty TCP target string");
+        set_last_error("Empty HTTP target string");
         return -1;
     }
     match s.parse::<crate::config::TcpTarget>() {
-        Ok(t) => {
-            c.tcp_targets.push(t);
-            0
-        }
-        Err(e) => {
-            set_last_error(&e);
-            -1
-        }
+        Ok(t) => c.http_targets.push(crate::config::HttpTarget::Endpoint(t)),
+        Err(_) => c.http_targets.push(crate::config::HttpTarget::Domain(s)),
     }
+    0
 }
 
 /// Load configuration from a JSON string. Rules are appended to existing ones.
@@ -789,7 +785,7 @@ mod tests {
     fn new_cfg() -> AgentsightConfig {
         let mut cfg = AgentsightConfig::default();
         cfg.cmdline_rules.clear();
-        cfg.domain_rules.clear();
+        cfg.https_rules.clear();
         cfg
     }
 
@@ -824,17 +820,17 @@ mod tests {
     }
 
     #[test]
-    fn test_load_json_domain_rules() {
+    fn test_load_json_https_rules() {
         let mut cfg = new_cfg();
         let json = r#"{
-            "domain": [
+            "https": [
                 {"rule": ["*.openai.com", "*.anthropic.com"]}
             ]
         }"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.domain_rules.len(), 2);
-        assert_eq!(cfg.domain_rules[0].pattern, "*.openai.com");
-        assert_eq!(cfg.domain_rules[1].pattern, "*.anthropic.com");
+        assert_eq!(cfg.https_rules.len(), 2);
+        assert_eq!(cfg.https_rules[0].pattern, "*.openai.com");
+        assert_eq!(cfg.https_rules[1].pattern, "*.anthropic.com");
     }
 
     #[test]
@@ -934,11 +930,11 @@ mod tests {
             "cmdline": {
                 "allow": [{"rule": ["node", "*claude*"], "agent_name": "Claude Code"}]
             },
-            "domain": [{"rule": ["*.openai.com"]}]
+            "https": [{"rule": ["*.openai.com"]}]
         }"#;
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.verbose, true);
         assert_eq!(cfg.cmdline_rules.len(), 1);
-        assert_eq!(cfg.domain_rules.len(), 1);
+        assert_eq!(cfg.https_rules.len(), 1);
     }
 }

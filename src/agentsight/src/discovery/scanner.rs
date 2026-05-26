@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::agent::{AgentInfo, DiscoveredAgent};
 use super::matcher::{CmdlineGlobMatcher, ProcessContext, match_domain_glob};
-use crate::config::{CmdlineRule, DomainRule};
+use crate::config::{CmdlineRule, HttpsRule};
 
 /// Scanner for discovering AI agent processes on the system
 ///
@@ -33,7 +33,7 @@ impl AgentScanner {
     ///
     /// Separates cmdline_rules into allow matchers and deny matchers,
     /// and stores domain patterns for DNS-based matching.
-    pub fn from_rules(cmdline_rules: &[CmdlineRule], domain_rules: &[DomainRule]) -> Self {
+    pub fn from_rules(cmdline_rules: &[CmdlineRule], https_rules: &[HttpsRule]) -> Self {
         let matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
             .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
@@ -42,7 +42,7 @@ impl AgentScanner {
             .iter()
             .filter_map(|r| CmdlineGlobMatcher::from_deny_rule(r))
             .collect();
-        let domain_patterns: Vec<String> = domain_rules.iter().map(|r| r.pattern.clone()).collect();
+        let domain_patterns: Vec<String> = https_rules.iter().map(|r| r.pattern.clone()).collect();
         Self {
             matchers,
             deny_matchers,
@@ -344,15 +344,15 @@ mod tests {
 
     #[test]
     fn test_matches_domain() {
-        let domain_rules = vec![
-            DomainRule {
+        let https_rules = vec![
+            HttpsRule {
                 pattern: "*.openai.com".to_string(),
             },
-            DomainRule {
+            HttpsRule {
                 pattern: "*.anthropic.com".to_string(),
             },
         ];
-        let scanner = AgentScanner::from_rules(&[], &domain_rules);
+        let scanner = AgentScanner::from_rules(&[], &https_rules);
 
         assert!(scanner.matches_domain("api.openai.com"));
         assert!(scanner.matches_domain("api.anthropic.com"));

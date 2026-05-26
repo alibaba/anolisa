@@ -110,7 +110,7 @@ impl Probes {
                 .context("failed to create udpdns")?;
             Some(dns)
         } else {
-            log::info!("UDP DNS probe disabled (no domain_rules configured)");
+            log::info!("UDP DNS probe disabled (no https/http domain rules configured)");
             None
         };
 

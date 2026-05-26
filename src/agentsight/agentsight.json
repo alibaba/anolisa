@@ -1,5 +1,6 @@
 {
-  "tcp_targets": [],
+  "https": [],
+  "http": [],
   "encryption": {
     "public_key": ""
   },

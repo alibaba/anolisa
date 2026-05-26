@@ -135,9 +135,10 @@ impl AgentSight {
             match load_result {
                 Ok(()) => {
                     log::info!(
-                        "Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
+                        "Loaded {} cmdline rule(s), {} https rule(s), {} http target(s) from {:?}",
                         config.cmdline_rules.len(),
-                        config.domain_rules.len(),
+                        config.https_rules.len(),
+                        config.http_targets.len(),
                         path
                     );
                 }
@@ -154,16 +155,36 @@ impl AgentSight {
 
         let all_cmdline_rules = config.cmdline_rules.clone();
 
+        // Derive tcp_targets from http_targets (endpoint entries only)
+        let tcp_targets: Vec<crate::config::TcpTarget> = config
+            .http_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::config::HttpTarget::Endpoint(ep) => Some(ep.clone()),
+                crate::config::HttpTarget::Domain(_) => None,
+            })
+            .collect();
+
+        // Collect http domain patterns for DNS-based resolution
+        let http_domains: Vec<String> = config
+            .http_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::config::HttpTarget::Domain(d) => Some(d.clone()),
+                crate::config::HttpTarget::Endpoint(_) => None,
+            })
+            .collect();
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
-        let enable_udpdns = !config.domain_rules.is_empty();
+        let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &config.tcp_targets).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
 
-        // Create scanner with all rules (allow/deny/domain)
-        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.domain_rules);
+        // Create scanner with all rules (allow/deny/https)
+        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.https_rules);
         let existing_agents = scanner.scan();
 
         // Attach SSL probes to already-running agents
@@ -171,7 +192,7 @@ impl AgentSight {
             Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
         }
 
-        // Connection scan: find processes with established connections to domain_rules IPs
+        // Connection scan: find processes with established connections to https_rules IPs
         let already_traced: HashSet<u32> = existing_agents.iter().map(|a| a.pid).collect();
         let conn_results = if scanner.has_domain_rules() {
             let conn_scanner = crate::discovery::ConnectionScanner::new(&scanner);
