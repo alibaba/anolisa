@@ -23,6 +23,54 @@
 // Payload buffer bitmask (DNS_PAYLOAD_MAX = 256, power of 2)
 #define PAYLOAD_MASK (DNS_PAYLOAD_MAX - 1)  // 0xFF
 
+// --- CO-RE compatibility for iov_iter fields ---
+// Kernel 6.4+ renamed iov_iter.iov to iov_iter.__iov.
+struct iov_iter___new {
+    const struct iovec *__iov;
+};
+
+// Kernel 6.0+ added ITER_UBUF: read()/write() on sockets use ubuf instead of iov.
+struct iov_iter___ubuf {
+    void *ubuf;
+    u8 iter_type;
+};
+
+#define ITER_UBUF_TYPE 5
+
+struct dns_buf_info {
+    void *buf;
+    __u64 len;
+};
+
+static __always_inline struct dns_buf_info get_dns_buf_info(struct msghdr *msg)
+{
+    struct dns_buf_info info = { .buf = NULL, .len = 0 };
+    struct iov_iter *iter = &msg->msg_iter;
+
+    struct iov_iter___ubuf *ubuf_iter = (void *)iter;
+    if (bpf_core_field_exists(ubuf_iter->ubuf)) {
+        u8 type = BPF_CORE_READ(ubuf_iter, iter_type);
+        if (type == ITER_UBUF_TYPE) {
+            info.buf = BPF_CORE_READ(ubuf_iter, ubuf);
+            info.len = BPF_CORE_READ(iter, count);
+            return info;
+        }
+    }
+
+    struct iov_iter___new *new_iter = (void *)iter;
+    const struct iovec *iov;
+    if (bpf_core_field_exists(new_iter->__iov)) {
+        iov = BPF_CORE_READ(new_iter, __iov);
+    } else {
+        iov = BPF_CORE_READ(iter, iov);
+    }
+    if (!iov)
+        return info;
+    info.buf = BPF_CORE_READ(iov, iov_base);
+    info.len = BPF_CORE_READ(iov, iov_len);
+    return info;
+}
+
 SEC("fentry/udp_sendmsg")
 int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 {
@@ -44,14 +92,8 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     if (bpf_map_lookup_elem(&traced_processes, &pid))
         return 0;
 
-    // Read the first iovec from msg_iter to get user-space buffer pointer
-    const struct iovec *iov = BPF_CORE_READ(msg, msg_iter.iov);
-    if (!iov)
-        return 0;
-
-    void *iov_base = BPF_CORE_READ(iov, iov_base);
-    size_t iov_len = BPF_CORE_READ(iov, iov_len);
-    if (!iov_base || iov_len < 17)
+    struct dns_buf_info buf = get_dns_buf_info(msg);
+    if (!buf.buf || buf.len < 17)
         return 0;
 
     // Reserve ring buffer event
@@ -60,12 +102,12 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         return 0;
 
     // Clamp read size to payload buffer capacity
-    __u32 read_len = iov_len;
+    __u32 read_len = buf.len;
     if (read_len > DNS_PAYLOAD_MAX)
         read_len = DNS_PAYLOAD_MAX;
 
     // Read user-space DNS buffer into event payload
-    int ret = bpf_probe_read_user(event->payload, read_len & PAYLOAD_MASK, iov_base);
+    int ret = bpf_probe_read_user(event->payload, read_len & PAYLOAD_MASK, buf.buf);
     if (ret != 0) {
         bpf_ringbuf_discard(event, 0);
         return 0;
