@@ -327,6 +327,15 @@ impl Probes {
         self.sslsniff.detach_process(pid);
     }
 
+    pub fn add_tcp_target(&mut self, target: &TcpTarget) -> Result<()> {
+        if let Some(ref mut tcp) = self.tcpsniff {
+            tcp.add_target(target)
+        } else {
+            log::warn!("TcpSniff not enabled, cannot add runtime target {:?}", target);
+            Ok(())
+        }
+    }
+
     /// Get a handle to the traced_processes map
     pub fn traced_processes_handle(&self) -> Result<MapHandle> {
         self.proctrace.traced_processes_handle()

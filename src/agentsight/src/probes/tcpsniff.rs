@@ -168,6 +168,30 @@ impl TcpSniff {
         Ok(())
     }
 
+    pub fn add_target(&mut self, target: &TcpTarget) -> Result<()> {
+        let binding = self.skel.maps();
+        let map = binding.tcp_targets();
+        let dummy: u8 = 1;
+
+        let ip_be: u32 = match target.ip {
+            Some(Ipv4Addr::UNSPECIFIED) | None => 0u32,
+            Some(ip) => u32::from(ip).to_be(),
+        };
+        let port_be: u16 = match target.port {
+            None => 0u16,
+            Some(p) => p.to_be(),
+        };
+        let mut key = [0u8; 8];
+        key[0..4].copy_from_slice(&ip_be.to_ne_bytes());
+        key[4..6].copy_from_slice(&port_be.to_ne_bytes());
+
+        map.update(&key, &[dummy], MapFlags::ANY)
+            .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
+
+        log::info!("TcpSniff: added runtime target {:?}", target);
+        Ok(())
+    }
+
     /// Attach fentry/fexit hooks for tcp_sendmsg and tcp_recvmsg.
     /// Attaches whichever tcp_recvmsg variant was loaded.
     pub fn attach(&mut self) -> Result<()> {
