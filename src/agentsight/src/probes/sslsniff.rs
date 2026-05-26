@@ -16,8 +16,9 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Write,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     path::Path,
+    slice,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -87,11 +88,14 @@ impl SslEvent {
         }
     }
 
-    /// Parse comm from raw C char array
-    fn parse_comm(comm: &[i8; 16]) -> String {
-        let bytes: Vec<u8> = comm
+    /// Parse comm from the BPF struct field (layout matches C `char comm[16]`; generated
+    /// bindings may use `[i8; 16]` or `[u8; 16]` depending on target / libbpf-cargo version).
+    fn parse_comm<T>(comm: &[T; 16]) -> String {
+        debug_assert_eq!(mem::size_of::<T>(), 1);
+        let bytes = unsafe { slice::from_raw_parts(comm.as_ptr() as *const u8, 16) };
+        let bytes: Vec<u8> = bytes
             .iter()
-            .map(|&c| c as u8)
+            .copied()
             .take_while(|&b| b != 0)
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
@@ -680,11 +684,11 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
     Ok(results)
 }
 
-/// Convert a null-terminated `i8` array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
-fn comm_to_string(comm: &[i8]) -> String {
+/// Convert a null-terminated byte array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
+fn comm_to_string(comm: &[u8]) -> String {
     let bytes: Vec<u8> = comm
         .iter()
-        .map(|&c| c as u8)
+        .copied()
         .take_while(|&b| b != 0)
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()

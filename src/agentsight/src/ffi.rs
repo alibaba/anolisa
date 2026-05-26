@@ -74,7 +74,7 @@ fn safe_cstring(s: &str) -> CString {
 
 /// Copy a Rust string into a fixed-size `[c_char; 16]` buffer (NUL-terminated).
 fn copy_process_name(name: &str) -> [c_char; 16] {
-    let mut buf = [0i8; 16];
+    let mut buf = [0 as c_char; 16];
     let bytes = name.as_bytes();
     let len = bytes.len().min(15);
     for i in 0..len {
