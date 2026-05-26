@@ -48,25 +48,28 @@ def _get_manager() -> CheckpointManager:
     return _manager
 
 
-def _cwd_invalidation_warning(workspace: str) -> Optional[str]:
-    # btrfs init replaces the workspace directory's inode (remove_dir_all → symlink),
-    # so any shell holding cwd inside it will get ENOENT on getcwd() after exiting hermes.
-    # Re-init is safe because the path is already a symlink — only the very first init
-    # triggers the inode swap.
-    if Path(workspace).is_symlink():
-        return None
+# init/checkpoint/rollback all swap the workspace inode (remove_dir_all → btrfs
+# subvolume symlink, then later snapshot/rollback recreates it), so any process
+# holding cwd inside the workspace will get ENOENT on the next getcwd(). Refuse
+# instead of silently producing broken state.
+CWD_INSIDE_WORKSPACE_REASON = (
+    "`cd` outside the workspace first — ws-ckpt replaces its inode, "
+    "which would invalidate the current cwd."
+)
+
+
+def _cwd_inside_workspace(workspace: str) -> bool:
+    """Return True when the current cwd is the workspace itself or a descendant."""
     try:
         cwd = Path(os.getcwd()).resolve()
     except (FileNotFoundError, OSError):
-        return None
-    ws_path = Path(workspace).resolve()
-    if cwd != ws_path and ws_path not in cwd.parents:
-        return None
-    return (
-        f"first-time init of {workspace} will replace it with a btrfs subvolume symlink. "
-        f"Your shell's cwd is inside this directory — after exiting hermes you'll need to "
-        f"`cd` out and back in (e.g. `cd ~ && cd -`) before the shell can run commands again."
-    )
+        # cwd already invalid — caller decides what to do; we can't prove containment.
+        return False
+    try:
+        ws_path = Path(workspace).resolve()
+    except (FileNotFoundError, OSError):
+        return False
+    return cwd == ws_path or ws_path in cwd.parents
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +84,22 @@ def _on_session_start(session_id: str = "", model: str = "", **_: Any) -> None:
     if not manager.config.auto_checkpoint:
         return
 
-    warning = _cwd_invalidation_warning(manager.config.workspace)
-    if warning is not None:
-        print(f"[ws-ckpt] Heads-up: {warning}", flush=True)
+    if not manager.config.workspace:
+        manager.set_auto_checkpoint(False)
+        print(
+            "[ws-ckpt] No workspace configured — auto-checkpoint disabled",
+            flush=True,
+        )
+        return
+
+    if _cwd_inside_workspace(manager.config.workspace):
+        # Disable for this session so on_session_end stops trying too.
+        manager.set_auto_checkpoint(False)
+        print(
+            f"[ws-ckpt] Refusing auto-checkpoint: {CWD_INSIDE_WORKSPACE_REASON}",
+            flush=True,
+        )
+        return
 
     # Idempotent: ws-ckpt init is a no-op if the workspace is already registered,
     # so eager-init here avoids the implicit init-on-first-checkpoint cost.

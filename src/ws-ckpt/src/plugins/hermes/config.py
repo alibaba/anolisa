@@ -43,11 +43,10 @@ def load_config() -> HermesPluginConfig:
     """
     yaml_cfg = _read_yaml_config()
 
-    # workspace: env > yaml > TERMINAL_CWD > cwd
+    # workspace: env > yaml > empty (no fallback — caller must handle absence)
     env_ws = os.environ.get("WS_CKPT_WORKSPACE", "").strip()
     yaml_ws = str(yaml_cfg.get("workspace", "")).strip() if yaml_cfg.get("workspace") else ""
-    terminal_cwd = os.environ.get("TERMINAL_CWD", "").strip()
-    workspace = env_ws or yaml_ws or terminal_cwd or os.getcwd()
+    workspace = env_ws or yaml_ws
 
     # autoCheckpoint: env > yaml > False
     env_auto = os.environ.get("WS_CKPT_AUTO_CHECKPOINT", "").strip().lower()

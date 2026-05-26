@@ -43,6 +43,26 @@ def _get_default_workspace() -> str:
     return _get_manager().config.workspace
 
 
+_NO_WORKSPACE_MSG = "No workspace configured. Tell me the workspace path and I'll set it up."
+
+
+def _require_workspace() -> Tuple[str, Optional[str]]:
+    """Resolve and validate workspace. Returns (workspace, None) or ("", error_json)."""
+    ws = _get_default_workspace()
+    if not ws:
+        return "", _err(_NO_WORKSPACE_MSG)
+    return ws, None
+
+
+def _reject_if_cwd_inside_workspace(workspace: str) -> Optional[str]:
+    """Return a serialized error response when cwd is inside workspace, else None."""
+    from . import CWD_INSIDE_WORKSPACE_REASON, _cwd_inside_workspace  # lazy
+
+    if _cwd_inside_workspace(workspace):
+        return _err(f"Refusing: {CWD_INSIDE_WORKSPACE_REASON}")
+    return None
+
+
 def _run_ws_ckpt_cmd(cmd: list) -> Tuple[bool, str]:
     """Execute a ws-ckpt CLI command and return (success, output)."""
     try:
@@ -331,6 +351,13 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         if value is None:
             return _err("autoCheckpoint requires a value (true/false)")
         coerced = str(value).strip().lower() in ("true", "1", "yes", "on")
+        if coerced:
+            workspace, ws_err = _require_workspace()
+            if ws_err:
+                return ws_err
+            rejection = _reject_if_cwd_inside_workspace(workspace)
+            if rejection:
+                return rejection
         err = _persist_plugin_yaml(autoCheckpoint=coerced)
         if err:
             return _err(f"Failed to persist config: {err}")
@@ -400,7 +427,13 @@ def handle_ws_ckpt_checkpoint(args: Dict[str, Any], **_kwargs) -> str:
     if not snapshot_id:
         return _err("'id' is required")
 
-    workspace = _get_default_workspace()
+    workspace, ws_err = _require_workspace()
+    if ws_err:
+        return ws_err
+    rejection = _reject_if_cwd_inside_workspace(workspace)
+    if rejection:
+        return rejection
+
     message = (args.get("message") or "").strip() or "manual checkpoint"
 
     cmd = ["ws-ckpt", "checkpoint", "-w", workspace, "-i", snapshot_id,
@@ -415,7 +448,13 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if not target:
         return _err("'target' is required")
 
-    workspace = _get_default_workspace()
+    workspace, ws_err = _require_workspace()
+    if ws_err:
+        return ws_err
+    rejection = _reject_if_cwd_inside_workspace(workspace)
+    if rejection:
+        return rejection
+
     cmd = ["ws-ckpt", "rollback", "-w", workspace, "-s", target]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
@@ -423,7 +462,9 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
 
 def handle_ws_ckpt_list(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-list tool call."""
-    workspace = _get_default_workspace()
+    workspace, ws_err = _require_workspace()
+    if ws_err:
+        return ws_err
     cmd = ["ws-ckpt", "list", "-w", workspace, "--format", "table"]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
@@ -438,7 +479,9 @@ def handle_ws_ckpt_diff(args: Dict[str, Any], **_kwargs) -> str:
     if not to_id:
         return _err("'to' is required")
 
-    workspace = _get_default_workspace()
+    workspace, ws_err = _require_workspace()
+    if ws_err:
+        return ws_err
     cmd = ["ws-ckpt", "diff", "-w", workspace, "--from", from_id, "--to", to_id]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
@@ -450,7 +493,13 @@ def handle_ws_ckpt_delete(args: Dict[str, Any], **_kwargs) -> str:
     if not snapshot:
         return _err("'snapshot' is required")
 
-    workspace = (args.get("workspace") or "").strip() or _get_default_workspace()
+    explicit_ws = (args.get("workspace") or "").strip()
+    if explicit_ws:
+        workspace = explicit_ws
+    else:
+        workspace, ws_err = _require_workspace()
+        if ws_err:
+            return ws_err
     cmd = ["ws-ckpt", "delete", "-s", snapshot, "-w", workspace, "--force"]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
@@ -458,7 +507,9 @@ def handle_ws_ckpt_delete(args: Dict[str, Any], **_kwargs) -> str:
 
 def handle_ws_ckpt_status(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-status tool call."""
-    workspace = _get_default_workspace()
+    workspace, ws_err = _require_workspace()
+    if ws_err:
+        return ws_err
     cmd = ["ws-ckpt", "status", "-w", workspace, "--format", "table"]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
