@@ -2,7 +2,7 @@
 
 > LLM token optimization toolkit — Schema/Response 压缩 + 命令重写 + TOON 格式
 
-**版本**：0.3.2
+**版本**：0.4.0
 **源码**：https://code.alibaba-inc.com/Agentic-OS/Token-Less
 **RPM 源码**：https://code.alibaba-inc.com/alinux/tokenless
 **系统要求**：Rust 1.89+ (edition 2024), Linux (推荐 Alinux 4)

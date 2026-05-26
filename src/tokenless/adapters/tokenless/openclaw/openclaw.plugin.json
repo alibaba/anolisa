@@ -1,7 +1,7 @@
 {
   "id": "tokenless-openclaw",
   "name": "Token-Less",
-  "version": "5.0.1",
+  "version": "0.4.0",
   "description": "Unified RTK command rewriting + response/TOON compression + Tool Ready environment pre-check",
   "activation": {
     "onCapabilities": ["hook"]

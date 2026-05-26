@@ -1,5 +1,5 @@
 name: tokenless
-version: "0.3.2"
+version: "0.4.0"
 description: "Token-Less context compression for Hermes Agent — response compression, TOON encoding, command rewriting, and Tool Ready environment pre-check"
 author: ANOLISA
 requires_env: []
