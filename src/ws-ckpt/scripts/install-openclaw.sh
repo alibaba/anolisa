@@ -5,20 +5,20 @@ set -euo pipefail
 # shellcheck source=lib-discover.sh
 source "$(dirname "$0")/lib-discover.sh"
 
-SKILL_DST="${HOME}/.openclaw/skills/ws-ckpt"
+OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+SKILL_DST="${OPENCLAW_HOME%/}/skills/ws-ckpt"
 
 # 1. Check openclaw availability
-if ! command -v openclaw &>/dev/null; then
+if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     echo "ERROR: openclaw is not installed, please install openclaw first"
     exit 1
 fi
 
 # 2. Try plugin install (preferred).
-#    Strip inherited OPENCLAW_HOME so the CLI uses its own default home —
-#    leaving it set causes plugins to land under ~/.openclaw/.openclaw/extensions.
 if PLUGIN_SRC=$(find_plugin_src openclaw); then
-    env -u OPENCLAW_HOME openclaw plugins install "$PLUGIN_SRC" --force
-    env -u OPENCLAW_HOME openclaw plugins enable ws-ckpt 2>/dev/null || true
+    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" --force
+    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins enable ws-ckpt 2>/dev/null || true
     echo "openclaw ws-ckpt plugin installed and enabled successfully (from $PLUGIN_SRC)"
     exit 0
 fi

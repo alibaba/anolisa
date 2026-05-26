@@ -14,7 +14,8 @@ OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-$HOME/.openclaw/skills}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 SEC_CORE_SKILLS=(code-scanner prompt-scanner skill-ledger)
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-export PATH="$HOME/.local/bin:${OPENCLAW_HOME:-$HOME/.openclaw}/bin:/usr/local/bin:$PATH"
+OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+export PATH="$HOME/.local/bin:${OPENCLAW_HOME%/}/bin:/usr/local/bin:$PATH"
 
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
@@ -28,7 +29,7 @@ if [ -n "$OPENCLAW_BIN" ]; then
     if [ "$DRY_RUN" = "1" ]; then
         echo "DRY-RUN: openclaw plugins uninstall agent-sec --force"
     else
-        env -u OPENCLAW_HOME "$OPENCLAW_BIN" plugins uninstall agent-sec --force || true
+        OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins uninstall agent-sec --force || true
     fi
 else
     log "openclaw CLI not found; plugin config cleanup skipped"

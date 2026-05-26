@@ -50,6 +50,7 @@ DO_CHECK_UPDATE=false
 DO_UPDATE=false
 SOURCE_MODE="auto"            # auto | rpm | source
 SOURCE_REF=""                  # used in source mode; default = upstream/HEAD
+ALLOW_CHECKOUT=false
 
 # Adapter discovery output
 ADAPTER_ROOT=""
@@ -177,7 +178,7 @@ Usage:
   $0 --status [options]
 
 Options:
-  --mode recommended|all       Component preset (recommended = os-skills,sec-core,tokenless,ws-ckpt)
+  --mode recommended|all       Component preset (all currently equals recommended; agentsight has no adapter)
   --component <name>           Add component (repeatable). Aliases: skills→os-skills, sight→agentsight
   --plugin <id>                Add component by OpenClaw plugin id (agent-sec, tokenless-openclaw, ws-ckpt)
   --uninstall                  Run uninstall action instead of install
@@ -189,7 +190,8 @@ Options:
   --check-update               Check whether components have updates (no changes made)
   --update                     Update components before running the OpenClaw adapter (install only)
   --source auto|rpm|source     Update channel (default: auto)
-  --source-ref <ref>           Git ref to update to in source mode (default: upstream/HEAD)
+  --source-ref <ref>           Git ref to update to in source mode (default: upstream tracking ref or HEAD)
+  --allow-checkout             Allow --update --source to checkout --source-ref
   -h, --help                   Show this help
 
 Components: os-skills, sec-core, tokenless, ws-ckpt, agentsight
@@ -232,6 +234,7 @@ parse_args() {
             --source-ref)
                 [[ -n "${2:-}" ]] || die "--source-ref requires a value"
                 SOURCE_REF="$2"; shift 2 ;;
+            --allow-checkout)  ALLOW_CHECKOUT=true; shift ;;
             -h|--help)          usage; exit 0 ;;
             *)                  die "unknown option: $1 (see --help)" ;;
         esac
@@ -265,7 +268,10 @@ resolve_project_root() {
     fi
 
     local src="${BASH_SOURCE[0]:-}"
-    if [[ -n "$src" && "$src" != /tmp/* && "$src" != /dev/fd/* ]]; then
+    # In curl|bash/stdin execution, BASH_SOURCE can point at a temporary file
+    # or fd pseudo-path rather than a repo checkout. Ignore those so remote
+    # usage only scans installed adapters unless --project-root is explicit.
+    if [[ -n "$src" && "$src" != /tmp/* && "$src" != /dev/fd/* && "$src" != /dev/std* ]]; then
         local script_dir maybe_root
         script_dir="$(cd "$(dirname "$src")" 2>/dev/null && pwd -P)" || true
         if [[ -n "$script_dir" ]]; then
@@ -286,7 +292,7 @@ resolve_project_root() {
 
 # Build effective component list = MODE preset ∪ explicit, deduped, in KNOWN_COMPONENTS order.
 build_component_list() {
-    local selected=() seen="" raw resolved c x
+    local selected=() raw resolved c x
     if [[ -n "$MODE" ]]; then
         case "$MODE" in
             recommended) selected=("${RECOMMENDED_SET[@]}") ;;
@@ -310,9 +316,8 @@ build_component_list() {
     EFFECTIVE_COMPONENTS=()
     for c in "${KNOWN_COMPONENTS[@]}"; do
         for x in "${selected[@]}"; do
-            if [[ "$x" == "$c" ]] && [[ ",$seen," != *",$c,"* ]]; then
+            if [[ "$x" == "$c" ]]; then
                 EFFECTIVE_COMPONENTS+=("$c")
-                seen="$seen,$c"
                 break
             fi
         done
@@ -320,8 +325,19 @@ build_component_list() {
 }
 
 # Read targets.openclaw.actions.<action> from a JSON manifest.
+# Prefer jq, then python3. Both parse the exact JSON path so we never
+# match an unrelated "install" key elsewhere in the manifest. If neither
+# is available, fail loudly instead of guessing with sed/awk.
 manifest_action_command() {
     local manifest="$1" action="$2"
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg action "$action" \
+            '.targets.openclaw.actions[$action] // "" | select(. != "") | gsub("^\\s+|\\s+$"; "")' \
+            "$manifest" 2>/dev/null
+        return 0
+    fi
+
     if command -v python3 >/dev/null 2>&1; then
         python3 - "$manifest" "$action" <<'PY'
 import json
@@ -340,9 +356,7 @@ PY
         return 0
     fi
 
-    # Minimal fallback for the repository's current manifest shape. This keeps
-    # curl|bash usage from depending on Python for simple action lookup.
-    sed -n "s/.*\"${action}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$manifest" | head -n 1
+    die "jq or python3 is required to parse adapter manifest actions: $manifest"
 }
 
 # Try manifest-declared OpenClaw action first, then the legacy
@@ -380,7 +394,8 @@ resolve_action_script_in_root() {
 }
 
 # Resolve the adapter root for $component+$action by checking candidates in order:
-# staged build target > source checkout > user install > system install.
+# previous uninstall state > staged build target > user install > system install
+# > source checkout fallback.
 # Sets ADAPTER_ROOT, ADAPTER_TARGET_DIR (may be empty), ADAPTER_SCRIPT, and
 # ADAPTER_ACTION_ARGS.
 # Returns 0 if found, 1 otherwise.
@@ -388,21 +403,29 @@ find_openclaw_adapter() {
     local component="$1" action="$2"
     local candidates=()
 
+    if [[ "$action" == "uninstall" ]]; then
+        local state_adapter
+        state_adapter="$(read_state_field "$component" "adapter_path" 2>/dev/null || true)"
+        [[ -n "$state_adapter" ]] && candidates+=("$state_adapter")
+    fi
+
     if [[ -n "$PROJECT_ROOT" ]]; then
         candidates+=("$PROJECT_ROOT/target/${component}/share/anolisa/adapters/${component}")
+    fi
+    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
+    candidates+=("/usr/share/anolisa/adapters/${component}")
+    if [[ -n "$PROJECT_ROOT" ]]; then
         local sub
         if sub="$(component_src_subpath "$component")"; then
             candidates+=("$PROJECT_ROOT/$sub")
         fi
     fi
-    candidates+=("$HOME/.local/share/anolisa/adapters/${component}")
-    candidates+=("/usr/share/anolisa/adapters/${component}")
 
     local cand
     for cand in "${candidates[@]}"; do
         if resolve_action_script_in_root "$cand" "$action"; then
             ADAPTER_ROOT="$cand"
-            if [[ -n "$PROJECT_ROOT" && -d "$PROJECT_ROOT/target/$component" ]]; then
+            if [[ -n "$PROJECT_ROOT" && "$cand" == "$PROJECT_ROOT/target/${component}/share/anolisa/adapters/${component}" ]]; then
                 ADAPTER_TARGET_DIR="$PROJECT_ROOT/target/$component"
             else
                 ADAPTER_TARGET_DIR=""
@@ -714,6 +737,13 @@ source_component_update() {
 
     # 2. Conservative checkout to target ref if different
     if [[ -n "$tgt_rev" && "$cur_rev" != "$tgt_rev" ]]; then
+        if ! $ALLOW_CHECKOUT; then
+            if $DRY_RUN; then
+                warn "${c}: source update would checkout $target_ref; add --allow-checkout to permit this"
+            else
+                die "${c}: source update would checkout $target_ref; rerun with --allow-checkout or update the repo manually"
+            fi
+        fi
         if ! git_workdir_clean "$PROJECT_ROOT"; then
             if $DRY_RUN; then
                 warn "${c}: working tree at $PROJECT_ROOT is not clean; real run would abort"
@@ -929,8 +959,8 @@ status_load_plugins() {
     $STATUS_PLUGINS_JSON_CACHED && return 0
     STATUS_PLUGINS_JSON_CACHED=true
     [[ -n "$openclaw_bin" ]] || return 0
-    STATUS_PLUGINS_JSON="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list --json 2>/dev/null || true)"
-    STATUS_PLUGINS_TXT="$(PATH="$(openclaw_search_path)" env -u OPENCLAW_HOME "$openclaw_bin" plugins list 2>/dev/null || true)"
+    STATUS_PLUGINS_JSON="$(PATH="$(openclaw_search_path)" OPENCLAW_HOME="$OPENCLAW_HOME" "$openclaw_bin" plugins list --json 2>/dev/null || true)"
+    STATUS_PLUGINS_TXT="$(PATH="$(openclaw_search_path)" OPENCLAW_HOME="$OPENCLAW_HOME" "$openclaw_bin" plugins list 2>/dev/null || true)"
 }
 
 status_plugin_listed() {

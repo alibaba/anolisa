@@ -93,7 +93,7 @@ deploy_script="$plugin_dir/scripts/deploy.sh"
 if [ "$DRY_RUN" = "1" ]; then
     echo "DRY-RUN: ${deploy_script} ${plugin_dir}"
 else
-    env -u OPENCLAW_HOME "$deploy_script" "$plugin_dir"
+    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$deploy_script" "$plugin_dir"
 fi
 
 if [ "$DRY_RUN" = "1" ]; then

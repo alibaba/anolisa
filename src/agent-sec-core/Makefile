@@ -182,6 +182,10 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
 	install -d -m 0755 $(ADAPTER_STAGE_DIR)
 	install -p -m 0644 adapters/adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
+	install -d -m 0755 $(ADAPTER_STAGE_DIR)/openclaw/scripts
+	install -p -m 0755 adapters/openclaw/scripts/detect.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
+	install -p -m 0755 adapters/openclaw/scripts/install.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
+	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
 
 .PHONY: build-all
 build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
@@ -336,7 +340,7 @@ install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL

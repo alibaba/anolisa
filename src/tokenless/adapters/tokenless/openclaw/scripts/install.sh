@@ -19,6 +19,7 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # Allow the orchestrator (or a packaging script) to inject a specific openclaw
 # binary. Defaults to whatever `openclaw` resolves to on PATH.
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 
@@ -44,9 +45,7 @@ if [ ! -f "$PLUGIN_SRC/dist/index.js" ]; then
     exit 1
 fi
 
-# Unset OPENCLAW_HOME for the CLI call so a stray value (e.g. already pointing
-# at ~/.openclaw) doesn't cause the plugin to land in ~/.openclaw/.openclaw/...
-env -u OPENCLAW_HOME "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
+OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
     --force --dangerously-force-unsafe-install || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
     exit 1

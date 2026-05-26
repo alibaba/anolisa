@@ -1462,9 +1462,6 @@ build_sec_core() {
         make build-all BUILD_DIR="$build_dir"
 
     if [[ -d "$build_dir/share" ]]; then
-        local adapter_scripts="$build_dir/share/anolisa/adapters/sec-core/openclaw/scripts"
-        install -d -m 0755 "$adapter_scripts"
-        cp -a "$dir/adapters/openclaw/scripts/." "$adapter_scripts/"
         rm -rf "$component_root/share"
         cp -a "$build_dir/share" "$component_root/share"
     fi
