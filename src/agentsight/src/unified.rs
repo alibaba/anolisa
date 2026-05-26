@@ -514,6 +514,13 @@ impl AgentSight {
                                     );
                                 }
                             }
+                            if let Some(ref sender) = self.ffi_sender {
+                                for event in &output.events {
+                                    if let GenAISemanticEvent::LLMCall(call) = event {
+                                        sender.send(FfiEvent::Llm(call.clone()));
+                                    }
+                                }
+                            }
                         } else {
                             self.export_genai_events(&output.events);
                         }

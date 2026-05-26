@@ -279,16 +279,27 @@ impl SslSniff {
                 SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
                 SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
                 SslLibKind::Boring => {
-                    // BoringSSL doesn't export named symbols; detect by byte pattern.
-                    match find_boringssl_offsets(&path) {
-                        Some(off) => {
-                            attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
-                        }
-                        None => {
-                            log::warn!(
-                                "[attach_process] pid={pid}: BoringSSL byte-pattern detection failed for {path}, skipping"
+                    match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
+                        Ok(ls) => Ok(ls),
+                        Err(sym_err) => {
+                            log::debug!(
+                                "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
                             );
-                            continue;
+                            match find_boringssl_offsets(&path) {
+                                Some(off) => attach_boringssl_by_offset(
+                                    &mut self.skel,
+                                    &path,
+                                    &off,
+                                    false,
+                                    -1,
+                                ),
+                                None => {
+                                    log::warn!(
+                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     }
                 }
@@ -811,6 +822,36 @@ fn attach_nss(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<Vec<Li
         ur!(skel.progs_mut().probe_SSL_read_exit(), pid, lib, "PR_Read")?,
         up!(skel.progs_mut().probe_SSL_rw_enter(), pid, lib, "PR_Recv")?,
         ur!(skel.progs_mut().probe_SSL_read_exit(), pid, lib, "PR_Recv")?,
+    ])
+}
+
+fn attach_boringssl_by_symbol(
+    skel: &mut SslsniffSkel<'_>,
+    lib: &str,
+    pid: i32,
+) -> Result<Vec<Link>> {
+    Ok(vec![
+        up!(skel.progs_mut().probe_SSL_rw_enter(), pid, lib, "SSL_write")?,
+        ur!(
+            skel.progs_mut().probe_SSL_write_exit(),
+            pid,
+            lib,
+            "SSL_write"
+        )?,
+        up!(skel.progs_mut().probe_SSL_rw_enter(), pid, lib, "SSL_read")?,
+        ur!(skel.progs_mut().probe_SSL_read_exit(), pid, lib, "SSL_read")?,
+        up!(
+            skel.progs_mut().probe_SSL_do_handshake_enter(),
+            pid,
+            lib,
+            "SSL_do_handshake"
+        )?,
+        ur!(
+            skel.progs_mut().probe_SSL_do_handshake_exit(),
+            pid,
+            lib,
+            "SSL_do_handshake"
+        )?,
     ])
 }
 

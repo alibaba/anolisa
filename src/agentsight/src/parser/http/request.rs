@@ -57,6 +57,14 @@ impl ParsedRequest {
     }
 
     /// Decode HTTP chunked transfer encoding and parse as JSON
+    ///
+    /// All slicing uses `str::get(..)` so that arbitrary binary bodies (e.g.
+    /// OpenTelemetry Protobuf streams that we converted via
+    /// `from_utf8_lossy`) can't panic with "byte index N is not a char
+    /// boundary" when the parsed chunk size happens to point into the middle
+    /// of a multi-byte `U+FFFD` replacement char. In those cases we simply
+    /// abandon the chunked-decode attempt and return `None`, which the caller
+    /// treats as "not JSON".
     fn decode_chunked_json(body: &str) -> Option<serde_json::Value> {
         let mut decoded = String::new();
         let mut remaining = body;
@@ -64,7 +72,7 @@ impl ParsedRequest {
         loop {
             // Find the chunk size line
             let newline_pos = remaining.find("\r\n")?;
-            let size_str = &remaining[..newline_pos];
+            let size_str = remaining.get(..newline_pos)?;
             let chunk_size = usize::from_str_radix(size_str.trim(), 16).ok()?;
 
             if chunk_size == 0 {
@@ -72,18 +80,19 @@ impl ParsedRequest {
             }
 
             let data_start = newline_pos + 2;
-            let data_end = data_start + chunk_size;
+            let data_end = data_start.checked_add(chunk_size)?;
             if data_end > remaining.len() {
-                // Partial chunk — decode what we have
-                decoded.push_str(&remaining[data_start..]);
+                // Partial chunk — decode what we have (still guarded against
+                // landing inside a multi-byte char from from_utf8_lossy).
+                decoded.push_str(remaining.get(data_start..)?);
                 break;
             }
-            decoded.push_str(&remaining[data_start..data_end]);
+            decoded.push_str(remaining.get(data_start..data_end)?);
 
             // Skip past chunk data and trailing \r\n
-            remaining = &remaining[data_end..];
+            remaining = remaining.get(data_end..)?;
             if remaining.starts_with("\r\n") {
-                remaining = &remaining[2..];
+                remaining = remaining.get(2..)?;
             }
         }
 
@@ -287,6 +296,19 @@ mod tests {
     #[test]
     fn test_decode_chunked_json_invalid() {
         assert!(ParsedRequest::decode_chunked_json("not chunked").is_none());
+    }
+
+    #[test]
+    fn test_decode_chunked_json_binary_body_does_not_panic() {
+        // A hex digit + \r\n + arbitrary invalid-UTF8 bytes (rendered as
+        // replacement chars by from_utf8_lossy) that intentionally place
+        // chunk_size past a multi-byte boundary.
+        let mut raw: Vec<u8> = b"c27\r\n".to_vec();
+        for _ in 0..4096 {
+            raw.push(0xC2); // invalid stray UTF-8 lead byte
+        }
+        let lossy = String::from_utf8_lossy(&raw);
+        assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
     }
 
     #[test]
