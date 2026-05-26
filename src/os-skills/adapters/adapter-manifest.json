@@ -42,6 +42,45 @@
         "install":   "openclaw/scripts/install.sh",
         "uninstall": "openclaw/scripts/uninstall.sh"
       }
+    },
+    "hermes": {
+      "compatibleVersions": "",
+      "capabilities": {
+        "plugins": [],
+        "skills": [
+          "copaw-usage",
+          "install-claude-code",
+          "install-copaw",
+          "install-hermes",
+          "install-openclaw",
+          "setup-mcp",
+          "aliyun-ecs",
+          "github",
+          "kernel-dev",
+          "sysom-agentsight",
+          "sysom-diagnosis",
+          "clawhub-skill-mng",
+          "cosh-guide",
+          "humanizer",
+          "image-gen",
+          "pdf-reader",
+          "xlsx",
+          "alinux-cve-query",
+          "alinux-admin",
+          "backup-restore",
+          "regex-mastery",
+          "shell-scripting",
+          "storage-resize",
+          "upgrade-alinux-kernel"
+        ],
+        "commands": [],
+        "hooks": []
+      },
+      "actions": {
+        "detect":    "hermes/scripts/detect.sh",
+        "install":   "hermes/scripts/install.sh",
+        "uninstall": "hermes/scripts/uninstall.sh"
+      }
     }
   },
   "resources": {
@@ -49,7 +88,8 @@
       "source": ".",
       "stagePath": "target/share/anolisa/skills",
       "installPath": "/usr/share/anolisa/skills",
-      "openclawPath": "~/.openclaw/skills"
+      "openclawPath": "~/.openclaw/skills",
+      "hermesPath": "~/.hermes/skills"
     }
   }
 }

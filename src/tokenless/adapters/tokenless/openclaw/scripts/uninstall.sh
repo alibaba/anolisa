@@ -12,6 +12,7 @@ OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
 if [ -z "$OPENCLAW_BIN" ]; then
@@ -19,6 +20,17 @@ if [ -z "$OPENCLAW_BIN" ]; then
 fi
 
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
+
+if [ "$DRY_RUN" = "1" ]; then
+    if [ -n "$OPENCLAW_BIN" ]; then
+        echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins uninstall tokenless-openclaw --force"
+    else
+        echo "DRY-RUN: openclaw CLI not found; remove plugin files manually"
+    fi
+    echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR%/}/plugins/tokenless-openclaw"
+    echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR%/}/extensions/tokenless-openclaw"
+    exit 0
+fi
 
 if [ -z "$OPENCLAW_BIN" ]; then
     echo "[${COMPONENT}] openclaw CLI not found — removing plugin files manually."

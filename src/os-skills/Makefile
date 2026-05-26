@@ -34,6 +34,10 @@ install:
 	install -p -m 0755 adapters/openclaw/scripts/detect.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
 	install -p -m 0755 adapters/openclaw/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
 	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
+	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts"
+	install -p -m 0755 adapters/hermes/scripts/detect.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
+	install -p -m 0755 adapters/hermes/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
+	install -p -m 0755 adapters/hermes/scripts/uninstall.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
 
 uninstall:
 	@echo "==> Removing os-skills from $(DESTDIR)$(SKILLS_DIR)"
