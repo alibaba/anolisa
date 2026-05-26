@@ -2,15 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
-/// Watches a workspace directory tree for write activity.
-///
-/// Uses the `notify` crate in recursive mode so that writes happening in any
-/// subdirectory (not just the top level) flip the write flag. On Linux the
-/// recommended backend is inotify with recursive registration handled by the
-/// crate itself, including newly created subdirectories.
+/// Recursive workspace write watcher. CLOSE_WRITE clears the flag so
+/// checkpoint can skip the quiescence wait when all writers have closed.
 pub struct WorkspaceWatcher {
     is_writing: Arc<AtomicBool>,
     /// Hold the watcher so its background thread stays alive; dropping the
@@ -47,11 +44,15 @@ impl WorkspaceWatcher {
         tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
                 match res {
-                    Ok(event) => {
-                        if is_write_event(&event.kind) {
+                    Ok(event) => match &event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                             writing.store(true, Ordering::Release);
                         }
-                    }
+                        EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
+                            writing.store(false, Ordering::Release);
+                        }
+                        _ => {}
+                    },
                     Err(e) => {
                         warn!("notify error for {:?}: {}", log_path, e);
                     }
@@ -97,16 +98,4 @@ impl WorkspaceWatcher {
     pub fn is_writing_flag(&self) -> Arc<AtomicBool> {
         self.is_writing.clone()
     }
-}
-
-/// Return true for event kinds that represent actual write activity.
-///
-/// We intentionally treat Create / Modify / Remove / (file) Rename as writes.
-/// Access-only events (e.g. metadata-only access timestamps) are ignored to
-/// avoid false positives.
-fn is_write_event(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
 }
