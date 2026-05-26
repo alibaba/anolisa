@@ -67,8 +67,10 @@ find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
     -exec rm -rf {} +
 install -p -m 0644 adapter-manifest.json %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/manifest.json
 install -p -m 0644 scripts/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
+install -p -m 0755 scripts/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 install -p -m 0755 scripts/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 install -p -m 0755 scripts/uninstall-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
+install -p -m 0755 scripts/detect-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 install -p -m 0755 scripts/install-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 install -p -m 0755 scripts/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
 

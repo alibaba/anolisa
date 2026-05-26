@@ -46,6 +46,9 @@ install -p -m 0644 adapters/adapter-manifest.json \
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/os-skills/openclaw/scripts
 install -p -m 0755 adapters/openclaw/scripts/*.sh \
     %{buildroot}%{_datadir}/anolisa/adapters/os-skills/openclaw/scripts/
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/os-skills/hermes/scripts
+install -p -m 0755 adapters/hermes/scripts/*.sh \
+    %{buildroot}%{_datadir}/anolisa/adapters/os-skills/hermes/scripts/
 
 %files
 %license LICENSE
@@ -58,6 +61,9 @@ install -p -m 0755 adapters/openclaw/scripts/*.sh \
 %dir %{_datadir}/anolisa/adapters/os-skills/openclaw
 %dir %{_datadir}/anolisa/adapters/os-skills/openclaw/scripts
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/os-skills/openclaw/scripts/*.sh
+%dir %{_datadir}/anolisa/adapters/os-skills/hermes
+%dir %{_datadir}/anolisa/adapters/os-skills/hermes/scripts
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/os-skills/hermes/scripts/*.sh
 
 %changelog
 * Wed Mar 18 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.1-1

@@ -26,6 +26,26 @@
         "install":   "openclaw/scripts/install.sh",
         "uninstall": "openclaw/scripts/uninstall.sh"
       }
+    },
+    "hermes": {
+      "compatibleVersions": "",
+      "capabilities": {
+        "plugins": [
+          "agent-sec-core-hermes-plugin"
+        ],
+        "skills": [
+          "code-scanner",
+          "prompt-scanner",
+          "skill-ledger"
+        ],
+        "commands": [],
+        "hooks": []
+      },
+      "actions": {
+        "detect":    "hermes/scripts/detect.sh",
+        "install":   "hermes/scripts/install.sh",
+        "uninstall": "hermes/scripts/uninstall.sh"
+      }
     }
   },
   "resources": {
@@ -45,6 +65,13 @@
       "installPath": "/usr/local/lib/anolisa/sec-core/openclaw-plugin",
       "deployScript": "/usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh",
       "openclawPath": "OpenClaw plugin registry"
+    },
+    "hermesPlugin": {
+      "source": "hermes-plugin",
+      "stagePath": "target/hermes-plugin",
+      "installPath": "/usr/local/lib/anolisa/sec-core/hermes-plugin",
+      "deployScript": "/usr/local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh",
+      "hermesPath": "~/.hermes/plugins/agent-sec-core-hermes-plugin"
     },
     "securitySkills": {
       "source": "skills",

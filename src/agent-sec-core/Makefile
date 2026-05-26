@@ -186,6 +186,10 @@ stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
 	install -p -m 0755 adapters/openclaw/scripts/detect.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/install.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
+	install -d -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts
+	install -p -m 0755 adapters/hermes/scripts/detect.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
+	install -p -m 0755 adapters/hermes/scripts/install.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
+	install -p -m 0755 adapters/hermes/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
 
 .PHONY: build-all
 build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
@@ -333,6 +337,10 @@ install-adapter-manifest: ## Install adapter-manifest.json from staged copy
 	install -p -m 0755 adapters/openclaw/scripts/detect.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
 	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
+	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts
+	install -p -m 0755 adapters/hermes/scripts/detect.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
+	install -p -m 0755 adapters/hermes/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
+	install -p -m 0755 adapters/hermes/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
 
 .PHONY: install-all
 install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)

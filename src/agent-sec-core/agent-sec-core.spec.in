@@ -138,6 +138,9 @@ Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/hermes-plugin/scripts/deploy.sh
 /opt/agent-sec/hermes-plugin/
+%dir %{_datadir}/anolisa/adapters/sec-core/hermes
+%dir %{_datadir}/anolisa/adapters/sec-core/hermes/scripts
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/sec-core/hermes/scripts/*.sh
 %license LICENSE
 
 # =============================================================================

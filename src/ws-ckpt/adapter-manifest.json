@@ -31,6 +31,7 @@
         "hooks": []
       },
       "actions": {
+        "detect":    "scripts/detect-hermes.sh",
         "install":   "scripts/install-hermes.sh",
         "uninstall": "scripts/uninstall-hermes.sh"
       }

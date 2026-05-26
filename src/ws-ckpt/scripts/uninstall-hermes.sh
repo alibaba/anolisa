@@ -2,8 +2,34 @@
 
 set -euo pipefail
 
-PLUGIN_DST="${HOME}/.hermes/plugins/ws-ckpt"
-SKILL_DST="${HOME}/.hermes/skills/ws-ckpt"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_BIN="${HERMES_BIN:-}"
+HERMES_SKILLS_DIR="${HERMES_SKILLS_DIR:-${HERMES_HOME%/}/skills}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
+PLUGIN_DST="${HERMES_HOME%/}/plugins/ws-ckpt"
+SKILL_DST="${HERMES_SKILLS_DIR%/}/ws-ckpt"
+
+if [ -z "$HERMES_BIN" ]; then
+    HERMES_BIN="$(command -v hermes 2>/dev/null || true)"
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
+        echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} $HERMES_BIN plugins disable ws-ckpt"
+        echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} $HERMES_BIN plugins remove ws-ckpt"
+    else
+        echo "DRY-RUN: hermes CLI not found; skip CLI disable/remove"
+    fi
+    echo "DRY-RUN: rm -rf $PLUGIN_DST"
+    echo "DRY-RUN: update ${HERMES_HOME%/}/config.yaml to remove ws-ckpt entries"
+    echo "DRY-RUN: rm -rf $SKILL_DST"
+    exit 0
+fi
+
+if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
+    HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins disable ws-ckpt 2>/dev/null || true
+    HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins remove ws-ckpt 2>/dev/null || true
+fi
 
 # 1. Remove plugin symlink
 if [ -L "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST" ]; then
@@ -12,7 +38,7 @@ if [ -L "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST" ]; then
 fi
 
 # 2. Remove ws-ckpt config from ~/.hermes/config.yaml
-HERMES_CONFIG="${HOME}/.hermes/config.yaml"
+HERMES_CONFIG="${HERMES_CONFIG_PATH:-${HERMES_HOME%/}/config.yaml}"
 if [ -f "$HERMES_CONFIG" ]; then
     python3 -c "
 import sys, re

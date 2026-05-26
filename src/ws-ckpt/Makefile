@@ -48,6 +48,7 @@ else
 	install -p -m 0755 scripts/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
 	install -p -m 0755 scripts/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
 	install -p -m 0755 scripts/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -p -m 0755 scripts/detect-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
 	install -p -m 0755 scripts/install-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
 	install -p -m 0755 scripts/uninstall-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
 	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)/openclaw"

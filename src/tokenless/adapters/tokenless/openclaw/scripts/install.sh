@@ -23,17 +23,12 @@ OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 
 echo "[${COMPONENT}] Installing ${AGENT} plugin..."
-
-if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
-    echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — skipping plugin installation."
-    echo "[${COMPONENT}] Install OpenClaw first, then run this script again."
-    exit 0
-fi
 
 if [ ! -d "$PLUGIN_SRC" ]; then
     echo "[${COMPONENT}] Plugin source not found: $PLUGIN_SRC" >&2
@@ -47,6 +42,17 @@ if [ ! -f "$PLUGIN_SRC/dist/index.js" ]; then
     echo "[${COMPONENT}]        (run by 'make install' automatically; only an issue when" >&2
     echo "[${COMPONENT}]         deploying a hand-assembled adapter directory)." >&2
     exit 1
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force --dangerously-force-unsafe-install"
+    exit 0
+fi
+
+if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
+    echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — skipping plugin installation."
+    echo "[${COMPONENT}] Install OpenClaw first, then run this script again."
+    exit 0
 fi
 
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
