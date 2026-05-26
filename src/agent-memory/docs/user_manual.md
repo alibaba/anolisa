@@ -184,7 +184,91 @@ The package installs:
   user template
 - `/usr/lib/tmpfiles.d/anolisa-memory.conf` — creates
   `/run/anolisa/{,sessions}` at boot with `0700`
+- `/usr/share/anolisa/adapters/agent-memory/` — OpenClaw plugin
+  bundle (manifest, source, prebuilt `dist/index.js`, install scripts)
 - `/usr/share/doc/agent-memory/{CHANGELOG.md, user_manual.md, user_manual.zh.md}`
+
+### Installing the OpenClaw plugin (optional)
+
+[OpenClaw](https://github.com/openclaw) is an Anolis OS agent gateway
+that consumes plugins via its own contract (different from raw MCP
+stdio). If you also run an MCP-direct client (Claude Code, Cursor,
+Continue) on the same host pointed at `/usr/bin/agent-memory` via
+`mcp-server.json`, that client sees all 19 native tools (`mem_*` +
+`memory_*`); the OpenClaw plugin separately exposes a 4-tool subset
+to OpenClaw users under contract names. The two paths can coexist —
+each agent sees only the tool set its own runtime advertises.
+
+Register the bundled plugin so the four memory contract tools
+(`memory_search`, `memory_get`, `memory_observe`,
+`memory_get_context`) call into agent-memory:
+
+**Prerequisite**: the `openclaw` CLI must be on `$PATH`. The script
+detects this and exits 0 (with a clear log line) when the CLI is
+missing, so re-run after installing OpenClaw.
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw gateway restart
+```
+
+OpenClaw's signature/sandbox check is on by default. To bypass it
+during local development before the bundle is signed, set
+`AGENT_MEMORY_UNSAFE_INSTALL=1` when invoking the script.
+
+Uninstall (removes the plugin from `~/.openclaw/plugins/` and cleans
+`openclaw.json`'s `plugins.{allow,entries,slots}`):
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+When the agent-memory RPM is uninstalled (`yum remove agent-memory`),
+the spec's `%preun` runs the uninstall script automatically — no
+orphan plugin in the OpenClaw config. `jq` is preferred for editing
+`openclaw.json`; `python3` is used as a fallback when `jq` is missing.
+
+The plugin's contract-name mapping:
+
+| OpenClaw contract | agent-memory MCP tool |
+|---|---|
+| `memory_search` | `memory_search` (Tier B, BM25) |
+| `memory_get` | `mem_read` (Tier A) |
+| `memory_observe` | `memory_observe` (Tier B) |
+| `memory_get_context` | `memory_get_context` (Tier B) |
+
+The plugin's MCP `clientInfo.version` always matches the
+agent-memory RPM version — esbuild injects it at bundle time from
+`Cargo.toml` via the Makefile `sync-versions` target, so an
+upgrade automatically updates what OpenClaw sees.
+
+Plugin config (set via OpenClaw's plugin config UI or `openclaw.json`
+`plugins.entries["memory-anolisa"].config`):
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `binaryPath` | string | auto-detect: `$PATH`-resolved `agent-memory`, then `/usr/bin/agent-memory`, `/usr/local/bin/agent-memory`, `~/.local/bin/agent-memory` | absolute path to the agent-memory binary |
+| `userId` | string | env `USER_ID` → OS `uid` (via `process.getuid()`) → env `$USER` | namespace `user_id` for the memory mount; validated against the same rules as the Rust side (no `..` / `/` / `\` / control chars, ≤128 bytes) |
+| `profile` | `basic` / `advanced` / `expert` | `advanced` | profile gate (§4) — set in the plugin config; the plugin spawns `agent-memory serve` with `MEMORY_PROFILE=<value>` env, so a `MEMORY_PROFILE` set in the systemd unit or shell **is overridden** by the plugin config |
+| `maxReadBytes` | integer (1..4 GiB) | `1048576` (1 MiB) | cap on a single `mem_read`; mirrored to `MEMORY_MAX_READ_BYTES` env on the child |
+| `maxWriteBytes` | integer (1..4 GiB) | `16777216` (16 MiB) | cap on a single `mem_write`; mirrored to `MEMORY_MAX_WRITE_BYTES` env on the child |
+| `sessionId` | string (`ses_<hex>` shape) | env `MEMORY_SESSION_ID` → a freshly-generated `ses_<random>` pinned for the client's lifetime | namespace mount session; mirrored to `MEMORY_SESSION_ID` env. Pinning matters: a fresh value per spawn would defeat `mem_promote` (the scratch dir would not survive a respawn) |
+| `sessionDir` | string | env `MEMORY_SESSION_DIR` → `/run/anolisa/sessions` (created at boot by `anolisa-memory.conf` tmpfiles snippet) | base dir for session scratch + log; mirrored to `MEMORY_SESSION_DIR` env |
+
+The plugin passes a minimal env allowlist (`PATH`, `HOME`, `USER`,
+`USER_ID`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`,
+`XDG_RUNTIME_DIR`, plus anything starting with `MEMORY_` / `RUST_`)
+to the child; unrelated parent env stays in the OpenClaw process and
+does not leak into `agent-memory`. `USER_ID` is matched exactly, so
+look-alikes such as `USER_IDX` are not forwarded.
+
+> **Compatibility note**: the adapter's `manifest.json` declares
+> `compatibleVersions: ">=5.0.0"`. OpenClaw publishes under CalVer
+> (e.g. `2026.5.7`), and the constraint is informational only —
+> the plugin uses only the stable `openclaw/plugin-sdk` surface and
+> has been validated against the 5.x SDK shape. If a future
+> OpenClaw release breaks the plugin-sdk contract, bump the
+> `compatibleVersions` field and republish.
 
 ### From source
 

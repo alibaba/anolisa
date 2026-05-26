@@ -14,13 +14,18 @@ Source1:        %{name}-%{version}-vendor.tar.gz
 # Build dependencies
 # Rust edition 2024 needs >=1.85; cmake is required by the git2 crate's
 # vendored libgit2 build; systemd-devel ships libsystemd headers for the
-# optional journald audit fan-out.
+# optional journald audit fan-out. nodejs is required to build the
+# OpenClaw TS plugin (dist/index.js). jq is used by the Makefile
+# `sync-versions` target to write Cargo.toml's version into every
+# derived JSON file (adapter manifest, npm package, mcp-server).
 BuildRequires:  cargo >= 1.85
 BuildRequires:  rust >= 1.85
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  cmake
 BuildRequires:  pkgconfig
+BuildRequires:  nodejs >= 18
+BuildRequires:  jq
 BuildRequires:  systemd-devel
 BuildRequires:  systemd-rpm-macros
 
@@ -47,7 +52,10 @@ Core Features:
 - Optional systemd-journald audit fan-out
 - Single statically-linked binary (bundled SQLite + vendored libgit2)
 
-Integration:
+Note: OpenClaw plugin (memory-anolisa) is available under
+/usr/share/anolisa/adapters/agent-memory/openclaw/. Run the install
+script to register with OpenClaw:
+  /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
 - Claude Code: configure in .claude/settings.json mcpServers
 - Cursor / any MCP-compatible client: stdio transport
 
@@ -63,6 +71,12 @@ Integration:
 # --offline forbids network access; --locked enforces Cargo.lock pinning.
 # Combined they require Source1 (vendor) to be present, fail fast otherwise.
 cargo build --release --locked --offline
+
+# Compile the OpenClaw TS plugin via Makefile target.
+# Produces adapters/agent-memory/openclaw/dist/index.js, which package.json
+# declares as "main" and openclaw.extensions. Mirroring tokenless's
+# build-openclaw-plugin pattern.
+make build-openclaw-plugin
 
 %install
 rm -rf %{buildroot}
@@ -89,11 +103,33 @@ install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_useruni
 install -d -m 0755 %{buildroot}%{_tmpfilesdir}
 install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
 
-# Install documentation (CHANGELOG + user manual EN/ZH)
+# Install documentation (CHANGELOG + user manual EN/ZH).
+# The v2 design doc and the standalone agent-memory-user-manual.md from
+# the openclaw branch are dropped in favour of the consolidated bilingual
+# user_manual.md / user_manual.zh.md introduced in the v0.1.0 rewrite.
 install -d -m 0755 %{buildroot}%{_docdir}/%{name}
 install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
 install -p -m 0644 docs/user_manual.md %{buildroot}%{_docdir}/%{name}/user_manual.md
 install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_manual.zh.md
+
+# Install adapter bundle per FHS spec.
+# anolisa-adapter-ctl scans %{_datadir}/anolisa/adapters/*/manifest.json.
+# Ship only what's needed at runtime — the same set that package.json
+# `files` declares: dist/ (prebuilt bundle), openclaw.plugin.json,
+# scripts/ (install/detect/uninstall), package.json (so OpenClaw can
+# read the plugin's version + name). TS sources are dev-only.
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
+
+install -m 0644 adapters/agent-memory/manifest.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/
+install -m 0755 adapters/agent-memory/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0755 adapters/agent-memory/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0755 adapters/agent-memory/openclaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/
+install -m 0644 adapters/agent-memory/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
+install -m 0644 adapters/agent-memory/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/
+# esbuild bundles typebox inline, so dist/index.js has no external
+# runtime deps beyond the openclaw peerDependency.
+install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/
 
 %files
 %defattr(0644,root,root,0755)
@@ -109,6 +145,19 @@ install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_ma
 %doc %{_docdir}/%{name}/CHANGELOG.md
 %doc %{_docdir}/%{name}/user_manual.md
 %doc %{_docdir}/%{name}/user_manual.zh.md
+# Adapter bundle (anolisa-adapter-ctl auto-discovery)
+%dir %{_datadir}/anolisa/adapters
+%dir %{_datadir}/anolisa/adapters/agent-memory
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/manifest.json
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/openclaw.plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/package.json
+%dir %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/agent-memory/openclaw/dist/index.js
 
 %post
 # Apply the shipped tmpfiles.d snippet immediately so /run/anolisa{,
@@ -122,6 +171,16 @@ install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_ma
 # subcommand creates the namespace under the invoking user's real
 # ~/.anolisa/memory/user-<uid>/ — fed by libc::getuid() — on first
 # run, which is the correct trust boundary.
+
+%preun
+# On uninstall ($1=0): run the adapter uninstall script which removes
+# the openclaw plugin (CLI or manual) and cleans openclaw.json entries.
+if [ $1 -eq 0 ]; then
+    UNINSTALL_SCRIPT="%{_datadir}/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh"
+    if [ -f "$UNINSTALL_SCRIPT" ]; then
+        bash "$UNINSTALL_SCRIPT" || true
+    fi
+fi
 
 %changelog
 * Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
@@ -142,3 +201,14 @@ install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_ma
   RestrictNamespaces allowlist user|mnt) + tmpfiles.d snippet
 - RPM build fully offline via vendored crates (Source1); single
   statically-linked binary (bundled SQLite + vendored libgit2)
+- OpenClaw plugin "memory-anolisa" bundled under
+  /usr/share/anolisa/adapters/agent-memory/openclaw/: 4 memory
+  contract tools (memory_search / memory_get / memory_observe /
+  memory_get_context) routed to the MCP server as a stdio child;
+  install.sh / uninstall.sh registers via the OpenClaw CLI;
+  %preun auto-cleans plugins.{allow,entries,slots} on RPM removal
+- Single-source version sync: Cargo.toml -> jq -> manifest.json /
+  package.json / openclaw.plugin.json / mcp-server.json, plus
+  esbuild --define injects PLUGIN_VERSION into the bundle, so every
+  surface (rpm header, binary, plugin manifest, MCP clientInfo)
+  always agrees with the Rust crate's version

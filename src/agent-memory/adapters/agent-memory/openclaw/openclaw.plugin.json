@@ -1,0 +1,70 @@
+{
+  "id": "memory-anolisa",
+  "name": "Anolisa Memory",
+  "version": "0.1.0",
+  "description": "Persistent memory backed by the agent-memory MCP server with namespace isolation and openat2 sandbox. Provides BM25 search, file read/write, observe, and context assembly tools.",
+  "activation": {
+    "onStartup": false
+  },
+  "kind": "memory",
+  "contracts": {
+    "tools": ["memory_search", "memory_get", "memory_observe", "memory_get_context"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "binaryPath": {
+        "type": "string",
+        "description": "Path to the agent-memory binary. Default: auto-detect from PATH or known install locations."
+      },
+      "userId": {
+        "type": "string",
+        "maxLength": 128,
+        "description": "Namespace user_id for the memory mount. Default: auto-detect from OS uid. Must not contain '..', '/', '\\' or control characters (validated against the Rust side)."
+      },
+      "profile": {
+        "type": "string",
+        "enum": ["basic", "advanced", "expert"],
+        "description": "Memory profile controlling which tools are visible to the agent."
+      },
+      "maxReadBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4294967296,
+        "description": "Maximum bytes for a single mem_read call. Default: 1048576 (1 MiB). Hard cap: 4 GiB."
+      },
+      "maxWriteBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4294967296,
+        "description": "Maximum bytes for a single mem_write call. Default: 16777216 (16 MiB). Hard cap: 4 GiB."
+      }
+    }
+  },
+  "uiHints": {
+    "binaryPath": {
+      "label": "Agent Memory Binary",
+      "placeholder": "/usr/local/bin/agent-memory",
+      "help": "Absolute path to the agent-memory binary. Leave empty to auto-detect from PATH."
+    },
+    "userId": {
+      "label": "Namespace User ID",
+      "help": "User identifier for the memory namespace. Defaults to the OS user uid."
+    },
+    "profile": {
+      "label": "Memory Profile",
+      "help": "Controls which tools are advertised: basic (structured API only), advanced (file + search), expert (file tools only)."
+    },
+    "maxReadBytes": {
+      "label": "Max Read Bytes",
+      "help": "Maximum bytes returned by a single read call. Prevents multi-GB blobs from exhausting memory.",
+      "advanced": true
+    },
+    "maxWriteBytes": {
+      "label": "Max Write Bytes",
+      "help": "Maximum bytes accepted by a single write call. Caps disk and buffer growth.",
+      "advanced": true
+    }
+  }
+}

@@ -20,12 +20,19 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DATADIR ?= /usr/share/anolisa
 DOCDIR ?= $(PREFIX)/share/doc/$(NAME)
+SHARE_DIR ?= $(DATADIR)/adapters/agent-memory
+
+# Adapter directories
+ADAPTER_SRC_DIR := adapters/agent-memory
+OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
 
 # RPM build paths
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
 SPEC_FILE := $(NAME).spec
 
-.PHONY: all build test lint fmt clean install dist rpm help
+.PHONY: all build build-openclaw-plugin sync-versions test lint fmt clean install \
+        install-adapter-resources uninstall dist spec rpm srpm \
+        smoke help
 
 all: build
 
@@ -33,10 +40,65 @@ all: build
 # BUILD
 # =============================================================================
 
-build: ## Build release binary
+build: build-openclaw-plugin ## Build release binary + openclaw plugin
 	@echo "==> Building $(NAME) v$(VERSION)..."
 	cargo build --release --locked
 	@echo "==> Binary: target/release/$(NAME) ($$(du -sh target/release/$(NAME) | cut -f1))"
+
+# Single-source version sync: Cargo.toml is the authority. Every derived
+# JSON file (adapter manifest, npm package, npm lockfile, MCP server
+# descriptor, openclaw plugin manifest) is rewritten to match. The
+# openclaw plugin's runtime version (sent in MCP initialize.clientInfo
+# .version) is injected by esbuild's --define at bundle time using
+# `npm_package_version` set by npm, which itself was just synced from
+# $(VERSION) here.
+#
+# Idempotent: each file is only rewritten when its current `.version`
+# differs from $(VERSION); a no-op invocation leaves mtime untouched so
+# `make build` doesn't dirty the git tree on every run.
+SYNC_JSON_FILES := \
+	$(ADAPTER_SRC_DIR)/manifest.json \
+	$(OPENCLAW_PLUGIN_SRC_DIR)/package.json \
+	$(OPENCLAW_PLUGIN_SRC_DIR)/openclaw.plugin.json \
+	config/mcp-server.json
+
+sync-versions: ## Sync $(VERSION) (from Cargo.toml) into all derived JSON files
+	@command -v jq >/dev/null || { echo "ERROR: jq is required for sync-versions"; exit 1; }
+	@# Auto-clean stray *.tmp on shell error (jq failure, disk full, SIGINT).
+	@trap 'rm -f $(SYNC_JSON_FILES:%=%.tmp) $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json.tmp' EXIT; \
+	changed=0; \
+	for f in $(SYNC_JSON_FILES); do \
+		cur=$$(jq -r '.version // empty' "$$f" 2>/dev/null || echo ""); \
+		if [ "$$cur" != "$(VERSION)" ]; then \
+			jq --arg v "$(VERSION)" '.version = $$v' "$$f" > "$$f.tmp" && mv "$$f.tmp" "$$f" || exit 1; \
+			echo "    $$f: $$cur -> $(VERSION)"; \
+			changed=1; \
+		fi; \
+	done; \
+	plock=$(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json; \
+	cur=$$(jq -r '.version // empty' "$$plock" 2>/dev/null || echo ""); \
+	if [ "$$cur" != "$(VERSION)" ]; then \
+		jq --arg v "$(VERSION)" '.version = $$v | (.packages[""] | select(.) | .version) |= $$v' \
+			"$$plock" > "$$plock.tmp" && mv "$$plock.tmp" "$$plock" || exit 1; \
+		echo "    $$plock: $$cur -> $(VERSION)"; \
+		changed=1; \
+	fi; \
+	if [ $$changed -eq 1 ]; then \
+		echo "==> Synced derived files to $(VERSION)"; \
+	fi
+
+build-openclaw-plugin: sync-versions ## Build openclaw TS plugin (dist/index.js)
+	@echo "==> Building $(NAME) OpenClaw plugin..."
+	# --legacy-peer-deps: the plugin declares `openclaw: "*"` as a peer
+	# but the dev openclaw resolves to CalVer 2026.5.7, which npm 7+'s
+	# strict peer resolver flags as needing a major bump. The peer
+	# constraint is intentionally permissive (the plugin uses only the
+	# stable plugin-sdk surface), so we keep --legacy-peer-deps until
+	# openclaw publishes a semver-compatible package range.
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
+	@test -f $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
+	    || { echo "ERROR: $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js was not produced"; exit 1; }
 
 build-debug: ## Build debug binary
 	cargo build --locked
@@ -98,7 +160,7 @@ fmt-check: ## Check formatting without modifying
 # INSTALL (source build)
 # =============================================================================
 
-install: build ## Install binary and config to PREFIX
+install: build install-adapter-resources ## Install binary, config, and adapter to PREFIX
 	@echo "==> Installing to $(DESTDIR)$(BINDIR)..."
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -p -m 0755 target/release/$(NAME) $(DESTDIR)$(BINDIR)/
@@ -107,6 +169,14 @@ install: build ## Install binary and config to PREFIX
 	install -d -m 0755 $(DESTDIR)$(DATADIR)/mcp-servers
 	install -p -m 0644 config/mcp-server.json $(DESTDIR)$(DATADIR)/mcp-servers/agent-memory.json
 	@echo "==> Installed $(NAME) to $(DESTDIR)$(BINDIR)/$(NAME)"
+
+install-adapter-resources: build-openclaw-plugin ## Install adapter bundle per FHS spec
+	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
+	rm -rf $(DESTDIR)$(SHARE_DIR)
+	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
+	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
+	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources"; exit 1; }
 
 install-systemd-user: ## Install per-user systemd template (Linux only)
 	@echo "==> Installing systemd template to /usr/lib/systemd/user/..."
@@ -125,7 +195,7 @@ uninstall: ## Remove installed files
 # DISTRIBUTION
 # =============================================================================
 
-dist: clean ## Create source + vendor tarballs for RPM build
+dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM build
 	@echo "==> Vendoring crates..."
 	cargo vendor vendor/
 	@mkdir -p .cargo
@@ -138,6 +208,14 @@ dist: clean ## Create source + vendor tarballs for RPM build
 	@cp -R Cargo.toml Cargo.lock src config tests docs \
 		Makefile agent-memory.spec.in \
 		.gitignore .cargo/config.toml dist/$(NAME)-$(VERSION)/
+	# Adapter: include source + pre-built dist/index.js, exclude
+	# node_modules/tests so the source tarball stays under a few MB.
+	@mkdir -p dist/$(NAME)-$(VERSION)/$(ADAPTER_SRC_DIR)
+	tar -cf - -C $(ADAPTER_SRC_DIR) \
+		--exclude='node_modules' \
+		--exclude='.tsbuildinfo' \
+		--exclude='tests' \
+		. | tar -xf - -C dist/$(NAME)-$(VERSION)/$(ADAPTER_SRC_DIR)/
 	tar czf dist/$(NAME)-$(VERSION).tar.gz -C dist $(NAME)-$(VERSION)
 	@echo "==> Creating $(NAME)-$(VERSION)-vendor.tar.gz..."
 	# Top-level dir is `vendor/` (no $(NAME)-vendor wrapper) so that
@@ -161,7 +239,7 @@ rpm: dist spec ## Build RPM package
 	cp dist/$(NAME)-$(VERSION).tar.gz $(RPMBUILD_DIR)/SOURCES/
 	cp dist/$(NAME)-$(VERSION)-vendor.tar.gz $(RPMBUILD_DIR)/SOURCES/
 	cp $(SPEC_FILE) $(RPMBUILD_DIR)/SPECS/
-	rpmbuild -bb $(RPMBUILD_DIR)/SPECS/$(SPEC_FILE)
+	rpmbuild -bb --define "_topdir $(RPMBUILD_DIR)" $(RPMBUILD_DIR)/SPECS/$(SPEC_FILE)
 	@echo "==> RPM built. Check $(RPMBUILD_DIR)/RPMS/"
 
 srpm: dist spec ## Build source RPM
@@ -170,7 +248,7 @@ srpm: dist spec ## Build source RPM
 	cp dist/$(NAME)-$(VERSION).tar.gz $(RPMBUILD_DIR)/SOURCES/
 	cp dist/$(NAME)-$(VERSION)-vendor.tar.gz $(RPMBUILD_DIR)/SOURCES/
 	cp $(SPEC_FILE) $(RPMBUILD_DIR)/SPECS/
-	rpmbuild -bs $(RPMBUILD_DIR)/SPECS/$(SPEC_FILE)
+	rpmbuild -bs --define "_topdir $(RPMBUILD_DIR)" $(RPMBUILD_DIR)/SPECS/$(SPEC_FILE)
 	@echo "==> SRPM built. Check $(RPMBUILD_DIR)/SRPMS/"
 
 # =============================================================================
@@ -179,8 +257,10 @@ srpm: dist spec ## Build source RPM
 
 clean: ## Clean build artifacts
 	cargo clean
-	rm -rf dist/
+	rm -rf dist/ vendor/ .cargo/
+	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist/ $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules/
 	rm -f $(SPEC_FILE)
+	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 
 version: ## Show current version
 	@echo $(VERSION)

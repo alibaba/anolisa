@@ -481,6 +481,13 @@ build_agent_memory() {
         return 1
     fi
 
+    # Always clean source-tree vendoring artefacts on exit (success or
+    # failure), so a `set -e` mid-build can't leave $MEM_DIR/vendor/
+    # and $MEM_DIR/.cargo/ behind to pollute the developer's git tree
+    # or confuse subsequent non-vendored cargo builds.
+    # shellcheck disable=SC2064  # we want $MEM_DIR expanded now
+    trap "rm -rf '${MEM_DIR}/vendor' '${MEM_DIR}/.cargo'" RETURN
+
     # Version from env, Cargo.toml, then spec fallback
     local version="${VERSION:-}"
     if [ -z "$version" ]; then
@@ -490,8 +497,11 @@ build_agent_memory() {
         version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
     fi
     if [ -z "$version" ]; then
-        version="0.1.0"
-        warn "No version specified for agent-memory, using default: ${version}"
+        # Hard fail rather than burying a stale fallback that drifts from
+        # Cargo.toml. The build must derive its version from the
+        # authoritative source (Cargo.toml → spec.in @VERSION@).
+        err "Could not derive agent-memory version from VERSION env, Cargo.toml, or ${spec_in}"
+        exit 1
     fi
 
     local pkg_name
@@ -501,10 +511,16 @@ build_agent_memory() {
     local spec_file
     spec_file=$(process_spec_template "$spec_in" "$version")
 
+    # Build the OpenClaw TS plugin first so its dist/ is part of the
+    # source archive — the spec's %install copies the prebuilt bundle
+    # rather than running npm during rpmbuild (no network in mock).
+    log "Step 1/4: Building OpenClaw TS plugin..."
+    cd "$MEM_DIR" && make build-openclaw-plugin
+
     # The source-archive top-level dir must match `%setup -n %{name}-%{version}`
     # in the spec, so the unpacked tree lines up with the CI-produced
     # archive from .github/actions/package-source.
-    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    log "Step 2/4: Creating source tarball ${tarball_name}..."
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
@@ -513,8 +529,9 @@ build_agent_memory() {
     # Single tar pass: copy the whole source tree minus build artefacts.
     # The previous two-pass implementation hard-failed under `set -e`
     # because the first pass referenced an `adapters/` directory that
-    # only exists in agent-sec-core, leaving agent-memory's RPM build
-    # broken from day one.
+    # only existed in agent-sec-core. Now agent-memory ships its own
+    # adapters/ (the OpenClaw plugin built above) so a single pass
+    # captures it via the default include.
     tar -cf - -C "$MEM_DIR" \
         --exclude='target' \
         --exclude='dist' \
@@ -529,7 +546,7 @@ build_agent_memory() {
     # Vendor tarball for --offline cargo build. Must run BEFORE copying
     # .cargo/config.toml into the source tarball so the vendored-sources
     # config (not the original crates-io one) ends up in Source0.
-    log "Step 2/3: Creating vendor tarball..."
+    log "Step 3/4: Creating vendor tarball..."
     cd "$MEM_DIR" && cargo vendor vendor/
     mkdir -p "$MEM_DIR"/.cargo
     printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > "$MEM_DIR"/.cargo/config.toml
@@ -548,7 +565,7 @@ build_agent_memory() {
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
-    log "Step 3/3: Running rpmbuild..."
+    log "Step 4/4: Running rpmbuild..."
     "$RPMBUILD" -ba --nodeps \
         --define "_topdir ${BUILD_DIR}" \
         "$spec_file"

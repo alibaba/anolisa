@@ -173,7 +173,84 @@ sudo yum install agent-memory
   user 模板单元
 - `/usr/lib/tmpfiles.d/anolisa-memory.conf` —— 启动时创建
   `/run/anolisa/{,sessions}`（权限 0700）
+- `/usr/share/anolisa/adapters/agent-memory/` —— OpenClaw 插件 bundle
+  （manifest、源码、预构建 `dist/index.js`、安装脚本）
 - `/usr/share/doc/agent-memory/{CHANGELOG.md, user_manual.md, user_manual.zh.md}`
+
+### 安装 OpenClaw 插件（可选）
+
+[OpenClaw](https://github.com/openclaw) 是 Anolis OS 的 Agent 网关，
+通过其自有契约消费插件（与裸 MCP stdio 不同）。如果同一台机上还有
+通过 `mcp-server.json` 直连 `/usr/bin/agent-memory` 的 MCP 客户端
+（Claude Code、Cursor、Continue 等），该客户端会看到全部 19 个原生工具
+（`mem_*` + `memory_*`）；本 OpenClaw 插件则独立向 OpenClaw 暴露
+4 个 contract 名的子集。两条链路可共存 —— 每个 Agent 只看到所在
+runtime 实际广告的工具集。
+
+注册随包附带的插件即可让 4 个 memory contract 工具（`memory_search`、
+`memory_get`、`memory_observe`、`memory_get_context`）转发到
+agent-memory：
+
+**前置条件**：`openclaw` CLI 必须在 `$PATH` 上。脚本会检测此条件，
+缺失时输出明确日志并以 0 退出 —— 安装 OpenClaw 之后重跑即可。
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw gateway restart
+```
+
+OpenClaw 默认开启签名 / 沙箱校验。在本地开发或 bundle 未签名时如需
+绕过，可设 `AGENT_MEMORY_UNSAFE_INSTALL=1` 调用脚本。
+
+卸载（从 `~/.openclaw/plugins/` 移除插件并清理 `openclaw.json` 的
+`plugins.{allow,entries,slots}` 条目）：
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+`yum remove agent-memory` 时 spec 的 `%preun` 会自动调用 uninstall
+脚本，OpenClaw 配置不会残留孤立插件项。`jq` 优先用于改写
+`openclaw.json`；缺失时回退到 `python3`。
+
+插件 contract 名 ↔ agent-memory MCP 工具映射：
+
+| OpenClaw contract | agent-memory MCP 工具 |
+|---|---|
+| `memory_search` | `memory_search`（Tier B，BM25） |
+| `memory_get` | `mem_read`（Tier A） |
+| `memory_observe` | `memory_observe`（Tier B） |
+| `memory_get_context` | `memory_get_context`（Tier B） |
+
+插件 MCP `clientInfo.version` 始终与 agent-memory RPM 版本一致 ——
+esbuild 在打包时通过 Makefile `sync-versions` target 从 `Cargo.toml`
+注入版本号，因此升级 RPM 后 OpenClaw 看到的插件版本会自动跟进。
+
+插件配置（通过 OpenClaw 插件配置 UI 或 `openclaw.json` 的
+`plugins.entries["memory-anolisa"].config` 设置）：
+
+| 键 | 类型 | 默认 | 作用 |
+|---|---|---|---|
+| `binaryPath` | string | 自动发现：先 `$PATH` 中的 `agent-memory`，再依次 `/usr/bin/agent-memory`、`/usr/local/bin/agent-memory`、`~/.local/bin/agent-memory` | agent-memory 二进制绝对路径 |
+| `userId` | string | env `USER_ID` → OS `uid`（`process.getuid()`）→ env `$USER` | 命名空间 `user_id`；校验规则与 Rust 侧一致（不含 `..` / `/` / `\` / 控制字符，长度 ≤128 字节） |
+| `profile` | `basic` / `advanced` / `expert` | `advanced` | profile 门控（§4）—— 插件以 `MEMORY_PROFILE=<value>` env 启动 `agent-memory serve`，因此 systemd unit 或 shell 中预设的 `MEMORY_PROFILE` **会被插件配置覆盖** |
+| `maxReadBytes` | integer (1..4 GiB) | `1048576`（1 MiB） | 单次 `mem_read` 上限；以 `MEMORY_MAX_READ_BYTES` env 传给子进程 |
+| `maxWriteBytes` | integer (1..4 GiB) | `16777216`（16 MiB） | 单次 `mem_write` 上限；以 `MEMORY_MAX_WRITE_BYTES` env 传给子进程 |
+| `sessionId` | string（`ses_<hex>` 形式） | env `MEMORY_SESSION_ID` → 新生成的 `ses_<random>` 并在 client 生命周期内固定 | 命名空间挂载会话；以 `MEMORY_SESSION_ID` env 传给子进程。一定要固定 —— 若每次 spawn 都不同会导致 `mem_promote` 永远找不到旧 scratch |
+| `sessionDir` | string | env `MEMORY_SESSION_DIR` → `/run/anolisa/sessions`（由 `anolisa-memory.conf` tmpfiles 在 boot 时创建） | session scratch + log 根目录；以 `MEMORY_SESSION_DIR` env 传给子进程 |
+
+插件给子进程传递一个最小的 env allowlist（`PATH`、`HOME`、`USER`、
+`USER_ID`、`LANG`、`LC_ALL`、`LC_CTYPE`、`TZ`、`TMPDIR`、
+`XDG_RUNTIME_DIR`，以及所有以 `MEMORY_` / `RUST_` 起头的变量），
+其它来自 OpenClaw 进程的 env 不会泄漏到 agent-memory 子进程。
+`USER_ID` 是精确匹配，类似 `USER_IDX` 这种"挂着"前缀的变量不会被放过。
+
+> **兼容性说明**：adapter `manifest.json` 声明
+> `compatibleVersions: ">=5.0.0"`。OpenClaw 实际用 CalVer 发布
+> （例如 `2026.5.7`），该约束仅作信息提示 —— 插件只用了稳定的
+> `openclaw/plugin-sdk` 表面，并在 5.x SDK 形态下验证过。如果未来
+> OpenClaw 破坏了 plugin-sdk 契约，应 bump `compatibleVersions`
+> 后重新发布。
 
 ### 源码构建
 
