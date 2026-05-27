@@ -74,6 +74,14 @@ vi.mock('./utils/events.js', async (importOriginal) => {
   };
 });
 
+vi.mock('./ui/hooks/useKittyKeyboardProtocol.js', () => ({
+  useKittyKeyboardProtocol: vi.fn(() => ({
+    supported: false,
+    enabled: false,
+    checking: false,
+  })),
+}));
+
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
 }));
@@ -499,6 +507,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
+      getResumedSessionData: () => undefined,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -600,9 +609,58 @@ describe('validateDnsResolutionOrder', () => {
   });
 });
 
+type ReactElementLike = {
+  type?: unknown;
+  props?: {
+    children?: unknown;
+    initialPromptCount?: number;
+    onPromptCountChange?: (promptCount: number) => void;
+  };
+};
+
+function isReactElementLike(value: unknown): value is ReactElementLike {
+  return typeof value === 'object' && value !== null && 'props' in value;
+}
+
+function renderAppWrapper(element: unknown): unknown {
+  if (!isReactElementLike(element) || typeof element.type !== 'function') {
+    return element;
+  }
+  return element.type(element.props ?? {});
+}
+
+function findSessionStatsProviderProps(
+  element: unknown,
+): ReactElementLike['props'] | undefined {
+  if (Array.isArray(element)) {
+    for (const child of element) {
+      const result = findSessionStatsProviderProps(child);
+      if (result) {
+        return result;
+      }
+    }
+    return undefined;
+  }
+
+  if (!isReactElementLike(element)) {
+    return undefined;
+  }
+
+  if (
+    typeof element.props?.initialPromptCount === 'number' &&
+    typeof element.props?.onPromptCountChange === 'function'
+  ) {
+    return element.props;
+  }
+
+  return findSessionStatsProviderProps(element.props?.children);
+}
+
 describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
+    getSessionId: () => 'session-1',
+    getResumedSessionData: () => undefined,
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
   } as Config;
@@ -672,6 +730,39 @@ describe('startInteractiveUI', () => {
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
     expect(reactElement).toBeDefined();
+  });
+
+  it('should carry prompt count into remounted UI after shell suspend', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [reactElement] = renderSpy.mock.calls[0];
+    const firstProviderProps = findSessionStatsProviderProps(
+      renderAppWrapper(reactElement),
+    );
+    expect(firstProviderProps?.initialPromptCount).toBe(0);
+
+    firstProviderProps?.onPromptCountChange?.(2);
+
+    const remountedProviderProps = findSessionStatsProviderProps(
+      renderAppWrapper(reactElement),
+    );
+    expect(remountedProviderProps?.initialPromptCount).toBe(2);
   });
 
   it('should perform all startup tasks in correct order', async () => {

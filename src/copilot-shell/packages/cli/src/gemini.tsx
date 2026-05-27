@@ -30,7 +30,10 @@ import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
 import { AppContainer } from './ui/AppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 import { KeypressProvider } from './ui/contexts/KeypressContext.js';
-import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
+import {
+  getPromptCountFromSessionData,
+  SessionStatsProvider,
+} from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
@@ -142,6 +145,9 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+  let interactivePromptCount = getPromptCountFromSessionData(
+    config.getResumedSessionData(),
+  );
 
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
@@ -157,7 +163,13 @@ export async function startInteractiveUI(
             process.platform === 'win32' || nodeMajorVersion < 20
           }
         >
-          <SessionStatsProvider sessionId={config.getSessionId()}>
+          <SessionStatsProvider
+            sessionId={config.getSessionId()}
+            initialPromptCount={interactivePromptCount}
+            onPromptCountChange={(promptCount) => {
+              interactivePromptCount = promptCount;
+            }}
+          >
             <VimModeProvider settings={settings}>
               <AppContainer
                 config={config}

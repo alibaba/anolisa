@@ -10,10 +10,10 @@ import { useResumeCommand } from './useResumeCommand.js';
 
 const resumeMocks = vi.hoisted(() => {
   let resolveLoadSession:
-    | ((value: { conversation: unknown } | undefined) => void)
+    | ((value: { conversation: { messages: unknown[] } } | undefined) => void)
     | undefined;
   let pendingLoadSession:
-    | Promise<{ conversation: unknown } | undefined>
+    | Promise<{ conversation: { messages: unknown[] } } | undefined>
     | undefined;
 
   return {
@@ -23,7 +23,9 @@ const resumeMocks = vi.hoisted(() => {
       });
       return pendingLoadSession;
     },
-    resolvePendingLoadSession(value: { conversation: unknown } | undefined) {
+    resolvePendingLoadSession(
+      value: { conversation: { messages: unknown[] } } | undefined,
+    ) {
       resolveLoadSession?.(value);
     },
     getPendingLoadSession() {
@@ -47,7 +49,11 @@ vi.mock('@copilot-shell/core', () => {
       return (
         resumeMocks.getPendingLoadSession() ??
         Promise.resolve({
-          conversation: [{ role: 'user', parts: [{ text: 'hello' }] }],
+          conversation: {
+            messages: [
+              { type: 'user', message: { parts: [{ text: 'hello' }] } },
+            ],
+          },
         })
       );
     }
@@ -55,6 +61,12 @@ vi.mock('@copilot-shell/core', () => {
 
   return {
     SessionService,
+    uiTelemetryService: {
+      getMetrics: () => ({ models: {}, tools: {}, files: {} }),
+      getLastPromptTokenCount: () => 0,
+      on: () => {},
+      off: () => {},
+    },
   };
 });
 
@@ -170,7 +182,13 @@ describe('useResumeCommand', () => {
 
     // Now finish the async load and let the handler complete.
     resumeMocks.resolvePendingLoadSession({
-      conversation: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      conversation: {
+        messages: [
+          { type: 'user', message: { parts: [{ text: 'hello' }] } },
+          { type: 'assistant', message: { parts: [{ text: 'hi' }] } },
+          { type: 'user', message: { parts: [{ text: 'again' }] } },
+        ],
+      },
     });
     await act(async () => {
       await resumePromise;
@@ -182,7 +200,7 @@ describe('useResumeCommand', () => {
         conversation: expect.anything(),
       }),
     );
-    expect(startNewSession).toHaveBeenCalledWith('session-2');
+    expect(startNewSession).toHaveBeenCalledWith('session-2', 2);
     expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);

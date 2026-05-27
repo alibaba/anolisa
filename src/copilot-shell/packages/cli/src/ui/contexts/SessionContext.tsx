@@ -15,6 +15,7 @@ import {
 } from 'react';
 
 import type {
+  ResumedSessionData,
   SessionMetrics,
   ModelMetrics,
   ToolCallStats,
@@ -176,7 +177,7 @@ export interface ComputedSessionStats {
 // and the functions to update it.
 interface SessionStatsContextValue {
   stats: SessionStatsState;
-  startNewSession: (sessionId: string) => void;
+  startNewSession: (sessionId: string, initialPromptCount?: number) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
 }
@@ -187,22 +188,37 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
   undefined,
 );
 
-const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
+export function getPromptCountFromSessionData(
+  sessionData: ResumedSessionData | undefined,
+): number {
+  return (
+    sessionData?.conversation.messages.filter(
+      (message) => message.type === 'user',
+    ).length ?? 0
+  );
+}
+
+const createDefaultStats = (
+  sessionId: string = '',
+  promptCount: number = 0,
+): SessionStatsState => ({
   sessionId,
   sessionStartTime: new Date(),
   metrics: uiTelemetryService.getMetrics(),
   lastPromptTokenCount: 0,
-  promptCount: 0,
+  promptCount,
 });
 
 // --- Provider Component ---
 
 export const SessionStatsProvider: React.FC<{
   sessionId?: string;
+  initialPromptCount?: number;
+  onPromptCountChange?: (promptCount: number) => void;
   children: React.ReactNode;
-}> = ({ sessionId, children }) => {
+}> = ({ sessionId, initialPromptCount = 0, onPromptCountChange, children }) => {
   const [stats, setStats] = useState<SessionStatsState>(() =>
-    createDefaultStats(sessionId ?? ''),
+    createDefaultStats(sessionId ?? '', initialPromptCount),
   );
 
   useEffect(() => {
@@ -240,19 +256,27 @@ export const SessionStatsProvider: React.FC<{
     };
   }, []);
 
-  const startNewSession = useCallback((sessionId: string) => {
-    setStats(() => ({
-      ...createDefaultStats(sessionId),
-      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
-    }));
-  }, []);
+  const startNewSession = useCallback(
+    (sessionId: string, initialPromptCount: number = 0) => {
+      onPromptCountChange?.(initialPromptCount);
+      setStats(() => ({
+        ...createDefaultStats(sessionId, initialPromptCount),
+        lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      }));
+    },
+    [onPromptCountChange],
+  );
 
   const startNewPrompt = useCallback(() => {
-    setStats((prevState) => ({
-      ...prevState,
-      promptCount: prevState.promptCount + 1,
-    }));
-  }, []);
+    setStats((prevState) => {
+      const promptCount = prevState.promptCount + 1;
+      onPromptCountChange?.(promptCount);
+      return {
+        ...prevState,
+        promptCount,
+      };
+    });
+  }, [onPromptCountChange]);
 
   const getPromptCount = useCallback(
     () => stats.promptCount,

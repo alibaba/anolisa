@@ -9,7 +9,12 @@ import { render } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { act } from 'react-dom/test-utils';
 import type { SessionMetrics } from './SessionContext.js';
-import { SessionStatsProvider, useSessionStats } from './SessionContext.js';
+import type { ResumedSessionData } from '@copilot-shell/core';
+import {
+  getPromptCountFromSessionData,
+  SessionStatsProvider,
+  useSessionStats,
+} from './SessionContext.js';
 import { describe, it, expect, vi } from 'vitest';
 import { uiTelemetryService } from '@copilot-shell/core';
 
@@ -44,6 +49,83 @@ describe('SessionStatsContext', () => {
     expect(stats?.sessionStartTime).toBeInstanceOf(Date);
     expect(stats?.metrics).toBeDefined();
     expect(stats?.metrics.models).toEqual({});
+  });
+
+  it('should initialize prompt count from resumed session state', () => {
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    render(
+      <SessionStatsProvider sessionId="session-1" initialPromptCount={3}>
+        <TestHarness contextRef={contextRef} />
+      </SessionStatsProvider>,
+    );
+
+    expect(contextRef.current?.stats.sessionId).toBe('session-1');
+    expect(contextRef.current?.stats.promptCount).toBe(3);
+    expect(contextRef.current?.getPromptCount()).toBe(3);
+  });
+
+  it('should preserve resumed prompt count when starting a session', () => {
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    render(
+      <SessionStatsProvider>
+        <TestHarness contextRef={contextRef} />
+      </SessionStatsProvider>,
+    );
+
+    act(() => {
+      contextRef.current?.startNewSession('resumed-session', 7);
+    });
+
+    expect(contextRef.current?.stats.sessionId).toBe('resumed-session');
+    expect(contextRef.current?.stats.promptCount).toBe(7);
+  });
+
+  it('should notify prompt count changes for remount persistence', () => {
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+    const onPromptCountChange = vi.fn();
+
+    render(
+      <SessionStatsProvider onPromptCountChange={onPromptCountChange}>
+        <TestHarness contextRef={contextRef} />
+      </SessionStatsProvider>,
+    );
+
+    act(() => {
+      contextRef.current?.startNewPrompt();
+    });
+    act(() => {
+      contextRef.current?.startNewSession('resumed-session', 4);
+    });
+
+    expect(onPromptCountChange).toHaveBeenNthCalledWith(1, 1);
+    expect(onPromptCountChange).toHaveBeenNthCalledWith(2, 4);
+  });
+
+  it('should count user messages in resumed session data', () => {
+    const sessionData = {
+      conversation: {
+        messages: [
+          { type: 'user' },
+          { type: 'assistant' },
+          { type: 'tool_result' },
+          { type: 'user' },
+        ],
+      },
+    };
+
+    expect(
+      getPromptCountFromSessionData(
+        sessionData as unknown as ResumedSessionData,
+      ),
+    ).toBe(2);
   });
 
   it('should update metrics when the uiTelemetryService emits an update', () => {
