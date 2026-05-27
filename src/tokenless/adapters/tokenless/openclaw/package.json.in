@@ -1,6 +1,6 @@
 {
   "name": "@tokenless/openclaw-plugin",
-  "version": "0.4.0",
+  "version": "@VERSION@",
   "description": "Unified OpenClaw plugin — RTK command rewriting + tokenless schema/response compression for 60-90% LLM token savings",
   "type": "module",
   "main": "dist/index.js",

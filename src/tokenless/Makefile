@@ -20,10 +20,16 @@ BIN_DIR ?= $(BINDIR)
 LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
 OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
+ADAPTER_TEMPLATES := \
+    $(ADAPTER_SRC_DIR)/manifest.json \
+    $(ADAPTER_SRC_DIR)/openclaw/package.json \
+    $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json \
+    $(ADAPTER_SRC_DIR)/hermes/plugin.yaml
 TOON_VER := 0.4.6
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
+        stamp-adapter-templates \
         install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
@@ -49,12 +55,31 @@ build-toon:
 	@echo "==> Installing toon binary (v$(TOON_VER))..."
 	cargo install toon-format --version $(TOON_VER) --locked
 
+# Generate adapter config files from .in templates (VERSION from Cargo.toml).
+stamp-adapter-templates: $(ADAPTER_TEMPLATES)
+
+$(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
+	@echo "==> Generating manifest.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
+	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json: $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json.in Cargo.toml
+	@echo "==> Generating openclaw/openclaw.plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/hermes/plugin.yaml: $(ADAPTER_SRC_DIR)/hermes/plugin.yaml.in Cargo.toml
+	@echo "==> Generating hermes/plugin.yaml (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
 # Produces $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js, which install-adapter-resources
 # then copies into $(SHARE_DIR)/openclaw/dist/index.js. This file is referenced by
 # the plugin's package.json ("main" / "openclaw.extensions") and must be present
 # for `openclaw plugins install` to succeed.
-build-openclaw-plugin:
+build-openclaw-plugin: stamp-adapter-templates
 	@echo "==> Building tokenless OpenClaw plugin..."
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund --package-lock=false
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
@@ -85,6 +110,7 @@ install-adapter-resources: build-openclaw-plugin
 	# Strip build-only artifacts from the installed plugin tree.
 	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
 	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json
+	find $(DESTDIR)$(SHARE_DIR) -name '*.in' -delete
 	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
 	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
 	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources"; exit 1; }
@@ -133,6 +159,7 @@ clean:
 	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
+	rm -f  $(ADAPTER_TEMPLATES)
 
 # Create source tarball (excludes build artifacts)
 dist: clean

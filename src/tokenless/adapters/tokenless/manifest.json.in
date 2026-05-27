@@ -1,6 +1,6 @@
 {
   "component": "tokenless",
-  "version": "0.4.0",
+  "version": "@VERSION@",
   "targets": {
     "cosh": {
       "compatibleVersions": "*",
