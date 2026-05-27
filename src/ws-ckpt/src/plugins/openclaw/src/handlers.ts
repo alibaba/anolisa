@@ -42,6 +42,27 @@ export async function handleCheckpoint(
     return { text: "Missing required parameter: id", isError: true };
   }
   const message = args.message?.trim() || "manual checkpoint";
+  const explicitWs = (args.workspace as string | undefined)?.trim();
+
+  // Explicit workspace bypasses the manager (and its workspace-bound cache),
+  // mirroring the handleDelete pattern.
+  if (explicitWs) {
+    try {
+      const executor = new CommandExecutor();
+      const output = await executor.checkpoint(explicitWs, id, { message });
+      if (output.exitCode !== 0) {
+        return { text: mapErrorToLLMMessage(output.stderr, { id }), isError: true };
+      }
+      if (output.stdout && (output.stdout.includes('Skipped') || output.stdout.includes('Empty workspace'))) {
+        return { text: 'Empty workspace, no snapshot created.', isError: false };
+      }
+      return { text: `Checkpoint created: ${id}`, isError: false };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { text: `Checkpoint error: ${msg}`, isError: true };
+    }
+  }
+
   const result = await pluginState.manager.createCheckpoint({
     id,
     message,
@@ -54,6 +75,7 @@ export async function handleCheckpoint(
 
 export async function handleRollback(
   target?: string,
+  workspace?: string,
 ): Promise<{ text: string; isError: boolean }> {
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
@@ -65,6 +87,22 @@ export async function handleRollback(
       isError: true,
     };
   }
+
+  const explicitWs = workspace?.trim();
+  if (explicitWs) {
+    try {
+      const executor = new CommandExecutor();
+      const output = await executor.rollback(explicitWs, trimmed);
+      if (output.exitCode !== 0) {
+        return { text: mapErrorToLLMMessage(output.stderr, { id: trimmed }), isError: true };
+      }
+      return { text: `Rolled back to ${trimmed}`, isError: false };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { text: `Rollback error: ${msg}`, isError: true };
+    }
+  }
+
   const result = await pluginState.manager.rollback(trimmed);
   return { text: result.message, isError: !result.success };
 }

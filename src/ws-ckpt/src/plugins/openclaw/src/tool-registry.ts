@@ -28,23 +28,36 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-config",
-      description: "View or update ws-ckpt plugin configuration. Only update the specific key explicitly requested by the user.",
+      description:
+        "View or update ws-ckpt configuration. " +
+        "Configurable keys: " +
+        "autoCheckpoint (whether to auto-snapshot at the end of each conversation turn), " +
+        "workspace (default workspace absolute path; used by every command without -w. " +
+        "If the path is a symlink, use the link itself — do NOT replace it with the " +
+        "resolved real path; the daemon registers and matches by the exact string you pass), " +
+        "maxSnapshotsNum (number of snapshots to keep when auto-cleanup is by count), " +
+        "maxSnapshotsDuration (duration to keep when auto-cleanup is by time, e.g. \"7d\"/\"24h\"). " +
+        "Only update the specific key requested by the user.",
       parameters: {
         type: "object",
         properties: {
           action: {
             type: "string",
-            description:
-              'Action to perform: "view" (default) or "update"',
+            description: 'Action to perform: "view" (default) or "update"',
           },
           key: {
             type: "string",
             description:
-              "Config key to update (autoCheckpoint, maxSnapshotsNum, maxSnapshotsDuration)",
+              "Config key to update: autoCheckpoint, workspace, maxSnapshotsNum, maxSnapshotsDuration",
           },
           value: {
             type: "string",
-            description: "New value for the config key. For maxSnapshotsNum/maxSnapshotsDuration, pass \"unset\" to clear the value and disable auto-cleanup when both are unset.",
+            description:
+              "New value as a string. Formats: " +
+              "autoCheckpoint = \"true\"/\"false\"; " +
+              "workspace = absolute path; " +
+              "maxSnapshotsNum = positive integer or \"unset\"; " +
+              "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" or \"unset\".",
           },
         },
       },
@@ -64,7 +77,7 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-checkpoint",
-      description: "Create a checkpoint of the current workspace. Communicates directly with ws-ckpt daemon — no additional CLI verification needed.",
+      description: "Create a checkpoint of the default or specified workspace. Communicates directly with ws-ckpt daemon — no additional CLI verification needed.",
       parameters: {
         type: "object",
         properties: {
@@ -75,6 +88,13 @@ export function registerTools(api: OpenClawPluginApi): void {
           message: {
             type: "string",
             description: "Optional message describing the checkpoint",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional: workspace absolute path. Defaults to the " +
+              "configured workspace. If the path is a symlink, use the " +
+              "link itself — do NOT replace it with the resolved real path.",
           },
         },
         required: ["id"],
@@ -91,20 +111,32 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-rollback",
-      description: "Roll back the workspace to a specific checkpoint. Communicates directly with ws-ckpt daemon — no additional CLI verification needed.",
+      description:
+        "Roll back the workspace to a previous snapshot. Always call " +
+        "ws-ckpt-list first to confirm the target snapshot id exists; " +
+        "never roll back to an id you haven't verified.",
       parameters: {
         type: "object",
         properties: {
           target: {
             type: "string",
+            description: "Snapshot id to roll back to.",
+          },
+          workspace: {
+            type: "string",
             description:
-              "Snapshot hash id to roll back to",
+              "Optional: workspace absolute path. Defaults to the " +
+              "configured workspace. If the path is a symlink, use the " +
+              "link itself — do NOT replace it with the resolved real path.",
           },
         },
         required: ["target"],
       },
       async execute(_toolCallId, params) {
-        const r = await handleRollback(params.target as string | undefined);
+        const r = await handleRollback(
+          params.target as string | undefined,
+          params.workspace as string | undefined,
+        );
         return textToolResult(r.text, r.isError);
       },
     },
@@ -115,7 +147,9 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-list",
-      description: "List all checkpoints managed by ws-ckpt. Always display the FULL untruncated result to the user.",
+      description:
+        "List all snapshots managed by ws-ckpt. " +
+        "Always display the FULL untruncated table to the user.",
       parameters: { type: "object", properties: {} },
       async execute() {
         const r = await handleListCheckpoints();
@@ -129,13 +163,16 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-diff",
-      description: "Compare file changes between two checkpoints. Always display the FULL untruncated result to the user. Do NOT re-interpret or contradict the tool output.",
+      description:
+        "Compare file changes between two snapshots. " +
+        "Always display the FULL untruncated diff. " +
+        "Do NOT re-interpret or contradict the tool output.",
       parameters: {
         type: "object",
         properties: {
           from: {
             type: "string",
-            description: "Source snapshot id or name",
+            description: "Source snapshot id",
           },
           to: {
             type: "string",
@@ -160,17 +197,23 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-delete",
-      description: "Delete a specific snapshot. Communicates directly with ws-ckpt daemon — no additional CLI verification needed.",
+      description:
+        "Delete a snapshot. Confirm the id with ws-ckpt-list first; " +
+        "never delete without an explicit user request — " +
+        "deletion is permanent and not reversible.",
       parameters: {
         type: "object",
         properties: {
           snapshot: {
             type: "string",
-            description: "Required: snapshot ID to delete",
+            description: "Required: snapshot id to delete.",
           },
           workspace: {
             type: "string",
-            description: "Workspace path (defaults to current workspace)",
+            description:
+              "Optional: workspace absolute path. Defaults to the " +
+              "configured workspace. If the path is a symlink, use the " +
+              "link itself — do NOT replace it with the resolved real path.",
           },
         },
         required: ["snapshot"],
@@ -190,7 +233,10 @@ export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     {
       name: "ws-ckpt-status",
-      description: "Show ws-ckpt service status and workspace information. Returns the complete status from ws-ckpt daemon — no additional CLI or exec verification needed.",
+      description:
+        "Show ws-ckpt daemon and workspace status — snapshot count, disk " +
+        "usage, auto-cleanup policy. Returns complete status from the " +
+        "daemon; no extra CLI verification needed.",
       parameters: { type: "object", properties: {} },
       async execute() {
         const r = await handleStatus();

@@ -113,8 +113,15 @@ def check_ws_ckpt_available() -> bool:
 WS_CKPT_CONFIG_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-config",
     "description": (
-        "View or update ws-ckpt plugin/daemon configuration. "
-        "Only update the specific key explicitly requested by the user."
+        "View or update ws-ckpt configuration. "
+        "Configurable keys: "
+        "autoCheckpoint (whether to auto-snapshot at the end of each conversation turn), "
+        "workspace (default workspace absolute path; used by every command without -w. "
+        "If the path is a symlink, use the link itself — do NOT replace it with the "
+        "resolved real path; the daemon registers and matches by the exact string you pass), "
+        "maxSnapshotsNum (number of snapshots to keep when auto-cleanup is by count), "
+        "maxSnapshotsDuration (duration to keep when auto-cleanup is by time, e.g. \"7d\"/\"24h\"). "
+        "Only update the specific key requested by the user."
     ),
     "parameters": {
         "type": "object",
@@ -133,9 +140,11 @@ WS_CKPT_CONFIG_SCHEMA: Dict[str, Any] = {
             "value": {
                 "type": "string",
                 "description": (
-                    'New value for the config key. For maxSnapshotsNum / '
-                    'maxSnapshotsDuration, pass "unset" to disable '
-                    "auto-cleanup."
+                    "New value as a string. Formats: "
+                    "autoCheckpoint = \"true\"/\"false\"; "
+                    "workspace = absolute path; "
+                    "maxSnapshotsNum = positive integer or \"unset\"; "
+                    "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" or \"unset\"."
                 ),
             },
         },
@@ -146,9 +155,9 @@ WS_CKPT_CONFIG_SCHEMA: Dict[str, Any] = {
 WS_CKPT_CHECKPOINT_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-checkpoint",
     "description": (
-        "Create a checkpoint of the current workspace. Use this to save the "
-        "current state before making significant changes, so you can roll "
-        "back if needed."
+        "Create a checkpoint of the default or specified workspace. Use this "
+        "to save the current state before making significant changes, so you "
+        "can rollback if needed."
     ),
     "parameters": {
         "type": "object",
@@ -160,6 +169,14 @@ WS_CKPT_CHECKPOINT_SCHEMA: Dict[str, Any] = {
             "message": {
                 "type": "string",
                 "description": "Optional message describing the checkpoint",
+            },
+            "workspace": {
+                "type": "string",
+                "description": (
+                    "Optional: workspace absolute path. Defaults to the "
+                    "configured workspace. If the path is a symlink, use the "
+                    "link itself — do NOT replace it with the resolved real path."
+                ),
             },
         },
         "required": ["id"],
@@ -178,7 +195,15 @@ WS_CKPT_ROLLBACK_SCHEMA: Dict[str, Any] = {
         "properties": {
             "target": {
                 "type": "string",
-                "description": "Snapshot hash id to roll back to",
+                "description": "Snapshot id to roll back to.",
+            },
+            "workspace": {
+                "type": "string",
+                "description": (
+                    "Optional: workspace absolute path. Defaults to the "
+                    "configured workspace. If the path is a symlink, use the "
+                    "link itself — do NOT replace it with the resolved real path."
+                ),
             },
         },
         "required": ["target"],
@@ -189,7 +214,7 @@ WS_CKPT_ROLLBACK_SCHEMA: Dict[str, Any] = {
 WS_CKPT_LIST_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-list",
     "description": (
-        "List all checkpoints managed by ws-ckpt. Always display the FULL "
+        "List all snapshots managed by ws-ckpt. Always display the FULL "
         "untruncated result to the user."
     ),
     "parameters": {
@@ -202,7 +227,7 @@ WS_CKPT_LIST_SCHEMA: Dict[str, Any] = {
 WS_CKPT_DIFF_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-diff",
     "description": (
-        "Compare file changes between two checkpoints. Always display the "
+        "Compare file changes between two snapshots. Always display the "
         "FULL untruncated result to the user. Do NOT re-interpret or "
         "contradict the tool output."
     ),
@@ -211,7 +236,7 @@ WS_CKPT_DIFF_SCHEMA: Dict[str, Any] = {
         "properties": {
             "from": {
                 "type": "string",
-                "description": "Source snapshot id or name",
+                "description": "Source snapshot id",
             },
             "to": {
                 "type": "string",
@@ -240,7 +265,11 @@ WS_CKPT_DELETE_SCHEMA: Dict[str, Any] = {
             },
             "workspace": {
                 "type": "string",
-                "description": "Workspace path (defaults to current workspace)",
+                "description": (
+                    "Optional: workspace absolute path. Defaults to the "
+                    "configured workspace. If the path is a symlink, use the "
+                    "link itself — do NOT replace it with the resolved real path."
+                ),
             },
         },
         "required": ["snapshot"],
@@ -421,13 +450,21 @@ def _persist_plugin_yaml(**fields: Any) -> str:
     return ""
 
 
+def _resolve_workspace(args: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Resolve workspace from args (explicit override) or config (fallback)."""
+    explicit = (args.get("workspace") or "").strip()
+    if explicit:
+        return explicit, None
+    return _require_workspace()
+
+
 def handle_ws_ckpt_checkpoint(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-checkpoint tool call."""
     snapshot_id = (args.get("id") or "").strip()
     if not snapshot_id:
         return _err("'id' is required")
 
-    workspace, ws_err = _require_workspace()
+    workspace, ws_err = _resolve_workspace(args)
     if ws_err:
         return ws_err
     rejection = _reject_if_cwd_inside_workspace(workspace)
@@ -448,7 +485,7 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if not target:
         return _err("'target' is required")
 
-    workspace, ws_err = _require_workspace()
+    workspace, ws_err = _resolve_workspace(args)
     if ws_err:
         return ws_err
     rejection = _reject_if_cwd_inside_workspace(workspace)
@@ -493,13 +530,9 @@ def handle_ws_ckpt_delete(args: Dict[str, Any], **_kwargs) -> str:
     if not snapshot:
         return _err("'snapshot' is required")
 
-    explicit_ws = (args.get("workspace") or "").strip()
-    if explicit_ws:
-        workspace = explicit_ws
-    else:
-        workspace, ws_err = _require_workspace()
-        if ws_err:
-            return ws_err
+    workspace, ws_err = _resolve_workspace(args)
+    if ws_err:
+        return ws_err
     cmd = ["ws-ckpt", "delete", "-s", snapshot, "-w", workspace, "--force"]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
