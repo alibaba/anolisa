@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_agent_memory:
+        description: 'Force run agent-memory tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -49,6 +54,7 @@ jobs:
       agentsight: ${{ steps.changes.outputs.agentsight }}
       tokenless: ${{ steps.changes.outputs.tokenless }}
       ws_ckpt: ${{ steps.changes.outputs.ws_ckpt }}
+      agent_memory: ${{ steps.changes.outputs.agent_memory }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,6 +80,7 @@ jobs:
           AGENTSIGHT=false
           TOKENLESS=false
           WS_CKPT=false
+          AGENT_MEMORY=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -90,6 +97,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/ws-ckpt/"; then
             WS_CKPT=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
+            AGENT_MEMORY=true
           fi
 
           # Manual override via workflow_dispatch
@@ -108,12 +118,16 @@ jobs:
           if [[ "${{ inputs.run_ws_ckpt }}" == "true" ]]; then
             WS_CKPT=true
           fi
+          if [[ "${{ inputs.run_agent_memory }}" == "true" ]]; then
+            AGENT_MEMORY=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
           echo "agentsight=$AGENTSIGHT" >> $GITHUB_OUTPUT
           echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
           echo "ws_ckpt=$WS_CKPT" >> $GITHUB_OUTPUT
+          echo "agent_memory=$AGENT_MEMORY" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -123,6 +137,7 @@ jobs:
           echo "| agentsight | $AGENTSIGHT |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | $TOKENLESS |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | $WS_CKPT |" >> $GITHUB_STEP_SUMMARY
+          echo "| agent-memory | $AGENT_MEMORY |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -609,3 +624,43 @@ jobs:
         run: |
           cd src/ws-ckpt/src
           cargo test --workspace
+
+  # =========================================================================
+  # Step 8: Test agent-memory (Linux-only Rust crate)
+  # =========================================================================
+  test-agent-memory:
+    name: Test agent-memory
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_memory == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agent-memory
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsystemd-dev cmake
+
+      - name: Check formatting
+        run: |
+          cd src/agent-memory
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/agent-memory
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/agent-memory
+          cargo test --locked

@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       component:
-        description: "Component to build (copilot-shell, agent-sec-core, agentsight, os-skills)"
+        description: "Component to build (copilot-shell, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory)"
         required: true
         type: string
       version:
@@ -61,6 +61,12 @@ jobs:
               ;;
             ws-ckpt)
               dnf install -y rust cargo btrfs-progs rsync systemd-rpm-macros
+              ;;
+            agent-memory)
+              # rusqlite (bundled) + git2 (vendored libgit2) need a C toolchain
+              # and cmake; systemd-devel provides libsystemd headers for the
+              # journald fan-out feature.
+              dnf install -y rust cargo cmake systemd-devel
               ;;
             os-skills)
               # noarch, no extra build deps

@@ -85,6 +85,26 @@ updates:
       - "deps"
       - "tokenless"
 
+  # agent-memory (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/agent-memory"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "agent-memory"
+
 
   # GitHub Actions
   - package-ecosystem: "github-actions"

@@ -13,6 +13,7 @@
         "sight",
         "tokenless",
         "ckpt",
+        "memory",
         "deps",
         "ci",
         "docs",

@@ -34,6 +34,7 @@ jobs:
       # sight-version: ${{ steps.sight.outputs.version }}
       tokenless-version: ${{ steps.tokenless.outputs.version }}
       ws-ckpt-version: ${{ steps.ws-ckpt.outputs.version }}
+      agent-memory-version: ${{ steps.agent-memory.outputs.version }}
       image-version: ${{ steps.image.outputs.version }}
       image-version-tag: ${{ steps.image.outputs.version_tag }}
     steps:
@@ -99,6 +100,12 @@ jobs:
         with:
           tag-match: "ckpt/v*"
 
+      - name: "Version: agent-memory"
+        id: agent-memory
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "memory/v*"
+
       - name: Summary
         run: |
           echo "## Component Versions" >> $GITHUB_STEP_SUMMARY
@@ -110,6 +117,7 @@ jobs:
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ steps.tokenless.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ steps.ws-ckpt.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| agent-memory | \`${{ steps.agent-memory.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **image** | \`${{ steps.image.outputs.version }}\` (tag: \`${{ steps.image.outputs.version_tag }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry-run }}" = "true" ]; then
@@ -186,6 +194,29 @@ jobs:
         with:
           component: ws-ckpt
           version: ${{ needs.versions.outputs.ws-ckpt-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+  package-agent-memory:
+    name: "Package: agent-memory"
+    runs-on: ubuntu-22.04
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: agent-memory
+          version: ${{ needs.versions.outputs.agent-memory-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: agent-memory
+          version: ${{ needs.versions.outputs.agent-memory-version }}
           artifact-suffix: ".nightly"
           retention-days: "7"
 
@@ -319,6 +350,21 @@ jobs:
       vendor-artifact: "ws-ckpt-${{ needs.versions.outputs.ws-ckpt-version }}.nightly-vendor"
       artifact-suffix: ".nightly"
 
+  rpm-agent-memory:
+    name: "RPM: agent-memory (${{ matrix.arch }})"
+    needs: [versions, package-agent-memory]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: agent-memory
+      version: ${{ needs.versions.outputs.agent-memory-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "agent-memory-${{ needs.versions.outputs.agent-memory-version }}.nightly"
+      vendor-artifact: "agent-memory-${{ needs.versions.outputs.agent-memory-version }}.nightly-vendor"
+      artifact-suffix: ".nightly"
+
   # ===========================================================================
   # Job 4: Build and push Docker image
   # ===========================================================================
@@ -332,6 +378,7 @@ jobs:
       - rpm-sec-core
       - rpm-tokenless
       - rpm-ws-ckpt
+      - rpm-agent-memory
       # TODO: uncomment when agentsight is integrated
       # - rpm-sight
     steps:
@@ -437,6 +484,7 @@ jobs:
           echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ needs.versions.outputs.tokenless-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ needs.versions.outputs.ws-ckpt-version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| agent-memory | \`${{ needs.versions.outputs.agent-memory-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.GHCR_IMAGE }}:${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY

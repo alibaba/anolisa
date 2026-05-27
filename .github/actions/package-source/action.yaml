@@ -52,6 +52,7 @@ runs:
           tokenless)     SRC_DIR="src/tokenless" ;;
           os-skills)      SRC_DIR="src/os-skills" ;;
           ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
+          agent-memory)   SRC_DIR="src/agent-memory" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"
             exit 1

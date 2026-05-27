@@ -74,6 +74,14 @@
                     "github": "Ziqi002"
                 }
             ]
+        },
+        {
+            "label": "component:memory",
+            "maintainers": [
+                {
+                    "github": "shiloong"
+                }
+            ]
         }
     ],
     "default": {

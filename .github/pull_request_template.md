@@ -39,6 +39,7 @@ closes #
 - [ ] `skill` (os-skills)
 - [ ] `sight` (agentsight)
 - [ ] `tokenless` (tokenless)
+- [ ] `memory` (agent-memory)
 - [ ] Multiple / Project-wide
 
 ## Checklist
@@ -55,6 +56,7 @@ closes #
 - [ ] For `skill`: Skill directory structure is valid and shell scripts pass syntax check
 - [ ] For `sight`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
 - [ ] For `tokenless`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
+- [ ] For `memory` (Linux only): `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `cargo test` pass
 - [ ] Lock files are up to date (`package-lock.json` / `Cargo.lock`)
 
 ## Testing

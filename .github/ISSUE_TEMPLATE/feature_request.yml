@@ -21,6 +21,7 @@ body:
         - sight
         - tokenless
         - ckpt
+        - memory
         - other
     validations:
       required: true

@@ -20,6 +20,7 @@ body:
         - sight
         - tokenless
         - ckpt
+        - memory
         - other
   - type: textarea
     id: question
