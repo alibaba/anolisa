@@ -26,6 +26,7 @@ if [ -z "$OPENCLAW_BIN" ]; then
 fi
 
 # Use openclaw CLI for proper removal (handles file cleanup + config update)
-OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins uninstall tokenless-openclaw --force || true
+# Unset OPENCLAW_HOME for the CLI call — same double-nesting bug as install.sh.
+env -u OPENCLAW_HOME "$OPENCLAW_BIN" plugins uninstall tokenless-openclaw --force || true
 
 echo "[${COMPONENT}] ${AGENT} plugin removed via openclaw CLI."

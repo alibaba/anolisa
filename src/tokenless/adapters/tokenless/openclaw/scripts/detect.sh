@@ -46,8 +46,9 @@ fi
 plugin_state="missing"
 plugin_detail="$PLUGIN_ID"
 if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
-    plugins_json="$(OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null || true)"
-    plugins_txt="$(OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
+    # Unset OPENCLAW_HOME for the CLI call — same double-nesting bug as install.sh.
+    plugins_json="$(env -u OPENCLAW_HOME "$OPENCLAW_BIN" plugins list --json 2>/dev/null || true)"
+    plugins_txt="$(env -u OPENCLAW_HOME "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
     if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${PLUGIN_ID}\"" <<<"$plugins_json" \
        || grep -qE "(^|[[:space:]])${PLUGIN_ID}([[:space:]]|$)" <<<"$plugins_txt"; then
         plugin_state="listed"
