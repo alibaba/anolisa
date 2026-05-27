@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.1
+
+- Fixed HookSystemMessage rendering as info and resolved Content/Thought duplication (#636)
+- Fixed prompt ids to remain monotonic after shell remount (#628)
+
 ## 2.4.0
 
 - Added DashScope Token Plan provider entry to the OpenAI-compatible auth dialog. (#598)
