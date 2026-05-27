@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import typer
+from agent_sec_cli.cli_logging import setup_cli_logging
 from agent_sec_cli.correlation_context import (
+    init_invocation_context,
     init_process_trace_context,
     parse_trace_context,
 )
@@ -652,6 +654,8 @@ def main() -> None:
         # setup can correlate startup records. This is the single process-level
         # trace-context initialization path.
         _init_trace_context(_extract_trace_context_arg(sys.argv))
+        init_invocation_context()
+        setup_cli_logging()
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise SystemExit(1) from exc

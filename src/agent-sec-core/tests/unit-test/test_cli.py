@@ -229,6 +229,49 @@ def test_main_invalid_trace_context_exits_before_app(mock_app, monkeypatch, caps
     mock_app.assert_not_called()
 
 
+def test_main_initializes_invocation_context_and_logging_after_trace_context(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_init_trace_context(trace_context):
+        calls.append(("trace", trace_context))
+
+    def fake_init_invocation_context():
+        calls.append(("invocation", None))
+
+    def fake_setup_cli_logging():
+        calls.append(("logging", None))
+
+    def fake_app():
+        calls.append(("app", None))
+
+    monkeypatch.setattr("sys.argv", ["agent-sec-cli", "scan-code"])
+    monkeypatch.setattr(
+        "agent_sec_cli.cli._init_trace_context", fake_init_trace_context
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.cli.init_invocation_context",
+        fake_init_invocation_context,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.cli.setup_cli_logging",
+        fake_setup_cli_logging,
+        raising=False,
+    )
+    monkeypatch.setattr("agent_sec_cli.cli.app", fake_app)
+
+    main()
+
+    assert calls == [
+        ("trace", None),
+        ("invocation", None),
+        ("logging", None),
+        ("app", None),
+    ]
+
+
 def test_events_count_forwards_trace_id_filter():
     captured = {}
 

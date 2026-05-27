@@ -627,6 +627,30 @@ class TestWriterFireAndForget:
         writer = SecurityEventWriter(path="/nonexistent/path/events.jsonl")
         writer.write(_make_event())
 
+    def test_write_serialization_failure_does_not_emit_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        writer = JsonlEventWriter(path=path)
+
+        writer.write({"bad": object()})
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert not path.exists()
+
+    def test_write_or_raise_surfaces_serialization_failure_without_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        writer = JsonlEventWriter(path=path)
+
+        with pytest.raises(TypeError):
+            writer.write_or_raise({"bad": object()})
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
 
 class TestWriterThreadSafety:
     def test_concurrent_writes(self, tmp_path: Path) -> None:

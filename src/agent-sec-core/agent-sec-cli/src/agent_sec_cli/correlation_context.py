@@ -1,6 +1,8 @@
 """Caller-provided tracing context for agent-sec-cli security events."""
 
 import json
+import os
+import uuid
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -70,6 +72,12 @@ _TraceContextOverride = TraceContext | None | _UnsetTraceContext
 _trace_context_override: ContextVar[_TraceContextOverride] = ContextVar(
     "trace_context_override",
     default=_UNSET_TRACE_CONTEXT,
+)
+
+_PROCESS_INVOCATION_ID: str = ""
+_invocation_id_override: ContextVar[str] = ContextVar(
+    "invocation_id_override",
+    default="",
 )
 
 
@@ -148,3 +156,52 @@ def get_current_trace_context() -> TraceContext | None:
     if not isinstance(override, _UnsetTraceContext):
         return override
     return _PROCESS_TRACE_CONTEXT
+
+
+def init_invocation_context() -> None:
+    """Initialize the process-level invocation ID once.
+
+    Caller-supplied values via ``AGENT_SEC_INVOCATION_ID`` are stripped and
+    truncated to ``MAX_CORRELATION_ID_LENGTH`` so one malformed env value
+    cannot inflate every log record. Empty or whitespace-only values fall
+    through to a freshly generated UUID.
+    """
+    global _PROCESS_INVOCATION_ID  # noqa: PLW0603
+    if _PROCESS_INVOCATION_ID:
+        return
+    env_value = _clean_string(
+        "invocation_id", os.environ.get("AGENT_SEC_INVOCATION_ID")
+    )
+    _PROCESS_INVOCATION_ID = env_value if env_value is not None else str(uuid.uuid4())
+
+
+def clear_invocation_context_for_tests() -> None:
+    """Clear invocation context state for in-process tests."""
+    global _PROCESS_INVOCATION_ID  # noqa: PLW0603
+    _PROCESS_INVOCATION_ID = ""
+    _invocation_id_override.set("")
+
+
+def set_current_invocation_id(invocation_id: str) -> Token[str]:
+    """Set a request-local invocation ID override.
+
+    Input is normalized the same way as the env value: stripped and truncated
+    to ``MAX_CORRELATION_ID_LENGTH``. Whitespace-only input clears the override.
+    """
+    cleaned = _clean_string("invocation_id", invocation_id)
+    return _invocation_id_override.set(cleaned or "")
+
+
+def reset_current_invocation_id(token: Token[str]) -> None:
+    """Reset a request-local invocation ID override."""
+    _invocation_id_override.reset(token)
+
+
+def get_invocation_id() -> str:
+    """Return request-local invocation ID, falling back to the process value."""
+    override = _invocation_id_override.get()
+    if override:
+        return override
+    if not _PROCESS_INVOCATION_ID:
+        init_invocation_context()
+    return _PROCESS_INVOCATION_ID

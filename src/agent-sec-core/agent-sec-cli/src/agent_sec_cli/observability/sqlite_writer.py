@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 
 class ObservabilitySqliteWriter:
-    """Best-effort SQLite index writer for observability records."""
+    """SQLite index writer for observability records."""
 
     def __init__(
         self,
@@ -59,25 +59,32 @@ class ObservabilitySqliteWriter:
 
     def write(self, record: ObservabilityRecord) -> None:
         """Insert *record* into SQLite. Fire-and-forget index writes never raise."""
+        try:
+            self.write_or_raise(record)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def write_or_raise(self, record: ObservabilityRecord) -> None:
+        """Insert *record* into SQLite and raise on foreground ingestion failure."""
         if self._store.disabled:
-            return
+            raise OSError("observability SQLite store is disabled")
 
         try:
-            self._repository.insert(record)
+            if not self._repository.insert(record):
+                raise OSError("observability SQLite write was skipped")
         except DatabaseError as exc:
             if not is_sqlite_corruption_error(exc):
                 if is_sqlite_schema_error(exc):
                     self._store.request_schema_repair()
-                return
+                raise
             self._store.handle_corruption(exc)
             if self._store.disabled:
-                return
-            try:
-                self._repository.insert(record)
-            except Exception:  # noqa: BLE001
-                pass
+                raise OSError("observability SQLite store is disabled") from exc
+            if not self._repository.insert(record):
+                raise OSError("observability SQLite write was skipped") from exc
         except (SQLAlchemyError, OSError):
             self._store.dispose()
+            raise
 
     def close(self) -> None:
         """Best-effort gated prune/WAL checkpoint and dispose pooled connections."""

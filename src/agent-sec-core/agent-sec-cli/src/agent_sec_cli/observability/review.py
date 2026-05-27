@@ -9,6 +9,7 @@ module never owns the reader's lifecycle.
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -26,6 +27,8 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Static
+
+logger = logging.getLogger(__name__)
 
 
 class _SecurityCorrelation(Protocol):
@@ -376,8 +379,15 @@ def _find_correlated_security_events(
         return []
     try:
         return security_correlation.find_correlated(_record_fields(record))
-    except Exception:
-        # TODO(logging): warn with error type, session_id, and run_id once logging is wired.
+    except Exception as exc:  # noqa: BLE001 - reviewer must not crash on backend faults
+        logger.warning(
+            "security correlation lookup failed",
+            extra={
+                "session_id": record.session_id,
+                "run_id": record.run_id,
+                "data": {"error_type": type(exc).__name__},
+            },
+        )
         return []
 
 

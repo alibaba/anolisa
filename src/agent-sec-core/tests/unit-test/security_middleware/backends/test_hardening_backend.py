@@ -94,7 +94,10 @@ class TestHardeningExecute(unittest.TestCase):
         mock_isfile.return_value = False
         mock_access.return_value = False
 
-        result = self.backend.execute(self.ctx, args=["--scan"])
+        with self.assertLogs(
+            "agent_sec_cli.security_middleware.backends.hardening", level="WARNING"
+        ) as logs:
+            result = self.backend.execute(self.ctx, args=["--scan"])
 
         self.assertFalse(result.success)
         self.assertEqual(result.exit_code, 127)
@@ -102,6 +105,14 @@ class TestHardeningExecute(unittest.TestCase):
         self.assertEqual(result.data["argv"], ["loongshield", "seharden", "--scan"])
         self.assertEqual(result.data["failures"], [])
         self.assertEqual(result.data["fixed_items"], [])
+        self.assertEqual(len(logs.records), 1)
+        record = logs.records[0]
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertEqual(record.trace_id, self.ctx.trace_id)
+        # Domain fields live under `data` in the new schema.
+        self.assertEqual(record.data["action"], "harden")
+        self.assertEqual(record.data["exit_code"], 127)
+        self.assertEqual(record.data["error_type"], "FileNotFoundError")
 
     @patch("agent_sec_cli.security_middleware.backends.hardening.subprocess.run")
     @patch("agent_sec_cli.security_middleware.backends.hardening.os.access")
@@ -333,11 +344,24 @@ class TestHardeningExecute(unittest.TestCase):
         mock_which.return_value = "/usr/bin/loongshield"
         mock_run.side_effect = OSError("Permission denied")
 
-        result = self.backend.execute(self.ctx, args=["--scan"])
+        with self.assertLogs(
+            "agent_sec_cli.security_middleware.backends.hardening", level="ERROR"
+        ) as logs:
+            result = self.backend.execute(self.ctx, args=["--scan"])
 
         self.assertFalse(result.success)
         self.assertIn("Failed to execute `loongshield seharden`", result.error)
         self.assertIn("Permission denied", result.error)
+        self.assertEqual(len(logs.records), 1)
+        record = logs.records[0]
+        self.assertEqual(record.levelname, "ERROR")
+        self.assertEqual(record.trace_id, self.ctx.trace_id)
+        # action/exit_code go via `data`; error_type is derived from exc_info
+        # by the JSONL handler, so it does not need to be in `extra=`.
+        self.assertEqual(record.data["action"], "harden")
+        self.assertEqual(record.data["exit_code"], 1)
+        self.assertIsNotNone(record.exc_info)
+        self.assertIs(record.exc_info[0], OSError)
 
     def test_unknown_legacy_kwargs_are_rejected(self):
         with self.assertRaises(TypeError):

@@ -1,0 +1,414 @@
+"""Unit tests for agent_sec_cli.cli_logging."""
+
+import json
+import logging
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+from agent_sec_cli.cli_logging import (
+    CLI_LOG_BACKUP_COUNT,
+    CLI_LOG_MAX_BYTES,
+    JsonlCliLogHandler,
+    _reset_cli_logging_for_tests,
+    resolve_cli_logging_config,
+    setup_cli_logging,
+)
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    clear_invocation_context_for_tests,
+    clear_process_trace_context,
+    init_invocation_context,
+    init_process_trace_context,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_logging_state() -> None:
+    clear_process_trace_context()
+    clear_invocation_context_for_tests()
+    _reset_cli_logging_for_tests()
+    yield
+    _reset_cli_logging_for_tests()
+    clear_invocation_context_for_tests()
+    clear_process_trace_context()
+
+
+def _clear_cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_SEC_CLI_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("AGENT_SEC_CLI_LOG_DISABLED", raising=False)
+    monkeypatch.delenv("AGENT_SEC_INVOCATION_ID", raising=False)
+
+
+def _make_record(
+    level: int = logging.WARNING,
+    msg: str = "action completed",
+    exc_info: tuple | None = None,
+) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="agent_sec_cli.tests",
+        level=level,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=exc_info,
+        func="test_function",
+    )
+
+
+def test_default_config_uses_cli_stream_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is True
+    assert config.level == logging.WARNING
+    assert config.log_file == tmp_path / "cli.jsonl"
+
+
+@pytest.mark.parametrize(
+    ("value", "level"),
+    [
+        ("debug", logging.DEBUG),
+        ("info", logging.INFO),
+        ("warning", logging.WARNING),
+        ("error", logging.ERROR),
+        ("critical", logging.CRITICAL),
+    ],
+)
+def test_log_level_env_accepts_supported_levels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str, level: int
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_SEC_CLI_LOG_LEVEL", value)
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is True
+    assert config.level == level
+
+
+def test_disabled_env_wins_over_log_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_SEC_CLI_LOG_LEVEL", "debug")
+    monkeypatch.setenv("AGENT_SEC_CLI_LOG_DISABLED", "true")
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is False
+    assert config.log_file is None
+
+
+def test_invalid_log_level_falls_back_to_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_SEC_CLI_LOG_LEVEL", "verbose")
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is True
+    assert config.level == logging.WARNING
+
+
+def test_data_dir_override_resolves_cli_log_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cli.jsonl follows AGENT_SEC_DATA_DIR (the shared knob for all three
+    # streams) — there is no per-file override env. The shared helper
+    # _resolve_data_dir() forces the directory to 0o700.
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is True
+    assert config.log_file == tmp_path / "cli.jsonl"
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+
+
+def test_default_path_resolution_failure_disables_cli_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    invalid_data_dir = tmp_path / "not-a-directory"
+    invalid_data_dir.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(invalid_data_dir))
+
+    config = resolve_cli_logging_config()
+
+    assert config.enabled is False
+    assert config.log_file is None
+
+
+def test_handler_uses_configured_retention_constants(tmp_path: Path) -> None:
+    handler = JsonlCliLogHandler(tmp_path / "cli.jsonl")
+
+    # JsonlEventWriter stores the configured size/count on private attributes.
+    # We assert on them because there is no public API to inspect them.
+    assert handler._writer._max_bytes == CLI_LOG_MAX_BYTES
+    assert handler._writer._backup_count == CLI_LOG_BACKUP_COUNT
+
+
+def test_handler_writes_jsonl_with_invocation_and_trace_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "invocation-1")
+    init_invocation_context()
+    init_process_trace_context(
+        TraceContext(
+            trace_id="trace-1",
+            session_id="session-1",
+            run_id="run-1",
+            call_id="call-1",
+            tool_call_id="tool-1",
+        )
+    )
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    # New schema: domain-specific fields live inside `data`.
+    record.data = {
+        "action": "code_scan",
+        "caller": "cli",
+        "exit_code": 1,
+        "duration_ms": 12.5,
+    }
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["level"] == "WARNING"
+    assert payload["logger"] == "agent_sec_cli.tests"
+    assert payload["message"] == "action completed"
+    assert payload["function"] == "test_function"
+    assert payload["invocation_id"] == "invocation-1"
+    assert payload["trace_id"] == "trace-1"
+    assert payload["session_id"] == "session-1"
+    assert payload["run_id"] == "run-1"
+    assert payload["call_id"] == "call-1"
+    assert payload["tool_call_id"] == "tool-1"
+    assert payload["data"] == {
+        "action": "code_scan",
+        "caller": "cli",
+        "exit_code": 1,
+        "duration_ms": 12.5,
+    }
+    # Domain-specific keys never leak to top level under the new schema —
+    # they go through `data`.
+    for key in ("action", "caller", "exit_code", "duration_ms", "module"):
+        assert key not in payload
+
+
+def test_handler_forwards_string_data_payload(tmp_path: Path) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    record.data = "retry budget exhausted after 5 attempts"
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["data"] == "retry budget exhausted after 5 attempts"
+
+
+def test_handler_does_not_leak_unrelated_record_attributes(tmp_path: Path) -> None:
+    # The handler reads only well-known slots (correlation IDs + data + exc_info).
+    # Arbitrary extras attached to a record do not appear in the output —
+    # this protects against accidental leakage of caller-side state.
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    record.metadata = {"secret": "should-not-leak"}
+    record.tenant_id = "tenant-42"
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert "metadata" not in payload
+    assert "tenant_id" not in payload
+    assert "data" not in payload  # nothing in data either
+
+
+def test_handler_uses_record_trace_id_when_process_trace_context_is_empty(
+    tmp_path: Path,
+) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    record.trace_id = "generated-request-trace"
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["trace_id"] == "generated-request-trace"
+
+
+def test_handler_records_error_exception_metadata(tmp_path: Path) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+
+    try:
+        raise ValueError("bad value")
+    except ValueError:
+        record = _make_record(
+            level=logging.ERROR,
+            msg="backend raised an exception",
+            exc_info=sys.exc_info(),
+        )
+        handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["level"] == "ERROR"
+    assert payload["error_type"] == "ValueError"
+    assert payload["exception"] == "bad value"
+    assert "ValueError: bad value" in payload["traceback"]
+
+
+def test_handler_omits_traceback_for_warning_with_exception_info(
+    tmp_path: Path,
+) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+
+    try:
+        raise ValueError("warning value")
+    except ValueError:
+        record = _make_record(
+            level=logging.WARNING,
+            msg="backend returned warning with context",
+            exc_info=sys.exc_info(),
+        )
+        handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["level"] == "WARNING"
+    assert payload["error_type"] == "ValueError"
+    assert payload["exception"] == "warning value"
+    assert "traceback" not in payload
+
+
+def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
+    # Access control relies on the parent directory's 0o700 mode; the handler
+    # must not chmod the log file itself on each write.
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o644)
+    handler = JsonlCliLogHandler(path)
+
+    handler.emit(_make_record())
+
+    # File mode is untouched by the handler — whatever umask/explicit chmod
+    # set it to, that's what remains.
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_setup_cli_logging_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+
+    setup_cli_logging()
+    setup_cli_logging()
+
+    logger = logging.getLogger("agent_sec_cli")
+    handlers = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler, JsonlCliLogHandler)
+    ]
+    assert len(handlers) == 1
+
+
+def test_setup_cli_logging_disables_root_propagation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    logger = logging.getLogger("agent_sec_cli")
+    logger.propagate = True
+
+    setup_cli_logging()
+
+    assert logger.propagate is False
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value"),
+    [
+        ("AGENT_SEC_CLI_LOG_DISABLED", "true"),
+        ("AGENT_SEC_CLI_LOG_LEVEL", "off"),
+    ],
+)
+def test_setup_cli_logging_disables_root_propagation_when_logging_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    env_value: str,
+) -> None:
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(env_name, env_value)
+    logger = logging.getLogger("agent_sec_cli")
+    logger.propagate = True
+
+    setup_cli_logging()
+
+    handlers = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler, JsonlCliLogHandler)
+    ]
+    assert handlers == []
+    assert logger.propagate is False
+
+
+def test_setup_cli_logging_handler_failure_is_sticky_no_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A setup failure marks the call as done — subsequent calls are no-ops
+    # even if the underlying cause would now succeed. Production never
+    # reconfigures mid-process, so failure is sticky and silent.
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+
+    class RaisingHandler:
+        def __init__(self, _path: Path) -> None:
+            raise RuntimeError("handler boom")
+
+    monkeypatch.setattr("agent_sec_cli.cli_logging.JsonlCliLogHandler", RaisingHandler)
+
+    setup_cli_logging()
+
+    # Restore the real handler — but the second setup should still be a no-op.
+    monkeypatch.setattr(
+        "agent_sec_cli.cli_logging.JsonlCliLogHandler",
+        JsonlCliLogHandler,
+    )
+    setup_cli_logging()
+
+    logger = logging.getLogger("agent_sec_cli")
+    handlers = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler, JsonlCliLogHandler)
+    ]
+    assert handlers == []

@@ -43,7 +43,7 @@ def get_sqlite_writer() -> "ObservabilitySqliteWriter":
 def record_observability(record: ObservabilityRecord) -> None:
     """Persist *record* to JSONL and the SQLite index."""
     get_writer().write(record)
-    get_sqlite_writer().write(record)
+    get_sqlite_writer().write_or_raise(record)
 
 
 __all__ = [

@@ -280,6 +280,40 @@ def test_record_returns_nonzero_when_jsonl_append_fails(tmp_path: Path) -> None:
     assert "Error: failed to write observability record:" in result.output
 
 
+def test_record_returns_nonzero_when_sqlite_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingSqliteWriter:
+        def write_or_raise(self, record: object) -> None:
+            raise OSError("sqlite unavailable")
+
+    runner = CliRunner()
+    monkeypatch.setattr(
+        observability,
+        "get_sqlite_writer",
+        lambda: FailingSqliteWriter(),
+    )
+
+    result = runner.invoke(
+        app,
+        ["observability", "record", "--format", "json", "--stdin"],
+        input=json.dumps(
+            _payload(
+                hook="after_agent_run",
+                metrics={"success": True},
+            )
+        ),
+        env={"AGENT_SEC_DATA_DIR": str(tmp_path)},
+    )
+
+    assert result.exit_code == 1
+    assert "Error: failed to write observability record:" in result.output
+    assert "sqlite unavailable" in result.output
+    assert _jsonl_records(tmp_path / "observability.jsonl")[0]["hook"] == (
+        "after_agent_run"
+    )
+
+
 def test_observability_schema_outputs_wire_schema() -> None:
     runner = CliRunner()
     call_id_hooks = {
