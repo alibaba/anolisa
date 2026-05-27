@@ -95,6 +95,13 @@ pub struct SavingsSessionSummary {
     pub request_count: i64,
 }
 
+/// Turn info for a tool_call_id, including which session it belongs to.
+#[derive(Debug, Clone)]
+pub struct ToolCallTurnInfo {
+    pub turn_index: usize,
+    pub session_id: String,
+}
+
 /// Summary of a single conversation (user query) within a session
 #[derive(Debug, serde::Serialize)]
 pub struct TraceSummary {
@@ -1007,16 +1014,16 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Build a mapping from `tool_call_id` to the turn index of the LLM call
-    /// that issued it.
+    /// Build a mapping from `tool_call_id` to the turn index and session of
+    /// the LLM call that issued it.
     ///
     /// Reads the `tool_call_ids` JSON array column from `genai_events` and
-    /// expands it so that each individual tool_call_id maps to the turn index
-    /// (1-based) of its parent LLM call.
+    /// expands it so that each individual tool_call_id maps to its parent LLM
+    /// call's turn index (1-based) and session_id.
     pub fn get_tool_call_turn_indices(
         &self,
         session_ids: &[&str],
-    ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
+    ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut result = std::collections::HashMap::new();
 
@@ -1034,16 +1041,23 @@ impl GenAISqliteStore {
             for (idx, row) in rows.enumerate() {
                 let (call_id, tool_call_ids_json) = row?;
                 let turn = idx + 1; // 1-based
+                let session_id = sid.to_string();
 
                 // Also map the call_id itself (for backward compat with
                 // stats.db that may still store call_id as tool_use_id)
-                result.insert(call_id.clone(), turn);
+                result.insert(call_id.clone(), ToolCallTurnInfo {
+                    turn_index: turn,
+                    session_id: session_id.clone(),
+                });
 
                 // Expand each tool_call_id in the JSON array
                 if let Some(json_str) = tool_call_ids_json {
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json_str) {
                         for tc_id in ids {
-                            result.insert(tc_id, turn);
+                            result.insert(tc_id, ToolCallTurnInfo {
+                                turn_index: turn,
+                                session_id: session_id.clone(),
+                            });
                         }
                     }
                 }

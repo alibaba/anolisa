@@ -910,7 +910,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setInterruptionStats(iStats);
     setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
     setConversationInterruptionCounts(new Map(iConvCounts.map((c) => [c.conversation_id, c])));
-    setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.saved_tokens]) ?? []));
+    setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved]) ?? []));
   }, []);
 
   const handleQuery = useCallback(async () => {
