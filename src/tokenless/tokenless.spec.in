@@ -238,7 +238,7 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun May 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.0-1
+* Mon May 25 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.0-1
 - feat(tokenless): add hermes agent plugin
 - refactor(tokenless): align FHS paths, restructure adapter dir, remove install.sh
 - refactor(tokenless): support staged installs

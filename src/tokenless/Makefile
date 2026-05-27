@@ -21,6 +21,7 @@ LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
 OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
 TOON_VER := 0.4.6
+VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
         install uninstall test lint clean \
@@ -137,18 +138,18 @@ clean:
 dist: clean
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
-	tar czf ../tokenless-0.3.2.tar.gz \
+	tar czf ../tokenless-$(VERSION).tar.gz \
 	    --exclude='target' \
 	    --exclude='.git' \
 	    -C .. tokenless
-	@echo "==> Tarball: ../tokenless-0.3.2.tar.gz"
+	@echo "==> Tarball: ../tokenless-$(VERSION).tar.gz"
 
 # Adapter management — invokes detect/install/uninstall action scripts per the
 # ANOLISA FHS adapter spec.  Environment variables point to installed FHS paths.
 ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_ADAPTER_DIR=$(SHARE_DIR) \
               ANOLISA_COMPONENT=tokenless \
-              ANOLISA_VERSION=0.3.2
+              ANOLISA_VERSION=$(VERSION)
 
 adapter-install: cosh-extension-install openclaw-install hermes-install
 
