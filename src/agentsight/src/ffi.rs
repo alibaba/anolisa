@@ -937,4 +937,50 @@ mod tests {
         assert_eq!(cfg.cmdline_rules.len(), 1);
         assert_eq!(cfg.https_rules.len(), 1);
     }
+
+    #[test]
+    fn test_load_json_http_endpoint() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "http": [
+                {"rule": [":8080", "10.0.0.1:9090"]}
+            ]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.http_targets.len(), 2);
+        match &cfg.http_targets[0] {
+            crate::config::HttpTarget::Endpoint(t) => {
+                assert_eq!(t.ip, None);
+                assert_eq!(t.port, Some(8080));
+            }
+            _ => panic!("expected Endpoint"),
+        }
+        match &cfg.http_targets[1] {
+            crate::config::HttpTarget::Endpoint(t) => {
+                assert_eq!(t.ip, Some(std::net::Ipv4Addr::new(10, 0, 0, 1)));
+                assert_eq!(t.port, Some(9090));
+            }
+            _ => panic!("expected Endpoint"),
+        }
+    }
+
+    #[test]
+    fn test_load_json_http_domain() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "http": [
+                {"rule": ["model-svc.default.svc", "*.internal.com"]}
+            ]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.http_targets.len(), 2);
+        match &cfg.http_targets[0] {
+            crate::config::HttpTarget::Domain(d) => assert_eq!(d, "model-svc.default.svc"),
+            _ => panic!("expected Domain"),
+        }
+        match &cfg.http_targets[1] {
+            crate::config::HttpTarget::Domain(d) => assert_eq!(d, "*.internal.com"),
+            _ => panic!("expected Domain"),
+        }
+    }
 }
