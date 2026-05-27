@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::AppState;
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::{GenAISqliteStore};
-use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket};
+use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket, ToolCallTurnInfo};
 use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Prometheus helpers ───────────────────────────────────────────────────────
@@ -970,25 +970,33 @@ pub async fn get_token_savings(
     let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
     let stats_available = stats_store.is_some();
 
-    // Step 3: Batch-query optimization records by session_id
+    // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
+    // This gives us all known tool_use_ids and their session membership.
     let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-    let stats_by_session = if let Some(ref store) = stats_store {
-        let rows = store.get_stats_by_session_ids(&session_ids);
-        TokenlessStatsStore::group_by_session(rows)
-    } else {
-        std::collections::HashMap::new()
-    };
-
-    // Step 3.5: Build tool_call_id → turn_index map so we can determine
-    // at which turn each tool_use_id was invoked. Uses the tool_call_ids
-    // column (JSON array) from genai_events, with backward compatibility
-    // for stats.db entries that still store call_id.
     let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
         Ok(store) => store.get_tool_call_turn_indices(&session_ids).unwrap_or_default(),
         Err(_) => std::collections::HashMap::new(),
     };
 
-    // Step 4: Build response
+    // Step 4: Query stats.db by tool_use_ids (instead of session_ids)
+    let stats_by_session = if let Some(ref store) = stats_store {
+        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
+        // Group by session: use turn_indices to determine session, fallback to row.session_id
+        let mut map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+        for row in rows {
+            let sid = turn_indices
+                .get(&row.tool_use_id)
+                .map(|info| info.session_id.clone())
+                .unwrap_or_else(|| row.session_id.clone());
+            map.entry(sid).or_default().push(row);
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Step 5: Build response
     let mut resp_sessions = Vec::with_capacity(sessions.len());
     let mut grand_input: i64 = 0;
     let mut grand_output: i64 = 0;
@@ -1022,7 +1030,7 @@ pub async fn get_token_savings(
                 // of M total turns, the savings persist for (M - N) turns.
                 let turn_index = turn_indices
                     .get(&row.tool_use_id)
-                    .copied()
+                    .map(|info| info.turn_index)
                     .unwrap_or(1) as i64;
                 let compounding_turns = (request_count - turn_index).max(1);
                 let compounded = saved * compounding_turns;
