@@ -39,6 +39,7 @@ DRY_RUN=false
 MODE=""                       # ""|recommended|all
 INSTALL_MODE="user"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
 PROJECT_ROOT_OVERRIDE=""
 COMPONENTS_INPUT=()           # raw user input
@@ -110,9 +111,15 @@ component_build_name() {
 openclaw_search_path() {
     printf '%s:%s:%s:%s' \
         "$HOME/.local/bin" \
-        "${OPENCLAW_HOME%/}/bin" \
+        "${OPENCLAW_STATE_DIR%/}/bin" \
         "/usr/local/bin" \
         "$PATH"
+}
+
+normalize_openclaw_paths() {
+    OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+    OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+    OPENCLAW_HOME="$OPENCLAW_STATE_DIR"
 }
 
 resolve_openclaw_bin() {
@@ -184,7 +191,7 @@ Options:
   --uninstall                  Run uninstall action instead of install
   --status                     Print runtime/adapter/skill diagnostic and exit
   --dry-run                    Print plan, do not execute adapter scripts
-  --openclaw-home <dir>        OpenClaw home (default: \$HOME/.openclaw)
+  --openclaw-home <dir>        OpenClaw state dir (default: \$HOME/.openclaw)
   --project-root <dir>         Anolisa repo root (enables source fallback)
   --install-mode user|system   Install profile (default: user)
   --check-update               Check whether components have updates (no changes made)
@@ -217,7 +224,7 @@ parse_args() {
             --dry-run)          DRY_RUN=true; shift ;;
             --openclaw-home)
                 [[ -n "${2:-}" ]] || die "--openclaw-home requires a value"
-                OPENCLAW_HOME="$2"; shift 2 ;;
+                OPENCLAW_HOME="$2"; OPENCLAW_STATE_DIR="$2"; shift 2 ;;
             --project-root)
                 [[ -n "${2:-}" ]] || die "--project-root requires a value"
                 PROJECT_ROOT_OVERRIDE="$2"; shift 2 ;;
@@ -512,9 +519,10 @@ run_adapter() {
         ANOLISA_PROJECT_ROOT="${PROJECT_ROOT}" \
         ANOLISA_INSTALL_MODE="$INSTALL_MODE" \
         ANOLISA_DRY_RUN="$dry_int" \
-        OPENCLAW_HOME="$OPENCLAW_HOME" \
+        OPENCLAW_HOME="$OPENCLAW_STATE_DIR" \
+        OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
         OPENCLAW_BIN="$openclaw_bin" \
-        OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills" \
+        OPENCLAW_SKILLS_DIR="$OPENCLAW_STATE_DIR/skills" \
         SEC_CORE_OPENCLAW_PLUGIN_DIR="$(sec_core_plugin_dir)" \
         SEC_CORE_BIN_DIR="$(sec_core_bin_dir)" \
         bash "$ADAPTER_SCRIPT" ${ADAPTER_ACTION_ARGS[@]+"${ADAPTER_ACTION_ARGS[@]}"}
@@ -901,7 +909,7 @@ cmd_dispatch() {
         printf '  %s%-14s%s %s%s%s\n' "$CYAN" "action" "$NC" "$BOLD" "$ACTION" "$NC"
         printf '  %s%-14s%s %s\n' "$CYAN" "install-mode" "$NC" "$INSTALL_MODE"
         printf '  %s%-14s%s %s\n' "$CYAN" "components" "$NC" "$(join_by ', ' "${EFFECTIVE_COMPONENTS[@]}")"
-        printf '  %s%-14s%s %s\n' "$CYAN" "openclaw-home" "$NC" "$OPENCLAW_HOME"
+        printf '  %s%-14s%s %s\n' "$CYAN" "openclaw-home" "$NC" "$OPENCLAW_STATE_DIR"
         if [[ -n "$PROJECT_ROOT" ]]; then
             printf '  %s%-14s%s %s\n' "$CYAN" "project-root" "$NC" "$PROJECT_ROOT"
         else
@@ -959,8 +967,8 @@ status_load_plugins() {
     $STATUS_PLUGINS_JSON_CACHED && return 0
     STATUS_PLUGINS_JSON_CACHED=true
     [[ -n "$openclaw_bin" ]] || return 0
-    STATUS_PLUGINS_JSON="$(PATH="$(openclaw_search_path)" OPENCLAW_HOME="$OPENCLAW_HOME" "$openclaw_bin" plugins list --json 2>/dev/null || true)"
-    STATUS_PLUGINS_TXT="$(PATH="$(openclaw_search_path)" OPENCLAW_HOME="$OPENCLAW_HOME" "$openclaw_bin" plugins list 2>/dev/null || true)"
+    STATUS_PLUGINS_JSON="$(env -u OPENCLAW_HOME PATH="$(openclaw_search_path)" OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$openclaw_bin" plugins list --json 2>/dev/null || true)"
+    STATUS_PLUGINS_TXT="$(env -u OPENCLAW_HOME PATH="$(openclaw_search_path)" OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$openclaw_bin" plugins list 2>/dev/null || true)"
 }
 
 status_plugin_listed() {
@@ -992,9 +1000,10 @@ status_run_detect() {
         ANOLISA_PROJECT_ROOT="${PROJECT_ROOT}" \
         ANOLISA_INSTALL_MODE="$INSTALL_MODE" \
         ANOLISA_DRY_RUN="0" \
-        OPENCLAW_HOME="$OPENCLAW_HOME" \
+        OPENCLAW_HOME="$OPENCLAW_STATE_DIR" \
+        OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
         OPENCLAW_BIN="$openclaw_bin" \
-        OPENCLAW_SKILLS_DIR="$OPENCLAW_HOME/skills" \
+        OPENCLAW_SKILLS_DIR="$OPENCLAW_STATE_DIR/skills" \
         SEC_CORE_OPENCLAW_PLUGIN_DIR="$(sec_core_plugin_dir)" \
         SEC_CORE_BIN_DIR="$(sec_core_bin_dir)" \
         bash "$ADAPTER_SCRIPT" ${ADAPTER_ACTION_ARGS[@]+"${ADAPTER_ACTION_ARGS[@]}"}
@@ -1034,7 +1043,7 @@ status_fallback() {
             status_load_plugins "$openclaw_bin"
             if status_plugin_listed "$plugin_id"; then
                 printf '  plugin %-20s listed\n' "$plugin_id"
-            elif [[ -d "${OPENCLAW_HOME%/}/extensions/$plugin_id" ]]; then
+            elif [[ -d "${OPENCLAW_STATE_DIR%/}/extensions/$plugin_id" ]]; then
                 printf '  plugin %-20s installed (extensions dir)\n' "$plugin_id"
             else
                 printf '  plugin %-20s not listed\n' "$plugin_id"
@@ -1047,7 +1056,7 @@ status_fallback() {
     if [[ "$component" == "sec-core" ]]; then
         local skill sf
         for skill in code-scanner prompt-scanner skill-ledger; do
-            sf="${OPENCLAW_HOME%/}/skills/$skill/SKILL.md"
+            sf="${OPENCLAW_STATE_DIR%/}/skills/$skill/SKILL.md"
             if [[ -f "$sf" ]]; then
                 printf '  skill  %-20s present (%s)\n' "$skill" "$sf"
             else
@@ -1066,10 +1075,10 @@ cmd_status() {
     else
         echo "  openclaw CLI:    missing"
     fi
-    if [[ -d "$OPENCLAW_HOME" ]]; then
-        echo "  OpenClaw home:   $OPENCLAW_HOME (exists)"
+    if [[ -d "$OPENCLAW_STATE_DIR" ]]; then
+        echo "  OpenClaw home:   $OPENCLAW_STATE_DIR (exists)"
     else
-        echo "  OpenClaw home:   $OPENCLAW_HOME (missing)"
+        echo "  OpenClaw home:   $OPENCLAW_STATE_DIR (missing)"
     fi
 
     step "State (${STATE_DIR})"
@@ -1111,6 +1120,7 @@ cmd_status() {
 
 main() {
     parse_args "$@"
+    normalize_openclaw_paths
     resolve_project_root
     if $DO_STATUS; then
         cmd_status

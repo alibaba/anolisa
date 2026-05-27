@@ -10,8 +10,11 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-openclaw}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-export PATH="$HOME/.local/bin:${OPENCLAW_HOME%/}/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless-openclaw"
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
@@ -36,27 +39,27 @@ else
     note_prereq_missing "openclaw CLI"
 fi
 
-if [ -d "$OPENCLAW_HOME" ]; then
-    field "openclaw home" "present (${OPENCLAW_HOME})"
+if [ -d "$OPENCLAW_STATE_DIR" ]; then
+    field "openclaw home" "present (${OPENCLAW_STATE_DIR})"
 else
-    field "openclaw home" "not installed (${OPENCLAW_HOME})"
+    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR})"
     note_install_missing "openclaw home"
 fi
 
 plugin_state="missing"
 plugin_detail="$PLUGIN_ID"
 if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
-    plugins_json="$(OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null || true)"
-    plugins_txt="$(OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
+    plugins_json="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins list --json 2>/dev/null || true)"
+    plugins_txt="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins list 2>/dev/null || true)"
     if grep -qE "\"id\"[[:space:]]*:[[:space:]]*\"${PLUGIN_ID}\"" <<<"$plugins_json" \
        || grep -qE "(^|[[:space:]])${PLUGIN_ID}([[:space:]]|$)" <<<"$plugins_txt"; then
         plugin_state="listed"
         plugin_detail="$PLUGIN_ID (openclaw plugins list)"
     fi
 fi
-if [ "$plugin_state" = "missing" ] && [ -d "${OPENCLAW_HOME%/}/extensions/${PLUGIN_ID}" ]; then
+if [ "$plugin_state" = "missing" ] && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then
     plugin_state="installed"
-    plugin_detail="${OPENCLAW_HOME%/}/extensions/${PLUGIN_ID}"
+    plugin_detail="${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}"
 fi
 if [ "$plugin_state" != "missing" ]; then
     field "${PLUGIN_ID} plugin" "${plugin_state} (${plugin_detail})"

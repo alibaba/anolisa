@@ -11,7 +11,11 @@ set -euo pipefail
 COMPONENT="${ANOLISA_COMPONENT:-sec-core}"
 PROJECT_ROOT="${ANOLISA_PROJECT_ROOT:-}"
 TARGET_DIR="${ANOLISA_TARGET_DIR:-}"
-OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-$HOME/.openclaw/skills}"
+OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${OPENCLAW_STATE_DIR%/}/skills}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 SEC_CORE_OPENCLAW_PLUGIN_DIR="${SEC_CORE_OPENCLAW_PLUGIN_DIR:-}"
 SEC_CORE_BIN_DIR="${SEC_CORE_BIN_DIR:-$HOME/.local/bin}"
@@ -93,7 +97,7 @@ deploy_script="$plugin_dir/scripts/deploy.sh"
 if [ "$DRY_RUN" = "1" ]; then
     echo "DRY-RUN: ${deploy_script} ${plugin_dir}"
 else
-    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$deploy_script" "$plugin_dir"
+    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$deploy_script" "$plugin_dir"
 fi
 
 if [ "$DRY_RUN" = "1" ]; then

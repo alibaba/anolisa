@@ -6,8 +6,11 @@ set -euo pipefail
 source "$(dirname "$0")/lib-discover.sh"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-SKILL_DST="${OPENCLAW_HOME%/}/skills/ws-ckpt"
+SKILL_DST="${OPENCLAW_STATE_DIR%/}/skills/ws-ckpt"
 
 # 1. Check openclaw availability
 if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
@@ -17,8 +20,8 @@ fi
 
 # 2. Try plugin install (preferred).
 if PLUGIN_SRC=$(find_plugin_src openclaw); then
-    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" --force
-    OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins enable ws-ckpt 2>/dev/null || true
+    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" --force
+    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins enable ws-ckpt 2>/dev/null || true
     echo "openclaw ws-ckpt plugin installed and enabled successfully (from $PLUGIN_SRC)"
     exit 0
 fi

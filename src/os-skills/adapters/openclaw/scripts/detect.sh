@@ -12,9 +12,12 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PROJECT_ROOT="${ANOLISA_PROJECT_ROOT:-}"
 TARGET_DIR="${ANOLISA_TARGET_DIR:-}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${OPENCLAW_HOME%/}/skills}"
-export PATH="$HOME/.local/bin:${OPENCLAW_HOME%/}/bin:/usr/local/bin:$PATH"
+OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${OPENCLAW_STATE_DIR%/}/skills}"
+export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
 OS_SKILLS=(
     copaw-usage
@@ -63,10 +66,10 @@ else
     note_prereq_missing "openclaw CLI"
 fi
 
-if [ -d "$OPENCLAW_HOME" ]; then
-    field "openclaw home" "present (${OPENCLAW_HOME})"
+if [ -d "$OPENCLAW_STATE_DIR" ]; then
+    field "openclaw home" "present (${OPENCLAW_STATE_DIR})"
 else
-    field "openclaw home" "not installed (${OPENCLAW_HOME})"
+    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR})"
     note_install_missing "openclaw home"
 fi
 

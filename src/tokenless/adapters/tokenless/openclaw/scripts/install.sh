@@ -20,6 +20,10 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # binary. Defaults to whatever `openclaw` resolves to on PATH.
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 
@@ -45,7 +49,7 @@ if [ ! -f "$PLUGIN_SRC/dist/index.js" ]; then
     exit 1
 fi
 
-OPENCLAW_HOME="${OPENCLAW_HOME%/}" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
+env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
     --force --dangerously-force-unsafe-install || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
     exit 1
