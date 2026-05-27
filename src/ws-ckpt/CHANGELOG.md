@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed plugin workspace config registration and auto-loading
+- Reject workspace paths that are hermes cwd itself or parent
+- Fixed plugin tool to prefer explicit workspace parameter over config
+- Fixed skill delete requiring --force flag
+- Fixed daemon workspace path validation and fswatch fd leak
+- Removed unused btrfs_ops.rs module
+
 ## 0.3.0
 
 - Added openclaw plugin scaffolding for ws-ckpt

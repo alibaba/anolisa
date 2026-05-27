@@ -81,8 +81,8 @@ echo ""
 echo "==> Done!"
 echo ""
 
-SRPM=$(ls -1 "${RPMBUILD_DIR}/SRPMS/"*.rpm 2>/dev/null | head -1)
-RPM=$(find "${RPMBUILD_DIR}/RPMS/" -name '*.rpm' ! -name '*debuginfo*' 2>/dev/null | head -1)
+SRPM=$(ls -1 "${RPMBUILD_DIR}/SRPMS/${NAME}-${VERSION}-"*.rpm 2>/dev/null | head -1)
+RPM=$(find "${RPMBUILD_DIR}/RPMS/" -name "${NAME}-${VERSION}-*.rpm" ! -name '*debuginfo*' 2>/dev/null | head -1)
 
 if [[ -n "${SRPM:-}" ]]; then
     echo "SRPM: ${SRPM}"
