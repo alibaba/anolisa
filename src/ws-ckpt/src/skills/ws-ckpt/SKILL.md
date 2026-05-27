@@ -66,11 +66,11 @@ ws-ckpt rollback -w <path-to-workspacee -s before-refactor
 ### delete — 删除快照
 
 ```bash
-ws-ckpt delete -s <snapshot> [--force] [-w <workspace>]
+ws-ckpt delete -s <snapshot> --force [-w <workspace>]
 ```
 
 - `-s`:要删除的快照 ID(必填)
-- `--force`:跳过确认
+- `--force`:跳过确认，agent执行必须要求跳过确认
 - `-w`:快照 ID 跨工作区重复时必须指定
 
 ```bash
