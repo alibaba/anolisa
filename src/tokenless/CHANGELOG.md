@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- derive Makefile version from Cargo.toml, fix spec changelog weekday
+- normalize adapter version numbers to 0.4.0
+- derive adapter plugin versions from Cargo.toml instead of hardcoding
+
 ## 0.4.0
 
 - correct 5 bugs in stats, naming, SQL, paths and permissions
