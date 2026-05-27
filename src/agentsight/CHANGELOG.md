@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- Refactor token savings query to use `tool_use_id` instead of `session_id` as the join key when querying `~/.tokenless/stats.db`.
+- Add `ToolCallTurnInfo` struct containing both `turn_index` and `session_id`, and `get_stats_by_tool_use_ids()` method to `TokenlessStatsStore`.
+- Group stats results back to sessions via `turn_indices` mapping.
+- Fix `ConversationList` to use `compounded_saved` instead of `saved_tokens` to align with `TokenSavingsPage` display.
+
 ## 0.5.0
 
 - Add Claude Code support including SSL probe attach for BoringSSL, Anthropic SSE thinking/tool_use content blocks, and `message.id`-based session correlation.
