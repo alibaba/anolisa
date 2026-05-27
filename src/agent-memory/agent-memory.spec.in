@@ -1,0 +1,144 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+Name:           agent-memory
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Agent memory — filesystem memory for AI agents (MCP Server)
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# Build dependencies
+# Rust edition 2024 needs >=1.85; cmake is required by the git2 crate's
+# vendored libgit2 build; systemd-devel ships libsystemd headers for the
+# optional journald audit fan-out.
+BuildRequires:  cargo >= 1.85
+BuildRequires:  rust >= 1.85
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  cmake
+BuildRequires:  pkgconfig
+BuildRequires:  systemd-devel
+BuildRequires:  systemd-rpm-macros
+
+%description
+Agent memory is a persistent filesystem memory for AI agents, served over
+the MCP (Model Context Protocol) standard. Linux only.
+
+Core Features:
+- MCP Server: 19 tools over stdio JSON-RPC 2.0, in three tiers
+  - Tier A file ops: mem_read / write / append / edit / list / grep /
+    diff / mkdir / remove / promote / mem_session_log
+  - Tier B structured: memory_search / memory_observe /
+    memory_get_context (hidden from tools/list AND rejected at
+    tools/call with METHOD_NOT_FOUND on the expert profile)
+  - Tier C governance: mem_snapshot / mem_snapshot_list /
+    mem_snapshot_restore / mem_log / mem_revert
+- Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
+  user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
+  sandbox for every file open
+- SQLite FTS5 BM25 background index (sub-millisecond search)
+- Optional git versioning of the mount tree with auto-commit on writes
+- tar.gz snapshots with atomic per-entry rename swap on restore
+- Optional cgroup v2 memory.max self-limit
+- Optional systemd-journald audit fan-out
+- Single statically-linked binary (bundled SQLite + vendored libgit2)
+
+Integration:
+- Claude Code: configure in .claude/settings.json mcpServers
+- Cursor / any MCP-compatible client: stdio transport
+
+%prep
+# -q quiet, -a 1 also extract Source1 (vendor) into the unpacked source
+# directory so .cargo/config.toml + vendor/ are in place before %build.
+# Top-level dir is `%{name}-%{version}` to match both the local
+# rpm-build.sh tarball and the CI-produced archive from
+# .github/actions/package-source (which uses ${component}-${version}).
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+# --offline forbids network access; --locked enforces Cargo.lock pinning.
+# Combined they require Source1 (vendor) to be present, fail fast otherwise.
+cargo build --release --locked --offline
+
+%install
+rm -rf %{buildroot}
+
+# Install binary
+install -d -m 0755 %{buildroot}%{_bindir}
+install -p -m 0755 target/release/agent-memory %{buildroot}%{_bindir}/
+
+# Install default config
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/agent-memory
+install -p -m 0644 config/default.toml %{buildroot}%{_datadir}/anolisa/agent-memory/default.toml
+
+# Install MCP server descriptor for auto-discovery
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/mcp-servers
+install -p -m 0644 config/mcp-server.json %{buildroot}%{_datadir}/anolisa/mcp-servers/agent-memory.json
+
+# Install systemd user template (opt-in via `systemctl --user enable anolisa-memory@$USER`).
+# Per-user instance because the server is stdio-bound per agent session.
+install -d -m 0755 %{buildroot}%{_userunitdir}
+install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_userunitdir}/anolisa-memory@.service
+
+# Install tmpfiles.d snippet so /run/anolisa{,/sessions} is created at
+# boot with 0700 permissions even when the unit is started by hand.
+install -d -m 0755 %{buildroot}%{_tmpfilesdir}
+install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
+
+# Install documentation (CHANGELOG + user manual EN/ZH)
+install -d -m 0755 %{buildroot}%{_docdir}/%{name}
+install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
+install -p -m 0644 docs/user_manual.md %{buildroot}%{_docdir}/%{name}/user_manual.md
+install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_manual.zh.md
+
+%files
+%defattr(0644,root,root,0755)
+%license LICENSE
+%attr(0755,root,root) %{_bindir}/agent-memory
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/agent-memory
+%attr(0644,root,root) %{_datadir}/anolisa/agent-memory/default.toml
+%dir %{_datadir}/anolisa/mcp-servers
+%attr(0644,root,root) %{_datadir}/anolisa/mcp-servers/agent-memory.json
+%{_userunitdir}/anolisa-memory@.service
+%{_tmpfilesdir}/anolisa-memory.conf
+%doc %{_docdir}/%{name}/CHANGELOG.md
+%doc %{_docdir}/%{name}/user_manual.md
+%doc %{_docdir}/%{name}/user_manual.zh.md
+
+%post
+# Apply the shipped tmpfiles.d snippet immediately so /run/anolisa{,
+# /sessions} is in place before the first invocation, instead of
+# waiting for the next boot.
+%tmpfiles_create %{_tmpfilesdir}/anolisa-memory.conf
+# We deliberately do NOT pre-create a per-user memory directory here.
+# The previous attempt derived the target from $HOME / $SUDO_USER, both
+# of which are forgeable (an attacker with control of SUDO_USER's env
+# could redirect chown to an arbitrary path). The binary's `init`
+# subcommand creates the namespace under the invoking user's real
+# ~/.anolisa/memory/user-<uid>/ — fed by libc::getuid() — on first
+# run, which is the correct trust boundary.
+
+%changelog
+* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
+- Initial release: filesystem memory MCP server for AI agents (Linux only)
+- 19 MCP tools over stdio JSON-RPC 2.0 across Tier A (file ops),
+  Tier B (structured search), Tier C (governance)
+- Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
+  user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
+  sandbox on every Tier A file open
+- SQLite FTS5 BM25 background index with transactional upsert,
+  schema-versioned migrations, and trigram CJK tokenizer
+- Optional git versioning with auto-commit serialized via per-handle
+  mutex; commits offloaded to tokio::task::spawn_blocking
+- tar.gz snapshots with strict id whitelist and atomic per-entry rename
+  swap on restore; rollback entries preserved under .anolisa/trash/
+- Optional cgroup v2 memory.max self-limit and journald audit fan-out
+- systemd user template with hardening (SystemCallFilter, MDWX,
+  RestrictNamespaces allowlist user|mnt) + tmpfiles.d snippet
+- RPM build fully offline via vendored crates (Source1); single
+  statically-linked binary (bundled SQLite + vendored libgit2)

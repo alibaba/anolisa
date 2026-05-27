@@ -18,6 +18,7 @@
 #   sec-core agent-sec-core     (Security CLI + sandbox + hooks)
 #   tokenless tokenless         (Rust compression library, cross-platform)
 #   ws-ckpt  ws-ckpt           (Rust workspace checkpoint daemon)
+#   memory   agent-memory       (Rust MCP filesystem memory server, Linux only)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -519,8 +520,8 @@ detect_distro() {
 
 # Default components (sight is excluded — it is optional and provides audit
 # capabilities only; use --component sight to include it explicitly).
-DEFAULT_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt)
-ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt sight)
+DEFAULT_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt memory)
+ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt memory sight)
 
 active_components() {
     if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
@@ -749,7 +750,7 @@ install_build_tools() {
 }
 
 install_rust() {
-    step "Rust (for agent-sec-core, agentsight, tokenless, ws-ckpt)"
+    step "Rust (for agent-sec-core, agentsight, tokenless, ws-ckpt, agent-memory)"
     local REQUIRED="1.91.0"
 
     local rust_pkg="rust" cargo_pkg="cargo"
@@ -1342,7 +1343,7 @@ do_install_deps() {
         if want_component cosh || want_component sec-core; then
             echo "DRY-RUN: check/install Node.js and build tools if needed"
         fi
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
         fi
         if want_component tokenless; then
@@ -1366,7 +1367,7 @@ do_install_deps() {
         install_build_tools
     fi
 
-    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
         install_rust
     fi
 
@@ -1573,6 +1574,45 @@ build_wsckpt() {
     fi
 }
 
+build_agent_memory() {
+    step "Building agent-memory"
+    local dir="$PROJECT_ROOT/src/agent-memory"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+    cd "$dir"
+
+    # agent-memory needs cmake (for git2's vendored libgit2) and libsystemd
+    # headers (for the journald audit fan-out); both are missing from the
+    # default toolchain installs above.
+    if ! $DRY_RUN; then
+        local missing=()
+        cmd_exists cmake || missing+=("cmake")
+        if [[ "$PKG_BASE" == "rpm" ]] && ! rpm -q systemd-devel &>/dev/null; then
+            missing+=("systemd-devel")
+        elif [[ "$PKG_BASE" == "deb" ]] && ! dpkg -s libsystemd-dev &>/dev/null 2>&1; then
+            missing+=("libsystemd-dev")
+        fi
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            warn "agent-memory native deps missing: ${missing[*]}"
+            info "Install with: ${BOLD}sudo $PKG_INSTALL ${missing[*]}${NC}"
+        fi
+    fi
+
+    stage_component_make_install "agent-memory" "$dir"
+    if $DRY_RUN; then
+        ok "agent-memory build plan generated"
+        return 0
+    fi
+
+    local component_root bin
+    component_root="$(component_target_dir agent-memory)"
+    bin="$component_root/bin/agent-memory"
+    if [[ -f "$bin" ]]; then
+        ok "agent-memory built successfully"
+    else
+        warn "Expected artifact $bin not found"
+    fi
+}
+
 do_build() {
     # shellcheck source=/dev/null
     [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
@@ -1581,7 +1621,7 @@ do_build() {
     export PATH="$HOME/.local/bin:$PATH"
 
     if $DRY_RUN; then
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: configure cargo mirror for this build"
         fi
         if want_component cosh || want_component sec-core || want_component sight; then
@@ -1596,7 +1636,7 @@ do_build() {
         echo "DRY-RUN: rm -rf $OUTPUT_DIR"
         echo "DRY-RUN: mkdir -p $OUTPUT_DIR"
     else
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt; then
+        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             _configure_cargo_mirror
         fi
         if want_component cosh || want_component sec-core || want_component sight; then
@@ -1616,12 +1656,13 @@ do_build() {
         info "Build log → $LOG_FILE"
     fi
 
-    if want_component cosh;      then build_cosh;      fi
-    if want_component skills;    then build_skills;    fi
-    if want_component sec-core;  then build_sec_core;  fi
-    if want_component tokenless; then build_tokenless; fi
-    if want_component ws-ckpt;   then build_wsckpt;    fi
-    if want_component sight;     then build_sight;     fi
+    if want_component cosh;      then build_cosh;         fi
+    if want_component skills;    then build_skills;       fi
+    if want_component sec-core;  then build_sec_core;     fi
+    if want_component tokenless; then build_tokenless;    fi
+    if want_component ws-ckpt;   then build_wsckpt;       fi
+    if want_component memory;    then build_agent_memory;   fi
+    if want_component sight;     then build_sight;        fi
 }
 
 # ─── install functions ───
@@ -1816,14 +1857,29 @@ install_wsckpt() {
     fi
 }
 
+install_agent_memory() {
+    step "Installing agent-memory"
+    local dir="$PROJECT_ROOT/src/agent-memory"
+    run_component_make_install "agent-memory" "$dir"
+    # agent-memory ships a per-user systemd template
+    # (anolisa-memory@.service); intentionally NOT enabled by default so
+    # users can opt-in with `systemctl --user enable anolisa-memory@$USER`.
+    if $DRY_RUN; then
+        ok "agent-memory install plan generated for ${INSTALL_BIN_DIR}/"
+    else
+        ok "agent-memory installed to ${INSTALL_BIN_DIR}/"
+    fi
+}
+
 do_install() {
     step "Installing components (mode=${INSTALL_MODE})"
-    if want_component cosh;      then install_cosh;      fi
-    if want_component skills;    then install_skills;    fi
-    if want_component sec-core;  then install_sec_core;  fi
-    if want_component tokenless; then install_tokenless; fi
-    if want_component ws-ckpt;   then install_wsckpt;    fi
-    if want_component sight;     then install_sight;     fi
+    if want_component cosh;      then install_cosh;         fi
+    if want_component skills;    then install_skills;       fi
+    if want_component sec-core;  then install_sec_core;     fi
+    if want_component tokenless; then install_tokenless;    fi
+    if want_component ws-ckpt;   then install_wsckpt;       fi
+    if want_component memory;    then install_agent_memory; fi
+    if want_component sight;     then install_sight;        fi
 }
 
 # ─── uninstall functions ───
@@ -1910,14 +1966,26 @@ uninstall_wsckpt() {
     fi
 }
 
+uninstall_agent_memory() {
+    step "Uninstalling agent-memory"
+    local dir="$PROJECT_ROOT/src/agent-memory"
+    run_component_make_uninstall "agent-memory" "$dir" || true
+    if $DRY_RUN; then
+        ok "agent-memory uninstall plan generated"
+    else
+        ok "agent-memory uninstalled"
+    fi
+}
+
 do_uninstall() {
     step "Uninstalling components"
-    if want_component cosh;      then uninstall_cosh;      fi
-    if want_component skills;    then uninstall_skills;    fi
-    if want_component sec-core;  then uninstall_sec_core;  fi
-    if want_component tokenless; then uninstall_tokenless; fi
-    if want_component ws-ckpt;   then uninstall_wsckpt;    fi
-    if want_component sight;     then uninstall_sight;     fi
+    if want_component cosh;      then uninstall_cosh;         fi
+    if want_component skills;    then uninstall_skills;       fi
+    if want_component sec-core;  then uninstall_sec_core;     fi
+    if want_component tokenless; then uninstall_tokenless;    fi
+    if want_component ws-ckpt;   then uninstall_wsckpt;       fi
+    if want_component memory;    then uninstall_agent_memory; fi
+    if want_component sight;     then uninstall_sight;        fi
 
     if [[ -d "$INSTALL_EXTENSIONS_DIR" ]] && [[ -z "$(ls -A "$INSTALL_EXTENSIONS_DIR" 2>/dev/null)" ]]; then
         if $DRY_RUN; then

@@ -54,11 +54,26 @@ run_tokenless() {
     fi
 }
 
+run_agent_memory() {
+    echo "==> Running agent-memory tests (Linux only)"
+    cd "$ROOT_DIR/src/agent-memory" || exit 1
+    if [ "$(uname -s)" != "Linux" ]; then
+        echo "agent-memory is Linux-only; skipping on $(uname -s)."
+        return 0
+    fi
+    if command -v cargo >/dev/null 2>&1; then
+        cargo test --locked
+    else
+        echo "cargo not found, skipping agent-memory tests."
+    fi
+}
+
 if [ -z "$FILTER" ]; then
     run_shell
     run_sec
     run_sight
     run_tokenless
+    run_agent_memory
 elif [ "$FILTER" == "shell" ]; then
     run_shell
 elif [ "$FILTER" == "sec" ]; then
@@ -67,8 +82,10 @@ elif [ "$FILTER" == "sight" ]; then
     run_sight
 elif [ "$FILTER" == "tokenless" ]; then
     run_tokenless
+elif [ "$FILTER" == "memory" ] || [ "$FILTER" == "mem" ]; then
+    run_agent_memory
 else
-    echo "Unknown filter: $FILTER. Use 'shell', 'sec', 'sight', or 'tokenless'."
+    echo "Unknown filter: $FILTER. Use 'shell', 'sec', 'sight', 'tokenless', or 'memory'."
     exit 1
 fi
 

@@ -16,6 +16,7 @@ system built for AI Agent workloads.
 | [Agent Sec Core](src/agent-sec-core/) | OS-level security kernel — system hardening, sandboxing, asset integrity verification, and security decision-making. |
 | [AgentSight](src/agentsight/) | eBPF-based observability for AI Agents — zero-intrusion monitoring of LLM API calls, token consumption, and process behavior. |
 | [Token-less](src/tokenless/) | LLM token optimization toolkit — schema/response compression and command rewriting to reduce token consumption. |
+| [Agent Memory](src/agent-memory/) | CMA-style persistent filesystem memory for AI agents, served over MCP — sandboxed file tools, SQLite FTS5 BM25 index, optional git versioning and tar.gz snapshots. Linux only. |
 | [OS Skills](src/os-skills/) | Curated skill library for system administration, monitoring, security, DevOps, and cloud integration. |
 
 See each component's README for detailed documentation.
@@ -24,7 +25,7 @@ See each component's README for detailed documentation.
 
 ```bash
 # Install all components via RPM
-sudo yum install copilot-shell agent-sec-core agentsight tokenless os-skills
+sudo yum install copilot-shell agent-sec-core agentsight tokenless agent-memory os-skills
 
 # Launch Copilot Shell
 cosh

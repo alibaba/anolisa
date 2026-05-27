@@ -12,9 +12,10 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux only |
 | **tokenless** | `src/tokenless/` | Rust | Linux only |
+| **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 
-> `agent-sec-core`, `agentsight`, and `tokenless` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, `tokenless`, and `agent-memory` require Linux. Do **not** attempt to build them on macOS or Windows.
 
 ## Development Commands
 
@@ -55,6 +56,12 @@ cd src/os-skills   # Skill definitions are static assets, no compilation needed
 cd src/tokenless
 cargo build --release
 cargo test
+
+# agent-memory (Linux only, per-component)
+cd src/agent-memory
+make build       # cargo build --release --locked
+make test        # cargo test --locked
+make smoke       # end-to-end MCP stdio smoke test
 ```
 
 ## Commit Message Rules
@@ -75,6 +82,7 @@ Format: `type(scope): description`
 | `src/os-skills/` | `skill` |
 | `src/agentsight/` | `sight` |
 | `src/tokenless/` | `tokenless` |
+| `src/agent-memory/` | `memory` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -142,6 +150,7 @@ When generating a PR description, use `.github/pull_request_template.md` as the 
 - `skill` → any file under `src/os-skills/`
 - `sight` → any file under `src/agentsight/`
 - `tokenless` → any file under `src/tokenless/`
+- `memory` → any file under `src/agent-memory/`
 - `Multiple / Project-wide` → cross-component or root-level changes
 
 **Checklist** — mark items that actually apply to this PR; skip items for unaffected components.

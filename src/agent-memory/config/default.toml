@@ -1,0 +1,22 @@
+[global]
+# Identity used as the default namespace (`user-<user_id>`).
+# Override via env: USER_ID=alice
+user_id = "default"
+
+[memory]
+# Intelligence profile biasing tool-selection strategy.
+# - basic    : weak models, prefer Tier B structured API (P4+)
+# - advanced : strong models (default), prefer file tools
+# - expert   : frontier models, file tools only
+# Profile gates BOTH tools/list (Tier B is hidden) AND tools/call
+# (Tier B invocations are rejected with METHOD_NOT_FOUND on `expert`),
+# so a client cannot bypass the filter by hard-coding a tool name.
+# It is still a UX hint, not a security boundary against a co-tenant
+# with kernel-level access — the filesystem sandbox is.
+profile = "advanced"
+
+[memory.paths]
+# Base directory under which each namespace gets its own mount:
+#   <base_dir>/<ns_kind>-<ns_id>/{README.md, .anolisa/, ...}
+# Override via env: MEMORY_BASE_DIR=/custom/path
+base_dir = "~/.anolisa/memory"

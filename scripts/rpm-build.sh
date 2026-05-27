@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -25,6 +25,7 @@ SEC_DIR="${ROOT_DIR}/src/agent-sec-core"
 SKILLS_DIR="${ROOT_DIR}/src/os-skills"
 SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
+MEM_DIR="${ROOT_DIR}/src/agent-memory"
 
 # Colors
 RED='\033[0;31m'
@@ -460,6 +461,95 @@ build_tokenless() {
 }
 
 # =============================================================================
+# agent-memory
+# =============================================================================
+build_agent_memory() {
+    log "=========================================="
+    log "Building RPM: agent-memory"
+    log "=========================================="
+
+    local spec_in="${MEM_DIR}/agent-memory.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    # Version from env, Cargo.toml, then spec fallback
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${MEM_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        version="0.1.0"
+        warn "No version specified for agent-memory, using default: ${version}"
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    # The source-archive top-level dir must match `%setup -n %{name}-%{version}`
+    # in the spec, so the unpacked tree lines up with the CI-produced
+    # archive from .github/actions/package-source.
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    # Single tar pass: copy the whole source tree minus build artefacts.
+    # The previous two-pass implementation hard-failed under `set -e`
+    # because the first pass referenced an `adapters/` directory that
+    # only exists in agent-sec-core, leaving agent-memory's RPM build
+    # broken from day one.
+    tar -cf - -C "$MEM_DIR" \
+        --exclude='target' \
+        --exclude='dist' \
+        --exclude='.git' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        --exclude='node_modules' \
+        --exclude='.tsbuildinfo' \
+        --exclude='tests' \
+        . | tar -xf - -C "$pkg_dir"
+
+    # Vendor tarball for --offline cargo build. Must run BEFORE copying
+    # .cargo/config.toml into the source tarball so the vendored-sources
+    # config (not the original crates-io one) ends up in Source0.
+    log "Step 2/3: Creating vendor tarball..."
+    cd "$MEM_DIR" && cargo vendor vendor/
+    mkdir -p "$MEM_DIR"/.cargo
+    printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > "$MEM_DIR"/.cargo/config.toml
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    cp -R "$MEM_DIR"/vendor "$vendor_tmp"/vendor
+    tar czf "${BUILD_DIR}/SOURCES/${pkg_name}-${version}-vendor.tar.gz" -C "$vendor_tmp" vendor
+    rm -rf "$vendor_tmp"
+
+    # .cargo/config.toml is now the vendored-sources version; copy it
+    # into Source0 so cargo --offline can find the local vendor/ dir.
+    # vendor/ itself is in Source1, extracted by %setup -a 1.
+    mkdir -p "$pkg_dir"/.cargo
+    cp "$MEM_DIR"/.cargo/config.toml "$pkg_dir"/.cargo/
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "agent-memory RPM built successfully"
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 usage() {
@@ -471,6 +561,7 @@ usage() {
     echo "  os-skills           Build os-skills RPM"
     echo "  agentsight          Build agentsight RPM"
     echo "  tokenless           Build tokenless RPM"
+    echo "  agent-memory        Build agent-memory RPM"
     echo "  all                 Build all RPM packages"
     echo ""
     echo "Environment variables:"
@@ -511,12 +602,16 @@ case "$TARGET" in
     tokenless)
         build_tokenless
         ;;
+    agent-memory)
+        build_agent_memory
+        ;;
     all)
         build_copilot_shell
         build_agent_sec_core
         build_agentic_os_skills
         build_agentsight
         build_tokenless
+        build_agent_memory
         ;;
     *)
         err "Unknown package: $TARGET"

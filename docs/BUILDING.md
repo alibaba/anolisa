@@ -17,7 +17,8 @@ anolisa/
 │   ├── copilot-shell/       # AI terminal assistant (Node.js / TypeScript)
 │   ├── os-skills/           # Ops skills (Markdown + optional scripts)
 │   ├── agent-sec-core/      # Agent security sandbox (Rust + Python)
-│   └── agentsight/          # eBPF observability/audit agent (Rust, optional)
+│   ├── agentsight/          # eBPF observability/audit agent (Rust, optional)
+│   └── agent-memory/        # MCP filesystem memory server (Rust, Linux only)
 ├── scripts/
 │   ├── build-all.sh         # Unified build entry
 │   └── rpm-build.sh         # Unified RPM build script
@@ -35,6 +36,7 @@ anolisa/
 | os-skills | Python >= 3.12 (only for optional scripts) |
 | agent-sec-core | Rust >= 1.91.0, Python >= 3.12, uv (Linux only) |
 | agentsight *(optional)* | Rust >= 1.80, clang >= 14, libbpf headers, kernel headers (Linux only) |
+| agent-memory | Rust >= 1.85, cargo, cmake, libsystemd headers (Linux only) |
 
 ## 3. Quick Start
 

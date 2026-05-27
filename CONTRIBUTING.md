@@ -106,6 +106,7 @@ docs(docs): update installation guide
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
 | `sight` | `src/agentsight/` |
+| `memory` | `src/agent-memory/` |
 | `ci` | `.github/workflows/` |
 | `docs` | `docs/` or documentation updates |
 | `deps` | Dependency version bumps (lock files) |
@@ -130,7 +131,7 @@ When you open a PR, the following checks run automatically:
 | Check | Level | How to fix |
 |-------|-------|------------|
 | Commit scope missing | **Error** (blocks merge) | Add `(scope)` to every commit message, e.g. `fix(cosh): ...` |
-| Commit scope not in allowed list | Warning | Use one of the scopes above: `cosh`, `sec-core`, `skill`, `sight`, `ci`, `docs`, `deps`, `chore` |
+| Commit scope not in allowed list | Warning | Use one of the scopes above: `cosh`, `sec-core`, `skill`, `sight`, `memory`, `ci`, `docs`, `deps`, `chore` |
 | PR title format | Warning | Follow `type(scope): description` — same as commit messages |
 | Branch name convention | Warning | Follow `feature/<scope>/<desc>` — not required for forks |
 | PR not linked to an issue | Warning | Add `closes #<n>` to your PR description, or `no-issue: <reason>` |
