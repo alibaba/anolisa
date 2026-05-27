@@ -3317,4 +3317,163 @@ describe('useGeminiStream', () => {
       expect(result.current.userPromptConfirmationRequest).toBeNull();
     });
   });
+
+  // Regression coverage for issue #635: HookSystemMessage must not be
+  // routed through assistant content, and pending content flushes triggered
+  // by Content<->Thought block switches must advance the redaction cursor.
+  describe('HookSystemMessage and Content/Thought interleaving', () => {
+    const geminiTextCalls = () =>
+      mockAddItem.mock.calls
+        .filter(
+          (call) =>
+            call[0].type === 'gemini' || call[0].type === 'gemini_content',
+        )
+        .map((call) => call[0].text as string);
+
+    it('renders HookSystemMessage as an info item and does not duplicate it into later assistant content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: '[test-hook] warning',
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('hook test');
+      });
+
+      await waitFor(() => {
+        // Hook message must surface as a host/info notification.
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: MessageType.INFO,
+            text: '[test-hook] warning',
+          }),
+          expect.any(Number),
+        );
+        // The model answer is still committed as a gemini item.
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'gemini', text: 'answer' }),
+          expect.any(Number),
+        );
+      });
+
+      // No gemini / gemini_content item may carry the hook warning text —
+      // it must never have been treated as assistant content.
+      for (const text of geminiTextCalls()) {
+        expect(text).not.toContain('[test-hook] warning');
+      }
+    });
+
+    it('does not re-emit earlier content when a Thought separates two Content chunks', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'first',
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'second',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('split test');
+      });
+
+      await waitFor(() => {
+        // The post-thought content must commit as just "second", not
+        // "firstsecond" (which would mean the redaction cursor was not
+        // advanced when the thought flushed the pending gemini item).
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'gemini', text: 'second' }),
+          expect.any(Number),
+        );
+      });
+
+      const texts = geminiTextCalls();
+      // Each text is exactly one chunk, never a concatenation that would
+      // indicate a re-slice of already-committed content.
+      expect(texts).toEqual(expect.arrayContaining(['first', 'second']));
+      for (const text of texts) {
+        expect(text).not.toBe('firstsecond');
+        expect(text).not.toContain('firstfirst');
+      }
+    });
+
+    it('handles repeated Thought -> Content block switches without duplicating prior content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 't1' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'c1',
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 't2' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'c2',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('multi switch');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'gemini', text: 'c2' }),
+          expect.any(Number),
+        );
+      });
+
+      const texts = geminiTextCalls();
+      expect(texts).toEqual(expect.arrayContaining(['c1', 'c2']));
+      for (const text of texts) {
+        expect(text).not.toBe('c1c2');
+        expect(text).not.toContain('c1c1');
+      }
+    });
+  });
 });

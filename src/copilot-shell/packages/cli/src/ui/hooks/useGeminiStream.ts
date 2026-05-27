@@ -486,6 +486,29 @@ export const useGeminiStream = (
 
   // --- Stream Event Handlers ---
 
+  // Flush the pending streaming history item. For gemini / gemini_content
+  // items the redaction cursor must also advance, otherwise a subsequent
+  // Content event will re-slice the already-flushed prefix from the raw
+  // turn buffer and duplicate it in history (see issue #635).
+  const finalizePendingHistoryItem = useCallback(
+    (userMessageTimestamp: number) => {
+      const pendingItem = pendingHistoryItemRef.current;
+      if (!pendingItem) return;
+
+      addItem(pendingItem, userMessageTimestamp);
+
+      if (
+        pendingItem.type === 'gemini' ||
+        pendingItem.type === 'gemini_content'
+      ) {
+        committedRedactedTextRef.current += pendingItem.text;
+      }
+
+      setPendingHistoryItem(null);
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
   const handleContentEvent = useCallback(
     (
       eventValue: ContentEvent['value'],
@@ -610,10 +633,10 @@ export const useGeminiStream = (
 
       // If we're not already showing a thought, start a new one
       if (!isPendingThought) {
-        // If there's a pending non-thought item, finalize it first
-        if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
-        }
+        // If there's a pending non-thought item, finalize it first. This
+        // also advances the redaction cursor for gemini/gemini_content so
+        // that the next Content event does not re-slice committed text.
+        finalizePendingHistoryItem(userMessageTimestamp);
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
 
@@ -654,7 +677,13 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      mergeThought,
+      finalizePendingHistoryItem,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -712,6 +741,26 @@ export const useGeminiStream = (
       setThought(null); // Reset thought when there's an error
     },
     [addItem, pendingHistoryItemRef, setPendingHistoryItem, config, setThought],
+  );
+
+  const handleHookSystemMessageEvent = useCallback(
+    (message: string, userMessageTimestamp: number) => {
+      if (turnCancelledRef.current) {
+        return;
+      }
+      // Hook/host notifications are not assistant content. Flush any
+      // pending streaming item (advancing the redaction cursor when needed)
+      // and render the hook message as a standalone info item.
+      finalizePendingHistoryItem(userMessageTimestamp);
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: message,
+        },
+        userMessageTimestamp,
+      );
+    },
+    [addItem, finalizePendingHistoryItem],
   );
 
   const handleCitationEvent = useCallback(
@@ -937,13 +986,11 @@ export const useGeminiStream = (
             // Will add the missing logic later
             break;
           case ServerGeminiEventType.HookSystemMessage:
-            // Display system message from hooks (e.g., Ralph Loop iteration info)
-            // This is handled as a content event to show in the UI
-            geminiMessageBuffer = handleContentEvent(
-              event.value + '\n',
-              geminiMessageBuffer,
-              userMessageTimestamp,
-            );
+            // Hook/host notifications are NOT model assistant content. They
+            // must not be routed through handleContentEvent (which would add
+            // them to rawTurnContentRef and risk duplicate rendering when
+            // later Content / Thought events re-slice that buffer).
+            handleHookSystemMessageEvent(event.value, userMessageTimestamp);
             break;
           case ServerGeminiEventType.AfterModelHookStop:
             // AfterModel hook requested stop — agent loop is ended by client.ts.
@@ -983,6 +1030,7 @@ export const useGeminiStream = (
       handleMaxSessionTurnsEvent,
       handleSessionTokenLimitExceededEvent,
       handleCitationEvent,
+      handleHookSystemMessageEvent,
       setThought,
     ],
   );
