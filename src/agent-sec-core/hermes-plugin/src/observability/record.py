@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .helpers import non_empty_string, now_iso
+from .helpers import json_safe, non_empty_string, now_iso
 
 ZERO_RUN_ID = "00000000-0000-0000-0000-000000000000"
+_MISSING = object()
 
 
 def build_record(
@@ -104,17 +105,21 @@ def _build_pre_api_request(
     data: dict[str, Any],
     observed_at: str,
 ) -> dict[str, Any] | None:
+    metrics: dict[str, Any] = {
+        "model_id": data.get("model"),
+        "model_provider": data.get("provider"),
+        "api": data.get("api_mode"),
+        "transport": data.get("base_url"),
+        "history_messages_count": data.get("message_count"),
+    }
+    if "request_messages" in data:
+        metrics["prompt"] = json_safe(data.get("request_messages"))
+
     return _base_record(
         "before_llm_call",
         observed_at,
         _metadata(data),
-        {
-            "model_id": data.get("model"),
-            "model_provider": data.get("provider"),
-            "api": data.get("api_mode"),
-            "transport": data.get("base_url"),
-            "history_messages_count": data.get("message_count"),
-        },
+        metrics,
     )
 
 
@@ -122,16 +127,45 @@ def _build_post_api_request(
     data: dict[str, Any],
     observed_at: str,
 ) -> dict[str, Any] | None:
+    metrics: dict[str, Any] = {
+        "latency_ms": data.get("api_duration"),
+        "stop_reason": data.get("finish_reason"),
+        "tool_calls_count": data.get("assistant_tool_call_count"),
+    }
+    if "assistant_message" in data:
+        response = _extract_assistant_output(data.get("assistant_message"))
+        if response:
+            metrics["response"] = response
+
     return _base_record(
         "after_llm_call",
         observed_at,
         _metadata(data),
-        {
-            "latency_ms": data.get("api_duration"),
-            "stop_reason": data.get("finish_reason"),
-            "tool_calls_count": data.get("assistant_tool_call_count"),
-        },
+        metrics,
     )
+
+
+def _extract_assistant_output(message: Any) -> dict[str, Any]:
+    if isinstance(message, str):
+        return {"content": message}
+
+    output: dict[str, Any] = {}
+    for field in ("content", "reasoning", "tool_calls"):
+        value = _field_value(message, field)
+        if value is not _MISSING:
+            output[field] = json_safe(value)
+    return output
+
+
+def _field_value(value: Any, field: str) -> Any:
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        return _MISSING
+    try:
+        return getattr(value, field)
+    except Exception:
+        return _MISSING
 
 
 def _build_pre_tool_call(

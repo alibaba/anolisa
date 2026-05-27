@@ -27,6 +27,19 @@ class InlineThread:
         self._target(*self._args, **self._kwargs)
 
 
+class FakeMessage:
+    def __init__(self, role, content):
+        self.role = role
+        self.content = content
+
+
+class FakeAssistantMessage:
+    def __init__(self):
+        self.content = "done"
+        self.reasoning = "brief reasoning"
+        self.tool_calls = [{"name": "terminal", "arguments": {"command": "ls"}}]
+
+
 def _make_capability() -> ObservabilityCapability:
     cap = ObservabilityCapability()
     cap._timeout = 5.0
@@ -244,6 +257,45 @@ def test_capability_handlers_emit_all_registered_hook_types():
         "after_tool_call",
         "after_agent_run",
     ]
+
+
+def test_api_request_handlers_pass_llm_input_and_output_fields():
+    cap = _make_capability()
+
+    with patch(
+        "src.capabilities.observability.threading.Thread",
+        InlineThread,
+    ), patch(
+        "src.capabilities.observability.record_hermes_observability",
+        return_value=CliResult(stdout="", stderr="", exit_code=0),
+    ) as mock_record:
+        cap._on_pre_api_request(
+            session_id="session-1",
+            api_call_count=1,
+            request_messages=[FakeMessage("user", "hello")],
+        )
+        cap._on_post_api_request(
+            session_id="session-1",
+            api_call_count=1,
+            assistant_message=FakeAssistantMessage(),
+            raw_response={"ignored": True},
+            usage={"completion_tokens": 5},
+        )
+
+    pre_payload = mock_record.call_args_list[0].args[0]
+    post_payload = mock_record.call_args_list[1].args[0]
+    assert pre_payload["hook"] == "before_llm_call"
+    assert pre_payload["metrics"]["prompt"] == [{"role": "user", "content": "hello"}]
+    assert post_payload["hook"] == "after_llm_call"
+    assert post_payload["metrics"]["response"] == {
+        "content": "done",
+        "reasoning": "brief reasoning",
+        "tool_calls": [
+            {"name": "terminal", "arguments": {"command": "ls"}},
+        ],
+    }
+    assert "raw_response" not in post_payload["metrics"]
+    assert "usage" not in post_payload["metrics"]
 
 
 def test_post_tool_call_preserves_explicit_none_result():

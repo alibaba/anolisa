@@ -14,6 +14,29 @@ from agent_sec_cli.observability import schema  # noqa: E402
 from src.observability.record import ZERO_RUN_ID, build_record  # noqa: E402
 
 
+class FakeMessage:
+    def __init__(self, role, content):
+        self.role = role
+        self.content = content
+
+
+class FakeToolCall:
+    def __init__(self, tool_call_id, name, arguments):
+        self.id = tool_call_id
+        self.name = name
+        self.arguments = arguments
+
+
+class FakeAssistantMessage:
+    def __init__(self):
+        self.content = "done"
+        self.reasoning = {"summary": "checked"}
+        self.tool_calls = [
+            FakeToolCall("tool-1", "terminal", {"command": "ls"}),
+        ]
+        self.raw_response = {"ignored": True}
+
+
 def _assert_schema_valid(record: dict) -> None:
     validated = schema.validate_observability_record(record)
     wire_record = validated.to_record()
@@ -81,6 +104,35 @@ def test_pre_api_request_builds_before_llm_record_without_plugin_counters():
     _assert_schema_valid(record)
 
 
+def test_pre_api_request_records_prompt_from_request_messages():
+    record = build_record(
+        "pre_api_request",
+        {
+            "session_id": "session-1",
+            "api_call_count": 3,
+            "model": "gpt-test",
+            "provider": "openai",
+            "request_messages": [
+                FakeMessage("system", "You are concise."),
+                {"role": "user", "content": "hello"},
+            ],
+            "usage": {"prompt_tokens": 10},
+            "raw_response": {"id": "response-1"},
+        },
+        observed_at="2026-05-18T00:00:01Z",
+    )
+
+    assert record["hook"] == "before_llm_call"
+    assert record["metadata"]["callId"] == f"{ZERO_RUN_ID}:llm:3"
+    assert record["metrics"]["prompt"] == [
+        {"role": "system", "content": "You are concise."},
+        {"role": "user", "content": "hello"},
+    ]
+    assert "usage" not in record["metrics"]
+    assert "raw_response" not in record["metrics"]
+    _assert_schema_valid(record)
+
+
 def test_post_api_request_omits_call_id_when_current_input_has_no_api_call_count():
     record = build_record(
         "post_api_request",
@@ -102,6 +154,41 @@ def test_post_api_request_omits_call_id_when_current_input_has_no_api_call_count
         "tool_calls_count": 0,
     }
     assert "response_stream_bytes" not in record["metrics"]
+    _assert_schema_valid(record)
+
+
+def test_post_api_request_records_response_from_assistant_message_object():
+    record = build_record(
+        "post_api_request",
+        {
+            "session_id": "session-1",
+            "api_call_count": 4,
+            "api_duration": 123.4,
+            "finish_reason": "stop",
+            "assistant_tool_call_count": 1,
+            "assistant_message": FakeAssistantMessage(),
+            "usage": {"completion_tokens": 10},
+            "raw_response": {"id": "response-1"},
+        },
+        observed_at="2026-05-18T00:00:02Z",
+    )
+
+    assert record["hook"] == "after_llm_call"
+    assert record["metadata"]["callId"] == f"{ZERO_RUN_ID}:llm:4"
+    assert record["metrics"]["response"] == {
+        "content": "done",
+        "reasoning": {"summary": "checked"},
+        "tool_calls": [
+            {
+                "id": "tool-1",
+                "name": "terminal",
+                "arguments": {"command": "ls"},
+            }
+        ],
+    }
+    assert record["metrics"]["stop_reason"] == "stop"
+    assert "usage" not in record["metrics"]
+    assert "raw_response" not in record["metrics"]
     _assert_schema_valid(record)
 
 
