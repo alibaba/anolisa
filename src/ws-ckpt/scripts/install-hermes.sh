@@ -12,7 +12,8 @@ SKILL_DST="${HOME}/.hermes/skills/ws-ckpt"
 if PLUGIN_SRC=$(find_plugin_src hermes); then
     mkdir -p "$(dirname "$PLUGIN_DST")"
     ln -sfn "$PLUGIN_SRC" "$PLUGIN_DST"
-    echo "hermes ws-ckpt plugin linked: $PLUGIN_DST -> $PLUGIN_SRC"
+    hermes plugins enable ws-ckpt
+    echo "hermes ws-ckpt plugin linked and enabled: $PLUGIN_DST -> $PLUGIN_SRC"
     exit 0
 fi
 
