@@ -14,6 +14,10 @@
       "autoCheckpoint": {
         "type": "boolean",
         "description": "Automatically create a checkpoint before each tool call (default: false)"
+      },
+      "workspace": {
+        "type": "string",
+        "description": "Default workspace absolute path used by every ws-ckpt command without -w. If the path is a symlink, pass the link itself — do NOT replace it with the resolved real path; the daemon registers and matches by the exact string. Defaults to ~/.openclaw/workspace."
       }
     }
   }
