@@ -1,4 +1,4 @@
-%define anolis_release 1
+%define anolis_release 2
 %global debug_package %{nil}
 
 Name:           agent-memory
@@ -183,7 +183,7 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
+* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-2
 - Initial release: filesystem memory MCP server for AI agents (Linux only)
 - 19 MCP tools over stdio JSON-RPC 2.0 across Tier A (file ops),
   Tier B (structured search), Tier C (governance)
