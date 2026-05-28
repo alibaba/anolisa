@@ -127,6 +127,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu May 28 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.2-1
+- Fixed openclaw uninstall to remove tool whitelist from config
+- Fixed parent path refusal to apply as workspace-level rules for skill and openclaw plugin
+
 * Wed May 27 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.1-1
 - Fixed plugin workspace config registration and auto-loading
 - Reject workspace paths that are hermes cwd itself or parent

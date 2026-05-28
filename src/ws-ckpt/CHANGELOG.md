@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- Fixed openclaw uninstall to remove tool whitelist from config
+- Fixed parent path refusal to apply as workspace-level rules for skill and openclaw plugin
+
 ## 0.3.1
 
 - Fixed plugin workspace config registration and auto-loading

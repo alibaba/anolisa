@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1",
   "component": "ws-ckpt",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Workspace session snapshot and recovery skill for agent runtimes.",
   "targets": {
     "openclaw": {
