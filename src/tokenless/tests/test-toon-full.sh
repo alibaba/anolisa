@@ -265,7 +265,12 @@ else
     fail "TOON Hook 响应结构异常"
 fi
 context=$(echo "$result" | jq -r '.hookSpecificOutput.additionalContext')
-assert_contains "$context" "token savings" "TOON Hook 包含压缩率信息"
+assert_contains "$context" "users[5]" "TOON Hook additionalContext 为裸 TOON 内容"
+if echo "$context" | grep -qF "TOON format"; then
+    fail "TOON Hook 仍包含已废弃的 [TOON format ...] 前缀"
+else
+    pass "TOON Hook 已去除 [TOON format ...] 前缀"
+fi
 
 scenario "2.2 独立 TOON Hook — 转义 JSON 字符串"
 
@@ -312,7 +317,12 @@ EOF
 result=$(echo "$payload" | python3 "$HOOK_DIR/compress_response_hook.py" 2>/dev/null)
 assert_not_empty "$result" "Response→TOON 流水线输出"
 context=$(echo "$result" | jq -r '.hookSpecificOutput.additionalContext')
-assert_contains "$context" "response compressed + TOON encoded" "流水线标签正确"
+assert_contains "$context" "data[5]" "流水线产出 TOON 表格内容"
+if echo "$context" | grep -qE "\[tokenless\]|TOON format"; then
+    fail "流水线 additionalContext 仍包含已废弃的标签前缀"
+else
+    pass "流水线 additionalContext 已去除标签前缀"
+fi
 # 验证 debug 字段被移除
 if echo "$context" | grep -qvF "debug_trace_id"; then
     pass "Response 压缩移除了 debug 字段"

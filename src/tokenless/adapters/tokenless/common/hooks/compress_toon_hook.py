@@ -120,19 +120,12 @@ def main() -> None:
     if after_chars >= before_chars:
         skip()
 
-    savings_pct = (before_chars - after_chars) * 100 // before_chars if before_chars > 0 else 0
-
     # 12. Build response
-    context = (
-        f"[tokenless] {tool_name} → TOON encoded ({savings_pct}% savings)\n"
-        f"{toon_output}"
-    )
-
     output = {
         "suppressOutput": True,
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": context,
+            "additionalContext": toon_output,
         },
     }
     print(json.dumps(output, ensure_ascii=False))

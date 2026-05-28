@@ -121,13 +121,12 @@ def _classify_env_error(parsed: dict) -> tuple[str | None, str | None]:
 
 
 def _build_additional_context(
-    tool_name: str, savings_pct: int, savings_label: str, content: str,
+    content: str,
     env_attribution: str = "",
 ) -> str:
     parts = []
     if env_attribution:
         parts.append(env_attribution)
-    parts.append(f"[tokenless] {tool_name} → {savings_label} ({savings_pct}% savings)")
     parts.append(content)
     return "\n".join(parts)
 
@@ -192,9 +191,8 @@ def main() -> None:
     attr_category, attr_fix_hint = _classify_env_error(parsed if isinstance(parsed, dict) else {})
     if attr_category:
         env_attribution = (
-            f"[tokenless env-attribution] {tool_name} tool failed: "
-            f"{attr_category} ({attr_fix_hint}). "
-            f"Skip retry — this is an environment issue, not a logic error."
+            f"[tokenless:env] {tool_name} failed: "
+            f"{attr_category} ({attr_fix_hint}). Skip retry."
         )
 
     # 10. Step 1: Response compression (only on JSON objects/arrays)
@@ -222,7 +220,6 @@ def main() -> None:
 
     # 11. Step 2: TOON encoding (via tokenless compress-toon for stats)
     toon_output = ""
-    savings_label = ""
 
     if tokenless_bin:
         toon_parsed = try_parse_json(compressed)
@@ -242,36 +239,15 @@ def main() -> None:
                     candidate = proc.stdout.strip()
                     if len(candidate) < len(compressed):
                         toon_output = candidate
-                        if used_resp_compression:
-                            savings_label = "response compressed + TOON encoded"
-                        else:
-                            savings_label = "TOON encoded"
             except Exception:
                 pass
 
-    # Determine final label
-    if not savings_label:
-        if used_resp_compression:
-            savings_label = "response compressed"
-        else:
-            savings_label = "passed through"
-
-    # Determine final output and metrics
-    if toon_output:
-        final_output = toon_output
-    else:
-        final_output = compressed
-
-    before_chars = len(tool_response)
-    after_chars = len(final_output)
-
-    savings_pct = 0
-    if before_chars > 0:
-        savings_pct = (before_chars - after_chars) * 100 // before_chars
+    # Determine final output
+    final_output = toon_output if toon_output else compressed
 
     # 12. Build response
     context = _build_additional_context(
-        tool_name, savings_pct, savings_label, final_output,
+        final_output,
         env_attribution=env_attribution,
     )
 

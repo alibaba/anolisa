@@ -1040,10 +1040,14 @@ fn build_json_result(
             .iter()
             .map(|m| format!("required dependency missing: {}", m))
             .collect();
-        obj.insert("diagnostic".to_string(), Value::String(
-            format!("[tokenless tool-ready] {}: NOT_READY — {}. Skip retry — environment issue, not logic error.",
-                tool_name, diag_parts.join(", "))
-        ));
+        obj.insert(
+            "diagnostic".to_string(),
+            Value::String(format!(
+                "[tokenless:ready] {}: NOT_READY — {}. Skip retry.",
+                tool_name,
+                diag_parts.join(", ")
+            )),
+        );
     }
     Value::Object(obj)
 }

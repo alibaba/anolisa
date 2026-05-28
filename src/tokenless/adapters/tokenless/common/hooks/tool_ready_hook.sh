@@ -16,7 +16,7 @@
 set -euo pipefail
 
 VERBOSE="${TOKENLESS_VERBOSE:-}"
-log_v() { [ -n "$VERBOSE" ] && echo "[tokenless tool-ready] $1" >&2 || true; }
+log_v() { [ -n "$VERBOSE" ] && echo "[tokenless:ready] $1" >&2 || true; }
 
 # --- Dependency check (fail-open) ---
 if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
@@ -361,7 +361,7 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
     # If only recommended still missing but required OK → PARTIAL, don't block
     if ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
         log_v "Phase 3 FIX: recommended deps partially installed, remaining: ${RECOMMENDED_MISSING_LIST}"
-        DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${RECOMMENDED_MISSING_LIST}. Core tool is functional."
+        DIAG_MSG="[tokenless:ready] ${TOOL_NAME}: PARTIAL — recommended deps not installed:${RECOMMENDED_MISSING_LIST}. Core tool is functional."
         jq -n --arg context "$DIAG_MSG" --arg msg "$DIAG_MSG" '{
           "systemMessage": $msg,
           "hookSpecificOutput": {
@@ -379,7 +379,7 @@ fi
 
 # PARTIAL (no fix script available): inform Agent but don't block
 if $IS_PARTIAL && ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
-    DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: PARTIAL — recommended deps missing:${RECOMMENDED_MISSING_LIST}. Core tool is functional, extended deps may be unavailable."
+    DIAG_MSG="[tokenless:ready] ${TOOL_NAME}: PARTIAL — recommended deps missing:${RECOMMENDED_MISSING_LIST}. Core tool is functional, extended deps may be unavailable."
     log_v "Phase 4 FEEDBACK: $TOOL_NAME → PARTIAL → injecting additionalContext (non-blocking)"
     jq -n --arg context "$DIAG_MSG" --arg msg "$DIAG_MSG" '{
       "systemMessage": $msg,
@@ -403,8 +403,7 @@ DIAG_PARTS=""
 $HAS_VERSION_LOW       && DIAG_PARTS="${DIAG_PARTS} version too low;"
 [ -n "$PERM_MISSING" ] && DIAG_PARTS="${DIAG_PARTS} permission missing:${PERM_MISSING};"
 
-DIAG_MSG="[tokenless tool-ready] ${TOOL_NAME}: NOT_READY (${DIAG_PARTS})"
-DIAG_MSG="${DIAG_MSG} Skip retry — environment issue, not logic error."
+DIAG_MSG="[tokenless:ready] ${TOOL_NAME}: NOT_READY (${DIAG_PARTS}) Skip retry."
 
 log_v "Phase 4 FEEDBACK: $TOOL_NAME → NOT_READY → blocking with decision:block"
 

@@ -149,7 +149,7 @@ function tryCompressToon(response: any, sessionId?: string, toolCallId?: string)
       input,
     }).trim();
     if (!toonText || toonText === input) return null;
-    if (toonText.length > beforeChars) return null;
+    if (toonText.length >= beforeChars) return null;
 
     const afterChars = toonText.length;
     const savingsPct = beforeChars > 0 ? Math.round(((beforeChars - afterChars) / beforeChars) * 100) : 0;
@@ -184,7 +184,7 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
 
     // Phase 4: Fix failed → feedback to Agent
     const diagnostic: string = fixParsed.diagnostic
-      || `[tokenless tool-ready] ${toolName}: NOT_READY — environment issue. Skip retry.`;
+      || `[tokenless:ready] ${toolName}: NOT_READY. Skip retry.`;
     return { status: postStatus, diagnostic };
   } catch {
     return null;
@@ -233,7 +233,7 @@ export default {
         if (!result) return;
 
         if (verbose) {
-          console.log(`[tokenless/tool-ready] ${event.toolName}: ${result.status} — tool not available`);
+          console.log(`[tokenless:ready] ${event.toolName}: ${result.status} — tool not available`);
         }
         return { contextPrefix: result.diagnostic };
       },
@@ -261,7 +261,7 @@ export default {
         if (!rewritten) return;
 
         if (verbose) {
-          console.log(`[tokenless/rtk] rewrite: ${command} -> ${rewritten}`);
+          console.log(`[tokenless:rtk] rewrite: ${command} -> ${rewritten}`);
         }
 
         return { params: { ...event.params, command: rewritten } };
@@ -340,19 +340,17 @@ export default {
           savingsLabel = usedResponseCompression
             ? "response compressed + TOON encoded"
             : "TOON encoded";
-          // Wrap TOON text in the original tool result message structure.
-          // If we return a raw string, OpenClaw's tool_result_persist hook
-          // replaces the entire message body, dropping role/toolCallId/toolName.
-          // That causes session-transcript-repair to inject a synthetic
-          // "missing tool result" error on the next run, breaking the session.
-          const toonWrapped = `[TOON format, ${totalSavingsPct}% token savings]\n${toonText}`;
+          // Preserve original tool result message structure. Returning a raw
+          // string causes OpenClaw's tool_result_persist hook to drop
+          // role/toolCallId/toolName, which makes session-transcript-repair
+          // inject a synthetic "missing tool result" error on the next run.
           if (typeof event.message === "object" && event.message?.role === "toolResult") {
             finalMessage = {
               ...event.message,
-              content: [{ type: "text" as const, text: toonWrapped }],
+              content: [{ type: "text" as const, text: toonText }],
             };
           } else {
-            finalMessage = toonWrapped;
+            finalMessage = toonText;
           }
         } else {
           const before = JSON.stringify(event.message).length;
@@ -366,7 +364,7 @@ export default {
           const before = JSON.stringify(event.message).length;
           const after = usedToon ? toonText.length : JSON.stringify(finalMessage).length;
           console.log(
-            `[tokenless/${savingsLabel}] ${event.toolName}: ${before} -> ${after} chars (${totalSavingsPct}% reduction)`,
+            `[tokenless:${savingsLabel}] ${event.toolName}: ${before} -> ${after} chars (${totalSavingsPct}% reduction)`,
           );
         }
 

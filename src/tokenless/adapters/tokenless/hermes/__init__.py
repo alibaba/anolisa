@@ -226,7 +226,7 @@ def _encode_toon(data: str, session_id: str = "", tool_call_id: str = "") -> tup
 
     toon_text = proc.stdout.strip()
     # Skip if TOON didn't reduce size
-    if toon_text == data or len(toon_text) > len(data):
+    if toon_text == data or len(toon_text) >= len(data):
         return None
 
     savings_pct = 0
@@ -278,10 +278,7 @@ def _env_check(tool_name: str) -> str | None:
 
 
 def _not_ready_msg(tool_name: str) -> str:
-    return (
-        f"[tokenless tool-ready] {tool_name}: NOT_READY — "
-        f"environment issue. Skip retry, this is not a logic error."
-    )
+    return f"[tokenless:ready] {tool_name}: NOT_READY. Skip retry."
 
 
 # ---------------------------------------------------------------------------
@@ -356,12 +353,7 @@ def _try_rewrite(
     logger.info("tokenless: rtk rewrite %s → %s", command, rewritten)
     return {
         "action": "block",
-        "message": (
-            f"[tokenless] Command rewritten for token savings.\n"
-            f"Original: {command}\n"
-            f"Optimized: {rewritten}\n"
-            f"Re-execute with the optimized command to save 60-90% tokens."
-        ),
+        "message": f"[tokenless:rewrite] Re-execute as: {rewritten}",
     }
 
 
@@ -468,14 +460,13 @@ def on_transform_tool_result(
     # Build final output
     if used_toon:
         toon_text, savings_pct = toon_result
+        final = toon_text
         final_len = len(toon_text)
         savings_label = (
             "response compressed + TOON encoded"
             if used_compression
             else "TOON encoded"
         )
-        # Wrap TOON so the model sees the format hint
-        final = f"[TOON format, {savings_pct}% token savings]\n{toon_text}"
     else:
         final = current  # type: ignore[assignment]
         final_len = len(final)
