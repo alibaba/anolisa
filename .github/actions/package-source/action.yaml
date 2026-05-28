@@ -101,7 +101,7 @@ runs:
         echo "LICENSE_BUILD_TARGET=${LICENSE_BUILD_TARGET}" >> $GITHUB_ENV
 
     # -----------------------------------------------------------------
-    # Step 3: Create source archive
+    # Step 3.1: Create source archive
     #
     # If Step 2 detected a LICENSE path reference, the resolved real
     # file is copied into the build tree before packaging so the archive
@@ -145,6 +145,49 @@ runs:
           cp -p "${LICENSE_REAL_PATH}" "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
         fi
 
+    # -----------------------------------------------------------------
+    # Step 3.2: Install plugin npm dependencies (ws-ckpt only)
+    #
+    # The source archive for ws-ckpt ships pre-installed node_modules
+    # so downstream consumers can use plugins without running npm.
+    # -----------------------------------------------------------------
+    - name: Setup Node.js (ws-ckpt)
+      if: inputs.component == 'ws-ckpt'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install plugin npm dependencies (ws-ckpt)
+      if: inputs.component == 'ws-ckpt'
+      shell: bash
+      run: |
+        found=0
+        while IFS= read -r pkg; do
+          plugin_dir=$(dirname "$pkg")
+          echo "::group::npm install: ${plugin_dir#/tmp/build/${ARCHIVE_NAME}/}"
+          cd "$plugin_dir"
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --omit=peer
+          else
+            npm install --ignore-scripts --omit=peer
+          fi
+          echo "::endgroup::"
+          found=$((found + 1))
+          cd /tmp/build/${ARCHIVE_NAME}
+        done < <(find /tmp/build/${ARCHIVE_NAME}/src/plugins -name 'package.json' -not -path '*/node_modules/*' 2>/dev/null)
+
+        if [ "$found" -eq 0 ]; then
+          echo "::warning::No plugin package.json found under src/plugins/"
+        else
+          echo "Installed npm dependencies for $found plugin(s)"
+        fi
+
+    # -----------------------------------------------------------------
+    # Step 3.3: Continue Create source archive
+    # -----------------------------------------------------------------
+    - name: Create source archive (tar)
+      shell: bash
+      run: |
         mkdir -p /tmp/archives
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
           -C /tmp/build "${ARCHIVE_NAME}"
