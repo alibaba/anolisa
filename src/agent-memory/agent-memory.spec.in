@@ -1,4 +1,4 @@
-%define anolis_release 1
+%define anolis_release 3
 %global debug_package %{nil}
 
 Name:           agent-memory
@@ -11,13 +11,23 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
+ExcludeArch:    aarch64
+
 # Build dependencies
 # Rust edition 2024 needs >=1.85; cmake is required by the git2 crate's
 # vendored libgit2 build; systemd-devel ships libsystemd headers for the
-# optional journald audit fan-out. nodejs is required to build the
-# OpenClaw TS plugin (dist/index.js). jq is used by the Makefile
+# optional journald audit fan-out. jq is used by the Makefile
 # `sync-versions` target to write Cargo.toml's version into every
 # derived JSON file (adapter manifest, npm package, mcp-server).
+#
+# The OpenClaw TS plugin (dist/index.js) is pre-built during `make dist`
+# and shipped in the source tarball (Source0); %build verifies it exists
+# but does NOT rebuild it with npm — npm's signal-exit handler crashes
+# with "Exit handler never called!" inside mock/systemd-nspawn
+# (SIGHUP propagation differs from a plain chroot). Dropping npm from
+# BuildRequires avoids this CI-only failure entirely; the pre-built
+# bundle is the authoritative copy, identical to what `npm run build`
+# would produce locally.
 BuildRequires:  cargo >= 1.85
 BuildRequires:  rust >= 1.85
 BuildRequires:  gcc
@@ -72,11 +82,11 @@ script to register with OpenClaw:
 # Combined they require Source1 (vendor) to be present, fail fast otherwise.
 cargo build --release --locked --offline
 
-# Compile the OpenClaw TS plugin via Makefile target.
-# Produces adapters/agent-memory/openclaw/dist/index.js, which package.json
-# declares as "main" and openclaw.extensions. Mirroring tokenless's
-# build-openclaw-plugin pattern.
-make build-openclaw-plugin
+# Verify the pre-built OpenClaw TS plugin is present in the source
+# tarball (shipped by `make dist`). Do NOT rebuild it with npm here —
+# npm's signal-exit handler crashes inside mock/systemd-nspawn.
+test -f adapters/agent-memory/openclaw/dist/index.js \
+    || { echo "ERROR: adapters/agent-memory/openclaw/dist/index.js missing from source tarball"; exit 1; }
 
 %install
 rm -rf %{buildroot}
@@ -183,32 +193,26 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu May 28 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-3
+- Fix OPENCLAW_HOME double-nesting; normalize OPENCLAW_STATE_DIR across
+  lifecycle scripts (env -u OPENCLAW_HOME, trailing slash, state paths)
+- Fix uninstall using wrong plugin ID (memory-anolisa-openclaw-plugin
+  vs memory-anolisa); replace hardcoded string with $PLUGIN_ID
+- Eliminate child_process in config.ts: replace execSync("which") with
+  PATH traversal (searchPathEnv)
+- Flip install flag semantics: bypass OpenClaw security scanner by
+  default (--dangerously-force-unsafe-install), set
+  AGENT_MEMORY_SAFE_INSTALL=1 for the safe-install path
+- Fix .cargo/config.toml flattening in dist tarball; include
+  CHANGELOG.md and LICENSE
+- Drop npm BuildRequires; use pre-built OpenClaw plugin from source
+  tarball instead of rebuilding in %build — npm's signal-exit handler
+  crashes ("Exit handler never called!") inside mock/systemd-nspawn
+  due to SIGHUP propagation differences
+
+* Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-2
+- Add OpenClaw plugin (memory-anolisa) with install/detect/uninstall
+  lifecycle scripts and config.ts binary resolution
+
 * Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-1
-- Initial release: filesystem memory MCP server for AI agents (Linux only)
-- 19 MCP tools over stdio JSON-RPC 2.0 across Tier A (file ops),
-  Tier B (structured search), Tier C (governance)
-- Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
-  user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
-  sandbox on every Tier A file open
-- SQLite FTS5 BM25 background index with transactional upsert,
-  schema-versioned migrations, and trigram CJK tokenizer
-- Optional git versioning with auto-commit serialized via per-handle
-  mutex; commits offloaded to tokio::task::spawn_blocking
-- tar.gz snapshots with strict id whitelist and atomic per-entry rename
-  swap on restore; rollback entries preserved under .anolisa/trash/
-- Optional cgroup v2 memory.max self-limit and journald audit fan-out
-- systemd user template with hardening (SystemCallFilter, MDWX,
-  RestrictNamespaces allowlist user|mnt) + tmpfiles.d snippet
-- RPM build fully offline via vendored crates (Source1); single
-  statically-linked binary (bundled SQLite + vendored libgit2)
-- OpenClaw plugin "memory-anolisa" bundled under
-  /usr/share/anolisa/adapters/agent-memory/openclaw/: 4 memory
-  contract tools (memory_search / memory_get / memory_observe /
-  memory_get_context) routed to the MCP server as a stdio child;
-  install.sh / uninstall.sh registers via the OpenClaw CLI;
-  %preun auto-cleans plugins.{allow,entries,slots} on RPM removal
-- Single-source version sync: Cargo.toml -> jq -> manifest.json /
-  package.json / openclaw.plugin.json / mcp-server.json, plus
-  esbuild --define injects PLUGIN_VERSION into the bundle, so every
-  surface (rpm header, binary, plugin manifest, MCP clientInfo)
-  always agrees with the Rust crate's version
+- Initial release
