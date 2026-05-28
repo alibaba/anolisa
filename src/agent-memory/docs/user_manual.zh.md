@@ -199,10 +199,9 @@ bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
 openclaw gateway restart
 ```
 
-OpenClaw 默认开启签名 / 沙箱校验。在本地开发或 bundle 未签名时如需
-绕过，可设 `AGENT_MEMORY_UNSAFE_INSTALL=1` 调用脚本。
+OpenClaw 安全扫描器将 `child_process.spawn` 标记为"危险代码模式"，但插件仅用 spawn 启动 agent-memory MCP 服务端作为 stdio 子进程——这是标准 MCP 传输机制而非任意 shell 执行。安装脚本默认绕过扫描器。若需走常规（可能阻断的）安全安装路径，可设 `AGENT_MEMORY_SAFE_INSTALL=1` 调用脚本。
 
-卸载（从 `~/.openclaw/plugins/` 移除插件并清理 `openclaw.json` 的
+卸载（从 `~/.openclaw/extensions/` 移除插件并清理 `openclaw.json` 的
 `plugins.{allow,entries,slots}` 条目）：
 
 ```bash

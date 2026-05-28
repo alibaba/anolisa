@@ -5,13 +5,13 @@ set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-openclaw}"
 COMPONENT="${ANOLISA_COMPONENT:-agent-memory}"
-# Honour OPENCLAW_HOME consistently across detect / install / uninstall
-# so a user with a non-default location isn't told "not detected" while
-# install / uninstall still target ~/.openclaw.
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 
-if [ -d "$OPENCLAW_HOME" ]; then
-    echo "[${COMPONENT}] ${AGENT}: detected ${OPENCLAW_HOME} config directory"
+if [ -d "$OPENCLAW_STATE_DIR" ]; then
+    echo "[${COMPONENT}] ${AGENT}: detected ${OPENCLAW_STATE_DIR} config directory"
     exit 0
 fi
 
@@ -20,5 +20,5 @@ if command -v openclaw &>/dev/null; then
     exit 0
 fi
 
-echo "[${COMPONENT}] ${AGENT}: not detected (neither ${OPENCLAW_HOME} nor openclaw binary found)" >&2
+echo "[${COMPONENT}] ${AGENT}: not detected (neither ${OPENCLAW_STATE_DIR} nor openclaw binary found)" >&2
 exit 1

@@ -5,22 +5,23 @@ set -euo pipefail
 AGENT="${ANOLISA_TARGET:-openclaw}"
 COMPONENT="${ANOLISA_COMPONENT:-agent-memory}"
 PLUGIN_ID="memory-anolisa"
-# Honour OPENCLAW_HOME (default: ~/.openclaw). Same resolution as
-# detect.sh / install.sh so a non-default OpenClaw root works end-to-end.
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
+OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
 
 if ! command -v openclaw &>/dev/null; then
     echo "[${COMPONENT}] openclaw CLI not found — removing plugin files manually."
-    rm -rf "${OPENCLAW_HOME}/plugins/memory-anolisa-openclaw-plugin" 2>/dev/null || true
-    rm -rf "${OPENCLAW_HOME}/extensions/memory-anolisa" 2>/dev/null || true
+    rm -rf "${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID}" 2>/dev/null || true
+    rm -rf "${OPENCLAW_STATE_DIR}/extensions/memory-anolisa" 2>/dev/null || true
 else
-    openclaw plugins uninstall memory-anolisa-openclaw-plugin --force || true
+    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" openclaw plugins uninstall "$PLUGIN_ID" --force || true
 fi
 
 # Clean openclaw.json config entries (plugins.allow + plugins.entries + plugins.slots).
-OPENCLAW_CFG="${OPENCLAW_HOME}/openclaw.json"
+OPENCLAW_CFG="${OPENCLAW_STATE_DIR}/openclaw.json"
 if [ -f "$OPENCLAW_CFG" ]; then
     if command -v jq &>/dev/null; then
         jq '(.plugins.allow // [] | map(select(. != "'"$PLUGIN_ID"'"))) as $allow |

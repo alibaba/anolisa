@@ -206,8 +206,10 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 	# `%setup -n %{name}-%{version}` and the CI archive shape.
 	@rm -rf dist/$(NAME)-$(VERSION) && mkdir -p dist/$(NAME)-$(VERSION)
 	@cp -R Cargo.toml Cargo.lock src config tests docs \
-		Makefile agent-memory.spec.in \
-		.gitignore .cargo/config.toml dist/$(NAME)-$(VERSION)/
+		Makefile agent-memory.spec.in CHANGELOG.md LICENSE \
+		.gitignore dist/$(NAME)-$(VERSION)/
+	@mkdir -p dist/$(NAME)-$(VERSION)/.cargo
+	@cp .cargo/config.toml dist/$(NAME)-$(VERSION)/.cargo/config.toml
 	# Adapter: include source + pre-built dist/index.js, exclude
 	# node_modules/tests so the source tarball stays under a few MB.
 	@mkdir -p dist/$(NAME)-$(VERSION)/$(ADAPTER_SRC_DIR)

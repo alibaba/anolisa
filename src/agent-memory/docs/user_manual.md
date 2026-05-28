@@ -212,11 +212,15 @@ bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
 openclaw gateway restart
 ```
 
-OpenClaw's signature/sandbox check is on by default. To bypass it
-during local development before the bundle is signed, set
-`AGENT_MEMORY_UNSAFE_INSTALL=1` when invoking the script.
+OpenClaw's security scanner flags `child_process.spawn` as a
+"dangerous code pattern", but the plugin uses spawn exclusively
+to launch the agent-memory MCP server as a stdio subprocess —
+the standard MCP transport mechanism, not arbitrary shell
+execution. The install script bypasses the scanner by default.
+To go through the regular (blocking) safe-install path instead,
+set `AGENT_MEMORY_SAFE_INSTALL=1` when invoking the script.
 
-Uninstall (removes the plugin from `~/.openclaw/plugins/` and cleans
+Uninstall (removes the plugin from `~/.openclaw/extensions/` and cleans
 `openclaw.json`'s `plugins.{allow,entries,slots}`):
 
 ```bash

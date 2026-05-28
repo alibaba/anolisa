@@ -10,9 +10,9 @@
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
-import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 export type AgentMemoryConfig = {
   binaryPath: string;
@@ -132,6 +132,19 @@ function knownBinaryLocations(): string[] {
   ];
 }
 
+/** Search PATH directories for agent-memory without spawning a shell. */
+function searchPathEnv(): string | undefined {
+  const pathEnv = process.env.PATH || "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "agent-memory");
+    if (fs.existsSync(candidate) && isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 /** Find the agent-memory binary on the system. */
 function resolveBinaryPath(explicit?: string): string {
   if (explicit) {
@@ -143,17 +156,10 @@ function resolveBinaryPath(explicit?: string): string {
     );
   }
 
-  // Try PATH lookup first.
-  try {
-    const whichResult = execSync("which agent-memory 2>/dev/null", {
-      encoding: "utf8",
-      timeout: 5000,
-    }).trim();
-    if (whichResult && fs.existsSync(whichResult) && isExecutable(whichResult)) {
-      return whichResult;
-    }
-  } catch {
-    // which not found or binary not on PATH; fall through.
+  // Search PATH without child_process.
+  const pathResult = searchPathEnv();
+  if (pathResult) {
+    return pathResult;
   }
 
   // Try known locations.
