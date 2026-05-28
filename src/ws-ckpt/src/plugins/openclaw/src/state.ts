@@ -6,6 +6,7 @@
  * from this module to avoid circular dependencies.
  */
 
+import path from "node:path";
 import type { BtrfsManager } from "./btrfs-manager.js";
 import type { OpenClawPluginApi } from "../types-shim.js";
 import type { PluginConfig } from "./types.js";
@@ -34,3 +35,21 @@ export const pluginState = {
 
 export const UNAVAILABLE_MSG =
   "ws-ckpt plugin is not available. Run environment check for details.";
+
+export const CWD_INSIDE_WORKSPACE_REASON =
+  "The hosting process's cwd is inside the workspace. " +
+  "ws-ckpt replaces the workspace inode during init/checkpoint/rollback, " +
+  "which would invalidate the process cwd. " +
+  "This is NOT retryable — do NOT call any ws-ckpt tool again in this session. " +
+  "The user must launch the session from outside the workspace directory.";
+
+export function cwdInsideWorkspace(workspace: string): boolean {
+  let cwd: string;
+  try {
+    cwd = path.resolve(process.cwd());
+  } catch {
+    return false;
+  }
+  const ws = path.resolve(workspace);
+  return cwd === ws || cwd.startsWith(ws + path.sep);
+}

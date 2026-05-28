@@ -53,8 +53,10 @@ def _get_manager() -> CheckpointManager:
 # holding cwd inside the workspace will get ENOENT on the next getcwd(). Refuse
 # instead of silently producing broken state.
 CWD_INSIDE_WORKSPACE_REASON = (
-    "`cd` outside the workspace first — ws-ckpt replaces its inode, "
-    "which would invalidate the current cwd."
+    "The hosting process's cwd is inside the workspace. "
+    "ws-ckpt replaces the workspace inode during init/checkpoint/rollback, "
+    "which would invalidate the process cwd. "
+    "The user must launch the session from outside the workspace directory."
 )
 
 

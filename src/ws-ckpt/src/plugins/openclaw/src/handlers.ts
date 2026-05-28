@@ -8,7 +8,7 @@
 import { CommandExecutor } from "./commands.js";
 import { mapErrorToLLMMessage } from "./btrfs-manager.js";
 import type { AgentToolResult } from "../types-shim.js";
-import { pluginState, UNAVAILABLE_MSG } from "./state.js";
+import { pluginState, UNAVAILABLE_MSG, cwdInsideWorkspace, CWD_INSIDE_WORKSPACE_REASON } from "./state.js";
 import { daemonAutoCleanup } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +47,9 @@ export async function handleCheckpoint(
   // Explicit workspace bypasses the manager (and its workspace-bound cache),
   // mirroring the handleDelete pattern.
   if (explicitWs) {
+    if (cwdInsideWorkspace(explicitWs)) {
+      return { text: CWD_INSIDE_WORKSPACE_REASON, isError: true };
+    }
     try {
       const executor = new CommandExecutor();
       const output = await executor.checkpoint(explicitWs, id, { message });
@@ -61,6 +64,11 @@ export async function handleCheckpoint(
       const msg = error instanceof Error ? error.message : String(error);
       return { text: `Checkpoint error: ${msg}`, isError: true };
     }
+  }
+
+  const ws = pluginState.resolvedConfig?.workspace;
+  if (ws && cwdInsideWorkspace(ws)) {
+    return { text: CWD_INSIDE_WORKSPACE_REASON, isError: true };
   }
 
   const result = await pluginState.manager.createCheckpoint({
@@ -90,6 +98,9 @@ export async function handleRollback(
 
   const explicitWs = workspace?.trim();
   if (explicitWs) {
+    if (cwdInsideWorkspace(explicitWs)) {
+      return { text: CWD_INSIDE_WORKSPACE_REASON, isError: true };
+    }
     try {
       const executor = new CommandExecutor();
       const output = await executor.rollback(explicitWs, trimmed);
@@ -101,6 +112,11 @@ export async function handleRollback(
       const msg = error instanceof Error ? error.message : String(error);
       return { text: `Rollback error: ${msg}`, isError: true };
     }
+  }
+
+  const ws = pluginState.resolvedConfig?.workspace;
+  if (ws && cwdInsideWorkspace(ws)) {
+    return { text: CWD_INSIDE_WORKSPACE_REASON, isError: true };
   }
 
   const result = await pluginState.manager.rollback(trimmed);
@@ -305,6 +321,12 @@ export async function handleConfig(
 
     if (key === "autoCheckpoint") {
       const coerced = value === "true";
+      if (coerced) {
+        const ws = pluginState.resolvedConfig.workspace;
+        if (ws && cwdInsideWorkspace(ws)) {
+          return { text: CWD_INSIDE_WORKSPACE_REASON, isError: true };
+        }
+      }
       pluginState.resolvedConfig.autoCheckpoint = coerced;
       const persistHint = coerced
         ? `\n\nNote: This change is in-memory only and will reset on Gateway restart.\nTo persist, run:\n  openclaw config set plugins.entries.ws-ckpt.config.autoCheckpoint true --strict-json\n(This will cause a Gateway restart.)`

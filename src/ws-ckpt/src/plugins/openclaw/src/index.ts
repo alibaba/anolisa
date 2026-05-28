@@ -19,7 +19,7 @@ import {
   definePluginEntry,
   type OpenClawPluginApi,
 } from "../types-shim.js";
-import { pluginState } from "./state.js";
+import { pluginState, cwdInsideWorkspace, CWD_INSIDE_WORKSPACE_REASON } from "./state.js";
 import { registerTools } from "./tool-registry.js";
 import { registerHooks } from "./hooks.js";
 import { ensureToolsAlsoAllow } from "./whitelist.js";
@@ -83,22 +83,25 @@ function register(api: OpenClawPluginApi): void {
       return;
     }
 
-    try {
-      const ok = await pluginState.manager!.ensureWorkspace(config.workspace);
-      if (!ok) {
+    if (cwdInsideWorkspace(config.workspace)) {
+      pluginState.environmentReady = false;
+      console.warn(`[ws-ckpt] Refusing: ${CWD_INSIDE_WORKSPACE_REASON}`);
+    } else {
+      try {
+        const ok = await pluginState.manager!.ensureWorkspace(config.workspace);
+        if (!ok) {
+          pluginState.environmentReady = false;
+          console.warn(
+            `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace})`,
+          );
+        }
+      } catch (err) {
         pluginState.environmentReady = false;
         console.warn(
-          `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace})`,
+          `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace}):`,
+          err instanceof Error ? err.message : String(err),
         );
-        return;
       }
-    } catch (err) {
-      pluginState.environmentReady = false;
-      console.warn(
-        `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace}):`,
-        err instanceof Error ? err.message : String(err),
-      );
-      return;
     }
 
     // Query daemon auto-cleanup config to align in-memory state.

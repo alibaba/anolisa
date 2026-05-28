@@ -59,7 +59,11 @@ def _reject_if_cwd_inside_workspace(workspace: str) -> Optional[str]:
     from . import CWD_INSIDE_WORKSPACE_REASON, _cwd_inside_workspace  # lazy
 
     if _cwd_inside_workspace(workspace):
-        return _err(f"Refusing: {CWD_INSIDE_WORKSPACE_REASON}")
+        return _json({
+            "success": False,
+            "error": CWD_INSIDE_WORKSPACE_REASON,
+            "retryable": False,
+        })
     return None
 
 
