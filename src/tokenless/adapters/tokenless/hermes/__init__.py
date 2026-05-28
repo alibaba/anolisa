@@ -337,13 +337,15 @@ def _try_rewrite(
     )
 
     # Exit code protocol (from rtk rewrite_cmd.rs):
-    #   0 = rewrite available (stdout = rewritten command)
+    #   0 = rewrite available, Allow verdict (auto-allow by permission rule)
     #   1 = no RTK equivalent (passthrough)
     #   2 = deny rule matched (let Hermes handle)
-    #   3 = ask rule matched (let Hermes handle)
-    if proc.returncode == 1 or proc.returncode == 2 or proc.returncode == 3:
+    #   3 = Ask/Default verdict (rewrite available but permission model requires
+    #       user confirmation; in non-interactive hook context, treat as valid
+    #       rewrite since the intent is token optimization, not permission gating)
+    if proc.returncode == 1 or proc.returncode == 2:
         return None
-    if proc.returncode != 0:
+    if proc.returncode != 0 and proc.returncode != 3:
         return None
 
     rewritten = proc.stdout.strip()

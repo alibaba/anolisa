@@ -115,7 +115,13 @@ def main() -> None:
     except Exception:
         skip()
 
-    # exit 1/2 = no rewrite; exit 0 = same or rewritten
+    # Exit code protocol (from rtk rewrite_cmd.rs):
+    #   0 = rewrite available, Allow verdict (auto-allow by permission rule)
+    #   1 = no RTK equivalent (passthrough)
+    #   2 = deny rule matched (let hook handle)
+    #   3 = Ask/Default verdict (rewrite available but permission model requires
+    #       user confirmation; in non-interactive hook context, treat as valid
+    #       rewrite since the intent is token optimization, not permission gating)
     if proc.returncode in (1, 2):
         skip()
     rewritten = proc.stdout.strip()

@@ -104,6 +104,13 @@ function tryRtkRewrite(command: string): string | null {
       stdio: ["ignore", "pipe", "pipe"],
     });
     const rewritten = result.stdout?.trim();
+    // Exit code protocol (from rtk rewrite_cmd.rs):
+    //   0 = rewrite available, Allow verdict (auto-allow by permission rule)
+    //   1 = no RTK equivalent (passthrough)
+    //   2 = deny rule matched (let agent handle)
+    //   3 = Ask/Default verdict (rewrite available but permission model requires
+    //       user confirmation; in non-interactive hook context, treat as valid
+    //       rewrite since the intent is token optimization, not permission gating)
     if ((result.status === 0 || result.status === 3) && rewritten && rewritten !== command) {
       return rewritten;
     }
