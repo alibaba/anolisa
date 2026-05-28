@@ -67,7 +67,23 @@ impl TraceCommand {
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch)
             .set_config_path(std::path::PathBuf::from(&self.config));
-        
+
+        // Quick check: if config file disables trace, keep service alive but idle.
+        // This avoids attaching eBPF probes when trace collection is turned off.
+        let config_path = std::path::Path::new(&self.config);
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(config_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if json.get("traceEnabled").and_then(|v| v.as_bool()) == Some(false) {
+                        eprintln!("agentsight: trace collection disabled by configuration (traceEnabled=false)");
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                }
+            }
+        }
+
         // Create AgentSight (auto-attaches probes and starts polling)
         let mut sight = match AgentSight::new(config) {
             Ok(s) => s,

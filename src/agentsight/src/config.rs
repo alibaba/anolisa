@@ -194,6 +194,8 @@ impl FromStr for TcpTarget {
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
 struct JsonFullConfig {
+    #[serde(default, rename = "traceEnabled")]
+    trace_enabled: Option<bool>,
     #[serde(default)]
     verbose: Option<i32>,
     #[serde(default)]
@@ -369,6 +371,11 @@ pub struct AgentsightConfig {
     /// Purge check interval (run purge every N inserts, 0 = never auto-purge)
     pub purge_interval: u64,
 
+    // --- Trace Control ---
+    /// Whether trace collection is enabled (false = service alive but idle)
+    /// JSON field name: "traceEnabled"
+    pub trace_enabled: bool,
+
     // --- Probe Configuration ---
     /// Optional UID filter for process tracing
     pub target_uid: Option<u32>,
@@ -435,6 +442,9 @@ impl Default for AgentsightConfig {
             http_table: DEFAULT_HTTP_TABLE.to_string(),
             retention_days: DEFAULT_RETENTION_DAYS,
             purge_interval: DEFAULT_PURGE_INTERVAL,
+
+            // Trace control defaults
+            trace_enabled: true,
 
             // Probe defaults
             target_uid: None,
@@ -545,6 +555,9 @@ impl AgentsightConfig {
         let mut parsed: JsonFullConfig = serde_json::from_str(json)
             .map_err(|e| format!("JSON parse error: {}", e))?;
 
+        if let Some(t) = parsed.trace_enabled {
+            self.trace_enabled = t;
+        }
         if let Some(v) = parsed.verbose {
             self.verbose = v != 0;
         }
