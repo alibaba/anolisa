@@ -282,6 +282,29 @@ impl AgentScanner {
     }
 }
 
+/// Read the parent PID of a process from /proc/[pid]/stat
+pub fn read_ppid(pid: u32) -> Option<u32> {
+    let data = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    // Format: pid (comm) state ppid ...  — ppid is the 4th field.
+    // comm may contain spaces/parens, so find the closing ')' first.
+    let after_comm = data.rsplit_once(')')?.1;
+    let ppid_str = after_comm.split_whitespace().nth(1)?;
+    ppid_str.parse().ok()
+}
+
+/// Check if a process has AGENT_MODE=1 in its environment
+///
+/// Reads /proc/[pid]/environ and looks for the AGENT_MODE=1 variable.
+pub fn has_agent_mode(pid: u32) -> bool {
+    let path = format!("/proc/{}/environ", pid);
+    match fs::read(&path) {
+        Ok(data) => data
+            .split(|&b| b == 0)
+            .any(|entry| entry == b"AGENT_MODE=1"),
+        Err(_) => false,
+    }
+}
+
 /// Read and parse cmdline file
 ///
 /// The cmdline file contains arguments separated by null bytes.
