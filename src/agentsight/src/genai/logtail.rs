@@ -37,6 +37,11 @@ pub fn logtail_path() -> Option<String> {
 pub struct LogtailExporter {
     path: PathBuf,
     encryptor: Option<MessageEncryptor>,
+    /// 轨迹采集开关（对应 agentsight.json 的 `traceEnabled`）。
+    /// 为 `false` 时，LLMCall 上传记录中的
+    /// `gen_ai.input.messages` 与 `gen_ai.output.messages` 对话内容字段被丢弃；
+    /// token 数量、模型、提供商等元数据仍照常上传。
+    trace_enabled: bool,
 }
 
 impl LogtailExporter {
@@ -48,7 +53,10 @@ impl LogtailExporter {
     /// `encryption_pem`：可选 RSA 公钥 PEM（通常来自 agentsight.json
     /// 的 `encryption.public_key`）。有值且解析成功则启用加密；
     /// 为 None 或解析失败则不加密。
-    pub fn new(encryption_pem: Option<&str>) -> Option<Self> {
+    ///
+    /// `trace_enabled`：轨迹采集开关。为 `false` 时不上传对话内容字段，
+    /// 但保留 token 数量等元数据。
+    pub fn new(encryption_pem: Option<&str>, trace_enabled: bool) -> Option<Self> {
         let path_str = logtail_path()?;
         let path = PathBuf::from(path_str);
         if let Some(parent) = path.parent() {
@@ -58,7 +66,10 @@ impl LogtailExporter {
         if encryptor.is_none() {
             log::info!("Logtail exporter: encryption disabled (no public key configured)");
         }
-        Some(LogtailExporter { path, encryptor })
+        if !trace_enabled {
+            log::info!("Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
+        }
+        Some(LogtailExporter { path, encryptor, trace_enabled })
     }
 
     /// 返回导出文件路径
@@ -68,7 +79,7 @@ impl LogtailExporter {
 
     /// 将扁平化记录批量写入文件（append 模式）
     fn write_batch(&self, events: &[GenAISemanticEvent]) {
-        let records = events_to_flat_records(events, self.encryptor.as_ref());
+        let records = events_to_flat_records(events, self.encryptor.as_ref(), self.trace_enabled);
         if records.is_empty() {
             return;
         }
@@ -124,7 +135,10 @@ impl GenAIExporter for LogtailExporter {
 ///
 /// 此函数被 Logtail 文件导出器使用，由 iLogtail 采集后上传到 SLS。
 /// 敏感消息字段（system_instructions/input.messages/output.messages）使用混合加密保护。
-pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&MessageEncryptor>) -> Vec<BTreeMap<String, String>> {
+///
+/// `trace_enabled=false` 时跳过 LLMCall 中的对话内容字段
+/// (`gen_ai.input.messages` 与 `gen_ai.output.messages`)，token 数量等元数据仍上传。
+pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&MessageEncryptor>, trace_enabled: bool) -> Vec<BTreeMap<String, String>> {
     let hostname = instance_id::get_instance_id();
     let uid = instance_id::get_owner_account_id();
     let mut records = Vec::with_capacity(events.len());
@@ -220,24 +234,29 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&
                 }
 
                 // ── gen_ai.input.messages (增量：只取最新一轮) ──
+                // 仅在 trace_enabled=true 时上传对话内容。轨迹开关关闭时
+                // 仅保留 token 数量等元数据，不上传用户输入。
                 // 从后往前找最后一条 user message，取它及之后的所有非 system 消息
-                let non_system: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
-                    .filter(|msg| msg.role != "system")
-                    .collect();
-                let latest_msgs: &[&super::semantic::InputMessage] = if let Some(last_user_idx) = non_system.iter().rposition(|m| m.role == "user") {
-                    &non_system[last_user_idx..]
-                } else {
-                    &non_system[..]
-                };
-                if !latest_msgs.is_empty() {
-                    if let Ok(json) = serde_json::to_string(&latest_msgs) {
-                        m.insert("gen_ai.input.messages".to_string(),
-                            MessageEncryptor::maybe_encrypt(encryptor, &json));
+                if trace_enabled {
+                    let non_system: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
+                        .filter(|msg| msg.role != "system")
+                        .collect();
+                    let latest_msgs: &[&super::semantic::InputMessage] = if let Some(last_user_idx) = non_system.iter().rposition(|m| m.role == "user") {
+                        &non_system[last_user_idx..]
+                    } else {
+                        &non_system[..]
+                    };
+                    if !latest_msgs.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&latest_msgs) {
+                            m.insert("gen_ai.input.messages".to_string(),
+                                MessageEncryptor::maybe_encrypt(encryptor, &json));
+                        }
                     }
                 }
 
                 // ── gen_ai.output.messages (parts-based with finish_reason) ──
-                if !call.response.messages.is_empty() {
+                // 同样受 trace_enabled 控制，不上传模型响应内容。
+                if trace_enabled && !call.response.messages.is_empty() {
                     if let Ok(json) = serde_json::to_string(&call.response.messages) {
                         m.insert("gen_ai.output.messages".to_string(),
                             MessageEncryptor::maybe_encrypt(encryptor, &json));
@@ -318,4 +337,140 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&
     }
 
     records
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genai::semantic::{
+        InputMessage, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage, TokenUsage,
+    };
+    use std::collections::HashMap;
+
+    /// 构造一个包含 user/assistant 对话与 token usage 的 LLMCall。
+    fn make_full_llm_call() -> LLMCall {
+        let request = LLMRequest {
+            messages: vec![
+                InputMessage {
+                    role: "system".to_string(),
+                    parts: vec![MessagePart::Text { content: "you are helpful".to_string() }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text { content: "hello secret".to_string() }],
+                    name: None,
+                },
+            ],
+            temperature: Some(0.7),
+            max_tokens: Some(1024),
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        let mut call = LLMCall::new(
+            "call-trace-test".to_string(),
+            1_000,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            request,
+            42,
+            "test-proc".to_string(),
+        );
+        call.set_response(
+            LLMResponse {
+                messages: vec![OutputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::Text { content: "sensitive reply".to_string() }],
+                    name: None,
+                    finish_reason: Some("stop".to_string()),
+                }],
+                streamed: false,
+                raw_body: None,
+            },
+            5_000,
+        );
+        call.set_token_usage(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.metadata = HashMap::new();
+        call
+    }
+
+    #[test]
+    fn test_trace_enabled_true_includes_messages() {
+        // 默认轨迹开启：input.messages 与 output.messages 均上传
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        let records = events_to_flat_records(&[event], None, true);
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert!(r.contains_key("gen_ai.input.messages"), "input.messages should be uploaded when traceEnabled=true");
+        assert!(r.contains_key("gen_ai.output.messages"), "output.messages should be uploaded when traceEnabled=true");
+        // token 数量元数据也应存在
+        assert_eq!(r.get("gen_ai.usage.input_tokens").map(String::as_str), Some("100"));
+        assert_eq!(r.get("gen_ai.usage.output_tokens").map(String::as_str), Some("50"));
+    }
+
+    #[test]
+    fn test_trace_enabled_false_drops_messages_keeps_token_metadata() {
+        // 轨迹关闭：input.messages 与 output.messages 不上传，token 数量仍保留
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        let records = events_to_flat_records(&[event], None, false);
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert!(!r.contains_key("gen_ai.input.messages"), "input.messages must NOT be uploaded when traceEnabled=false");
+        assert!(!r.contains_key("gen_ai.output.messages"), "output.messages must NOT be uploaded when traceEnabled=false");
+
+        // token 消耗与模型元数据仍需上传
+        assert_eq!(r.get("gen_ai.usage.input_tokens").map(String::as_str), Some("100"));
+        assert_eq!(r.get("gen_ai.usage.output_tokens").map(String::as_str), Some("50"));
+        assert_eq!(r.get("gen_ai.provider.name").map(String::as_str), Some("openai"));
+        assert_eq!(r.get("gen_ai.request.model").map(String::as_str), Some("gpt-4"));
+        assert_eq!(r.get("agentsight.pid").map(String::as_str), Some("42"));
+        assert_eq!(r.get("agentsight.duration_ns").map(String::as_str), Some("4000"));
+        // 所有名为 gen_ai.*.messages 的字段都应被过滤
+        for key in r.keys() {
+            assert!(
+                !key.ends_with(".messages") || key == "gen_ai.system_instructions",
+                "unexpected message field leaked when traceEnabled=false: {}",
+                key,
+            );
+        }
+    }
+
+    #[test]
+    fn test_trace_enabled_false_does_not_affect_non_llmcall_events() {
+        // 轨迹关闭对 ToolUse / AgentInteraction / StreamChunk 本身不增加过滤逻辑
+        // （这些事件本来就不包含 input/output messages）
+        use crate::genai::semantic::ToolUse;
+        let tool = ToolUse {
+            tool_use_id: "tu-1".to_string(),
+            timestamp_ns: 0,
+            tool_name: "shell".to_string(),
+            arguments: serde_json::Value::Null,
+            result: None,
+            duration_ns: Some(1000),
+            success: true,
+            error: None,
+            parent_llm_call_id: Some("parent-1".to_string()),
+            pid: 7,
+        };
+        let event = GenAISemanticEvent::ToolUse(tool);
+        let records = events_to_flat_records(&[event], None, false);
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.get("gen_ai.operation.name").map(String::as_str), Some("tool_use"));
+        assert_eq!(r.get("gen_ai.tool.name").map(String::as_str), Some("shell"));
+        assert_eq!(r.get("agentsight.pid").map(String::as_str), Some("7"));
+    }
 }
