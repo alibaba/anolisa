@@ -23,6 +23,7 @@ typedef enum {
     EVENT_SOURCE_FILEWATCH = 4, // File watch events (filewatch)
     EVENT_SOURCE_FILEWRITE = 5, // File write events (filewrite)
     EVENT_SOURCE_UDPDNS = 6,   // UDP DNS query events (udpdns)
+    EVENT_SOURCE_SCHED  = 7,   // Scheduler state events (schedmon)
 } event_source_t;
 
 // Common event header - every ringbuffer event MUST start with this
