@@ -210,6 +210,24 @@ impl LineageTree {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    /// Walk up from `pid` to find the Agent root of its family.
+    /// Returns the PID of the nearest Agent ancestor, or `pid` itself if it is an Agent.
+    /// Returns None if no Agent is found in the ancestry chain.
+    pub fn find_root(&self, pid: u32) -> Option<u32> {
+        let mut current = pid;
+        for _ in 0..64 {
+            let node = self.nodes.get(&current)?;
+            if node.process_type == ProcessType::Agent {
+                return Some(current);
+            }
+            if !self.nodes.contains_key(&node.ppid) {
+                return None;
+            }
+            current = node.ppid;
+        }
+        None
+    }
 }
 
 /// Recursive subtree for JSON serialization
@@ -300,5 +318,33 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&100));
         assert!(roots.contains(&300));
+    }
+
+    #[test]
+    fn test_find_root_agent() {
+        let mut tree = LineageTree::new();
+        tree.insert(make_node(100, 1, ProcessType::Agent));
+        tree.insert(make_node(200, 100, ProcessType::Tool));
+        tree.insert(make_node(300, 200, ProcessType::Tool));
+
+        assert_eq!(tree.find_root(100), Some(100));
+        assert_eq!(tree.find_root(200), Some(100));
+        assert_eq!(tree.find_root(300), Some(100));
+    }
+
+    #[test]
+    fn test_find_root_no_agent() {
+        let mut tree = LineageTree::new();
+        tree.insert(make_node(100, 1, ProcessType::Unknown));
+        tree.insert(make_node(200, 100, ProcessType::Unknown));
+
+        assert_eq!(tree.find_root(100), None);
+        assert_eq!(tree.find_root(200), None);
+    }
+
+    #[test]
+    fn test_find_root_nonexistent_pid() {
+        let tree = LineageTree::new();
+        assert_eq!(tree.find_root(999), None);
     }
 }
