@@ -11,6 +11,7 @@ AGENT="${ANOLISA_TARGET:-openclaw}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PROJECT_ROOT="${ANOLISA_PROJECT_ROOT:-}"
 TARGET_DIR="${ANOLISA_TARGET_DIR:-}"
+MANIFEST_PATH="${ANOLISA_MANIFEST_PATH:-}"
 INSTALL_MODE="${ANOLISA_INSTALL_MODE:-user}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
@@ -22,8 +23,12 @@ SEC_CORE_BIN_DIR="${SEC_CORE_BIN_DIR:-$HOME/.local/bin}"
 SEC_CORE_OPENCLAW_PLUGIN_DIR="${SEC_CORE_OPENCLAW_PLUGIN_DIR:-}"
 export PATH="$SEC_CORE_BIN_DIR:$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
-SEC_CORE_SKILLS=(code-scanner prompt-scanner skill-ledger)
-PLUGIN_ID="agent-sec"
+COMMON_HELPER="${ADAPTER_DIR}/common/manifest.sh"
+[ -f "$COMMON_HELPER" ] || {
+    echo "[${COMPONENT}] missing adapter common helper: $COMMON_HELPER" >&2
+    exit 1
+}
+. "$COMMON_HELPER"
 
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
@@ -36,6 +41,7 @@ note_install_missing() { INSTALL_MISSING+=("$1"); }
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
 fi
+PLUGIN_ID="$(sec_core_manifest_plugin_id "${ANOLISA_TARGET:-openclaw}" "$MANIFEST_PATH")"
 
 line "${AGENT} detect"
 if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
@@ -107,6 +113,10 @@ if [ "$plugin_resource" = "-" ]; then
 fi
 
 # sec-core skills — list each explicitly so users see exact install paths.
+SEC_CORE_SKILLS=()
+while IFS= read -r skill_name; do
+    [ -n "$skill_name" ] && SEC_CORE_SKILLS+=("$skill_name")
+done < <(sec_core_manifest_skills "${ANOLISA_TARGET:-openclaw}" "$MANIFEST_PATH")
 missing_skills=()
 for s in "${SEC_CORE_SKILLS[@]}"; do
     sf="${OPENCLAW_SKILLS_DIR%/}/$s/SKILL.md"

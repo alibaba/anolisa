@@ -9,8 +9,10 @@
 set -euo pipefail
 
 COMPONENT="${ANOLISA_COMPONENT:-sec-core}"
+ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PROJECT_ROOT="${ANOLISA_PROJECT_ROOT:-}"
 TARGET_DIR="${ANOLISA_TARGET_DIR:-}"
+MANIFEST_PATH="${ANOLISA_MANIFEST_PATH:-}"
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
@@ -20,7 +22,12 @@ DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 SEC_CORE_OPENCLAW_PLUGIN_DIR="${SEC_CORE_OPENCLAW_PLUGIN_DIR:-}"
 SEC_CORE_BIN_DIR="${SEC_CORE_BIN_DIR:-$HOME/.local/bin}"
 export PATH="$SEC_CORE_BIN_DIR:$HOME/.local/bin:/usr/local/bin:$PATH"
-SEC_CORE_SKILLS=(code-scanner prompt-scanner skill-ledger)
+COMMON_HELPER="${ADAPTER_DIR}/common/manifest.sh"
+[ -f "$COMMON_HELPER" ] || {
+    echo "[${COMPONENT}] missing adapter common helper: $COMMON_HELPER" >&2
+    exit 1
+}
+. "$COMMON_HELPER"
 
 log() {
     echo "[${COMPONENT}] $*"
@@ -105,6 +112,10 @@ if [ "$DRY_RUN" = "1" ]; then
 else
     mkdir -p "$OPENCLAW_SKILLS_DIR"
 fi
+SEC_CORE_SKILLS=()
+while IFS= read -r skill_name; do
+    [ -n "$skill_name" ] && SEC_CORE_SKILLS+=("$skill_name")
+done < <(sec_core_manifest_skills "${ANOLISA_TARGET:-openclaw}" "$MANIFEST_PATH")
 for skill_name in "${SEC_CORE_SKILLS[@]}"; do
     skill_dir="$(find_skill_dir "$skill_name")" || {
         echo "[${COMPONENT}] skill resource not found: ${skill_name}" >&2

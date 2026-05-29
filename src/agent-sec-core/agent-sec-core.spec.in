@@ -78,6 +78,8 @@ Built with maturin as a Rust native Python extension.
 %dir %{_datadir}/anolisa/adapters
 %dir %{_datadir}/anolisa/adapters/sec-core
 %{_datadir}/anolisa/adapters/sec-core/manifest.json
+%dir %{_datadir}/anolisa/adapters/sec-core/common
+%{_datadir}/anolisa/adapters/sec-core/common/manifest.sh
 %license LICENSE
 
 # =============================================================================
@@ -129,6 +131,7 @@ Hooks into OpenClaw to perform code scanning before tool execution.
 %package -n agent-sec-hermes-hook
 Summary:        Hermes Agent plugin for agent security
 Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       jq
 
 %description -n agent-sec-hermes-hook
 Hermes Agent security plugin powered by agent-sec-core.

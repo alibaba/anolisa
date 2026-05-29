@@ -9,8 +9,10 @@ set -euo pipefail
 
 COMPONENT="${ANOLISA_COMPONENT:-sec-core}"
 AGENT="${ANOLISA_TARGET:-hermes}"
+ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PROJECT_ROOT="${ANOLISA_PROJECT_ROOT:-}"
 TARGET_DIR="${ANOLISA_TARGET_DIR:-}"
+MANIFEST_PATH="${ANOLISA_MANIFEST_PATH:-}"
 INSTALL_MODE="${ANOLISA_INSTALL_MODE:-user}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_BIN="${HERMES_BIN:-}"
@@ -19,8 +21,12 @@ SEC_CORE_BIN_DIR="${SEC_CORE_BIN_DIR:-$HOME/.local/bin}"
 SEC_CORE_HERMES_PLUGIN_DIR="${SEC_CORE_HERMES_PLUGIN_DIR:-}"
 export PATH="$SEC_CORE_BIN_DIR:$HOME/.local/bin:${HERMES_HOME%/}/bin:/usr/local/bin:$PATH"
 
-SEC_CORE_SKILLS=(code-scanner prompt-scanner skill-ledger)
-PLUGIN_ID="agent-sec-core-hermes-plugin"
+COMMON_HELPER="${ADAPTER_DIR}/common/manifest.sh"
+[ -f "$COMMON_HELPER" ] || {
+    echo "[${COMPONENT}] missing adapter common helper: $COMMON_HELPER" >&2
+    exit 1
+}
+. "$COMMON_HELPER"
 
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
@@ -33,6 +39,7 @@ note_install_missing() { INSTALL_MISSING+=("$1"); }
 if [ -z "$HERMES_BIN" ]; then
     HERMES_BIN="$(command -v hermes 2>/dev/null || true)"
 fi
+PLUGIN_ID="$(sec_core_manifest_plugin_id "${ANOLISA_TARGET:-hermes}" "$MANIFEST_PATH")"
 
 line "${AGENT} detect"
 if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
@@ -94,6 +101,10 @@ else
 fi
 
 # sec-core skills under Hermes skills dir.
+SEC_CORE_SKILLS=()
+while IFS= read -r skill_name; do
+    [ -n "$skill_name" ] && SEC_CORE_SKILLS+=("$skill_name")
+done < <(sec_core_manifest_skills "${ANOLISA_TARGET:-hermes}" "$MANIFEST_PATH")
 missing_skills=()
 for s in "${SEC_CORE_SKILLS[@]}"; do
     sf="${HERMES_SKILLS_DIR%/}/$s/SKILL.md"

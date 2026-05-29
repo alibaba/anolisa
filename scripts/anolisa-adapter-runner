@@ -58,6 +58,7 @@ ALLOW_CHECKOUT=false
 ADAPTER_ROOT=""
 ADAPTER_SCRIPT=""
 ADAPTER_TARGET_DIR=""
+ADAPTER_MANIFEST=""
 ADAPTER_ACTION_ARGS=()
 
 # ─── component metadata ───
@@ -474,6 +475,7 @@ resolve_action_script_in_root() {
         script="$root/$rel"
         if [[ -f "$script" ]]; then
             ADAPTER_SCRIPT="$script"
+            ADAPTER_MANIFEST="$manifest"
             return 0
         fi
     done
@@ -481,6 +483,7 @@ resolve_action_script_in_root() {
     script="$root/${TARGET}/scripts/${action}.sh"
     if [[ -f "$script" ]]; then
         ADAPTER_SCRIPT="$script"
+        ADAPTER_MANIFEST=""
         ADAPTER_ACTION_ARGS=()
         return 0
     fi
@@ -529,6 +532,7 @@ find_target_adapter() {
     ADAPTER_ROOT=""
     ADAPTER_SCRIPT=""
     ADAPTER_TARGET_DIR=""
+    ADAPTER_MANIFEST=""
     ADAPTER_ACTION_ARGS=()
     return 1
 }
@@ -587,6 +591,7 @@ adapter_env_args() {
         "ANOLISA_COMPONENT=$component"
         "ANOLISA_TARGET=$TARGET"
         "ANOLISA_ADAPTER_DIR=$ADAPTER_ROOT"
+        "ANOLISA_MANIFEST_PATH=$ADAPTER_MANIFEST"
         "ANOLISA_TARGET_DIR=${ADAPTER_TARGET_DIR}"
         "ANOLISA_PROJECT_ROOT=${PROJECT_ROOT}"
         "ANOLISA_INSTALL_MODE=$INSTALL_MODE"
@@ -1137,17 +1142,6 @@ status_fallback() {
         fi
     fi
 
-    if [[ "$component" == "sec-core" ]]; then
-        local skill sf
-        for skill in code-scanner prompt-scanner skill-ledger; do
-            sf="$(target_skills_dir)/$skill/SKILL.md"
-            if [[ -f "$sf" ]]; then
-                printf '  skill  %-20s present (%s)\n' "$skill" "$sf"
-            else
-                printf '  skill  %-20s missing (%s)\n' "$skill" "$sf"
-            fi
-        done
-    fi
 }
 
 cmd_status() {
