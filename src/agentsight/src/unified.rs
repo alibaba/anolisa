@@ -256,7 +256,13 @@ impl AgentSight {
 
         // When SLS_LOGTAIL_FILE is set, use Logtail file exporter only (skip local storage)
         // — the Logtail file will be collected by iLogtail and uploaded to SLS.
-        if let Some(exporter) = LogtailExporter::new(config.encryption_public_key.as_deref()) {
+        // `config.trace_enabled` (from `traceEnabled` in agentsight.json) controls whether
+        // conversation content fields (gen_ai.input.messages / gen_ai.output.messages) are
+        // included in the uploaded records. When false, only token metadata is uploaded.
+        if let Some(exporter) = LogtailExporter::new(
+            config.encryption_public_key.as_deref(),
+            config.trace_enabled,
+        ) {
             // SLS 模式必须能获取到 uid (owner-account-id)，否则拒绝启动
             let uid = crate::genai::instance_id::get_owner_account_id();
             if uid.is_empty() {
