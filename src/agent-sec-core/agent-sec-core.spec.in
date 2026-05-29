@@ -74,6 +74,10 @@ Built with maturin as a Rust native Python extension.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 /opt/agent-sec/lib/python3.11/site-packages/*
+%dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/adapters
+%dir %{_datadir}/anolisa/adapters/sec-core
+%{_datadir}/anolisa/adapters/sec-core/manifest.json
 %license LICENSE
 
 # =============================================================================
@@ -114,10 +118,6 @@ Hooks into OpenClaw to perform code scanning before tool execution.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/openclaw-plugin/scripts/deploy.sh
 /opt/agent-sec/openclaw-plugin/
-%dir %{_datadir}/anolisa
-%dir %{_datadir}/anolisa/adapters
-%dir %{_datadir}/anolisa/adapters/sec-core
-%{_datadir}/anolisa/adapters/sec-core/manifest.json
 %dir %{_datadir}/anolisa/adapters/sec-core/openclaw
 %dir %{_datadir}/anolisa/adapters/sec-core/openclaw/scripts
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/sec-core/openclaw/scripts/*.sh
