@@ -206,6 +206,21 @@ struct JsonFullConfig {
     http: Option<Vec<JsonHttpGroup>>,
     #[serde(default)]
     encryption: Option<JsonEncryption>,
+    #[serde(default)]
+    scheduler: Option<JsonScheduler>,
+}
+
+/// 调度器配置（空闲-突发-空闲 cgroup CPU 权重管理）
+#[derive(serde::Deserialize)]
+struct JsonScheduler {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    active_weight: Option<u32>,
+    #[serde(default)]
+    idle_threshold_ms: Option<u64>,
+    #[serde(default)]
+    cgroup_root: Option<String>,
 }
 
 /// 加密配置：可选公钥（PEM 字符串）或公钥文件路径
@@ -376,6 +391,10 @@ pub struct AgentsightConfig {
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
+    /// Enable scheduler (idle-burst-idle cgroup CPU weight management)
+    pub enable_scheduler: bool,
+    /// Scheduler configuration
+    pub scheduler_config: crate::scheduler::SchedulerConfig,
     /// TCP capture targets for plain HTTP capture (empty = disabled).
     /// Each entry specifies destination IP, port, or both.
     pub tcp_targets: Vec<TcpTarget>,
@@ -440,6 +459,8 @@ impl Default for AgentsightConfig {
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
             enable_filewatch: false,
+            enable_scheduler: false,
+            scheduler_config: crate::scheduler::SchedulerConfig::default(),
             tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
@@ -527,6 +548,13 @@ impl AgentsightConfig {
         self
     }
 
+    /// Set enable_scheduler
+    pub fn set_enable_scheduler(mut self, enable: bool) -> Self {
+        self.enable_scheduler = enable;
+        self.scheduler_config.enabled = enable;
+        self
+    }
+
     /// Set connection capacity
     pub fn set_connection_capacity(mut self, capacity: usize) -> Self {
         self.connection_capacity = capacity;
@@ -574,6 +602,31 @@ impl AgentsightConfig {
                         }
                     }
                 }
+            }
+        }
+
+        // Load scheduler config. Precedence is file-wins: a `scheduler` block
+        // overrides the CLI --enable-scheduler flag (config is applied after the
+        // builder). Warn when they disagree so the override is not silent.
+        if let Some(sched) = parsed.scheduler.take() {
+            if let Some(enabled) = sched.enabled {
+                if enabled != self.enable_scheduler {
+                    log::warn!(
+                        "config scheduler.enabled={} overrides --enable-scheduler={}",
+                        enabled, self.enable_scheduler
+                    );
+                }
+                self.enable_scheduler = enabled;
+                self.scheduler_config.enabled = enabled;
+            }
+            if let Some(w) = sched.active_weight {
+                self.scheduler_config.active_weight = w;
+            }
+            if let Some(t) = sched.idle_threshold_ms {
+                self.scheduler_config.idle_threshold_ms = t;
+            }
+            if let Some(r) = sched.cgroup_root {
+                self.scheduler_config.cgroup_root = PathBuf::from(r);
             }
         }
 

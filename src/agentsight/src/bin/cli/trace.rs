@@ -22,6 +22,10 @@ pub struct TraceCommand {
     #[structopt(long)]
     pub enable_filewatch: bool,
 
+    /// Enable scheduler (idle-burst-idle cgroup CPU weight management)
+    #[structopt(long)]
+    pub enable_scheduler: bool,
+
     /// Path to JSON configuration file
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
@@ -66,6 +70,7 @@ impl TraceCommand {
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch)
+            .set_enable_scheduler(self.enable_scheduler)
             .set_config_path(std::path::PathBuf::from(&self.config));
         
         // Create AgentSight (auto-attaches probes and starts polling)

@@ -24,6 +24,7 @@ use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 use super::udpdns::{UdpDns, RawUdpDnsEvent};
 use crate::config::TcpTarget;
 use super::tcpsniff::TcpSniff;
+use super::schedmon::{SchedMon, RawSchedEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -34,6 +35,7 @@ const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
 const EVENT_SOURCE_FILEWRITE: u32 = 5;
 const EVENT_SOURCE_UDPDNS: u32 = 6;
+const EVENT_SOURCE_SCHED: u32 = 7;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -57,6 +59,8 @@ pub struct Probes {
     udpdns: Option<UdpDns>,
     /// TCP sniff probe (captures plain HTTP traffic on configured ports, optional)
     tcpsniff: Option<TcpSniff>,
+    /// Scheduler monitor probe (detects idle/active transitions, optional)
+    schedmon: Option<SchedMon>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -70,7 +74,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_targets: &[TcpTarget]) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_targets: &[TcpTarget], enable_schedmon: bool) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -126,8 +130,22 @@ impl Probes {
             None
         };
 
+        // Optionally create schedmon - detects idle/active transitions for traced processes
+        let schedmon = if enable_schedmon {
+            match SchedMon::new_with_maps(&map_handle, &rb_handle) {
+                Ok(sm) => Some(sm),
+                Err(e) => {
+                    log::warn!("SchedMon probe unavailable (requires BTF sched tracepoints): {e}");
+                    None
+                }
+            }
+        } else {
+            log::info!("SchedMon probe disabled (scheduler not enabled)");
+            None
+        };
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
-        
+
         Ok(Self {
             proctrace,
             sslsniff,
@@ -136,6 +154,7 @@ impl Probes {
             filewrite,
             udpdns,
             tcpsniff,
+            schedmon,
             rb_handle,
             event_tx,
             event_rx,
@@ -166,6 +185,11 @@ impl Probes {
             tcp.attach()
                 .context("failed to attach tcpsniff")?;
         }
+        // Attach schedmon for idle/active transition detection (if enabled)
+        if let Some(ref mut sm) = self.schedmon {
+            sm.attach()
+                .context("failed to attach schedmon")?;
+        }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
@@ -193,6 +217,7 @@ impl Probes {
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
         let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
         let udpdns_event_size = mem::size_of::<RawUdpDnsEvent>();
+        let sched_event_size = mem::size_of::<RawSchedEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -255,6 +280,14 @@ impl Probes {
                         // UDP DNS event (domain name from DNS query)
                         if data.len() >= udpdns_event_size {
                             super::udpdns::UdpDnsEvent::from_bytes(data).map(Event::UdpDns)
+                        } else {
+                            None
+                        }
+                    }
+                    EVENT_SOURCE_SCHED => {
+                        // Scheduler state event (sleep/wakeup)
+                        if data.len() >= sched_event_size {
+                            super::schedmon::SchedEvent::from_bytes(data).map(Event::Sched)
                         } else {
                             None
                         }

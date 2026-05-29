@@ -661,6 +661,8 @@ fn ffi_background_thread(
         if sight.try_process().is_none() {
             // No event available — flush any timed-out pending GenAI events
             sight.flush_expired_pending_genai();
+            // Finalize debounced scheduler idle transitions (same as run()).
+            sight.on_idle_tick();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }

@@ -95,6 +95,8 @@ pub struct AgentSight {
     http_domains: Vec<String>,
     /// Blood lineage tree tracking process parent-child relationships and type classification
     lineage_tree: Arc<std::sync::RwLock<crate::lineage::LineageTree>>,
+    /// Idle-burst-idle scheduler for Agent family cgroup CPU weight management
+    scheduler: Option<crate::scheduler::Scheduler>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -206,7 +208,7 @@ impl AgentSight {
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets, config.enable_scheduler).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -367,6 +369,18 @@ impl AgentSight {
                 .ok();
         }
 
+        let scheduler = if config.enable_scheduler {
+            log::info!(
+                "Scheduler enabled: active_weight={}, idle_threshold={}ms, cgroup_root={:?}",
+                config.scheduler_config.active_weight,
+                config.scheduler_config.idle_threshold_ms,
+                config.scheduler_config.cgroup_root,
+            );
+            Some(crate::scheduler::Scheduler::new(config.scheduler_config.clone()))
+        } else {
+            None
+        };
+
         Ok(AgentSight {
             probes,
             parser: Parser::new(),
@@ -390,6 +404,7 @@ impl AgentSight {
             pid_agent_name_cache,
             http_domains,
             lineage_tree: Arc::new(std::sync::RwLock::new(crate::lineage::LineageTree::new())),
+            scheduler,
         })
     }
 
@@ -465,6 +480,14 @@ impl AgentSight {
         // Handle ProcMon events for agent lifecycle tracking
         if let Event::ProcMon(ref procmon_event) = event {
             self.handle_procmon_event(procmon_event);
+            return None;
+        }
+
+        // Handle scheduler state events (idle-burst-idle)
+        if let Event::Sched(ref sched_event) = event {
+            if let Some(ref mut scheduler) = self.scheduler {
+                scheduler.on_sched_event(sched_event.tgid, sched_event.tid, sched_event.event_type);
+            }
             return None;
         }
 
@@ -745,6 +768,16 @@ impl AgentSight {
                 tree.insert(node);
             }
             tree.classify(pid, has_agent_mode, matches_agent);
+
+            // Register a classified process with the scheduler's Agent family.
+            if let Some(ref mut scheduler) = self.scheduler {
+                let ptype = tree.get(pid).map(|n| n.process_type);
+                if ptype.is_some_and(|t| t != crate::lineage::ProcessType::Unknown) {
+                    if let Some(root_pid) = tree.find_root(pid) {
+                        scheduler.add_process(pid, root_pid);
+                    }
+                }
+            }
         }
     }
 
@@ -791,15 +824,28 @@ impl AgentSight {
                     tree.insert(node);
                     tree.classify(header.pid, has_agent_mode, matches_agent);
 
+                    let ptype = tree.get(header.pid).map(|n| n.process_type);
                     log::debug!(
                         "Lineage: added pid={} ppid={} type={:?}",
                         header.pid,
                         header.ppid,
-                        tree.get(header.pid).map(|n| n.process_type),
+                        ptype,
                     );
+
+                    // Register a classified process with the scheduler's Agent family.
+                    if let Some(ref mut scheduler) = self.scheduler {
+                        if ptype.is_some_and(|t| t != crate::lineage::ProcessType::Unknown) {
+                            if let Some(root_pid) = tree.find_root(header.pid) {
+                                scheduler.add_process(header.pid, root_pid);
+                            }
+                        }
+                    }
                 }
             }
             VariableEvent::Exit { header, .. } => {
+                if let Some(ref mut scheduler) = self.scheduler {
+                    scheduler.remove_process(header.pid);
+                }
                 if let Ok(mut tree) = self.lineage_tree.write() {
                     if let Some(removed) = tree.remove(header.pid) {
                         log::debug!(
@@ -830,6 +876,15 @@ impl AgentSight {
         self.filewatch_callback = Some(Box::new(callback));
     }
 
+    /// Idle-loop hook: finalize debounced scheduler transitions. Must be called
+    /// from every driver loop's idle branch (run() and the FFI loop) so the
+    /// scheduler is not stuck never transitioning families to idle.
+    pub fn on_idle_tick(&mut self) {
+        if let Some(ref mut scheduler) = self.scheduler {
+            scheduler.tick();
+        }
+    }
+
     /// Handle FileWrite event: extract responseId→sessionId mapping, then call callback
     fn handle_filewrite_event(&mut self, event: &FileWriteEvent) {
         log::debug!(
@@ -854,6 +909,7 @@ impl AgentSight {
                 self.flush_expired_pending_genai();
                 // Drain orphaned connections from dead PIDs and persist as pending
                 self.drain_and_persist_dead_connections();
+                self.on_idle_tick();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
