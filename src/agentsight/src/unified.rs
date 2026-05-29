@@ -93,6 +93,8 @@ pub struct AgentSight {
     pid_agent_name_cache: HashMap<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
+    /// Blood lineage tree tracking process parent-child relationships and type classification
+    lineage_tree: Arc<std::sync::RwLock<crate::lineage::LineageTree>>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -393,6 +395,7 @@ impl AgentSight {
             last_drain_check: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
+            lineage_tree: Arc::new(std::sync::RwLock::new(crate::lineage::LineageTree::new())),
         })
     }
 
@@ -469,6 +472,11 @@ impl AgentSight {
         if let Event::ProcMon(ref procmon_event) = event {
             self.handle_procmon_event(procmon_event);
             return None;
+        }
+
+        // Maintain lineage tree from proctrace exec/exit events
+        if let Event::Proc(ref proc_event) = event {
+            self.update_lineage_from_proc(proc_event);
         }
 
         // Handle FileWatch events via callback (not through the pipeline)
@@ -647,7 +655,7 @@ impl AgentSight {
         use crate::probes::procmon::Event as ProcMonEvent;
 
         match event {
-            ProcMonEvent::Exec { pid, comm, .. } => {
+            ProcMonEvent::Exec { pid, ppid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
                 let cmdline_args =
                     crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
@@ -662,10 +670,44 @@ impl AgentSight {
                 }
 
                 // Phase 2: check if this is a known agent and start tracking
-                if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
+                let matched = self.scanner.on_process_create(*pid, comm);
+                let matches_agent_pattern = matched.is_some();
+
+                if let Some(agent) = matched {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.insert(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
+                }
+
+                // Phase 3: userspace AGENT_MODE=1 detection (complements BPF layer)
+                // Skip if already attached by cmdline rules or previously attached.
+                // Also skip if the parent is already tracked — that means this
+                // process inherited AGENT_MODE from its parent, not set it itself.
+                if !matches_agent_pattern
+                    && !self.pid_agent_name_cache.contains_key(pid)
+                    && crate::discovery::scanner::has_agent_mode(*pid)
+                {
+                    let parent_tracked = crate::discovery::scanner::read_ppid(*pid)
+                        .is_some_and(|ppid| self.pid_agent_name_cache.contains_key(&ppid));
+                    if parent_tracked {
+                        log::debug!(
+                            "ProcMon: pid={} has AGENT_MODE=1 but parent is already tracked, skipping",
+                            pid
+                        );
+                    } else {
+                        log::info!(
+                            "ProcMon: pid={} detected AGENT_MODE=1 via /proc environ, auto-attaching",
+                            pid
+                        );
+                        let agent_name = format!("agent-mode-{}", comm);
+                        self.pid_agent_name_cache.insert(*pid, agent_name.clone());
+                        self.attach_process(*pid, &agent_name);
+                        // Insert into the lineage tree directly. proctrace does not
+                        // emit an exec event for an AGENT_MODE root (it was not yet in
+                        // traced_processes when it execed), so without this the root
+                        // would never appear in the tree.
+                        self.ensure_lineage_node(*pid, *ppid, comm, Some(agent_name), true, false);
+                    }
                 }
             }
             ProcMonEvent::Exit { pid, .. } => {
@@ -675,6 +717,106 @@ impl AgentSight {
                     self.detach_process(*pid, &agent_name);
                 }
             }
+        }
+    }
+
+    /// Ensure a lineage node exists and is correctly classified after procmon
+    /// provides agent info. Handles the race where the proctrace exec event is
+    /// missed because the process was not yet in traced_processes when it execed.
+    fn ensure_lineage_node(
+        &mut self,
+        pid: u32,
+        ppid: u32,
+        comm: &str,
+        agent_name: Option<String>,
+        has_agent_mode: bool,
+        matches_agent: bool,
+    ) {
+        if let Ok(mut tree) = self.lineage_tree.write() {
+            if tree.get(pid).is_none() {
+                let node = crate::lineage::LineageNode {
+                    pid,
+                    ppid,
+                    process_type: crate::lineage::ProcessType::Unknown,
+                    flags: if has_agent_mode {
+                        crate::lineage::LINEAGE_FLAG_AGENT_MODE
+                    } else {
+                        0
+                    },
+                    create_time_ns: 0,
+                    comm: comm.to_string(),
+                    agent_name,
+                    children: Vec::new(),
+                };
+                tree.insert(node);
+            }
+            tree.classify(pid, has_agent_mode, matches_agent);
+        }
+    }
+
+    /// Update lineage tree from proctrace exec/exit events
+    fn update_lineage_from_proc(&mut self, event: &crate::probes::proctrace::VariableEvent) {
+        use crate::probes::proctrace::VariableEvent;
+
+        match event {
+            VariableEvent::Exec { header, .. } => {
+                let comm_bytes: Vec<u8> = header
+                    .comm
+                    .iter()
+                    .map(|&c| c as u8)
+                    .take_while(|&b| b != 0)
+                    .collect();
+                let comm = String::from_utf8_lossy(&comm_bytes).into_owned();
+
+                let agent_name = self.pid_agent_name_cache.get(&header.pid).cloned();
+                let matches_agent = agent_name
+                    .as_ref()
+                    .is_some_and(|n| !n.starts_with("agent-mode-"));
+                // Infer AGENT_MODE from cache: if procmon already detected it, the
+                // name starts with "agent-mode-". Avoids redundant /proc/pid/environ I/O.
+                let has_agent_mode = agent_name
+                    .as_ref()
+                    .is_some_and(|n| n.starts_with("agent-mode-"));
+
+                let node = crate::lineage::LineageNode {
+                    pid: header.pid,
+                    ppid: header.ppid,
+                    process_type: crate::lineage::ProcessType::Unknown,
+                    flags: if has_agent_mode {
+                        crate::lineage::LINEAGE_FLAG_AGENT_MODE
+                    } else {
+                        0
+                    },
+                    create_time_ns: header.timestamp_ns,
+                    comm,
+                    agent_name,
+                    children: Vec::new(),
+                };
+
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    tree.insert(node);
+                    tree.classify(header.pid, has_agent_mode, matches_agent);
+
+                    log::debug!(
+                        "Lineage: added pid={} ppid={} type={:?}",
+                        header.pid,
+                        header.ppid,
+                        tree.get(header.pid).map(|n| n.process_type),
+                    );
+                }
+            }
+            VariableEvent::Exit { header, .. } => {
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    if let Some(removed) = tree.remove(header.pid) {
+                        log::debug!(
+                            "Lineage: removed pid={} type={:?}",
+                            header.pid,
+                            removed.process_type,
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
