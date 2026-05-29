@@ -7,6 +7,7 @@ pub mod filewatch;
 pub mod filewrite;
 pub mod udpdns;
 pub mod tcpsniff;
+pub mod schedmon;
 pub mod probes;
 
 // Re-export commonly used types
@@ -18,3 +19,4 @@ pub use filewatch::{FileWatch, FileWatchEvent};
 pub use filewrite::{FileWrite as FileWriteProbe, FileWriteEvent};
 pub use udpdns::{UdpDns, UdpDnsEvent};
 pub use tcpsniff::TcpSniff;
+pub use schedmon::{SchedMon, SchedEvent};
