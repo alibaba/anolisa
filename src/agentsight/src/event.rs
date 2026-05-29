@@ -4,6 +4,7 @@ use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
 use crate::probes::udpdns::UdpDnsEvent;
+use crate::probes::schedmon::SchedEvent;
 
 /// Unified event type that can represent any probe event
 ///
@@ -16,6 +17,7 @@ pub enum Event {
     FileWatch(FileWatchEvent),
     FileWrite(FileWriteEvent),
     UdpDns(UdpDnsEvent),
+    Sched(SchedEvent),
 }
 
 impl Event {
@@ -28,6 +30,7 @@ impl Event {
             Event::FileWatch(_) => "FileWatch",
             Event::FileWrite(_) => "FileWrite",
             Event::UdpDns(_) => "UdpDns",
+            Event::Sched(_) => "Sched",
         }
     }
 }
@@ -107,6 +110,19 @@ impl Event {
     pub fn as_udpdns(&self) -> Option<&UdpDnsEvent> {
         match self {
             Event::UdpDns(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a scheduler state event
+    pub fn is_sched(&self) -> bool {
+        matches!(self, Event::Sched(_))
+    }
+
+    /// Get scheduler event if this is one
+    pub fn as_sched(&self) -> Option<&SchedEvent> {
+        match self {
+            Event::Sched(e) => Some(e),
             _ => None,
         }
     }
