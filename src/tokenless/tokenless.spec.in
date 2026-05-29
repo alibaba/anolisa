@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 3
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -53,6 +53,10 @@ Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/to
 Hermes Agent plugin (response compression, TOON encoding, command rewriting via RTK,
 and Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/hermes/.
 Run the install script to register with Hermes: hermes/scripts/install.sh
+Claude Code plugin (RTK command rewriting, response/TOON compression, and Tool Ready
+environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/claude-code/.
+Register it with the official `claude plugin marketplace add` / `claude plugin install`
+CLI, or run the install script: claude-code/scripts/install.sh
 
 %prep
 %setup -q -n tokenless
@@ -69,7 +73,14 @@ cargo build --release
 cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
 # Build toon (standalone binary for Python hooks)
-cargo install toon-format --version 0.4.6 --root %{_builddir}/toon-root --locked
+# Note: toon-format's transitive deps (darling, image, time, plist, etc.)
+# have MSRV 1.88+, which exceeds the build environment's Rust 1.86.
+# Fall back to the system-provided toon binary when available.
+if test -x "%{_bindir}/toon"; then
+    echo "toon (system) already available, skipping cargo install"
+else
+    cargo install toon-format --version 0.4.6 --root %{_builddir}/toon-root --locked
+fi
 
 # Compile the OpenClaw TS plugin via the project Makefile.
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
@@ -89,12 +100,23 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
 install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/anolisa/tokenless/rtk
-install -m 0755 %{_builddir}/toon-root/bin/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
+# Install toon — prefer cargo build output, fall back to system binary
+if [ -f %{_builddir}/toon-root/bin/toon ]; then
+    install -m 0755 %{_builddir}/toon-root/bin/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
+elif command -v toon &>/dev/null; then
+    cp "$(command -v toon)" %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
+else
+    echo "ERROR: toon binary not found"
+    exit 1
+fi
 
 # Create symlinks so rtk and toon are discoverable via PATH
 ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
@@ -140,6 +162,17 @@ install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadi
 install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 
+# Install Claude Code plugin (marketplace + plugin manifest + wrapper hook + scripts).
+# plugin.json is stamped from .in by `make stamp-adapter-templates` during %build
+# (transitive dep of build-openclaw-plugin); shipped as a regular file here.
+install -m 0644 adapters/tokenless/claude-code/.claude-plugin/marketplace.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/
+install -m 0644 adapters/tokenless/claude-code/.claude-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/
+install -m 0644 adapters/tokenless/claude-code/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/
+install -m 0755 adapters/tokenless/claude-code/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/
+install -m 0755 adapters/tokenless/claude-code/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
+install -m 0755 adapters/tokenless/claude-code/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
+install -m 0755 adapters/tokenless/claude-code/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/
+
 # Install cosh extension for auto-discovery at /usr/share/anolisa/extensions/tokenless/
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
@@ -177,6 +210,10 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
+%dir %{_datadir}/anolisa/adapters/tokenless/claude-code
+%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
+%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
+%dir %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/manifest.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tool-ready-spec.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/cosh-extension.json
@@ -202,6 +239,14 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
+
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/marketplace.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks/run-hook.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/uninstall.sh
 # Cosh extension — auto-discovered from /usr/share/anolisa/extensions/
 %dir %{_datadir}/anolisa/extensions
 %dir %{_datadir}/anolisa/extensions/tokenless
@@ -277,9 +322,22 @@ if [ $1 -eq 0 ]; then
     elif [ -d "$HOME/.hermes/plugins/tokenless" ]; then
         rm -rf "$HOME/.hermes/plugins/tokenless" 2>/dev/null || true
     fi
+    # Uninstall claude-code plugin (remove via claude CLI or strip settings.json).
+    # Note: %preun runs as root so this only touches root's ~/.claude — per-user
+    # configs under non-root home dirs are intentionally left alone. Users who
+    # installed claude per-user (npm i -g) must run the cleanup themselves.
+    CLAUDE_CODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts/uninstall.sh"
+    if [ -f "$CLAUDE_CODE_SCRIPT" ]; then
+        bash "$CLAUDE_CODE_SCRIPT" || true
+        echo "WARN: per-user Claude Code plugin entries are not removed by RPM %preun." >&2
+        echo "WARN: each user running claude should run: claude plugin uninstall tokenless@anolisa" >&2
+    fi
 fi
 
 %changelog
+* Thu Jun 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.1-3
+- feat(tokenless): add Claude Code adapter plugin support
+
 * Wed Jun 03 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.1-2
 - feat(tokenless): add qodercli plugin support
 

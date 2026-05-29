@@ -35,7 +35,7 @@
         "hooks": [
           "compress-response",
           "compress-toon",
-          "rtk-rewrite",
+          "rewrite",
           "tool-ready"
         ]
       },
@@ -58,6 +58,25 @@
         "detect":    "qoder/scripts/detect.sh",
         "install":   "qoder/scripts/install.sh",
         "uninstall": "qoder/scripts/uninstall.sh"
+      }
+    },
+    "claude-code": {
+      "compatibleVersions": ">=2.0.0",
+      "method": "plugin",
+      "marketplace": "anolisa",
+      "pluginId": "tokenless@anolisa",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "claude-code/scripts/detect.sh",
+        "install":   "claude-code/scripts/install.sh",
+        "uninstall": "claude-code/scripts/uninstall.sh"
       }
     }
   }

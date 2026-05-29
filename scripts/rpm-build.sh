@@ -455,6 +455,7 @@ build_tokenless() {
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
         --exclude='adapters/tokenless/hermes/plugin.yaml' \
         --exclude='adapters/tokenless/qoder/.qoder-plugin/plugin.json' \
+        --exclude='adapters/tokenless/claude-code/.claude-plugin/plugin.json' \
         . | tar -xf - -C "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}"
