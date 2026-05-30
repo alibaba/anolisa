@@ -1,0 +1,16 @@
+[capability]
+name = "sandbox"
+description = "Sandbox isolation for Agent workloads"
+
+# `sandbox` is implemented by the osbase sandbox layer; backend selected at
+# install time. Backend availability is environment-gated:
+#   - kata / firecracker: require KVM-capable host
+#   - landlock:           require kernel >= 5.13
+[implementation]
+components = ["osbase-sandbox"]
+features."osbase-sandbox" = ["backend_kata", "backend_firecracker", "backend_landlock"]
+
+[requires_env]
+os = "linux"
+arch = ["x86_64", "aarch64"]
+# At least one backend must satisfy its own gate; resolver intersects.

@@ -1,0 +1,13 @@
+[package]
+name = "anolisa-build"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anolisa-core.workspace = true
+anolisa-env.workspace = true
+anolisa-platform.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+indicatif.workspace = true

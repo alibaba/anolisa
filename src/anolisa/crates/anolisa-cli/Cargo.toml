@@ -1,0 +1,22 @@
+[package]
+name = "anolisa-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "anolisa"
+path = "src/main.rs"
+
+[dependencies]
+anolisa-core.workspace = true
+anolisa-env.workspace = true
+anolisa-build.workspace = true
+anolisa-platform.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+indicatif.workspace = true
+console.workspace = true

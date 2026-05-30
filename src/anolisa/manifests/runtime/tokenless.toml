@@ -1,0 +1,71 @@
+[component]
+name = "tokenless"
+version = "0.3.2"
+layer = "runtime"
+domain = "cost"
+description = "LLM token optimization toolkit — transport compression, context pruning, command output rewriting"
+
+[build]
+system = "cargo"
+targets = ["tokenless"]
+pre_build = ["just setup-rtk"]
+
+[build.toolchain]
+rust = ">=1.91.0"
+just = ">=1.0"
+
+[install]
+modes = ["user", "system"]
+
+[[install.files]]
+source = "target/release/tokenless"
+dest = "{bindir}/tokenless"
+mode = "0755"
+
+[[install.files]]
+source = "third_party/rtk/target/release/rtk"
+dest = "{libexecdir}/tokenless/rtk"
+mode = "0755"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+requires_kernel = ">=5.4"
+
+[dependencies]
+build = ["rust>=1.91", "just>=1.0"]
+
+[[features]]
+name = "rtk"
+label = "RTK command output rewriting"
+default = true
+
+[[features]]
+name = "toon"
+label = "TOON JSON encoding"
+default = true
+
+[[features]]
+name = "schema_compress"
+label = "Schema compression"
+default = true
+
+[[adapters]]
+framework = "cosh"
+kind = "first-party"
+source = "target/release/cosh-ext/"
+dest = "{datadir}/adapters/tokenless/cosh/"
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party"
+source = "target/release/openclaw-plugin/"
+dest = "{datadir}/adapters/tokenless/openclaw/"
+detect = { binary = "openclaw" }
+
+[[adapters]]
+framework = "hermes"
+kind = "third-party"
+source = "target/release/hermes-plugin/"
+dest = "{datadir}/adapters/tokenless/hermes/"
+detect = { binary = "hermes", paths = ["/opt/hermes"] }

@@ -1,0 +1,23 @@
+[component]
+name = "os-skills"
+version = "0.1.0"
+layer = "runtime"
+domain = "tools"
+description = "Curated OS Skill library — SKILL.md format standardized tool definitions"
+
+[build]
+system = "static"
+
+[install]
+modes = ["user", "system"]
+
+[[install.files]]
+source = "skills/"
+dest = "{share_dir}/skills"
+mode = "0644"
+
+[environment]
+requires_os = "linux"
+
+[dependencies]
+components = ["cosh"]

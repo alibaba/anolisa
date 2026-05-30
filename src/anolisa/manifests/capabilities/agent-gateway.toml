@@ -1,0 +1,10 @@
+[capability]
+name = "agent-gateway"
+description = "Deterministic CLI gateway from Agent to OS"
+
+[implementation]
+components = ["cosh"]
+
+[requires_env]
+os = "linux"
+arch = ["x86_64", "aarch64"]

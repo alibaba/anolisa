@@ -1,0 +1,10 @@
+[package]
+name = "anolisa-platform"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+nix.workspace = true
+dirs.workspace = true

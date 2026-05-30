@@ -1,0 +1,13 @@
+[capability]
+name = "os-security"
+description = "OS kernel-level security hardening"
+
+# Currently the only backend is `loongshield`; named at the capability level so
+# adding new backends later does not require a capability rename.
+[implementation]
+components = ["osbase-security"]
+features."osbase-security" = ["backend_loongshield"]
+
+[requires_env]
+os = "linux"
+arch = ["x86_64", "aarch64"]

@@ -1,0 +1,28 @@
+[component]
+name = "cosh"
+version = "2.1.0"
+layer = "runtime"
+domain = "tools"
+description = "ANOLISA Agent-OS deterministic interaction interface — cross-distro structured CLI gateway"
+
+[build]
+system = "npm"
+targets = ["build"]
+
+[build.toolchain]
+node = ">=20.0"
+
+[install]
+modes = ["user", "system"]
+
+[[install.files]]
+source = "dist/cosh"
+dest = "{bindir}/cosh"
+mode = "0755"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+build = ["node>=20"]

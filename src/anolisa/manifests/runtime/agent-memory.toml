@@ -1,0 +1,57 @@
+[component]
+name = "agent-memory"
+version = "0.1.0"
+layer = "runtime"
+domain = "state"
+description = "Agent persistent memory and context"
+
+[build]
+system = "cargo"
+targets = ["agent-memory"]
+
+[build.toolchain]
+rust = ">=1.85.0"
+
+[install]
+modes = ["user", "system"]
+
+[[install.files]]
+source = "target/release/agent-memory"
+dest = "{bindir}/agent-memory"
+mode = "0755"
+
+[[install.files]]
+source = "share/agent-memory/default.toml"
+dest = "{datadir}/agent-memory/default.toml"
+mode = "0644"
+
+[[install.files]]
+source = "share/mcp-servers/agent-memory.json"
+dest = "{datadir}/mcp-servers/agent-memory.json"
+mode = "0644"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+build = ["rust>=1.85"]
+
+[[adapters]]
+framework = "cosh"
+kind = "first-party"
+source = "target/release/cosh-ext/"
+dest = "{datadir}/adapters/agent-memory/cosh/"
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party"
+source = "target/release/openclaw-plugin/"
+dest = "{datadir}/adapters/agent-memory/openclaw/"
+detect = { binary = "openclaw" }
+
+[[adapters]]
+framework = "mcp"
+kind = "protocol"
+source = "share/mcp-servers/agent-memory.json"
+dest = "{datadir}/mcp-servers/agent-memory.json"

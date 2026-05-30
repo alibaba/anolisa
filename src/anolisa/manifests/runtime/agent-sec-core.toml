@@ -1,0 +1,70 @@
+[component]
+name = "agent-sec-core"
+version = "1.2.0"
+layer = "runtime"
+domain = "security"
+description = "Agent security kernel — behavior monitoring, credential zero-exposure, Skill signature verification"
+
+[build]
+system = "make"
+targets = ["all"]
+
+[build.toolchain]
+rust = ">=1.93.0"
+python = ">=3.12"
+
+[install]
+modes = ["user", "system"]
+
+[[install.files]]
+source = "target/release/agent-sec-cli"
+dest = "{bindir}/agent-sec-cli"
+mode = "0755"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+build = ["rust>=1.93", "python>=3.12", "uv"]
+runtime = ["bubblewrap", "gpg", "jq"]
+
+[[features]]
+name = "prompt_scanner"
+label = "ML-based prompt injection detection"
+default = true
+
+[[features]]
+name = "code_scanner"
+label = "Code scanning"
+default = true
+
+[[features]]
+name = "sandbox"
+label = "Linux-sandbox enforcement"
+default = true
+
+[[features]]
+name = "skill_ledger"
+label = "Skill integrity verification"
+default = true
+
+[[adapters]]
+framework = "cosh"
+kind = "first-party"
+source = "target/release/cosh-ext/"
+dest = "{datadir}/adapters/agent-sec-core/cosh/"
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party"
+source = "target/release/openclaw-plugin/"
+dest = "{datadir}/adapters/agent-sec-core/openclaw/"
+detect = { binary = "openclaw" }
+
+[[adapters]]
+framework = "hermes"
+kind = "third-party"
+source = "target/release/hermes-plugin/"
+dest = "{datadir}/adapters/agent-sec-core/hermes/"
+detect = { binary = "hermes", paths = ["/opt/hermes"] }

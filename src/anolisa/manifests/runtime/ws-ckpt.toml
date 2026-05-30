@@ -1,0 +1,68 @@
+[component]
+name = "ws-ckpt"
+version = "0.4.1"
+layer = "runtime"
+domain = "state"
+description = "Workspace checkpoint — btrfs COW session-level isolation and rollback"
+
+[build]
+system = "cargo"
+targets = ["ws-ckpt-daemon"]
+
+[build.toolchain]
+rust = ">=1.91.0"
+
+[install]
+modes = ["system"]
+services = ["ws-ckpt.service"]
+
+[[install.files]]
+source = "target/release/ws-ckpt-daemon"
+dest = "{bindir}/ws-ckpt-daemon"
+mode = "0755"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+requires_kernel = ">=5.4"
+
+[environment.requires_env]
+privilege = "root"
+
+[dependencies]
+build = ["rust>=1.91"]
+runtime = ["btrfs-progs"]
+
+[[features]]
+name = "btrfs_loop"
+label = "Btrfs loop-device backend"
+default = true
+
+[features.requires_env]
+filesystem = "btrfs_available"
+
+[[features]]
+name = "overlayfs"
+label = "Overlayfs fallback backend"
+default = false
+conflicts_with = ["btrfs_loop"]
+
+[[adapters]]
+framework = "cosh"
+kind = "first-party"
+source = "target/release/cosh-ext/"
+dest = "{datadir}/adapters/ws-ckpt/cosh/"
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party"
+source = "target/release/openclaw-plugin/"
+dest = "{datadir}/adapters/ws-ckpt/openclaw/"
+detect = { binary = "openclaw" }
+
+[[adapters]]
+framework = "hermes"
+kind = "third-party"
+source = "target/release/hermes-plugin/"
+dest = "{datadir}/adapters/ws-ckpt/hermes/"
+detect = { binary = "hermes", paths = ["/opt/hermes"] }

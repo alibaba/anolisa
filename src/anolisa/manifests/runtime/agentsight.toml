@@ -1,0 +1,57 @@
+[component]
+name = "agentsight"
+version = "0.2.0"
+layer = "runtime"
+domain = "observability"
+description = "Agent observability — execution tracing, resource metering, Token attribution"
+
+[build]
+system = "cargo"
+targets = ["agentsight"]
+
+[build.toolchain]
+rust = ">=1.91.0"
+clang = ">=14"
+
+[install]
+modes = ["system"]
+services = ["agentsight.service"]
+
+[[install.files]]
+source = "target/release/agentsight"
+dest = "{bindir}/agentsight"
+mode = "0755"
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64"]
+requires_kernel = ">=5.8"
+
+[environment.requires_env]
+btf_available = "true"
+capability = "CAP_BPF"
+
+[dependencies]
+build = ["rust>=1.91", "clang>=14", "libbpf-dev"]
+runtime = ["kernel-headers"]
+
+[[features]]
+name = "token_counting"
+label = "LLM Token metering"
+default = true
+
+[[features]]
+name = "server"
+label = "HTTP observability dashboard"
+default = true
+
+[features.requires_env]
+port = "9090"
+
+[[features]]
+name = "ebpf_tracing"
+label = "eBPF-based execution tracing"
+default = true
+
+[features.requires_env]
+capability = "CAP_BPF"

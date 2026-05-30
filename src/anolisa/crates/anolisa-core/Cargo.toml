@@ -1,0 +1,16 @@
+[package]
+name = "anolisa-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anolisa-env.workspace = true
+anolisa-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+petgraph.workspace = true
+semver.workspace = true
+chrono.workspace = true
+sha2.workspace = true
