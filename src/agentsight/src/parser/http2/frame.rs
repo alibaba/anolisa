@@ -323,15 +323,16 @@ impl ParsedHttp2Frame {
         (result, pos + length - start)
     }
 
-    /// Simple Huffman decoder for HPACK
+    /// Decode an HPACK Huffman-encoded string (RFC 7541 Appendix B) using the
+    /// hpack crate's canonical decoder. On decode error (corrupt/truncated data)
+    /// we fall back to a lossy view of the raw bytes rather than a placeholder,
+    /// so callers always get the most readable result available.
     fn huffman_decode(data: &[u8]) -> String {
-        // HPACK uses a specific Huffman code. For simplicity, we'll use
-        // a basic approach - in production, use the hpack crate's decoder
-        // which handles this correctly.
-        // 
-        // For now, return a placeholder indicating Huffman-encoded data
-        // The proper implementation would use the Huffman tree from RFC 7541
-        format!("<huffman:{} bytes>", data.len())
+        let mut decoder = hpack::huffman::HuffmanDecoder::new();
+        match decoder.decode(data) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => String::from_utf8_lossy(data).to_string(),
+        }
     }
 
     /// Get an entry from the HPACK static table (RFC 7541 Appendix A)
@@ -513,5 +514,33 @@ impl fmt::Debug for ParsedHttp2Frame {
             .field("timestamp_ns", &self.source_event.timestamp_ns);
 
         debug.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_huffman_decode_rfc7541_vectors() {
+        // RFC 7541 C.4.1: "www.example.com"
+        let www = [0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff];
+        assert_eq!(ParsedHttp2Frame::huffman_decode(&www), "www.example.com");
+
+        // RFC 7541 C.4.2: "no-cache"
+        let no_cache = [0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf];
+        assert_eq!(ParsedHttp2Frame::huffman_decode(&no_cache), "no-cache");
+
+        // RFC 7541 C.6.1: ":status" value "302" -> Huffman 0x6402
+        let s302 = [0x64, 0x02];
+        assert_eq!(ParsedHttp2Frame::huffman_decode(&s302), "302");
+    }
+
+    #[test]
+    fn test_huffman_decode_invalid_falls_back_to_lossy() {
+        // Not a valid complete Huffman sequence: must not panic and must not
+        // return the old "<huffman:N bytes>" placeholder.
+        let out = ParsedHttp2Frame::huffman_decode(&[0x00]);
+        assert!(!out.starts_with("<huffman:"));
     }
 }
