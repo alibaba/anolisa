@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_full_url_paths() {
-        let parser = MessageParser::new();
+        let _parser = MessageParser::new();
 
         // Should work with full URLs too
         assert!(MessageParser::is_llm_api_path(
