@@ -208,7 +208,7 @@ impl Storage {
         if let AnalysisResult::Http(_) = result {
             return Ok(0);
         }
-        log::debug!("Storing analysis result: {:?}", result);
+        log::debug!("Storing analysis result: {result:?}");
         let id = match result {
             AnalysisResult::Audit(record) => self.audit_store.insert(record),
             AnalysisResult::Token(record) => self.token_store.insert(record),
@@ -234,7 +234,7 @@ impl Storage {
             let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
             if count % self.purge_interval == 0 {
                 if let Err(e) = self.purge_expired() {
-                    log::warn!("Auto-purge failed: {}", e);
+                    log::warn!("Auto-purge failed: {e}");
                 }
             }
         }
@@ -318,9 +318,9 @@ impl Storage {
         // Only need one successful checkpoint since all stores share the same db,
         // but we try on audit_store first and fall through if it fails.
         if let Err(e) = self.audit_store.checkpoint() {
-            log::warn!("Audit store checkpoint failed: {}, trying token store", e);
+            log::warn!("Audit store checkpoint failed: {e}, trying token store");
             if let Err(e2) = self.token_store.checkpoint() {
-                log::warn!("Token store checkpoint failed: {}, trying http store", e2);
+                log::warn!("Token store checkpoint failed: {e2}, trying http store");
                 self.http_store.checkpoint()?;
             }
         }
@@ -332,7 +332,7 @@ impl Storage {
 impl Drop for Storage {
     fn drop(&mut self) {
         if let Err(e) = self.checkpoint() {
-            log::warn!("WAL checkpoint during Storage drop failed: {}", e);
+            log::warn!("WAL checkpoint during Storage drop failed: {e}");
         }
     }
 }

@@ -216,14 +216,14 @@ impl InterruptionCommand {
         let db_path = default_db_path();
 
         if !db_path.exists() {
-            eprintln!("Database file not found: {:?}", db_path);
+            eprintln!("Database file not found: {db_path:?}");
             std::process::exit(1);
         }
 
         let store = match InterruptionStore::new_with_path(&db_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Error opening interruption database {:?}: {}", db_path, e);
+                eprintln!("Error opening interruption database {db_path:?}: {e}");
                 std::process::exit(1);
             }
         };
@@ -265,7 +265,7 @@ impl InterruptionCommand {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -283,11 +283,11 @@ impl InterruptionCommand {
                     }
                 }
                 Ok(None) => {
-                    eprintln!("No interruption found with id: {}", interruption_id);
+                    eprintln!("No interruption found with id: {interruption_id}");
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("Query error: {}", e);
+                    eprintln!("Query error: {e}");
                     std::process::exit(1);
                 }
             },
@@ -300,7 +300,7 @@ impl InterruptionCommand {
                             print_json(&stats);
                         } else {
                             if stats.is_empty() {
-                                println!("No interruption events in the last {} hour(s).", last);
+                                println!("No interruption events in the last {last} hour(s).");
                                 return;
                             }
                             println!("{:<20} {:<10} {:>6}", "TYPE", "SEVERITY", "COUNT");
@@ -314,7 +314,7 @@ impl InterruptionCommand {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -352,17 +352,17 @@ impl InterruptionCommand {
                             });
                             println!("{}", serde_json::to_string_pretty(&output).unwrap());
                         } else {
-                            println!("Unresolved interruptions (last {} hour(s)):", last);
+                            println!("Unresolved interruptions (last {last} hour(s)):");
                             println!();
-                            println!("  Total:    {}", total);
-                            println!("  Critical: {}", critical);
-                            println!("  High:     {}", high);
-                            println!("  Medium:   {}", medium);
-                            println!("  Low:      {}", low);
+                            println!("  Total:    {total}");
+                            println!("  Critical: {critical}");
+                            println!("  High:     {high}");
+                            println!("  Medium:   {medium}");
+                            println!("  Low:      {low}");
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -375,16 +375,16 @@ impl InterruptionCommand {
                             print_json(&rows);
                         } else {
                             if rows.is_empty() {
-                                println!("No interruptions for session: {}", session_id);
+                                println!("No interruptions for session: {session_id}");
                                 return;
                             }
-                            println!("Interruptions for session {}:", session_id);
+                            println!("Interruptions for session {session_id}:");
                             println!();
                             print_records_table(&rows);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -399,16 +399,16 @@ impl InterruptionCommand {
                         print_json(&rows);
                     } else {
                         if rows.is_empty() {
-                            println!("No interruptions for conversation: {}", conversation_id);
+                            println!("No interruptions for conversation: {conversation_id}");
                             return;
                         }
-                        println!("Interruptions for conversation {}:", conversation_id);
+                        println!("Interruptions for conversation {conversation_id}:");
                         println!();
                         print_records_table(&rows);
                     }
                 }
                 Err(e) => {
-                    eprintln!("Query error: {}", e);
+                    eprintln!("Query error: {e}");
                     std::process::exit(1);
                 }
             },
@@ -416,14 +416,14 @@ impl InterruptionCommand {
             InterruptionAction::Resolve { interruption_id } => {
                 match store.resolve(interruption_id) {
                     Ok(true) => {
-                        println!("Resolved: {}", interruption_id);
+                        println!("Resolved: {interruption_id}");
                     }
                     Ok(false) => {
-                        eprintln!("No interruption found with id: {}", interruption_id);
+                        eprintln!("No interruption found with id: {interruption_id}");
                         std::process::exit(1);
                     }
                     Err(e) => {
-                        eprintln!("Error resolving interruption: {}", e);
+                        eprintln!("Error resolving interruption: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -466,7 +466,7 @@ fn format_ns(ns: i64) -> String {
     let hour = total_hours % 24;
 
     // Days since epoch to Y-M-D (simplified)
-    let (year, month, day) = days_to_ymd(total_days as i64);
+    let (year, month, day) = days_to_ymd(total_days);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         year,
@@ -512,15 +512,8 @@ fn print_records_table(records: &[InterruptionRecord]) {
     }
 
     println!(
-        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} {}",
-        "INTERRUPTION_ID",
-        "TYPE",
-        "SEVERITY",
-        "OCCURRED_AT",
-        "RESOLVED",
-        "AGENT",
-        "SESSION_ID",
-        "CONVERSATION_ID"
+        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} CONVERSATION_ID",
+        "INTERRUPTION_ID", "TYPE", "SEVERITY", "OCCURRED_AT", "RESOLVED", "AGENT", "SESSION_ID"
     );
     println!("{}", "-".repeat(140));
 
@@ -583,7 +576,7 @@ fn print_record_detail(r: &InterruptionRecord) {
                 serde_json::to_string_pretty(&v).unwrap_or_else(|_| detail.clone())
             );
         } else {
-            println!("  Detail:       {}", detail);
+            println!("  Detail:       {detail}");
         }
     }
 }
@@ -591,9 +584,9 @@ fn print_record_detail(r: &InterruptionRecord) {
 /// Print any Serialize value as JSON.
 fn print_json<T: serde::Serialize>(value: &T) {
     match serde_json::to_string_pretty(value) {
-        Ok(s) => println!("{}", s),
+        Ok(s) => println!("{s}"),
         Err(e) => {
-            eprintln!("JSON serialization error: {}", e);
+            eprintln!("JSON serialization error: {e}");
             std::process::exit(1);
         }
     }

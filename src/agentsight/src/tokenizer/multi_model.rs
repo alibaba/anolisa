@@ -148,10 +148,7 @@ impl MultiModelTokenizer {
 
         // Return the tokenizer
         self.get(model_name).ok_or_else(|| {
-            anyhow!(
-                "Failed to get tokenizer after registration for model '{}'",
-                model_name
-            )
+            anyhow!("Failed to get tokenizer after registration for model '{model_name}'")
         })
     }
 

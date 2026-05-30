@@ -582,13 +582,11 @@ Some text after"#;
         let names = scan_skills_dir_recursive(&tmp.to_string_lossy(), 2);
         assert!(
             names.contains(&"install-copaw".to_string()),
-            "expected install-copaw in {:?}",
-            names
+            "expected install-copaw in {names:?}"
         );
         assert!(
             names.contains(&"network".to_string()),
-            "expected network in {:?}",
-            names
+            "expected network in {names:?}"
         );
 
         // cleanup

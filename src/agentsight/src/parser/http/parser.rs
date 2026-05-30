@@ -36,19 +36,17 @@ impl HttpParser {
         // 尝试解析为 Request
         match Self::parse_request(data, &event) {
             Ok(req) => return Ok(ParsedHttpMessage::Request(req)),
-            Err(e) => log::trace!("Failed to parse as HTTP request: {}", e),
+            Err(e) => log::trace!("Failed to parse as HTTP request: {e}"),
         }
 
         // 尝试解析为 Response
         match Self::parse_response(data, &event) {
             Ok(resp) => return Ok(ParsedHttpMessage::Response(resp)),
-            Err(e) => log::trace!("Failed to parse as HTTP response: {}", e),
+            Err(e) => log::trace!("Failed to parse as HTTP response: {e}"),
         }
 
         Err(anyhow::anyhow!(
-            "Failed to parse HTTP message (len={}), not a valid HTTP request or response, raw data: {:?}",
-            data_len,
-            event
+            "Failed to parse HTTP message (len={data_len}), not a valid HTTP request or response, raw data: {event:?}"
         ))
     }
 

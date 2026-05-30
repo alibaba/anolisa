@@ -106,19 +106,19 @@ impl LogtailExporter {
         for record in &records {
             match serde_json::to_string(record) {
                 Ok(json_line) => {
-                    if let Err(e) = writeln!(writer, "{}", json_line) {
-                        log::warn!("Failed to write logtail record: {}", e);
+                    if let Err(e) = writeln!(writer, "{json_line}") {
+                        log::warn!("Failed to write logtail record: {e}");
                         return;
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to serialize logtail record: {}", e);
+                    log::warn!("Failed to serialize logtail record: {e}");
                 }
             }
         }
 
         if let Err(e) = writer.flush() {
-            log::warn!("Failed to flush logtail file: {}", e);
+            log::warn!("Failed to flush logtail file: {e}");
         }
     }
 }
@@ -206,7 +206,7 @@ pub fn events_to_flat_records(
                 {
                     m.insert(
                         "gen_ai.response.finish_reasons".to_string(),
-                        format!("[\"{}\"]", reason),
+                        format!("[\"{reason}\"]"),
                     );
                 }
                 if let Some(temp) = call.request.temperature {
@@ -573,8 +573,7 @@ mod tests {
         for key in r.keys() {
             assert!(
                 !key.ends_with(".messages") || key == "gen_ai.system_instructions",
-                "unexpected message field leaked when traceEnabled=false: {}",
-                key,
+                "unexpected message field leaked when traceEnabled=false: {key}",
             );
         }
     }

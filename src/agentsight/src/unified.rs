@@ -145,11 +145,7 @@ impl AgentSight {
                     );
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Failed to load config from {:?}: {}, using embedded defaults",
-                        path,
-                        e
-                    );
+                    log::warn!("Failed to load config from {path:?}: {e}, using embedded defaults");
                     config.cmdline_rules = crate::config::default_cmdline_rules();
                 }
             }
@@ -187,7 +183,7 @@ impl AgentSight {
                 Ok(addrs) => {
                     for addr in addrs {
                         if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-                            log::info!("http domain resolve: {} → {}", domain, ipv4);
+                            log::info!("http domain resolve: {domain} → {ipv4}");
                             tcp_targets.push(crate::config::TcpTarget {
                                 ip: Some(ipv4),
                                 port: None,
@@ -196,7 +192,7 @@ impl AgentSight {
                     }
                 }
                 Err(e) => {
-                    log::warn!("http domain resolve failed for {}: {}", domain, e);
+                    log::warn!("http domain resolve failed for {domain}: {e}");
                 }
             }
         }
@@ -296,7 +292,7 @@ impl AgentSight {
                     genai_exporters.push(Box::new(store));
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
                 }
             }
         }
@@ -312,22 +308,19 @@ impl AgentSight {
 
                 match LlmTokenizer::from_file(tokenizer_path, &config_path) {
                     Ok(tokenizer) => {
-                        log::info!("Tokenizer loaded from: {:?}", tokenizer_path);
+                        log::info!("Tokenizer loaded from: {tokenizer_path:?}");
                         Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
                     }
                     Err(e) => {
                         log::warn!(
-                            "Failed to load tokenizer from {:?}: {}. Using analyzer without tokenizer.",
-                            tokenizer_path,
-                            e
+                            "Failed to load tokenizer from {tokenizer_path:?}: {e}. Using analyzer without tokenizer."
                         );
                         Analyzer::new()
                     }
                 }
             } else {
                 log::warn!(
-                    "Tokenizer file not found: {:?}. Using analyzer without tokenizer.",
-                    tokenizer_path
+                    "Tokenizer file not found: {tokenizer_path:?}. Using analyzer without tokenizer."
                 );
                 Analyzer::new()
             }
@@ -343,11 +336,11 @@ impl AgentSight {
                 .join("interruption_events.db");
             match InterruptionStore::new_with_path(&db_path) {
                 Ok(store) => {
-                    log::info!("Interruption events store initialized at {:?}", db_path);
+                    log::info!("Interruption events store initialized at {db_path:?}");
                     Some(Arc::new(store))
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize interruption store: {}", e);
+                    log::warn!("Failed to initialize interruption store: {e}");
                     None
                 }
             }
@@ -370,7 +363,7 @@ impl AgentSight {
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                         if let Err(e) = store_ref.mark_interrupted_stale(300) {
-                            log::warn!("Stale-pending scan failed: {}", e);
+                            log::warn!("Stale-pending scan failed: {e}");
                         }
                     }
                 })
@@ -439,20 +432,20 @@ impl AgentSight {
 
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
-        log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Attaching to pid {pid}, agent name: {agent_name}");
         if let Err(e) = probes.add_traced_pid(pid) {
-            log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
+            log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
         if let Err(e) = probes.attach_process(pid as i32) {
-            log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
+            log::error!("Failed to attach SSL probe to pid {pid}: {e}");
         } else {
-            log::info!("Attached to agent: {} (pid={})", agent_name, pid);
+            log::info!("Attached to agent: {agent_name} (pid={pid})");
         }
     }
 
     /// Detach SSL probes from a specific agent process
     pub fn detach_process(&mut self, pid: u32, agent_name: &str) {
-        log::debug!("Detaching from pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Detaching from pid {pid}, agent name: {agent_name}");
         let _ = self.probes.remove_traced_pid(pid).inspect_err(|e| {
             log::error!("failed to delete {pid} from traced pid map: {e}");
         });
@@ -529,11 +522,7 @@ impl AgentSight {
                                     port: None,
                                 };
                                 if let Err(e) = self.probes.add_tcp_target(&target) {
-                                    log::warn!(
-                                        "[UDP-DNS] Failed to add tcp target {}: {}",
-                                        ipv4,
-                                        e
-                                    );
+                                    log::warn!("[UDP-DNS] Failed to add tcp target {ipv4}: {e}");
                                 }
                             }
                         }
@@ -601,7 +590,7 @@ impl AgentSight {
                             }
                             for event in &output.events {
                                 if let Err(e) = sqlite_store.complete_pending(event) {
-                                    log::warn!("Failed to complete pending call: {}", e);
+                                    log::warn!("Failed to complete pending call: {e}");
                                 }
                             }
                             // Export to non-SQLite exporters only (SQLite already written)
@@ -646,7 +635,7 @@ impl AgentSight {
             if self.ffi_sender.is_none() {
                 for analysis_result in &analysis_results {
                     if let Err(e) = self.storage.store(analysis_result) {
-                        log::warn!("Failed to store analysis result: {}", e);
+                        log::warn!("Failed to store analysis result: {e}");
                     } else {
                         log::debug!("Analysis result saved");
                     }
@@ -665,14 +654,11 @@ impl AgentSight {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
                 let cmdline_args =
-                    crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+                    crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {
-                    log::debug!(
-                        "ProcMon: pid={} denied by cmdline rule, skipping attach",
-                        pid
-                    );
+                    log::debug!("ProcMon: pid={pid} denied by cmdline rule, skipping attach");
                     return;
                 }
 
@@ -727,7 +713,7 @@ impl AgentSight {
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
             if let Some(result) = self.try_process() {
-                log::trace!("[Event {}] Processed", result);
+                log::trace!("[Event {result}] Processed");
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();
@@ -814,7 +800,7 @@ impl AgentSight {
                             }
                         }
                         if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {}", e);
+                            log::warn!("Failed to store interruption event: {e}");
                         }
                         // Also stamp genai_events row with interruption_type
                         if let Some(ref sqlite) = self.genai_sqlite_store {
@@ -868,7 +854,7 @@ impl AgentSight {
                     let pid = pending.pid;
 
                     if let Err(e) = store.insert_pending(&pending) {
-                        log::warn!("[DrainCheck] FAIL persist: {}", e);
+                        log::warn!("[DrainCheck] FAIL persist: {e}");
                         continue;
                     }
                     // ── Session ID reconciliation ──────────────────────────
@@ -879,13 +865,13 @@ impl AgentSight {
                         Ok(Some(ref real_session_id)) => {
                             if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
                                 if let Err(e) = store.update_session_id(&call_id, real_session_id) {
-                                    log::warn!("[DrainCheck] FAIL update session_id: {}", e);
+                                    log::warn!("[DrainCheck] FAIL update session_id: {e}");
                                 }
                             }
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            log::warn!("[DrainCheck] FAIL lookup session: {}", e);
+                            log::warn!("[DrainCheck] FAIL lookup session: {e}");
                         }
                     }
 
@@ -1003,7 +989,7 @@ impl AgentSight {
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
                                             let wrapped =
-                                                format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                                                format!("<think>\n{all_reasoning}\n</think>\n\n");
                                             total += tokenizer.count(&wrapped).unwrap_or(0);
                                         }
                                         if !all_content.is_empty() {
@@ -1026,7 +1012,7 @@ impl AgentSight {
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
-                                log::warn!("[DrainCheck] FAIL enrich SSE: {}", e);
+                                log::warn!("[DrainCheck] FAIL enrich SSE: {e}");
                             }
                         }
                     }

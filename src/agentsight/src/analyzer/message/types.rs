@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Unified message role across different LLM providers
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MessageRole {
     /// System message (instructions/context)
     /// Note: Some newer OpenAI models use "developer" instead of "system"
@@ -24,17 +25,12 @@ pub enum MessageRole {
     /// Used for developer instructions that should take precedence over user messages
     Developer,
     /// User message (human input)
+    #[default]
     User,
     /// Assistant message (LLM response)
     Assistant,
     /// Tool/Function message
     Tool,
-}
-
-impl Default for MessageRole {
-    fn default() -> Self {
-        MessageRole::User
-    }
 }
 
 // ============================================================================

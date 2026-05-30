@@ -81,28 +81,21 @@ impl<'a> ConnectionScanner<'a> {
             }
 
             // Read cmdline for deny check (fail-closed: skip if unreadable)
-            let cmdline = read_cmdline(&format!("/proc/{}/cmdline", pid));
+            let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
             if cmdline.is_empty() {
-                log::debug!(
-                    "Connection scan: pid={} cmdline empty (process exited?), skipping",
-                    pid
-                );
+                log::debug!("Connection scan: pid={pid} cmdline empty (process exited?), skipping");
                 continue;
             }
 
             // Apply deny rules
             if self.scanner.is_denied(&cmdline) {
-                log::debug!("Connection scan: pid={} denied by rule, skipping", pid);
+                log::debug!("Connection scan: pid={pid} denied by rule, skipping");
                 continue;
             }
 
             seen_pids.insert(pid);
             log::info!(
-                "Connection scan: found pid={} connected to {} ({}:{})",
-                pid,
-                domain,
-                remote_ip,
-                remote_port
+                "Connection scan: found pid={pid} connected to {domain} ({remote_ip}:{remote_port})"
             );
             results.push(ConnectionScanResult {
                 pid,
@@ -141,11 +134,7 @@ fn resolve_domains(domain_patterns: &[String]) -> IpDomainCache {
                 }
             }
             Err(e) => {
-                log::warn!(
-                    "Connection scan: DNS resolution failed for {}: {}",
-                    pattern,
-                    e
-                );
+                log::warn!("Connection scan: DNS resolution failed for {pattern}: {e}");
             }
         }
     }
@@ -177,7 +166,7 @@ fn scan_tcp_connections(ip_cache: &IpDomainCache) -> Vec<(u64, IpAddr, u16, Stri
             }
         }
         Err(e) => {
-            log::warn!("Connection scan: failed to read /proc/net/tcp: {}", e);
+            log::warn!("Connection scan: failed to read /proc/net/tcp: {e}");
         }
     }
     results

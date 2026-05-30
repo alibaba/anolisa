@@ -28,7 +28,7 @@ fn metadata_agent() -> ureq::Agent {
 /// 获取 owner account ID（带缓存）：首次调用请求阿里云 ECS metadata（超时1秒），
 /// 失败返回空字符串。后续调用直接返回缓存值。
 pub fn get_owner_account_id() -> &'static str {
-    OWNER_ACCOUNT_ID.get_or_init(|| fetch_owner_account_id())
+    OWNER_ACCOUNT_ID.get_or_init(fetch_owner_account_id)
 }
 
 /// 实际请求 owner-account-id
@@ -42,13 +42,13 @@ fn fetch_owner_account_id() -> String {
             if let Ok(body) = resp.into_string() {
                 let uid = body.trim().to_string();
                 if !uid.is_empty() {
-                    log::info!("Got ECS owner-account-id: {}", uid);
+                    log::info!("Got ECS owner-account-id: {uid}");
                     return uid;
                 }
             }
         }
         Err(e) => {
-            log::warn!("ECS owner-account-id not available: {}", e);
+            log::warn!("ECS owner-account-id not available: {e}");
         }
     }
     String::new()
@@ -57,7 +57,7 @@ fn fetch_owner_account_id() -> String {
 /// 获取实例ID（带缓存）：首次调用请求阿里云 ECS metadata（超时1秒），
 /// 失败则回退到 hostname。后续调用直接返回缓存值。
 pub fn get_instance_id() -> &'static str {
-    INSTANCE_ID.get_or_init(|| fetch_instance_id())
+    INSTANCE_ID.get_or_init(fetch_instance_id)
 }
 
 /// 实际请求 instance-id
@@ -72,16 +72,13 @@ fn fetch_instance_id() -> String {
             if let Ok(body) = resp.into_string() {
                 let id = body.trim().to_string();
                 if !id.is_empty() {
-                    log::debug!("Got ECS instance-id: {}", id);
+                    log::debug!("Got ECS instance-id: {id}");
                     return id;
                 }
             }
         }
         Err(e) => {
-            log::debug!(
-                "ECS metadata not available, falling back to hostname: {}",
-                e
-            );
+            log::debug!("ECS metadata not available, falling back to hostname: {e}");
         }
     }
     // 回退: /etc/hostname -> $HOSTNAME -> "unknown"

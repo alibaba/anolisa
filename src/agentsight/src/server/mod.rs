@@ -108,7 +108,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
                 Some(Arc::new(store))
             }
             Err(e) => {
-                log::warn!("Failed to initialize GenAI store for HealthChecker: {}", e);
+                log::warn!("Failed to initialize GenAI store for HealthChecker: {e}");
                 None
             }
         };
@@ -122,11 +122,11 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .join("interruption_events.db");
         match InterruptionStore::new_with_path(&db_path) {
             Ok(store) => {
-                log::info!("Interruption store initialized at {:?}", db_path);
+                log::info!("Interruption store initialized at {db_path:?}");
                 Some(Arc::new(store))
             }
             Err(e) => {
-                log::warn!("Failed to open interruption store: {}", e);
+                log::warn!("Failed to open interruption store: {e}");
                 None
             }
         }
@@ -151,17 +151,10 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
-    log::info!(
-        "AgentSight API server listening on http://{}:{}",
-        host,
-        port
-    );
-    eprintln!(
-        "AgentSight API server listening on http://{}:{}",
-        host, port
-    );
+    log::info!("AgentSight API server listening on http://{host}:{port}");
+    eprintln!("AgentSight API server listening on http://{host}:{port}");
     if has_frontend {
-        eprintln!("Dashboard UI: http://{}:{}/", host, port);
+        eprintln!("Dashboard UI: http://{host}:{port}/");
     } else {
         eprintln!(
             "[WARN] Frontend not embedded. Run `npm run build:embed` in dashboard/ then recompile."

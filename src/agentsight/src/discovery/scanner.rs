@@ -36,11 +36,11 @@ impl AgentScanner {
     pub fn from_rules(cmdline_rules: &[CmdlineRule], https_rules: &[HttpsRule]) -> Self {
         let matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
-            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .filter_map(CmdlineGlobMatcher::from_config)
             .collect();
         let deny_matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
-            .filter_map(|r| CmdlineGlobMatcher::from_deny_rule(r))
+            .filter_map(CmdlineGlobMatcher::from_deny_rule)
             .collect();
         let domain_patterns: Vec<String> = https_rules.iter().map(|r| r.pattern.clone()).collect();
         Self {
@@ -84,14 +84,11 @@ impl AgentScanner {
         if !self.matches_domain(domain) {
             return false;
         }
-        let cmdline = read_cmdline(&format!("/proc/{}/cmdline", pid));
+        let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
         // Fail-closed: if cmdline is empty (process already exited or unreadable),
         // do NOT attach — deny rules cannot be evaluated reliably.
         if cmdline.is_empty() {
-            log::debug!(
-                "on_dns_event: pid={} cmdline empty (process exited?), skipping attach",
-                pid
-            );
+            log::debug!("on_dns_event: pid={pid} cmdline empty (process exited?), skipping attach");
             return false;
         }
         !self.is_denied(&cmdline)
@@ -155,7 +152,7 @@ impl AgentScanner {
             bpf_comm.to_string()
         } else {
             // Fallback: read from /proc/[pid]/comm
-            let comm_path = format!("/proc/{}/comm", pid);
+            let comm_path = format!("/proc/{pid}/comm");
             fs::read_to_string(&comm_path)
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -164,16 +161,11 @@ impl AgentScanner {
         };
 
         // Read full command line from /proc/[pid]/cmdline
-        let cmdline_args = read_cmdline(&format!("/proc/{}/cmdline", pid));
-        log::debug!(
-            "Process created: pid={}, comm='{}', cmdline={:?}",
-            pid,
-            comm,
-            cmdline_args
-        );
+        let cmdline_args = read_cmdline(&format!("/proc/{pid}/cmdline"));
+        log::debug!("Process created: pid={pid}, comm='{comm}', cmdline={cmdline_args:?}");
 
         // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path_str = format!("/proc/{}/exe", pid);
+        let exe_path_str = format!("/proc/{pid}/exe");
         let exe = fs::read_link(&exe_path_str)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -202,7 +194,7 @@ impl AgentScanner {
     ///
     /// Remove the process from tracking if it was a known agent.
     pub fn on_process_exit(&mut self, pid: u32) -> Option<DiscoveredAgent> {
-        log::debug!("Process exited: pid={}", pid);
+        log::debug!("Process exited: pid={pid}");
         self.tracked_agents.remove(&pid)
     }
 
@@ -233,19 +225,19 @@ impl AgentScanner {
 
     /// Attempt to match a process against known agents
     fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
-        let proc_dir = format!("/proc/{}", pid);
+        let proc_dir = format!("/proc/{pid}");
 
         // Read process name from /proc/[pid]/comm
-        let comm_path = format!("{}/comm", proc_dir);
+        let comm_path = format!("{proc_dir}/comm");
         let comm = fs::read_to_string(&comm_path).ok()?;
         let process_name = comm.trim().to_string();
 
         // Read full command line from /proc/[pid]/cmdline
-        let cmdline_path = format!("{}/cmdline", proc_dir);
+        let cmdline_path = format!("{proc_dir}/cmdline");
         let cmdline_args = read_cmdline(&cmdline_path);
 
         // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path = format!("{}/exe", proc_dir);
+        let exe_path = format!("{proc_dir}/exe");
         let exe = fs::read_link(&exe_path)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();

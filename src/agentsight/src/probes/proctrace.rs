@@ -406,7 +406,7 @@ impl ProcTrace {
                 skel.maps_mut()
                     .traced_processes()
                     .update(&key, &val, libbpf_rs::MapFlags::ANY)
-                    .with_context(|| format!("failed to add pid {} to traced_processes", pid))?;
+                    .with_context(|| format!("failed to add pid {pid} to traced_processes"))?;
             }
         }
 
@@ -439,7 +439,7 @@ impl ProcTrace {
             .maps_mut()
             .traced_processes()
             .update(&key, &val, libbpf_rs::MapFlags::ANY)
-            .with_context(|| format!("failed to add pid {} to traced_processes", pid))
+            .with_context(|| format!("failed to add pid {pid} to traced_processes"))
     }
 
     /// Remove a PID from the traced_processes map at runtime
@@ -449,7 +449,7 @@ impl ProcTrace {
             .maps_mut()
             .traced_processes()
             .delete(&key)
-            .with_context(|| format!("failed to remove pid {} from traced_processes", pid))
+            .with_context(|| format!("failed to remove pid {pid} from traced_processes"))
     }
 
     /// Create a MapHandle from the traced_processes map for external reuse
@@ -527,7 +527,7 @@ impl ProcTrace {
         let mut rb_builder = RingBufferBuilder::new();
         let binding = self.skel.maps();
         rb_builder
-            .add(&binding.rb(), move |data: &[u8]| {
+            .add(binding.rb(), move |data: &[u8]| {
                 if data.len() < min_sz {
                     return 0;
                 }

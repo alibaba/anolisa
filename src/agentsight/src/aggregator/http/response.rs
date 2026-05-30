@@ -27,7 +27,7 @@ impl AggregatedResponse {
     }
 
     pub fn body(&self) -> &[u8] {
-        &self.parsed.body()
+        self.parsed.body()
     }
 
     pub fn body_string(&self) -> String {
@@ -43,7 +43,7 @@ impl AggregatedResponse {
         } else if sse_body.is_empty() {
             first.to_string()
         } else {
-            format!("{}{}", first, sse_body)
+            format!("{first}{sse_body}")
         }
     }
 

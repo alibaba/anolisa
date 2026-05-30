@@ -269,9 +269,9 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .unwrap_or_default();
     let path = call.metadata.get("path").cloned().unwrap_or_default();
     let url = if server_port.is_empty() {
-        format!("https://{}{}", server_addr, path)
+        format!("https://{server_addr}{path}")
     } else {
-        format!("https://{}:{}{}", server_addr, server_port, path)
+        format!("https://{server_addr}:{server_port}{path}")
     };
     let request_url = safe_cstring(&url);
 
@@ -283,7 +283,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("status_code")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let is_sse: bool = call.metadata.get("is_sse").map_or(false, |s| s == "true");
+    let is_sse: bool = call.metadata.get("is_sse").is_some_and(|s| s == "true");
 
     let finish_reason = call
         .response
@@ -650,10 +650,7 @@ fn ffi_background_thread(
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
         Err(e) => {
-            log::error!(
-                "agentsight background thread: AgentSight::new failed: {}",
-                e
-            );
+            log::error!("agentsight background thread: AgentSight::new failed: {e}");
             return;
         }
     };
@@ -799,7 +796,7 @@ mod tests {
         let mut cfg = new_cfg();
         let json = r#"{"verbose":1,"log_path":"/tmp/test.log"}"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.log_path, Some("/tmp/test.log".to_string()));
     }
 
@@ -911,7 +908,7 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Hermes".to_string()));
-        assert_eq!(cfg.cmdline_rules[0].allow, true);
+        assert!(cfg.cmdline_rules[0].allow);
         assert_eq!(cfg.cmdline_rules[1].agent_name, Some("Cosh".to_string()));
     }
 
@@ -941,7 +938,7 @@ mod tests {
             "https": [{"rule": ["*.openai.com"]}]
         }"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.cmdline_rules.len(), 1);
         assert_eq!(cfg.https_rules.len(), 1);
     }

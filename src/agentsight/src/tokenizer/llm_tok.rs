@@ -46,10 +46,10 @@ impl LlmTokenizer {
         let config_path = config_path.as_ref();
         let tokenizer_str = tokenizer_path
             .to_str()
-            .ok_or_else(|| anyhow!("Tokenizer path is not valid UTF-8: {:?}", tokenizer_path))?;
+            .ok_or_else(|| anyhow!("Tokenizer path is not valid UTF-8: {tokenizer_path:?}"))?;
         let config_str = config_path
             .to_str()
-            .ok_or_else(|| anyhow!("Config path is not valid UTF-8: {:?}", config_path))?;
+            .ok_or_else(|| anyhow!("Config path is not valid UTF-8: {config_path:?}"))?;
 
         // Use HuggingFaceTokenizer with explicit chat template config
         let tokenizer =
@@ -77,7 +77,7 @@ impl LlmTokenizer {
         let encoding = self
             .inner
             .encode(text, true)
-            .map_err(|e| anyhow!("Failed to encode text with special tokens: {}", e))?;
+            .map_err(|e| anyhow!("Failed to encode text with special tokens: {e}"))?;
         Ok(encoding.token_ids().to_vec())
     }
 
@@ -86,7 +86,7 @@ impl LlmTokenizer {
         let encoding = self
             .inner
             .encode(text, false)
-            .map_err(|e| anyhow!("Failed to encode text: {}", e))?;
+            .map_err(|e| anyhow!("Failed to encode text: {e}"))?;
         Ok(encoding.token_ids().to_vec())
     }
 
@@ -112,7 +112,7 @@ impl LlmTokenizer {
                     ..Default::default()
                 },
             )
-            .map_err(|e| anyhow!("Failed to apply chat template: {}", e))
+            .map_err(|e| anyhow!("Failed to apply chat template: {e}"))
     }
 
     /// Count tokens in text
@@ -120,7 +120,7 @@ impl LlmTokenizer {
         let encoding = self
             .inner
             .encode(text, false)
-            .map_err(|e| anyhow!("Failed to encode text: {}", e))?;
+            .map_err(|e| anyhow!("Failed to encode text: {e}"))?;
         Ok(encoding.token_ids().len())
     }
 
@@ -133,7 +133,7 @@ impl LlmTokenizer {
     pub fn decode(&self, tokens: &[u32]) -> Result<String> {
         self.inner
             .decode(tokens, false)
-            .map_err(|e| anyhow!("Failed to decode tokens: {}", e))
+            .map_err(|e| anyhow!("Failed to decode tokens: {e}"))
     }
 
     /// Get the model name
@@ -146,7 +146,7 @@ impl LlmTokenizer {
         let encoding = self
             .inner
             .encode(text, true)
-            .map_err(|e| anyhow!("Failed to encode text with special tokens: {}", e))?;
+            .map_err(|e| anyhow!("Failed to encode text with special tokens: {e}"))?;
         Ok(encoding.token_ids().len())
     }
 

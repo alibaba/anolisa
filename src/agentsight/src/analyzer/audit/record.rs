@@ -29,7 +29,7 @@ impl std::str::FromStr for AuditEventType {
         match s {
             "llm_call" | "llm" => Ok(AuditEventType::LlmCall),
             "process_action" | "process" => Ok(AuditEventType::ProcessAction),
-            _ => Err(format!("unknown event type: {}", s)),
+            _ => Err(format!("unknown event type: {s}")),
         }
     }
 }

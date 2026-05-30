@@ -90,7 +90,7 @@ pub fn init_logging(verbose: bool, log_path: Option<&str>) {
                 builder.target(env_logger::Target::Pipe(Box::new(file)));
             }
             Err(e) => {
-                eprintln!("agentsight: failed to open log file {:?}: {}", path, e);
+                eprintln!("agentsight: failed to open log file {path:?}: {e}");
             }
         }
     }
@@ -166,31 +166,26 @@ impl FromStr for TcpTarget {
             // ":port" — port-only
             let port: u16 = s[1..]
                 .parse()
-                .map_err(|_| format!("invalid port in '{}'", s))?;
+                .map_err(|_| format!("invalid port in '{s}'"))?;
             Ok(TcpTarget {
                 ip: None,
                 port: Some(port),
             })
         } else if s.contains(':') {
             // "ip:port"
-            let mut parts = s.rsplitn(2, ':');
-            let port_str = parts.next().unwrap();
-            let ip_str = parts.next().unwrap();
-            let ip: Ipv4Addr = ip_str
-                .parse()
-                .map_err(|_| format!("invalid IP in '{}'", s))?;
+            let (ip_str, port_str) = s.rsplit_once(':').unwrap();
+
+            let ip: Ipv4Addr = ip_str.parse().map_err(|_| format!("invalid IP in '{s}'"))?;
             let port: u16 = port_str
                 .parse()
-                .map_err(|_| format!("invalid port in '{}'", s))?;
+                .map_err(|_| format!("invalid port in '{s}'"))?;
             Ok(TcpTarget {
                 ip: Some(ip),
                 port: Some(port),
             })
         } else {
             // "ip" — IP-only
-            let ip: Ipv4Addr = s
-                .parse()
-                .map_err(|_| format!("invalid IP address '{}'", s))?;
+            let ip: Ipv4Addr = s.parse().map_err(|_| format!("invalid IP address '{s}'"))?;
             Ok(TcpTarget {
                 ip: Some(ip),
                 port: None,
@@ -319,7 +314,7 @@ pub fn parse_json_rules(
     json: &str,
 ) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
     let parsed: JsonFullConfig =
-        serde_json::from_str(json).map_err(|e| format!("JSON parse error: {}", e))?;
+        serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
     Ok(extract_rules(&parsed))
 }
 
@@ -333,11 +328,11 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // Create parent directory if needed
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {:?}", parent))?;
+            .with_context(|| format!("Failed to create directory {parent:?}"))?;
     }
     std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to write default agents config to {:?}", path))?;
-    log::info!("Generated default agents config at {:?}", path);
+        .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
+    log::info!("Generated default agents config at {path:?}");
     Ok(())
 }
 
@@ -569,7 +564,7 @@ impl AgentsightConfig {
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
         let mut parsed: JsonFullConfig =
-            serde_json::from_str(json).map_err(|e| format!("JSON parse error: {}", e))?;
+            serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
 
         if let Some(t) = parsed.trace_enabled {
             self.trace_enabled = t;
@@ -597,9 +592,7 @@ impl AgentsightConfig {
                         }
                         Err(e) => {
                             log::warn!(
-                                "Failed to read encryption public_key_path {:?}: {}, encryption disabled",
-                                trimmed,
-                                e
+                                "Failed to read encryption public_key_path {trimmed:?}: {e}, encryption disabled"
                             );
                         }
                     }
@@ -656,9 +649,9 @@ impl AgentsightConfig {
     /// `load_from_json` (verbose, log_path, cmdline, domain) are loaded.
     pub fn load_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config from {:?}", path))?;
+            .with_context(|| format!("Failed to read config from {path:?}"))?;
         self.load_from_json(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config from {:?}: {}", path, e))
+            .map_err(|e| anyhow::anyhow!("Failed to parse config from {path:?}: {e}"))
     }
 
     /// Resolve the effective config file path.

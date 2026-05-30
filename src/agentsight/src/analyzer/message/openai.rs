@@ -57,7 +57,7 @@ impl OpenAIParser {
     /// ```
     pub fn parse_request(body: &serde_json::Value) -> Option<OpenAIRequest> {
         // Quick validation - must have model and messages fields
-        if !body.get("model").is_some() || !body.get("messages").is_some() {
+        if body.get("model").is_none() || body.get("messages").is_none() {
             log::trace!("OpenAI request missing required fields: model or messages");
             return None;
         }
@@ -72,7 +72,7 @@ impl OpenAIParser {
                 Some(request)
             }
             Err(e) => {
-                log::trace!("Failed to parse OpenAI request: {}", e);
+                log::trace!("Failed to parse OpenAI request: {e}");
                 None
             }
         }
@@ -112,7 +112,7 @@ impl OpenAIParser {
                     return Some(response);
                 }
                 Err(e) => {
-                    log::trace!("Failed to parse OpenAI response: {}", e);
+                    log::trace!("Failed to parse OpenAI response: {e}");
                 }
             }
         }

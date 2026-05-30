@@ -53,7 +53,7 @@ fn main() {
         if let Some(event) = sniffer.try_recv() {
             let result = parser.parse_ssl_event(Rc::new(event));
             for msg in result.messages {
-                println!("{:#?}", msg);
+                println!("{msg:#?}");
             }
         } else {
             std::thread::sleep(Duration::from_millis(10));

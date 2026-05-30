@@ -12,14 +12,14 @@ impl MetricsCommand {
         let db_path = GenAISqliteStore::default_path();
 
         if !db_path.exists() {
-            eprintln!("Database file not found: {:?}", db_path);
+            eprintln!("Database file not found: {db_path:?}");
             std::process::exit(1);
         }
 
         let store = match GenAISqliteStore::new_with_path(&db_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Error opening database {:?}: {}", db_path, e);
+                eprintln!("Error opening database {db_path:?}: {e}");
                 std::process::exit(1);
             }
         };
@@ -27,7 +27,7 @@ impl MetricsCommand {
         let summaries = match store.get_agent_token_summary() {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Error querying metrics: {}", e);
+                eprintln!("Error querying metrics: {e}");
                 std::process::exit(1);
             }
         };

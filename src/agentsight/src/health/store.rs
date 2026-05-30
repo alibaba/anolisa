@@ -55,6 +55,12 @@ pub struct HealthStore {
     pub last_scan_time: u64,
 }
 
+impl Default for HealthStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthStore {
     pub fn new() -> Self {
         Self {

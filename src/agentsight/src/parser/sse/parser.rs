@@ -12,10 +12,10 @@ impl SSEParser {
         let mut result = SSEEvents::new();
         let mut current_event = SSEEvent::new("");
         let mut data_lines: Vec<String> = Vec::new();
-        let mut lines = buffer.lines().peekable();
+        let lines = buffer.lines().peekable();
         let mut consumed_len = 0;
 
-        while let Some(line) = lines.next() {
+        for line in lines {
             consumed_len += line.len() + 1; // +1 for newline
 
             if line.is_empty() {

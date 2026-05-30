@@ -110,7 +110,7 @@ pub fn extract_response_content(
                         let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
                         let arguments =
                             func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                        let tool_content = format!("{}: {}", name, arguments);
+                        let tool_content = format!("{name}: {arguments}");
                         if !tool_content.is_empty() {
                             tool_calls.push(tool_content);
                             has_data = true;

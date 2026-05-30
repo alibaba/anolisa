@@ -27,7 +27,7 @@ impl HttpStore {
         let table_name = table_name.to_string();
 
         let create_table_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_ns      INTEGER NOT NULL,
                 pid               INTEGER NOT NULL,
@@ -42,16 +42,14 @@ impl HttpStore {
                 duration_ns       INTEGER NOT NULL DEFAULT 0,
                 is_sse            INTEGER NOT NULL DEFAULT 0,
                 sse_event_count   INTEGER NOT NULL DEFAULT 0
-            );",
-            table_name
+            );"
         );
         let create_index_sql = format!(
-            "CREATE INDEX IF NOT EXISTS idx_{}_ts ON {}(timestamp_ns);
-             CREATE INDEX IF NOT EXISTS idx_{}_pid ON {}(pid);
-             CREATE INDEX IF NOT EXISTS idx_{}_path ON {}(path);",
-            table_name, table_name, table_name, table_name, table_name, table_name
+            "CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name}(timestamp_ns);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_pid ON {table_name}(pid);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_path ON {table_name}(path);"
         );
-        conn.execute_batch(&format!("{}{}", create_table_sql, create_index_sql))?;
+        conn.execute_batch(&format!("{create_table_sql}{create_index_sql}"))?;
 
         Ok(HttpStore { conn, table_name })
     }
@@ -105,8 +103,8 @@ impl HttpStore {
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -131,8 +129,8 @@ impl HttpStore {
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -157,8 +155,8 @@ impl HttpStore {
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse HTTP record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -189,19 +187,19 @@ impl HttpStore {
 
 /// Parse a database row into an HttpRecord
 fn row_to_record(row: &rusqlite::Row) -> Result<HttpRecord> {
-    let timestamp_ns: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let pid: u32 = row.get(1).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let comm: String = row.get(2).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let method: String = row.get(3).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let path: String = row.get(4).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let status_code: u16 = row.get(5).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let request_headers: String = row.get(6).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let request_body: Option<String> = row.get(7).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let response_headers: String = row.get(8).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let response_body: Option<String> = row.get(9).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let duration_ns: i64 = row.get(10).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let is_sse_int: i32 = row.get(11).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let sse_event_count: i64 = row.get(12).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let timestamp_ns: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pid: u32 = row.get(1).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let comm: String = row.get(2).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let method: String = row.get(3).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let path: String = row.get(4).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let status_code: u16 = row.get(5).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let request_headers: String = row.get(6).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let request_body: Option<String> = row.get(7).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let response_headers: String = row.get(8).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let response_body: Option<String> = row.get(9).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let duration_ns: i64 = row.get(10).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let is_sse_int: i32 = row.get(11).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let sse_event_count: i64 = row.get(12).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(HttpRecord {
         timestamp_ns: timestamp_ns as u64,
@@ -227,7 +225,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_db_path(name: &str) -> PathBuf {
-        PathBuf::from(format!("/tmp/test_agentsight_http_{}.db", name))
+        PathBuf::from(format!("/tmp/test_agentsight_http_{name}.db"))
     }
 
     #[test]

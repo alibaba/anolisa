@@ -245,7 +245,7 @@ impl ParsedHttp2Frame {
                     break; // Invalid
                 } else {
                     // Dynamic table index - cannot decode without state
-                    result.push((format!("<dynamic:{}>", index), None));
+                    result.push((format!("<dynamic:{index}>"), None));
                 }
                 pos += 1;
             }
@@ -291,7 +291,7 @@ impl ParsedHttp2Frame {
             if let Some((n, _)) = Self::get_static_table_entry(name_index) {
                 name = n.to_string();
             } else {
-                name = format!("<unknown:{}>", name_index);
+                name = format!("<unknown:{name_index}>");
             }
         } else {
             // Name is literal string
@@ -540,8 +540,8 @@ impl fmt::Debug for ParsedHttp2Frame {
                 let header_strs: Vec<String> = headers
                     .into_iter()
                     .map(|(name, value)| match value {
-                        Some(v) => format!("  {}: {}", name, v),
-                        None => format!("  {}: <undecoded>", name),
+                        Some(v) => format!("  {name}: {v}"),
+                        None => format!("  {name}: <undecoded>"),
                     })
                     .collect();
                 debug.field("headers", &format!("\n{}", header_strs.join("\n")));

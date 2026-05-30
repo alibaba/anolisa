@@ -124,7 +124,7 @@ impl MessageParser {
             }
         }
 
-        log::warn!("Path '{}' does not match any known LLM API endpoint", path);
+        log::warn!("Path '{path}' does not match any known LLM API endpoint");
         None
     }
 

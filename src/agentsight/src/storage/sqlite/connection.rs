@@ -21,11 +21,11 @@ pub fn create_connection(path: &Path) -> Result<Connection> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+            .with_context(|| format!("Failed to create directory: {parent:?}"))?;
     }
 
     let conn =
-        Connection::open(path).with_context(|| format!("Failed to open SQLite: {:?}", path))?;
+        Connection::open(path).with_context(|| format!("Failed to open SQLite: {path:?}"))?;
 
     // Enable WAL mode for better concurrent read performance
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;

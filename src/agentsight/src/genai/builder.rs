@@ -54,7 +54,7 @@ impl GenAIBuilder {
             .unwrap_or(0);
         let pid = std::process::id();
         GenAIBuilder {
-            session_prefix: format!("{:x}_{:x}", ts, pid),
+            session_prefix: format!("{ts:x}_{pid:x}"),
             call_counter: AtomicU64::new(0),
         }
     }
@@ -251,12 +251,12 @@ impl GenAIBuilder {
                     let first_user_text = messages
                         .iter()
                         .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .find_map(|m| extract_text(m))
+                        .find_map(&extract_text)
                         .unwrap_or_default();
 
                     let session_id = if !first_user_text.is_empty() {
                         let hash = Sha256::digest(first_user_text.as_bytes());
-                        Some(format!("{:x}", hash)[..32].to_string())
+                        Some(format!("{hash:x}")[..32].to_string())
                     } else {
                         None
                     };
@@ -267,19 +267,17 @@ impl GenAIBuilder {
                         .iter()
                         .rev()
                         .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .find_map(|m| extract_text(m));
+                        .find_map(extract_text);
 
                     // conversation_id: SHA256 of last user message raw text
                     // (same logic as compute_user_query_fingerprint)
                     let conversation_id = last_user_raw.as_deref().map(|text| {
                         let hash = Sha256::digest(text.as_bytes());
-                        format!("{:x}", hash)[..32].to_string()
+                        format!("{hash:x}")[..32].to_string()
                     });
 
                     // user_query: last user message text, stripped of metadata prefix
-                    let user_query = last_user_raw
-                        .as_deref()
-                        .map(|s| Self::strip_user_query_prefix(s));
+                    let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
 
                     // Serialise message subsets for the pending record
                     let sys: Vec<_> = messages
@@ -331,7 +329,7 @@ impl GenAIBuilder {
         // Resolve agent_name: check pid→name cache first, then comm-based matching, then comm as fallback
         let agent_name = Self::resolve_agent_name_from_comm(
             &request.source_event.comm,
-            conn_id.pid as u32,
+            conn_id.pid,
             pid_agent_name_cache,
         )
         .or_else(|| Some(request.source_event.comm_str()));
@@ -675,11 +673,7 @@ impl GenAIBuilder {
         match message {
             Some(ParsedApiMessage::OpenAICompletion { request, .. }) => {
                 if let Some(req) = request.as_ref() {
-                    let msgs = req
-                        .messages
-                        .iter()
-                        .map(|m| Self::openai_msg_to_input(m))
-                        .collect();
+                    let msgs = req.messages.iter().map(Self::openai_msg_to_input).collect();
                     return LLMRequest {
                         messages: msgs,
                         temperature: req.temperature,
@@ -747,12 +741,10 @@ impl GenAIBuilder {
                                     id: m.tool_call_id.clone(),
                                     response: response_val,
                                 });
-                            } else {
-                                if !m.content.is_empty() {
-                                    parts.push(MessagePart::Text {
-                                        content: m.content.clone(),
-                                    });
-                                }
+                            } else if !m.content.is_empty() {
+                                parts.push(MessagePart::Text {
+                                    content: m.content.clone(),
+                                });
                             }
                             if let Some(ref tool_calls) = m.tool_calls {
                                 for tc in tool_calls {
@@ -874,7 +866,7 @@ impl GenAIBuilder {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let arguments = func.get("arguments").map(|v| v.clone());
+                                let arguments = func.get("arguments").cloned();
                                 parts.push(MessagePart::ToolCall {
                                     id,
                                     name,
@@ -1349,7 +1341,7 @@ impl GenAIBuilder {
             .unwrap_or_default();
 
         let hash = Sha256::digest(first_user_raw.as_bytes());
-        format!("{:x}", hash)[..32].to_string()
+        format!("{hash:x}")[..32].to_string()
     }
 
     /// 提取最后一条有实际文本内容的 user message 的原始文本
@@ -1422,7 +1414,7 @@ impl GenAIBuilder {
         match Self::extract_last_user_raw(request) {
             Some(content) => {
                 let hash = Sha256::digest(content.as_bytes());
-                format!("{:x}", hash)[..32].to_string()
+                format!("{hash:x}")[..32].to_string()
             }
             None => "no_user_query".to_string(),
         }
@@ -1446,7 +1438,7 @@ impl GenAIBuilder {
         };
         default_cmdline_rules()
             .iter()
-            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .filter_map(CmdlineGlobMatcher::from_config)
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
     }
@@ -1462,7 +1454,7 @@ impl GenAIBuilder {
             return Some(name.clone());
         }
         // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
-        let cmdline_args = std::fs::read(format!("/proc/{}/cmdline", pid))
+        let cmdline_args = std::fs::read(format!("/proc/{pid}/cmdline"))
             .ok()
             .map(|data| {
                 data.split(|&b| b == 0)
@@ -1472,7 +1464,7 @@ impl GenAIBuilder {
             })
             .unwrap_or_default();
 
-        let exe_path = std::fs::read_link(format!("/proc/{}/exe", pid))
+        let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -1484,7 +1476,7 @@ impl GenAIBuilder {
         };
         default_cmdline_rules()
             .iter()
-            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .filter_map(CmdlineGlobMatcher::from_config)
             .find(|m| m.matches(&ctx))
             .map(|m| m.info().name.clone())
     }
@@ -1512,7 +1504,7 @@ impl GenAIBuilder {
                     let text = c.as_text();
                     // Try to parse as JSON, fall back to string
                     serde_json::from_str::<serde_json::Value>(&text)
-                        .unwrap_or_else(|_| serde_json::Value::String(text))
+                        .unwrap_or(serde_json::Value::String(text))
                 })
                 .unwrap_or(serde_json::Value::Null);
             parts.push(MessagePart::ToolCallResponse {
@@ -1648,7 +1640,7 @@ impl GenAIBuilder {
 
         log::debug!("[GenAI] Parsing SSE body with {} chunks", chunks.len());
 
-        for (_chunk_idx, chunk) in chunks.iter().enumerate() {
+        for chunk in chunks.iter() {
             let choices = chunk.get("choices").and_then(|c| c.as_array());
             let choices = match choices {
                 Some(c) => c,

@@ -43,19 +43,19 @@ fn main() {
 
     println!("=== Process Tracer ===");
     if let Some(pid) = opts.pid {
-        println!("Target PID: {}", pid);
+        println!("Target PID: {pid}");
     } else {
         println!("Target: All processes");
     }
     if let Some(uid) = opts.uid {
-        println!("UID filter: {}", uid);
+        println!("UID filter: {uid}");
     }
     println!("\n");
 
     loop {
         if let Some(event) = tracer.try_recv() {
             if let Some(parsed) = ProcTraceParser::parse_variable(&event) {
-                println!("{:#?}", parsed);
+                println!("{parsed:#?}");
             }
         } else {
             std::thread::sleep(Duration::from_millis(10));

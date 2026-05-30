@@ -54,7 +54,7 @@ impl TraceCommand {
                 self.run_tracing();
             }
             Err(e) => {
-                eprintln!("Failed to daemonize: {}", e);
+                eprintln!("Failed to daemonize: {e}");
                 std::process::exit(1);
             }
         }
@@ -78,7 +78,7 @@ impl TraceCommand {
         let mut sight = match AgentSight::new(config) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to create AgentSight: {}", e);
+                eprintln!("Failed to create AgentSight: {e}");
                 std::process::exit(1);
             }
         };
@@ -96,11 +96,11 @@ impl TraceCommand {
         // Run event loop (blocks until running flag is set to false)
         match sight.run() {
             Ok(count) => {
-                println!("\nReceived {} events total", count);
+                println!("\nReceived {count} events total");
                 println!("Token usage data saved. Use 'agentsight token' to query.");
             }
             Err(e) => {
-                eprintln!("Error during tracing: {}", e);
+                eprintln!("Error during tracing: {e}");
                 std::process::exit(1);
             }
         }

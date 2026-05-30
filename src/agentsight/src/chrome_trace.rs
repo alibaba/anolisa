@@ -362,7 +362,7 @@ fn trace_file_path() -> &'static std::path::PathBuf {
         let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M");
         std::env::current_dir()
             .unwrap_or_default()
-            .join(format!("trace-{}.json", datetime))
+            .join(format!("trace-{datetime}.json"))
     })
 }
 

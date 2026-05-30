@@ -65,7 +65,7 @@ impl InterruptionDetector {
             .get("response_body")
             .map(|s| s.as_str())
             .unwrap_or("");
-        let combined_error = format!("{} {}", error_text, response_body).to_ascii_lowercase();
+        let combined_error = format!("{error_text} {response_body}").to_ascii_lowercase();
 
         let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")

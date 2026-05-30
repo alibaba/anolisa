@@ -59,11 +59,11 @@ impl ToChromeTraceEvent for AggregatedResult {
             AggregatedResult::SseComplete(pair) => pair.to_chrome_trace_events(),
             AggregatedResult::ProcessComplete(process) => process.to_chrome_trace_events(),
             AggregatedResult::RequestOnly { .. } => {
-                log::warn!("RequestOnly: {:?}", self);
+                log::warn!("RequestOnly: {self:?}");
                 vec![]
             }
             AggregatedResult::ResponseOnly { .. } => {
-                log::warn!("ResponseOnly: {:?}", self);
+                log::warn!("ResponseOnly: {self:?}");
                 vec![]
             }
             AggregatedResult::Http2Frames { frames, .. } => frames

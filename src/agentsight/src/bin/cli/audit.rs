@@ -32,14 +32,14 @@ impl AuditCommand {
         let db_path = SqliteConfig::default().db_path();
 
         if !db_path.exists() {
-            eprintln!("Database file not found: {:?}", db_path);
+            eprintln!("Database file not found: {db_path:?}");
             std::process::exit(1);
         }
 
         let store = match AuditStore::new(&db_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to open audit database {:?}: {}", db_path, e);
+                eprintln!("Failed to open audit database {db_path:?}: {e}");
                 std::process::exit(1);
             }
         };
@@ -66,15 +66,15 @@ impl AuditCommand {
         let since_ns = super::hours_ago_ns(hours);
 
         match store.query_since(since_ns, event_type) {
-            Ok(records) => self.output_records(&records, &format!("Last {} hours", hours)),
-            Err(e) => eprintln!("Query failed: {}", e),
+            Ok(records) => self.output_records(&records, &format!("Last {hours} hours")),
+            Err(e) => eprintln!("Query failed: {e}"),
         }
     }
 
     fn query_by_pid(&self, store: &AuditStore, pid: u32, event_type: Option<AuditEventType>) {
         match store.query_by_pid(pid, event_type) {
-            Ok(records) => self.output_records(&records, &format!("PID {}", pid)),
-            Err(e) => eprintln!("Query failed: {}", e),
+            Ok(records) => self.output_records(&records, &format!("PID {pid}")),
+            Err(e) => eprintln!("Query failed: {e}"),
         }
     }
 
@@ -124,7 +124,7 @@ impl AuditCommand {
                 if self.json {
                     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
                 } else {
-                    println!("=== Audit Summary (last {} hours) ===", hours);
+                    println!("=== Audit Summary (last {hours} hours) ===");
                     println!();
                     println!("LLM calls:        {}", summary.total_llm_calls);
                     println!("Process actions:  {}", summary.total_process_actions);
@@ -133,7 +133,7 @@ impl AuditCommand {
                         println!();
                         println!("Providers:");
                         for (provider, count) in &summary.providers {
-                            println!("  {}: {} calls", provider, count);
+                            println!("  {provider}: {count} calls");
                         }
                     }
 
@@ -141,12 +141,12 @@ impl AuditCommand {
                         println!();
                         println!("Top commands:");
                         for (cmd, count) in &summary.top_commands {
-                            println!("  {}: {} times", cmd, count);
+                            println!("  {cmd}: {count} times");
                         }
                     }
                 }
             }
-            Err(e) => eprintln!("Summary query failed: {}", e),
+            Err(e) => eprintln!("Summary query failed: {e}"),
         }
     }
 }
