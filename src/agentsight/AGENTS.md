@@ -32,8 +32,8 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 
 | 模块 | 位置 | 职责 | 关键类型 |
 |------|------|------|----------|
-| **Probes** | `src/probes/` | eBPF 探针管理 | `Probes`, `ProbesPoller`, `SslSniff`, `ProcMon`, `FileWatch` |
-| **Event** | `src/event.rs` | 统一事件枚举 | `Event::{Ssl, Proc, ProcMon, FileWatch}` |
+| **Probes** | `src/probes/` | eBPF 探针管理 | `Probes`, `ProbesPoller`, `SslSniff`, `ProcMon`, `FileWatch`, `FileWriteProbe`, `UdpDns`, `TcpSniff` |
+| **Event** | `src/event.rs` | 统一事件枚举 | `Event::{Ssl, Proc, ProcMon, FileWatch, FileWrite, UdpDns}` |
 | **Parser** | `src/parser/` | 协议解析（HTTP/1.x, HTTP/2, SSE, ProcTrace） | `Parser`, `ParsedMessage` |
 | **Aggregator** | `src/aggregator/` | 请求-响应关联 | `Aggregator`, `AggregatedResult` |
 | **Analyzer** | `src/analyzer/` | Token/审计/消息分析 | `Analyzer`, `AnalysisResult` |
@@ -62,6 +62,9 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | proctrace | `src/bpf/proctrace.bpf.c` | tracepoint on execve 捕获命令行参数 |
 | procmon | `src/bpf/procmon.bpf.c` | 进程创建/退出事件（Agent 发现） |
 | filewatch | `src/bpf/filewatch.bpf.c` | 监控 .jsonl 文件打开事件 |
+| filewrite | `src/bpf/filewrite.bpf.c` | fentry on vfs_write 捕获 .jsonl 写入内容 |
+| udpdns | `src/bpf/udpdns.bpf.c` | fentry on udp_sendmsg 捕获 DNS 查询（域名→IP）|
+| tcpsniff | `src/bpf/tcpsniff.bpf.c` | fentry on tcp_recvmsg/sendmsg 捕获明文 HTTP 流量 |
 
 构建时 `build.rs` 通过 `libbpf-cargo` 自动生成 eBPF skeleton。
 
