@@ -1332,10 +1332,10 @@ fn compute_skill_metrics_response(
     mut options: crate::skill_metrics::MetricOptions,
 ) -> HttpResponse {
     // Apply granularity from query params
-    if let Some(ref g) = query.granularity {
-        if g == "day" {
-            options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
-        }
+    if let Some(ref g) = query.granularity
+        && g == "day"
+    {
+        options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
     }
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);

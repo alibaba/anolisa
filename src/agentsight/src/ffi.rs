@@ -4,6 +4,12 @@
 //! AgentSight runs a background pipeline thread; completed events are pushed
 //! into an `mpsc` channel and the caller is notified via `eventfd`.
 //! The caller consumes events by calling `agentsight_read()` with callbacks.
+//!
+//! The `extern "C"` entry points are `unsafe` because they take caller-provided
+//! raw pointers; their safety contracts (pointer validity, ownership, lifetime)
+//! are documented in `docs/design-docs/c-ffi-api.md` rather than per-function,
+//! so `missing_safety_doc` is allowed for this module.
+#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -889,8 +895,8 @@ mod tests {
         let buf = copy_process_name(name);
         assert_eq!(buf[15], 0); // NUL-terminated
         // First 15 chars should match
-        for i in 0..15 {
-            assert_eq!(buf[i] as u8, name.as_bytes()[i]);
+        for (i, &b) in name.as_bytes().iter().take(15).enumerate() {
+            assert_eq!(buf[i] as u8, b);
         }
     }
 

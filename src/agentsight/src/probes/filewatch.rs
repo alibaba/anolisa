@@ -121,6 +121,8 @@ impl FileWatch {
             .context("failed to load filewatch BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut FilewatchSkel<'static>) };
 

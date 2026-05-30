@@ -238,6 +238,8 @@ impl SslSniff {
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         // on the heap.  We pin both together inside Self and never move either,
         // so the 'static lifetime cast is sound for the lifetime of Self.
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut SslsniffSkel<'static>) };
 
@@ -692,10 +694,11 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
 // ─── uprobe helpers ───────────────────────────────────────────────────────────
 
 fn make_sym_opts(sym: &str, retprobe: bool) -> UprobeOpts {
-    let mut o = UprobeOpts::default();
-    o.func_name = sym.to_string();
-    o.retprobe = retprobe;
-    o
+    UprobeOpts {
+        func_name: sym.to_string(),
+        retprobe,
+        ..Default::default()
+    }
 }
 
 macro_rules! up {

@@ -44,6 +44,7 @@ const EVENT_SOURCE_UDPDNS: u32 = 6;
 /// and the same ring buffer, allowing coordinated process tracing where:
 /// - proctrace captures process creation events
 /// - sslsniff captures SSL traffic from those processes
+///
 /// Both write to a single shared ring buffer to save memory.
 pub struct Probes {
     /// Process trace probe (owns the traced_processes map and ring buffer)

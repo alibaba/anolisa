@@ -84,23 +84,23 @@ pub fn extract_response_content(
 
         if let Some(msg) = msg_or_delta {
             // Extract content
-            if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
-                if !c.is_empty() {
-                    content.push_str(c);
-                    has_data = true;
-                }
+            if let Some(c) = msg.get("content").and_then(|c| c.as_str())
+                && !c.is_empty()
+            {
+                content.push_str(c);
+                has_data = true;
             }
 
             // Extract reasoning_content
-            if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str()) {
-                if !r.is_empty() {
-                    // For SSE chunks, accumulate reasoning content
-                    reasoning = match reasoning {
-                        Some(existing) => Some(existing + r),
-                        None => Some(r.to_string()),
-                    };
-                    has_data = true;
-                }
+            if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str())
+                && !r.is_empty()
+            {
+                // For SSE chunks, accumulate reasoning content
+                reasoning = match reasoning {
+                    Some(existing) => Some(existing + r),
+                    None => Some(r.to_string()),
+                };
+                has_data = true;
             }
 
             // Extract tool_calls - only extract function name and arguments

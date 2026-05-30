@@ -114,12 +114,11 @@ impl ParsedSseEvent {
             return true;
         }
         // Anthropic style: data contains {"type":"message_stop"}
-        if trimmed.starts_with('{') {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
-                    return true;
-                }
-            }
+        if trimmed.starts_with('{')
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && v.get("type").and_then(|t| t.as_str()) == Some("message_stop")
+        {
+            return true;
         }
         false
     }

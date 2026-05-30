@@ -140,10 +140,10 @@ impl VariableEvent {
                 .map(|p| start + p)
                 .unwrap_or(buf.len());
 
-            if let Ok(s) = std::str::from_utf8(&buf[start..end]) {
-                if !s.is_empty() {
-                    parts.push(s);
-                }
+            if let Ok(s) = std::str::from_utf8(&buf[start..end])
+                && !s.is_empty()
+            {
+                parts.push(s);
             }
             start = end + 1;
         }
@@ -291,10 +291,10 @@ impl ProcEvent {
                 .position(|&c| c == 0)
                 .map(|p| start + p)
                 .unwrap_or(buf.len());
-            if let Ok(s) = std::str::from_utf8(&buf[start..end]) {
-                if !s.is_empty() {
-                    parts.push(s);
-                }
+            if let Ok(s) = std::str::from_utf8(&buf[start..end])
+                && !s.is_empty()
+            {
+                parts.push(s);
             }
             start = end + 1;
         }
@@ -413,6 +413,8 @@ impl ProcTrace {
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         // on the heap. We pin both together inside Self and never move either,
         // so the 'static lifetime cast is sound for the lifetime of Self.
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut ProctraceSkel<'static>) };
 

@@ -24,6 +24,24 @@
 //! sight.run()?;  // blocking event loop
 //! ```
 
+// Crate-wide clippy allows for lints that are either subjective style choices or
+// reflect intentional design here, so we can enforce `clippy -D warnings` in CI
+// without churning these:
+// - type_complexity: a few SQLite row-tuple / callback signatures are clearer
+//   inline than behind a type alias.
+// - large_enum_variant: event/result enums carry one large variant by design;
+//   boxing it would pessimize the common path and complicate call sites.
+// - too_many_arguments: a couple of SQL insert helpers mirror their table columns.
+// - module_inception: `probes::probes` is the established layout.
+// - should_implement_trait: an inherent `from_str` that is not the FromStr trait.
+#![allow(
+    clippy::type_complexity,
+    clippy::large_enum_variant,
+    clippy::too_many_arguments,
+    clippy::module_inception,
+    clippy::should_implement_trait
+)]
+
 pub mod config;
 pub mod probes;
 

@@ -58,10 +58,9 @@ fn collect_socket_inodes(pid: u32) -> std::io::Result<HashSet<u64>> {
         if let Some(inode_str) = link_str
             .strip_prefix("socket:[")
             .and_then(|s| s.strip_suffix(']'))
+            && let Ok(inode) = inode_str.parse::<u64>()
         {
-            if let Ok(inode) = inode_str.parse::<u64>() {
-                inodes.insert(inode);
-            }
+            inodes.insert(inode);
         }
     }
 

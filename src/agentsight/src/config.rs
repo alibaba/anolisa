@@ -162,9 +162,9 @@ impl FromStr for TcpTarget {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if s.starts_with(':') {
+        if let Some(port_str) = s.strip_prefix(':') {
             // ":port" — port-only
-            let port: u16 = s[1..]
+            let port: u16 = port_str
                 .parse()
                 .map_err(|_| format!("invalid port in '{s}'"))?;
             Ok(TcpTarget {

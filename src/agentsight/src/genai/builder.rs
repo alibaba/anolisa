@@ -221,10 +221,10 @@ impl GenAIBuilder {
                     //   "content": [{"type":"text","text":"..."},...]
                     let extract_text = |m: &serde_json::Value| -> Option<String> {
                         let c = m.get("content")?;
-                        if let Some(s) = c.as_str() {
-                            if !s.is_empty() {
-                                return Some(s.to_string());
-                            }
+                        if let Some(s) = c.as_str()
+                            && !s.is_empty()
+                        {
+                            return Some(s.to_string());
                         }
                         if let Some(arr) = c.as_array() {
                             let text: String = arr
@@ -380,28 +380,26 @@ impl GenAIBuilder {
             }
             if let Some(json) = event.json_body() {
                 // Extract model from first chunk that has it
-                if model.is_none() {
-                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
-                        if !m.is_empty() {
-                            model = Some(m.to_string());
-                        }
-                    }
+                if model.is_none()
+                    && let Some(m) = json.get("model").and_then(|v| v.as_str())
+                    && !m.is_empty()
+                {
+                    model = Some(m.to_string());
                 }
                 // Extract response id (trace_id) from first chunk that has it
-                if trace_id.is_none() {
-                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
-                        if !id.is_empty() {
-                            trace_id = Some(id.to_string());
-                        }
-                    }
+                if trace_id.is_none()
+                    && let Some(id) = json.get("id").and_then(|v| v.as_str())
+                    && !id.is_empty()
+                {
+                    trace_id = Some(id.to_string());
                 }
                 // Accumulate content deltas
                 if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
                     for choice in choices {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
-                                content_buf.push_str(c);
-                            }
+                        if let Some(delta) = choice.get("delta")
+                            && let Some(c) = delta.get("content").and_then(|v| v.as_str())
+                        {
+                            content_buf.push_str(c);
                         }
                     }
                 }
@@ -420,10 +418,10 @@ impl GenAIBuilder {
         };
 
         // Use model from usage if not found in content chunks
-        if model.is_none() {
-            if let Some(ref u) = usage {
-                model = u.model.clone();
-            }
+        if model.is_none()
+            && let Some(ref u) = usage
+        {
+            model = u.model.clone();
         }
 
         // Build output_messages JSON from accumulated content
@@ -580,12 +578,11 @@ impl GenAIBuilder {
                                 if let Some(msg) = inner.get("message").and_then(|m| m.as_str()) {
                                     return Some(msg.to_string());
                                 }
-                                if let Some(inner_e) = inner.get("error") {
-                                    if let Some(msg) =
+                                if let Some(inner_e) = inner.get("error")
+                                    && let Some(msg) =
                                         inner_e.get("message").and_then(|m| m.as_str())
-                                    {
-                                        return Some(msg.to_string());
-                                    }
+                                {
+                                    return Some(msg.to_string());
                                 }
                             }
                             return Some(s.to_string());
@@ -635,14 +632,13 @@ impl GenAIBuilder {
                 // Extract server.address and server.port from Host header
                 if let Ok(headers) =
                     serde_json::from_str::<HashMap<String, String>>(&http.request_headers)
+                    && let Some(host) = headers.get("host").or_else(|| headers.get("Host"))
                 {
-                    if let Some(host) = headers.get("host").or_else(|| headers.get("Host")) {
-                        if let Some((addr, port)) = host.rsplit_once(':') {
-                            meta.insert("server.address".to_string(), addr.to_string());
-                            meta.insert("server.port".to_string(), port.to_string());
-                        } else {
-                            meta.insert("server.address".to_string(), host.clone());
-                        }
+                    if let Some((addr, port)) = host.rsplit_once(':') {
+                        meta.insert("server.address".to_string(), addr.to_string());
+                        meta.insert("server.port".to_string(), port.to_string());
+                    } else {
+                        meta.insert("server.address".to_string(), host.clone());
                     }
                 }
                 // Derive gen_ai.operation.name from path
@@ -786,10 +782,10 @@ impl GenAIBuilder {
         }
 
         // Fallback: no parsed message — parse request_body directly
-        if let Some(ref body) = http.request_body {
-            if let Some(req) = Self::parse_request_body(body) {
-                return req;
-            }
+        if let Some(ref body) = http.request_body
+            && let Some(req) = Self::parse_request_body(body)
+        {
+            return req;
         }
         LLMRequest {
             messages: vec![],
@@ -842,17 +838,17 @@ impl GenAIBuilder {
                         }
 
                         // tool_call 结果 (role=tool)
-                        if role == "tool" {
-                            if let Some(content) = msg.get("content") {
-                                let id = msg
-                                    .get("tool_call_id")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                parts = vec![MessagePart::ToolCallResponse {
-                                    id,
-                                    response: content.clone(),
-                                }];
-                            }
+                        if role == "tool"
+                            && let Some(content) = msg.get("content")
+                        {
+                            let id = msg
+                                .get("tool_call_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            parts = vec![MessagePart::ToolCallResponse {
+                                id,
+                                response: content.clone(),
+                            }];
                         }
 
                         // tool_calls (role=assistant 发起的 tool calls)
@@ -1068,50 +1064,50 @@ impl GenAIBuilder {
         } else if http.is_sse {
             // Has parsed response but may be missing reasoning/tool_calls — enrich from SSE body
             let mut msgs = messages;
-            if let Some(ref body) = http.response_body {
-                if let Some(msg) = msgs.first_mut() {
-                    if msg.role == "assistant" {
-                        let has_reasoning = msg
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::Reasoning { .. }));
-                        // Check if any tool_call is missing id
-                        let has_tool_calls_without_id = msg
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()));
-                        let has_tool_calls = msg
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::ToolCall { .. }));
+            if let Some(ref body) = http.response_body
+                && let Some(msg) = msgs.first_mut()
+                && msg.role == "assistant"
+            {
+                let has_reasoning = msg
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Reasoning { .. }));
+                // Check if any tool_call is missing id
+                let has_tool_calls_without_id = msg
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()));
+                let has_tool_calls = msg
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::ToolCall { .. }));
 
-                        if let Some((extra, sse_finish)) = Self::extract_parts_from_sse_body(body) {
-                            if !has_reasoning {
-                                if let Some(r) = extra
-                                    .iter()
-                                    .find(|p| matches!(p, MessagePart::Reasoning { .. }))
-                                {
-                                    msg.parts.insert(0, r.clone());
-                                }
-                            }
-                            // Always try to enrich tool_calls if missing id or no tool_calls
-                            if !has_tool_calls || has_tool_calls_without_id {
-                                // Remove existing tool_calls without id, replace with SSE ones
-                                if has_tool_calls_without_id {
-                                    msg.parts.retain(|p| !matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()));
-                                }
-                                for p in extra
-                                    .into_iter()
-                                    .filter(|p| matches!(p, MessagePart::ToolCall { .. }))
-                                {
-                                    msg.parts.push(p);
-                                }
-                            }
-                            // Enrich finish_reason if missing
-                            if msg.finish_reason.is_none() {
-                                msg.finish_reason = sse_finish;
-                            }
+                if let Some((extra, sse_finish)) = Self::extract_parts_from_sse_body(body) {
+                    if !has_reasoning
+                        && let Some(r) = extra
+                            .iter()
+                            .find(|p| matches!(p, MessagePart::Reasoning { .. }))
+                    {
+                        msg.parts.insert(0, r.clone());
+                    }
+                    // Always try to enrich tool_calls if missing id or no tool_calls
+                    if !has_tool_calls || has_tool_calls_without_id {
+                        // Remove existing tool_calls without id, replace with SSE ones
+                        if has_tool_calls_without_id {
+                            msg.parts.retain(
+                                |p| !matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()),
+                            );
                         }
+                        for p in extra
+                            .into_iter()
+                            .filter(|p| matches!(p, MessagePart::ToolCall { .. }))
+                        {
+                            msg.parts.push(p);
+                        }
+                    }
+                    // Enrich finish_reason if missing
+                    if msg.finish_reason.is_none() {
+                        msg.finish_reason = sse_finish;
                     }
                 }
             }
@@ -1194,43 +1190,41 @@ impl GenAIBuilder {
         response_body: &Option<String>,
     ) -> Option<String> {
         // 尝试从 request body 获取
-        if let Some(body) = request_body {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                // 标准 OpenAI/Anthropic 格式
-                if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
-                    if !model.is_empty() {
-                        return Some(model.to_string());
-                    }
-                }
-                // SysOM 格式：model 嵌套在 llmParamString 中
-                if let Some(lps) = v.get("llmParamString").and_then(|v| v.as_str()) {
-                    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(lps) {
-                        if let Some(model) = inner.get("model").and_then(|m| m.as_str()) {
-                            if !model.is_empty() {
-                                return Some(model.to_string());
-                            }
-                        }
-                    }
-                }
+        if let Some(body) = request_body
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        {
+            // 标准 OpenAI/Anthropic 格式
+            if let Some(model) = v.get("model").and_then(|m| m.as_str())
+                && !model.is_empty()
+            {
+                return Some(model.to_string());
+            }
+            // SysOM 格式：model 嵌套在 llmParamString 中
+            if let Some(lps) = v.get("llmParamString").and_then(|v| v.as_str())
+                && let Ok(inner) = serde_json::from_str::<serde_json::Value>(lps)
+                && let Some(model) = inner.get("model").and_then(|m| m.as_str())
+                && !model.is_empty()
+            {
+                return Some(model.to_string());
             }
         }
         // 尝试从 response body 获取（SSE 响应是 JSON 数组，取第一个 chunk）
-        if let Some(body) = response_body {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                // 非 SSE: 直接是 JSON 对象
-                if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
-                    if !model.is_empty() {
+        if let Some(body) = response_body
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        {
+            // 非 SSE: 直接是 JSON 对象
+            if let Some(model) = v.get("model").and_then(|m| m.as_str())
+                && !model.is_empty()
+            {
+                return Some(model.to_string());
+            }
+            // SSE: JSON 数组，取第一个 chunk 的 model
+            if let Some(arr) = v.as_array() {
+                for chunk in arr {
+                    if let Some(model) = chunk.get("model").and_then(|m| m.as_str())
+                        && !model.is_empty()
+                    {
                         return Some(model.to_string());
-                    }
-                }
-                // SSE: JSON 数组，取第一个 chunk 的 model
-                if let Some(arr) = v.as_array() {
-                    for chunk in arr {
-                        if let Some(model) = chunk.get("model").and_then(|m| m.as_str()) {
-                            if !model.is_empty() {
-                                return Some(model.to_string());
-                            }
-                        }
                     }
                 }
             }
@@ -1272,33 +1266,32 @@ impl GenAIBuilder {
         }
 
         // 2. SSE fallback: extract "id" field from response body
-        if http.is_sse {
-            if let Some(ref body) = http.response_body {
-                // Try JSON array format first (from HTTP/2 stream aggregation)
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                    if let Some(arr) = v.as_array() {
-                        for chunk in arr {
-                            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
-                                if !id.is_empty() {
-                                    return Some(id.to_string());
-                                }
-                            }
-                        }
+        if http.is_sse
+            && let Some(ref body) = http.response_body
+        {
+            // Try JSON array format first (from HTTP/2 stream aggregation)
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+                && let Some(arr) = v.as_array()
+            {
+                for chunk in arr {
+                    if let Some(id) = chunk.get("id").and_then(|v| v.as_str())
+                        && !id.is_empty()
+                    {
+                        return Some(id.to_string());
                     }
                 }
-                // Try SSE line format (from HTTP/1.1: "data: {...}" per line)
-                for line in body.lines() {
-                    let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
-                    if json_str.is_empty() || json_str == "[DONE]" {
-                        continue;
-                    }
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
-                            if !id.is_empty() {
-                                return Some(id.to_string());
-                            }
-                        }
-                    }
+            }
+            // Try SSE line format (from HTTP/1.1: "data: {...}" per line)
+            for line in body.lines() {
+                let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
+                if json_str.is_empty() || json_str == "[DONE]" {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+                    && let Some(id) = v.get("id").and_then(|v| v.as_str())
+                    && !id.is_empty()
+                {
+                    return Some(id.to_string());
                 }
             }
         }
@@ -1487,12 +1480,12 @@ impl GenAIBuilder {
         let mut parts = Vec::new();
 
         // Reasoning content first
-        if let Some(ref rc) = m.reasoning_content {
-            if !rc.is_empty() {
-                parts.push(MessagePart::Reasoning {
-                    content: rc.clone(),
-                });
-            }
+        if let Some(ref rc) = m.reasoning_content
+            && !rc.is_empty()
+        {
+            parts.push(MessagePart::Reasoning {
+                content: rc.clone(),
+            });
         }
 
         // For tool role: content is tool_call_response
@@ -1543,12 +1536,12 @@ impl GenAIBuilder {
         let mut parts = Vec::new();
 
         // Reasoning content first
-        if let Some(ref rc) = m.reasoning_content {
-            if !rc.is_empty() {
-                parts.push(MessagePart::Reasoning {
-                    content: rc.clone(),
-                });
-            }
+        if let Some(ref rc) = m.reasoning_content
+            && !rc.is_empty()
+        {
+            parts.push(MessagePart::Reasoning {
+                content: rc.clone(),
+            });
         }
 
         // Text content
@@ -1666,12 +1659,12 @@ impl GenAIBuilder {
                         let entry = tc_map
                             .entry(idx)
                             .or_insert_with(|| (String::new(), String::new(), String::new()));
-                        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                            if !id.is_empty() {
-                                entry.0 = id.to_string();
-                            }
-                            // 空字符串不覆盖已有的 id
+                        if let Some(id) = tc.get("id").and_then(|v| v.as_str())
+                            && !id.is_empty()
+                        {
+                            entry.0 = id.to_string();
                         }
+                        // 空字符串不覆盖已有的 id
                         if let Some(func) = tc.get("function") {
                             if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
                                 entry.1 = name.to_string();

@@ -320,16 +320,16 @@ fn extract_cmdline_from_extra(extra_str: &str, comm: &str) -> String {
     // Try to parse as ProcessAction extra
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(extra_str) {
         // Try args first (full command line)
-        if let Some(args) = json.get("args").and_then(|v| v.as_str()) {
-            if !args.is_empty() {
-                return args.to_string();
-            }
+        if let Some(args) = json.get("args").and_then(|v| v.as_str())
+            && !args.is_empty()
+        {
+            return args.to_string();
         }
         // Try filename as fallback
-        if let Some(filename) = json.get("filename").and_then(|v| v.as_str()) {
-            if !filename.is_empty() {
-                return filename.to_string();
-            }
+        if let Some(filename) = json.get("filename").and_then(|v| v.as_str())
+            && !filename.is_empty()
+        {
+            return filename.to_string();
         }
     }
     // Fallback to comm (process name, max 16 chars)

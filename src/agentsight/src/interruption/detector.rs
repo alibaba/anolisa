@@ -159,30 +159,29 @@ impl InterruptionDetector {
             .messages
             .first()
             .and_then(|m| m.finish_reason.as_deref());
-        if finish_reason == Some("length") {
-            if let Some(max_tokens) = call.request.max_tokens {
-                if let Some(usage) = &call.token_usage {
-                    let ratio = usage.output_tokens as f64 / max_tokens as f64;
-                    if ratio >= self.config.token_limit_ratio {
-                        let detail = serde_json::json!({
-                            "model": call.model,
-                            "output_tokens": usage.output_tokens,
-                            "max_tokens": max_tokens,
-                            "ratio": ratio,
-                        });
-                        events.push(InterruptionEvent::new(
-                            InterruptionType::TokenLimit,
-                            session_id.clone(),
-                            trace_id.clone(),
-                            conversation_id.clone(),
-                            call_id.clone(),
-                            pid,
-                            agent_name.clone(),
-                            call.end_timestamp_ns as i64,
-                            Some(detail),
-                        ));
-                    }
-                }
+        if finish_reason == Some("length")
+            && let Some(max_tokens) = call.request.max_tokens
+            && let Some(usage) = &call.token_usage
+        {
+            let ratio = usage.output_tokens as f64 / max_tokens as f64;
+            if ratio >= self.config.token_limit_ratio {
+                let detail = serde_json::json!({
+                    "model": call.model,
+                    "output_tokens": usage.output_tokens,
+                    "max_tokens": max_tokens,
+                    "ratio": ratio,
+                });
+                events.push(InterruptionEvent::new(
+                    InterruptionType::TokenLimit,
+                    session_id.clone(),
+                    trace_id.clone(),
+                    conversation_id.clone(),
+                    call_id.clone(),
+                    pid,
+                    agent_name.clone(),
+                    call.end_timestamp_ns as i64,
+                    Some(detail),
+                ));
             }
         }
 
@@ -191,32 +190,31 @@ impl InterruptionDetector {
         // already exceeds the context window but response still arrives.
         // Detect via input_tokens >= model context ceiling (heuristic: >90% of
         // a well-known ceiling, or when input_tokens >> max_tokens).
-        if finish_reason == Some("length") {
-            if let Some(usage) = &call.token_usage {
-                if let Some(max_tokens) = call.request.max_tokens {
-                    // If input tokens are much larger than the output cap, this
-                    // is almost certainly a context-length issue, not output truncation.
-                    if usage.input_tokens > max_tokens * 4 {
-                        let detail = serde_json::json!({
-                            "model": call.model,
-                            "input_tokens": usage.input_tokens,
-                            "max_tokens": max_tokens,
-                            "finish_reason": "length",
-                            "note": "input_tokens >> max_tokens suggests context overflow",
-                        });
-                        events.push(InterruptionEvent::new(
-                            InterruptionType::ContextOverflow,
-                            session_id.clone(),
-                            trace_id.clone(),
-                            conversation_id.clone(),
-                            call_id.clone(),
-                            pid,
-                            agent_name.clone(),
-                            call.end_timestamp_ns as i64,
-                            Some(detail),
-                        ));
-                    }
-                }
+        if finish_reason == Some("length")
+            && let Some(usage) = &call.token_usage
+            && let Some(max_tokens) = call.request.max_tokens
+        {
+            // If input tokens are much larger than the output cap, this
+            // is almost certainly a context-length issue, not output truncation.
+            if usage.input_tokens > max_tokens * 4 {
+                let detail = serde_json::json!({
+                    "model": call.model,
+                    "input_tokens": usage.input_tokens,
+                    "max_tokens": max_tokens,
+                    "finish_reason": "length",
+                    "note": "input_tokens >> max_tokens suggests context overflow",
+                });
+                events.push(InterruptionEvent::new(
+                    InterruptionType::ContextOverflow,
+                    session_id.clone(),
+                    trace_id.clone(),
+                    conversation_id.clone(),
+                    call_id.clone(),
+                    pid,
+                    agent_name.clone(),
+                    call.end_timestamp_ns as i64,
+                    Some(detail),
+                ));
             }
         }
 

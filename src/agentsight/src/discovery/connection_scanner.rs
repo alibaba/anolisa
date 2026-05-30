@@ -181,10 +181,10 @@ fn resolve_inodes_to_pids(target_inodes: &HashSet<u64>) -> HashMap<u64, u32> {
         for proc in procs.flatten() {
             if let Ok(fds) = proc.fd() {
                 for fd in fds.flatten() {
-                    if let procfs::process::FDTarget::Socket(inode) = fd.target {
-                        if target_inodes.contains(&inode) {
-                            map.insert(inode, proc.pid() as u32);
-                        }
+                    if let procfs::process::FDTarget::Socket(inode) = fd.target
+                        && target_inodes.contains(&inode)
+                    {
+                        map.insert(inode, proc.pid() as u32);
                     }
                 }
             }

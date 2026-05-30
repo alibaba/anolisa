@@ -100,104 +100,98 @@ impl HealthChecker {
         //     All sessions for that pid are returned and each gets its own event.
         //   - Deduplication key is (agent_name, session_id, conversation_id): at most one
         //     agent_crash event is written per unique (agent, session, conversation) triple.
-        if !newly_offline.is_empty() {
-            if let Some(ref istore) = self.interruption_store {
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
+        if !newly_offline.is_empty()
+            && let Some(ref istore) = self.interruption_store
+        {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
 
-                // Group newly-offline entries by agent_name so multi-process agents
-                // (e.g. Cosh) are processed together in a single DB query.
-                let mut by_agent: HashMap<String, Vec<&AgentHealthStatus>> = HashMap::new();
-                for offline in &newly_offline {
-                    by_agent
-                        .entry(offline.agent_name.clone())
-                        .or_default()
-                        .push(offline);
-                }
+            // Group newly-offline entries by agent_name so multi-process agents
+            // (e.g. Cosh) are processed together in a single DB query.
+            let mut by_agent: HashMap<String, Vec<&AgentHealthStatus>> = HashMap::new();
+            for offline in &newly_offline {
+                by_agent
+                    .entry(offline.agent_name.clone())
+                    .or_default()
+                    .push(offline);
+            }
 
-                // Dedup key: (agent_name, session_id, conversation_id)
-                let mut seen_conv: HashSet<(String, Option<String>, Option<String>)> =
-                    HashSet::new();
+            // Dedup key: (agent_name, session_id, conversation_id)
+            let mut seen_conv: HashSet<(String, Option<String>, Option<String>)> = HashSet::new();
 
-                for (agent_name, group) in &by_agent {
-                    let pids: Vec<i32> = group.iter().map(|o| o.pid as i32).collect();
-                    // Use the representative offline entry for metadata (pid shown in detail).
-                    // When multiple pids exist (Cosh), use the largest pid (worker) as it is
-                    // most likely the one that carried LLM traffic.
-                    let rep = group.iter().max_by_key(|o| o.pid).unwrap();
+            for (agent_name, group) in &by_agent {
+                let pids: Vec<i32> = group.iter().map(|o| o.pid as i32).collect();
+                // Use the representative offline entry for metadata (pid shown in detail).
+                // When multiple pids exist (Cosh), use the largest pid (worker) as it is
+                // most likely the one that carried LLM traffic.
+                let rep = group.iter().max_by_key(|o| o.pid).unwrap();
 
-                    // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
-                    let pending_calls = self.get_pending_calls_for_pids(&pids);
-                    if !pending_calls.is_empty() {
-                        let mut by_conv: HashMap<
-                            (Option<String>, Option<String>),
-                            Vec<(String, Option<String>)>,
-                        > = HashMap::new();
-                        for (call_id, session_id, _trace_id, conversation_id) in &pending_calls {
-                            by_conv
-                                .entry((session_id.clone(), conversation_id.clone()))
-                                .or_default()
-                                .push((call_id.clone(), session_id.clone()));
-                        }
-                        for ((session_id, conversation_id), calls) in &by_conv {
-                            let dedup_key = (
-                                agent_name.clone(),
-                                session_id.clone(),
-                                conversation_id.clone(),
-                            );
-                            if !seen_conv.insert(dedup_key) {
-                                log::debug!(
-                                    "Skipping duplicate agent_crash for {agent_name} session={session_id:?} conversation={conversation_id:?}"
-                                );
-                                continue;
-                            }
-                            let call_ids: Vec<&str> =
-                                calls.iter().map(|(c, _)| c.as_str()).collect();
-                            let detail = serde_json::json!({
-                                "pid": rep.pid,
-                                "agent_name": agent_name,
-                                "exe_path": rep.exe_path.clone(),
-                                "call_ids": call_ids,
-                            });
-                            let event = InterruptionEvent::new(
-                                InterruptionType::AgentCrash,
-                                session_id.clone(),
-                                None,
-                                conversation_id.clone(),
-                                None,
-                                Some(rep.pid as i32),
-                                Some(agent_name.clone()),
-                                now_ns,
-                                Some(detail),
-                            );
-                            if let Err(e) = istore.insert(&event) {
-                                log::warn!(
-                                    "Failed to record agent_crash for pid={}: {}",
-                                    rep.pid,
-                                    e
-                                );
-                            } else {
-                                log::info!(
-                                    "Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s))",
-                                    agent_name,
-                                    rep.pid,
-                                    session_id,
-                                    conversation_id,
-                                    calls.len()
-                                );
-                            }
-                        }
-                        for o in group {
-                            self.mark_pending_interrupted(o.pid, "agent_crash");
-                        }
-                    } else {
-                        // No pending calls — treat as normal/graceful shutdown.
-                        log::debug!(
-                            "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
-                        );
+                // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
+                let pending_calls = self.get_pending_calls_for_pids(&pids);
+                if !pending_calls.is_empty() {
+                    let mut by_conv: HashMap<
+                        (Option<String>, Option<String>),
+                        Vec<(String, Option<String>)>,
+                    > = HashMap::new();
+                    for (call_id, session_id, _trace_id, conversation_id) in &pending_calls {
+                        by_conv
+                            .entry((session_id.clone(), conversation_id.clone()))
+                            .or_default()
+                            .push((call_id.clone(), session_id.clone()));
                     }
+                    for ((session_id, conversation_id), calls) in &by_conv {
+                        let dedup_key = (
+                            agent_name.clone(),
+                            session_id.clone(),
+                            conversation_id.clone(),
+                        );
+                        if !seen_conv.insert(dedup_key) {
+                            log::debug!(
+                                "Skipping duplicate agent_crash for {agent_name} session={session_id:?} conversation={conversation_id:?}"
+                            );
+                            continue;
+                        }
+                        let call_ids: Vec<&str> = calls.iter().map(|(c, _)| c.as_str()).collect();
+                        let detail = serde_json::json!({
+                            "pid": rep.pid,
+                            "agent_name": agent_name,
+                            "exe_path": rep.exe_path.clone(),
+                            "call_ids": call_ids,
+                        });
+                        let event = InterruptionEvent::new(
+                            InterruptionType::AgentCrash,
+                            session_id.clone(),
+                            None,
+                            conversation_id.clone(),
+                            None,
+                            Some(rep.pid as i32),
+                            Some(agent_name.clone()),
+                            now_ns,
+                            Some(detail),
+                        );
+                        if let Err(e) = istore.insert(&event) {
+                            log::warn!("Failed to record agent_crash for pid={}: {}", rep.pid, e);
+                        } else {
+                            log::info!(
+                                "Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s))",
+                                agent_name,
+                                rep.pid,
+                                session_id,
+                                conversation_id,
+                                calls.len()
+                            );
+                        }
+                    }
+                    for o in group {
+                        self.mark_pending_interrupted(o.pid, "agent_crash");
+                    }
+                } else {
+                    // No pending calls — treat as normal/graceful shutdown.
+                    log::debug!(
+                        "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
+                    );
                 }
             }
         }
@@ -358,10 +352,10 @@ impl HealthChecker {
 
     /// Mark all pending calls for a PID as interrupted in genai_events.
     fn mark_pending_interrupted(&self, pid: u32, itype: &str) {
-        if let Some(ref genai_store) = self.genai_store {
-            if let Err(e) = genai_store.mark_pending_interrupted_for_pid(pid as i32, itype) {
-                log::warn!("Failed to mark pending calls as interrupted for pid={pid}: {e}");
-            }
+        if let Some(ref genai_store) = self.genai_store
+            && let Err(e) = genai_store.mark_pending_interrupted_for_pid(pid as i32, itype)
+        {
+            log::warn!("Failed to mark pending calls as interrupted for pid={pid}: {e}");
         }
     }
 }

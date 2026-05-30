@@ -308,9 +308,8 @@ mod tests {
         // replacement chars by from_utf8_lossy) that intentionally place
         // chunk_size past a multi-byte boundary.
         let mut raw: Vec<u8> = b"c27\r\n".to_vec();
-        for _ in 0..4096 {
-            raw.push(0xC2); // invalid stray UTF-8 lead byte
-        }
+        // append 4096 invalid stray UTF-8 lead bytes
+        raw.resize(raw.len() + 4096, 0xC2);
         let lossy = String::from_utf8_lossy(&raw);
         assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
     }

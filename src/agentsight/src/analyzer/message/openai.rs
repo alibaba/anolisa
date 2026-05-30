@@ -144,16 +144,16 @@ impl OpenAIParser {
                 }
                 // Extract content delta for aggregation
                 for choice in &sse_chunk.choices {
-                    if let Some(content) = &choice.delta.content {
-                        if !content.is_empty() {
-                            content_parts.push(content.clone());
-                        }
+                    if let Some(content) = &choice.delta.content
+                        && !content.is_empty()
+                    {
+                        content_parts.push(content.clone());
                     }
                     // Extract reasoning_content delta
-                    if let Some(reasoning) = &choice.delta.reasoning_content {
-                        if !reasoning.is_empty() {
-                            reasoning_parts.push(reasoning.clone());
-                        }
+                    if let Some(reasoning) = &choice.delta.reasoning_content
+                        && !reasoning.is_empty()
+                    {
+                        reasoning_parts.push(reasoning.clone());
                     }
                     // Extract and merge tool_call deltas by index
                     if let Some(calls) = &choice.delta.tool_calls {
@@ -162,12 +162,12 @@ impl OpenAIParser {
                             let entry = tool_call_map
                                 .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
-                            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                if !id.is_empty() {
-                                    entry.0 = id.to_string();
-                                }
-                                // 空字符串不覆盖已有的 id
+                            if let Some(id) = tc.get("id").and_then(|v| v.as_str())
+                                && !id.is_empty()
+                            {
+                                entry.0 = id.to_string();
                             }
+                            // 空字符串不覆盖已有的 id
                             if let Some(func) = tc.get("function") {
                                 if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
                                     entry.1 = name.to_string();

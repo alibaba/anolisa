@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::exporter::GenAIExporter;
 use super::semantic::GenAISemanticEvent;
@@ -20,13 +20,15 @@ pub struct GenAIStore {
 
 impl GenAIStore {
     /// Create a new GenAI store with the given path
-    pub fn new(path: &PathBuf) -> Self {
+    pub fn new(path: &Path) -> Self {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
-        GenAIStore { path: path.clone() }
+        GenAIStore {
+            path: path.to_path_buf(),
+        }
     }
 
     /// Get default storage path
@@ -105,16 +107,16 @@ impl GenAIStore {
             if let GenAISemanticEvent::LLMCall(call) = event {
                 let call_time = DateTime::from_timestamp_nanos(call.start_timestamp_ns as i64);
 
-                if let Some(start) = start_time {
-                    if call_time < start {
-                        continue;
-                    }
+                if let Some(start) = start_time
+                    && call_time < start
+                {
+                    continue;
                 }
 
-                if let Some(end) = end_time {
-                    if call_time > end {
-                        continue;
-                    }
+                if let Some(end) = end_time
+                    && call_time > end
+                {
+                    continue;
                 }
 
                 calls.push(call);

@@ -69,13 +69,13 @@ pub fn extract_token_data(
 
                 match block_type {
                     Some("text") => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            if !text.is_empty() {
-                                token_data.response_content.push(ResponseTokenData {
-                                    content: text.to_string(),
-                                });
-                                has_content = true;
-                            }
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            token_data.response_content.push(ResponseTokenData {
+                                content: text.to_string(),
+                            });
+                            has_content = true;
                         }
                     }
                     Some("tool_use") => {
@@ -83,11 +83,11 @@ pub fn extract_token_data(
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("unknown");
-                        if let Some(input) = block.get("input") {
-                            if let Ok(input_str) = serde_json::to_string(input) {
-                                token_data.tool_calls.push(format!("{name}: {input_str}"));
-                                has_content = true;
-                            }
+                        if let Some(input) = block.get("input")
+                            && let Ok(input_str) = serde_json::to_string(input)
+                        {
+                            token_data.tool_calls.push(format!("{name}: {input_str}"));
+                            has_content = true;
                         }
                     }
                     _ => {}

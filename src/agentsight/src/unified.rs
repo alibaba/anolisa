@@ -559,14 +559,14 @@ impl AgentSight {
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
             for ar in &mut analysis_results {
-                if let crate::analyzer::AnalysisResult::Token(t) = ar {
-                    if t.agent.is_none() {
-                        t.agent = self
-                            .pid_agent_name_cache
-                            .get(&t.pid)
-                            .cloned()
-                            .or_else(|| Some(t.comm.clone()));
-                    }
+                if let crate::analyzer::AnalysisResult::Token(t) = ar
+                    && t.agent.is_none()
+                {
+                    t.agent = self
+                        .pid_agent_name_cache
+                        .get(&t.pid)
+                        .cloned()
+                        .or_else(|| Some(t.comm.clone()));
                 }
             }
 
@@ -863,10 +863,10 @@ impl AgentSight {
                     // Look up the real session_id from completed records for the same PID.
                     match store.lookup_session_for_pid(pid) {
                         Ok(Some(ref real_session_id)) => {
-                            if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
-                                if let Err(e) = store.update_session_id(&call_id, real_session_id) {
-                                    log::warn!("[DrainCheck] FAIL update session_id: {e}");
-                                }
+                            if pending.session_id.as_deref() != Some(real_session_id.as_str())
+                                && let Err(e) = store.update_session_id(&call_id, real_session_id)
+                            {
+                                log::warn!("[DrainCheck] FAIL update session_id: {e}");
                             }
                         }
                         Ok(None) => {}
@@ -877,143 +877,120 @@ impl AgentSight {
 
                     // ── SSE enrichment ────────────────────────────────────
                     // Parse captured SSE events for model, trace_id, tokens, output content
-                    if !sse_events.is_empty() {
-                        if let Some(mut enrichment) =
+                    if !sse_events.is_empty()
+                        && let Some(mut enrichment) =
                             GenAIBuilder::extract_sse_enrichment(&sse_events)
-                        {
-                            // If SSE didn't carry usage data (stream was interrupted before
-                            // the final chunk), compute tokens via the real tokenizer.
-                            if enrichment.input_tokens.is_none()
-                                || enrichment.output_tokens.is_none()
+                    {
+                        // If SSE didn't carry usage data (stream was interrupted before
+                        // the final chunk), compute tokens via the real tokenizer.
+                        if enrichment.input_tokens.is_none() || enrichment.output_tokens.is_none() {
+                            let model_name = enrichment
+                                .model
+                                .as_deref()
+                                .or(pending.model.as_deref())
+                                .unwrap_or("unknown");
+                            if let Ok(tokenizer) =
+                                crate::tokenizer::get_global_tokenizer(model_name)
                             {
-                                let model_name = enrichment
-                                    .model
-                                    .as_deref()
-                                    .or(pending.model.as_deref())
-                                    .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                // ── input tokens ──
+                                if enrichment.input_tokens.is_none()
+                                    && let Some(body) = request.json_body()
+                                    && let Some(messages) =
+                                        body.get("messages").and_then(|m| m.as_array())
                                 {
-                                    // ── input tokens ──
-                                    if enrichment.input_tokens.is_none() {
-                                        if let Some(body) = request.json_body() {
-                                            if let Some(messages) =
-                                                body.get("messages").and_then(|m| m.as_array())
-                                            {
-                                                let mut msgs = messages.clone();
-                                                // Parse tool_calls.arguments from string to object
-                                                for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg
-                                                        .get_mut("tool_calls")
-                                                        .and_then(|tc| tc.as_array_mut())
-                                                    {
-                                                        for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function")
-                                                            {
-                                                                if let Some(a) = f
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                {
-                                                                    if let Ok(p) =
-                                                                        serde_json::from_str::<
-                                                                            serde_json::Value,
-                                                                        >(
-                                                                            a
-                                                                        )
-                                                                    {
-                                                                        f["arguments"] = p;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let tools_json: Option<Vec<serde_json::Value>> =
-                                                    body.get("tools")
-                                                        .and_then(|t| t.as_array())
-                                                        .map(|a| a.to_vec());
-                                                let count = match tokenizer
-                                                    .apply_chat_template_with_tools(
-                                                        &msgs,
-                                                        tools_json.as_deref(),
-                                                        true,
-                                                    ) {
-                                                    Ok(formatted) => {
-                                                        tokenizer.count(&formatted).unwrap_or(0)
-                                                    }
-                                                    Err(_) => {
-                                                        // Fallback: raw message count
-                                                        msgs.iter()
-                                                            .filter_map(|m| {
-                                                                serde_json::to_string(m).ok()
-                                                            })
-                                                            .map(|s| {
-                                                                tokenizer.count(&s).unwrap_or(0)
-                                                            })
-                                                            .sum()
-                                                    }
-                                                };
-                                                if count > 0 {
-                                                    enrichment.input_tokens = Some(count as i64);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // ── output tokens ──
-                                    if enrichment.output_tokens.is_none() {
-                                        use crate::analyzer::token::extract_response_content;
-                                        let mut all_content = String::new();
-                                        let mut all_reasoning = String::new();
-                                        let mut all_tool_calls = Vec::new();
-                                        for ev in &sse_events {
-                                            if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) =
-                                                    extract_response_content(Some(&chunk))
+                                    let mut msgs = messages.clone();
+                                    // Parse tool_calls.arguments from string to object
+                                    for msg in msgs.iter_mut() {
+                                        if let Some(tcs) = msg
+                                            .get_mut("tool_calls")
+                                            .and_then(|tc| tc.as_array_mut())
+                                        {
+                                            for tc in tcs.iter_mut() {
+                                                if let Some(f) = tc.get_mut("function")
+                                                    && let Some(a) =
+                                                        f.get("arguments").and_then(|a| a.as_str())
+                                                    && let Ok(p) =
+                                                        serde_json::from_str::<serde_json::Value>(a)
                                                 {
-                                                    if !content.is_empty() {
-                                                        all_content.push_str(&content);
-                                                    }
-                                                    if let Some(r) = reasoning {
-                                                        if !r.is_empty() {
-                                                            all_reasoning.push_str(&r);
-                                                        }
-                                                    }
-                                                    for tc in tool_calls {
-                                                        if !tc.is_empty() {
-                                                            all_tool_calls.push(tc);
-                                                        }
-                                                    }
+                                                    f["arguments"] = p;
                                                 }
                                             }
                                         }
-                                        let mut total = 0usize;
-                                        if !all_reasoning.is_empty() {
-                                            let wrapped =
-                                                format!("<think>\n{all_reasoning}\n</think>\n\n");
-                                            total += tokenizer.count(&wrapped).unwrap_or(0);
+                                    }
+                                    let tools_json: Option<Vec<serde_json::Value>> = body
+                                        .get("tools")
+                                        .and_then(|t| t.as_array())
+                                        .map(|a| a.to_vec());
+                                    let count = match tokenizer.apply_chat_template_with_tools(
+                                        &msgs,
+                                        tools_json.as_deref(),
+                                        true,
+                                    ) {
+                                        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+                                        Err(_) => {
+                                            // Fallback: raw message count
+                                            msgs.iter()
+                                                .filter_map(|m| serde_json::to_string(m).ok())
+                                                .map(|s| tokenizer.count(&s).unwrap_or(0))
+                                                .sum()
                                         }
-                                        if !all_content.is_empty() {
-                                            total += tokenizer.count(&all_content).unwrap_or(0);
-                                        }
-                                        if !all_tool_calls.is_empty() {
-                                            total += tokenizer
-                                                .count(&all_tool_calls.join(""))
-                                                .unwrap_or(0);
-                                        }
-                                        if total > 0 {
-                                            enrichment.output_tokens = Some(total as i64);
+                                    };
+                                    if count > 0 {
+                                        enrichment.input_tokens = Some(count as i64);
+                                    }
+                                }
+                                // ── output tokens ──
+                                if enrichment.output_tokens.is_none() {
+                                    use crate::analyzer::token::extract_response_content;
+                                    let mut all_content = String::new();
+                                    let mut all_reasoning = String::new();
+                                    let mut all_tool_calls = Vec::new();
+                                    for ev in &sse_events {
+                                        if let Some(chunk) = ev.json_body()
+                                            && let Some((content, reasoning, tool_calls)) =
+                                                extract_response_content(Some(&chunk))
+                                        {
+                                            if !content.is_empty() {
+                                                all_content.push_str(&content);
+                                            }
+                                            if let Some(r) = reasoning
+                                                && !r.is_empty()
+                                            {
+                                                all_reasoning.push_str(&r);
+                                            }
+                                            for tc in tool_calls {
+                                                if !tc.is_empty() {
+                                                    all_tool_calls.push(tc);
+                                                }
+                                            }
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
+                                    let mut total = 0usize;
+                                    if !all_reasoning.is_empty() {
+                                        let wrapped =
+                                            format!("<think>\n{all_reasoning}\n</think>\n\n");
+                                        total += tokenizer.count(&wrapped).unwrap_or(0);
+                                    }
+                                    if !all_content.is_empty() {
+                                        total += tokenizer.count(&all_content).unwrap_or(0);
+                                    }
+                                    if !all_tool_calls.is_empty() {
+                                        total +=
+                                            tokenizer.count(&all_tool_calls.join("")).unwrap_or(0);
+                                    }
+                                    if total > 0 {
+                                        enrichment.output_tokens = Some(total as i64);
+                                    }
                                 }
+                            } else {
+                                log::warn!(
+                                    "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
+                                    enrichment.model.as_deref().or(pending.model.as_deref())
+                                );
                             }
-                            if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
-                                log::warn!("[DrainCheck] FAIL enrich SSE: {e}");
-                            }
+                        }
+                        if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
+                            log::warn!("[DrainCheck] FAIL enrich SSE: {e}");
                         }
                     }
                 }

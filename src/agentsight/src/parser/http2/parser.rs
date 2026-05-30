@@ -196,12 +196,11 @@ mod tests {
     #[test]
     fn test_parse_incomplete_frame() {
         // Valid header but truncated payload
-        let mut raw = Vec::new();
-        raw.push(0x00);
-        raw.push(0x00);
-        raw.push(0x20); // length = 32
-        raw.push(0x00); // DATA
-        raw.push(0x00); // no flags
+        let mut raw = vec![
+            0x00, 0x00, 0x20, // length = 32
+            0x00, // DATA
+            0x00, // no flags
+        ];
         raw.extend(&[0x00, 0x00, 0x00, 0x01]); // stream 1
         raw.extend(b"short"); // only 5 bytes, not 32
         let event = create_test_event(raw);

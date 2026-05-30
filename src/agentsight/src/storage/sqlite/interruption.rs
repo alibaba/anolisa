@@ -198,13 +198,12 @@ impl InterruptionStore {
                 }
                 Some(target) => {
                     // Compare normalized error keys (handles nested JSON vs clean message)
-                    if let Some(ref detail_str) = detail_opt {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail_str) {
-                            let stored_error =
-                                v.get("error").and_then(|e| e.as_str()).unwrap_or("");
-                            if errors_match(stored_error, target) {
-                                return true;
-                            }
+                    if let Some(ref detail_str) = detail_opt
+                        && let Ok(v) = serde_json::from_str::<serde_json::Value>(detail_str)
+                    {
+                        let stored_error = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                        if errors_match(stored_error, target) {
+                            return true;
                         }
                     }
                 }
@@ -522,10 +521,10 @@ fn normalize_error_key(raw: &str) -> String {
         return msg.to_lowercase();
     }
     // Try to find JSON embedded in the string (e.g. "curl...{\"error\":{...}}")
-    if let Some(brace_start) = trimmed.find('{') {
-        if let Some(msg) = extract_message_from_json(&trimmed[brace_start..]) {
-            return msg.to_lowercase();
-        }
+    if let Some(brace_start) = trimmed.find('{')
+        && let Some(msg) = extract_message_from_json(&trimmed[brace_start..])
+    {
+        return msg.to_lowercase();
     }
     trimmed.to_lowercase()
 }

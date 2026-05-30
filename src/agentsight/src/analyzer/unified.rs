@@ -225,10 +225,10 @@ pub fn count_response_tokens(
             if !content.is_empty() {
                 all_content.push_str(&content);
             }
-            if let Some(r) = reasoning {
-                if !r.is_empty() {
-                    all_reasoning.push_str(&r);
-                }
+            if let Some(r) = reasoning
+                && !r.is_empty()
+            {
+                all_reasoning.push_str(&r);
             }
             for tc in tool_calls {
                 if !tc.is_empty() {
@@ -473,29 +473,28 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
-            if token_result.is_none() && http_record.is_sse {
-                if let Some(body) = &http_record.response_body {
-                    if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
-                        if let Some(last) = x.last() {
-                            let parser = TokenParser::new();
-                            if let Some(usage) = parser.parse_json(last) {
-                                let record = TokenRecord::new(
-                                    http_record.pid,
-                                    http_record.comm.clone(),
-                                    usage.provider.to_string(),
-                                    usage.input_tokens,
-                                    usage.output_tokens,
-                                )
-                                .with_model(usage.model.clone().unwrap_or_default())
-                                .with_cache_tokens(
-                                    usage.cache_creation_input_tokens.unwrap_or(0),
-                                    usage.cache_read_input_tokens.unwrap_or(0),
-                                );
+            if token_result.is_none()
+                && http_record.is_sse
+                && let Some(body) = &http_record.response_body
+                && let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body)
+                && let Some(last) = x.last()
+            {
+                let parser = TokenParser::new();
+                if let Some(usage) = parser.parse_json(last) {
+                    let record = TokenRecord::new(
+                        http_record.pid,
+                        http_record.comm.clone(),
+                        usage.provider.to_string(),
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    )
+                    .with_model(usage.model.clone().unwrap_or_default())
+                    .with_cache_tokens(
+                        usage.cache_creation_input_tokens.unwrap_or(0),
+                        usage.cache_read_input_tokens.unwrap_or(0),
+                    );
 
-                                token_result = Some(record);
-                            }
-                        }
-                    }
+                    token_result = Some(record);
                 }
             }
 
@@ -659,16 +658,15 @@ impl Analyzer {
                         msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
                     {
                         for tool_call in tool_calls.iter_mut() {
-                            if let Some(func) = tool_call.get_mut("function") {
-                                if let Some(args) = func.get("arguments") {
-                                    if let Some(args_str) = args.as_str() {
-                                        // Try to parse arguments string as JSON object
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<serde_json::Value>(args_str)
-                                        {
-                                            func["arguments"] = parsed;
-                                        }
-                                    }
+                            if let Some(func) = tool_call.get_mut("function")
+                                && let Some(args) = func.get("arguments")
+                                && let Some(args_str) = args.as_str()
+                            {
+                                // Try to parse arguments string as JSON object
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(args_str)
+                                {
+                                    func["arguments"] = parsed;
                                 }
                             }
                         }
@@ -709,22 +707,21 @@ impl Analyzer {
             let mut all_tool_calls = Vec::new();
 
             for event in sse_events {
-                if let Some(chunk) = event.json_body() {
-                    if let Some((content, reasoning, tool_calls)) =
+                if let Some(chunk) = event.json_body()
+                    && let Some((content, reasoning, tool_calls)) =
                         extract_response_content(Some(&chunk))
+                {
+                    if !content.is_empty() {
+                        all_content.push_str(&content);
+                    }
+                    if let Some(r) = reasoning
+                        && !r.is_empty()
                     {
-                        if !content.is_empty() {
-                            all_content.push_str(&content);
-                        }
-                        if let Some(r) = reasoning {
-                            if !r.is_empty() {
-                                all_reasoning.push_str(&r);
-                            }
-                        }
-                        for tc in tool_calls {
-                            if !tc.is_empty() {
-                                all_tool_calls.push(tc);
-                            }
+                        all_reasoning.push_str(&r);
+                    }
+                    for tc in tool_calls {
+                        if !tc.is_empty() {
+                            all_tool_calls.push(tc);
                         }
                     }
                 }
