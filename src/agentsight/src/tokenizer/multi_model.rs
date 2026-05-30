@@ -10,7 +10,6 @@ use anyhow::{Result, anyhow};
 use hf_hub::api::sync::{Api, ApiBuilder};
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static GLOBAL_TOKENIZER: OnceCell<Mutex<MultiModelTokenizer>> = OnceCell::new();

@@ -341,26 +341,6 @@ impl HealthChecker {
         }
     }
 
-    /// Query pending LLM calls for a specific PID from genai_events.
-    ///
-    /// Returns a list of (call_id, session_id, trace_id, conversation_id) tuples.
-    fn get_pending_calls_for_pid(
-        &self,
-        pid: u32,
-    ) -> Vec<(String, Option<String>, Option<String>, Option<String>)> {
-        if let Some(ref genai_store) = self.genai_store {
-            match genai_store.list_pending_for_pid(pid as i32) {
-                Ok(calls) => calls,
-                Err(e) => {
-                    log::warn!("Failed to query pending calls for pid={}: {}", pid, e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        }
-    }
-
     /// Query pending LLM calls for multiple PIDs at once.
     ///
     /// Returns a list of (call_id, session_id, trace_id, conversation_id) tuples.

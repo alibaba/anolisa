@@ -1417,7 +1417,7 @@ impl GenAIBuilder {
 
         log::debug!("[GenAI] Parsing SSE body with {} chunks", chunks.len());
 
-        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        for (_chunk_idx, chunk) in chunks.iter().enumerate() {
             let choices = chunk.get("choices").and_then(|c| c.as_array());
             let choices = match choices {
                 Some(c) => c,

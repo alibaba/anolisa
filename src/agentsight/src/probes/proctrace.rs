@@ -11,7 +11,7 @@ use libbpf_rs::{
 };
 use std::{
     mem::MaybeUninit,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

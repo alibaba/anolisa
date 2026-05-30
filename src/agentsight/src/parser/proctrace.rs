@@ -47,7 +47,7 @@ impl ProcTraceParser {
     /// Parse a variable-length process event
     pub fn parse_variable(event: &VariableEvent) -> Option<ParsedProcEvent> {
         match event {
-            VariableEvent::Exec { header, filename, args } => {
+            VariableEvent::Exec { header, filename: _, args } => {
                 Some(ParsedProcEvent {
                     event_type: ProcEventType::Exec,
                     pid: header.pid,

@@ -746,7 +746,7 @@ fn ns_to_iso8601(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genai::semantic::{InputMessage, OutputMessage, MessagePart};
+    use crate::genai::semantic::{InputMessage, MessagePart};
 
     #[test]
     fn test_ns_to_iso8601() {

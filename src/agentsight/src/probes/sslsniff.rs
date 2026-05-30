@@ -5,7 +5,7 @@
 // Exposes a `SslSniff` struct with a builder-style API.
 
 use crate::config;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use libbpf_rs::{
     Link, MapHandle, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
@@ -15,7 +15,6 @@ use procfs::process::Process;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -682,16 +681,6 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
     }
 
     Ok(results)
-}
-
-/// Convert a null-terminated byte array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
-fn comm_to_string(comm: &[u8]) -> String {
-    let bytes: Vec<u8> = comm
-        .iter()
-        .copied()
-        .take_while(|&b| b != 0)
-        .collect();
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ─── uprobe helpers ───────────────────────────────────────────────────────────

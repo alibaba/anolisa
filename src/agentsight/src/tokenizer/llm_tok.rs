@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::analyzer::{MessageRole, OpenAIChatMessage};
 use llm_tokenizer::{Decoder as _, Encoder as _, HuggingFaceTokenizer, TokenizerTrait, chat_template::ChatTemplateParams};
 
 /// Unified tokenizer + chat template adapter wrapping `llm-tokenizer` crate.
@@ -63,16 +62,6 @@ impl LlmTokenizer {
         })
     }
 
-    /// Create a tokenizer from a URL (backward compatibility).
-    ///
-    /// This is deprecated in favor of `from_hf` which uses HuggingFace Hub directly.
-    /// For URLs pointing to HuggingFace (e.g., huggingface.co/...), consider using
-    /// `from_hf` with the model ID instead.
-    #[deprecated]
-    pub fn from_url(url: &str, model_name: &str) -> Result<Self> {
-        todo!()
-    }
-
     /// Encode text with special tokens.
     pub fn encode_with_special_tokens(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self.inner.encode(text, true)
@@ -109,11 +98,6 @@ impl LlmTokenizer {
             },
         )
         .map_err(|e| anyhow!("Failed to apply chat template: {}", e))
-    }
-
-    /// Convert OpenAIChatMessage to serde_json::Value for template rendering.
-    pub fn messages_to_json(messages: &[OpenAIChatMessage]) -> Vec<Value> {
-       todo!()
     }
 
     /// Count tokens in text
