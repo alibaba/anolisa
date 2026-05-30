@@ -29,6 +29,10 @@ sudo yum install copilot-shell agent-sec-core agentsight tokenless agent-memory 
 cosh
 ```
 
+## 快速入门
+
+快速上手使用 Copilot Shell — 查看我们的 [快速入门指南](docs/copilot-shell/users/quickstart_CN.md)。
+
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](LICENSE)。
