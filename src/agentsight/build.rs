@@ -61,7 +61,11 @@ fn main() {
 
     // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
     generate_skeleton(&mut out, "tcpsniff");
-    
+
+    // Generate lsmaudit skeleton and bindings
+    generate_skeleton(&mut out, "lsmaudit");
+    generate_header(&mut out, "lsmaudit");
+
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
     // generate_header(&mut out, "stackdeltatypes");
