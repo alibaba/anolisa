@@ -141,6 +141,7 @@ impl Parser {
             Event::FileWatch(_) => ParseResult { messages: Vec::new() },
             Event::FileWrite(_) => ParseResult { messages: Vec::new() },
             Event::UdpDns(_) => ParseResult { messages: Vec::new() },
+            Event::Lsm(_) => ParseResult { messages: Vec::new() },
         }
     }
 
