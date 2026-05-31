@@ -10,6 +10,7 @@ pub mod storage;
 pub mod instance_id;
 pub mod logtail;
 pub mod encrypt;
+pub mod cache_shadow;
 
 pub use semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
