@@ -22,6 +22,11 @@ pub struct TraceCommand {
     #[structopt(long)]
     pub enable_filewatch: bool,
 
+    /// Enable the observe-only LLM cache-hit shadow analyzer (measures would-be
+    /// cache hits and key precision on real traffic; never serves)
+    #[structopt(long)]
+    pub enable_cache_analysis: bool,
+
     /// Path to JSON configuration file
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
@@ -72,6 +77,7 @@ impl TraceCommand {
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch)
+            .set_enable_cache_analysis(self.enable_cache_analysis)
             .set_config_path(std::path::PathBuf::from(&self.config));
 
         // Create AgentSight (auto-attaches probes and starts polling)

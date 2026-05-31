@@ -383,6 +383,9 @@ pub struct AgentsightConfig {
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
+    /// Enable the observe-only LLM cache-hit shadow analyzer (measures would-be
+    /// cache hits + key precision on real traffic; never serves).
+    pub enable_cache_analysis: bool,
     /// TCP capture targets for plain HTTP capture (empty = disabled).
     /// Each entry specifies destination IP, port, or both.
     pub tcp_targets: Vec<TcpTarget>,
@@ -450,6 +453,7 @@ impl Default for AgentsightConfig {
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
             enable_filewatch: false,
+            enable_cache_analysis: false,
             tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
@@ -534,6 +538,12 @@ impl AgentsightConfig {
     /// Set enable_filewatch
     pub fn set_enable_filewatch(mut self, enable: bool) -> Self {
         self.enable_filewatch = enable;
+        self
+    }
+
+    /// Set enable_cache_analysis
+    pub fn set_enable_cache_analysis(mut self, enable: bool) -> Self {
+        self.enable_cache_analysis = enable;
         self
     }
 
