@@ -99,4 +99,130 @@ fn main() {
         .write_to_file(&header_path);
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
+
+    // Drift guard: cbindgen 0.27 silently skips `#[unsafe(no_mangle)]`, so the
+    // function declarations in cbindgen.toml are hand-maintained. Compare the
+    // export NAMES on both sides and fail the build if they disagree.
+    //
+    // NOTE: this guard checks NAMES only — it does NOT verify return types or
+    // parameter signatures. A maintainer changing only a return type or arg
+    // list (no name change) will pass this check but still produce an ABI
+    // mismatch. Keep cbindgen.toml's hand-written signatures in lockstep with
+    // src/ffi.rs by hand until cbindgen learns the new attribute.
+    check_ffi_header_drift(&crate_dir, &header_path);
+}
+
+/// Extract every `agentsight_<ident>` that appears as a function declaration
+/// `<...> agentsight_<ident>(` in the generated header. Skips doc comments,
+/// `#define`, `#include`, `typedef`, and multi-line parameter continuations
+/// by only considering lines that begin with an identifier character.
+fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for l in header.lines() {
+        let first_is_ident = l
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false);
+        if !first_is_ident || l.starts_with("typedef") {
+            continue;
+        }
+        let bytes = l.as_bytes();
+        let mut i = 0;
+        while i + "agentsight_".len() < bytes.len() {
+            if l[i..].starts_with("agentsight_") {
+                let mut j = i + "agentsight_".len();
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    out.insert(l[i..j].to_string());
+                    break; // one declaration per line
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Extract every `pub [unsafe] extern "C" fn agentsight_<ident>` from src/ffi.rs.
+/// We match the function name directly (no need to find the matching
+/// `#[unsafe(no_mangle)]` attribute first — every export uses that signature
+/// shape, and a stray `agentsight_*` identifier elsewhere in the file would
+/// not be preceded by `extern "C" fn`).
+fn extract_ffi_export_names(src: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for l in src.lines() {
+        let t = l.trim_start();
+        // Both `pub extern "C" fn agentsight_X(` and
+        // `pub unsafe extern "C" fn agentsight_X(` shapes.
+        let after_fn = if let Some(rest) = t.strip_prefix("pub extern \"C\" fn ") {
+            rest
+        } else if let Some(rest) = t.strip_prefix("pub unsafe extern \"C\" fn ") {
+            rest
+        } else {
+            continue;
+        };
+        if let Some(name) = after_fn.split('(').next() {
+            let name = name.trim();
+            if name.starts_with("agentsight_") {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
+    let ffi_path = PathBuf::from(crate_dir).join("src/ffi.rs");
+    let ffi_src = std::fs::read_to_string(&ffi_path).unwrap_or_else(|e| {
+        panic!(
+            "FFI drift guard: cannot read {}: {e}. If you renamed or moved ffi.rs, \
+             update build.rs::check_ffi_header_drift.",
+            ffi_path.display()
+        )
+    });
+    let header = std::fs::read_to_string(header_path).unwrap_or_else(|e| {
+        panic!(
+            "FFI drift guard: cannot read generated header {}: {e}. cbindgen \
+             should have just written it; check earlier cbindgen errors.",
+            header_path.display()
+        )
+    });
+
+    let ffi_names = extract_ffi_export_names(&ffi_src);
+    let header_names = extract_header_decl_names(&header);
+
+    // Sanity check: the FFI side count should match `#[unsafe(no_mangle)]`
+    // occurrences. A mismatch means our extractor missed an export shape we
+    // don't know about — fail loudly rather than under-reporting.
+    let marker_count = ffi_src.matches("#[unsafe(no_mangle)]").count();
+    assert_eq!(
+        marker_count,
+        ffi_names.len(),
+        "FFI drift guard: {} `#[unsafe(no_mangle)]` markers in src/ffi.rs but \
+         extract_ffi_export_names found {} `pub [unsafe] extern \"C\" fn agentsight_*` \
+         declarations. The extractor likely needs updating (build.rs).",
+        marker_count,
+        ffi_names.len()
+    );
+
+    let missing_in_header: Vec<&String> = ffi_names.difference(&header_names).collect();
+    let stale_in_header: Vec<&String> = header_names.difference(&ffi_names).collect();
+
+    if !missing_in_header.is_empty() || !stale_in_header.is_empty() {
+        panic!(
+            "FFI header drift detected — update the `after_includes` block in cbindgen.toml.\n\
+             missing in header (declared in src/ffi.rs but absent from cbindgen.toml): {:?}\n\
+             stale in header   (declared in cbindgen.toml but absent from src/ffi.rs):  {:?}\n\
+             NOTE: this guard checks NAMES only; signature drift (return type, \
+             parameter types/order) is NOT detected — verify by hand.",
+            missing_in_header, stale_in_header,
+        );
+    }
 }
