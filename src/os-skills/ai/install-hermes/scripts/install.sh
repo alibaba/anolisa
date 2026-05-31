@@ -190,6 +190,141 @@ get_hermes_command_path() {
     fi
 }
 
+upsert_env_var() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+
+    touch "$file"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        # Avoid echoing values because this helper may handle secrets.
+        "$CONFIG_PYTHON" - "$file" "$key" "$value" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+lines = path.read_text().splitlines()
+out = []
+updated = False
+for line in lines:
+    if line.startswith(f"{key}="):
+        out.append(f"{key}={value}")
+        updated = True
+    else:
+        out.append(line)
+if not updated:
+    out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n")
+PY
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+normalize_hermes_config() {
+    local config_file="$HERMES_HOME/config.yaml"
+    local env_file="$HERMES_HOME/.env"
+
+    if [ -x "$INSTALL_DIR/venv/bin/python" ]; then
+        CONFIG_PYTHON="$INSTALL_DIR/venv/bin/python"
+    elif [ -n "${PYTHON_PATH:-}" ] && [ -x "$PYTHON_PATH" ]; then
+        CONFIG_PYTHON="$PYTHON_PATH"
+    elif command -v python3 >/dev/null 2>&1; then
+        CONFIG_PYTHON="$(command -v python3)"
+    else
+        log_warn "Python not found; skipping Hermes config normalization"
+        return 0
+    fi
+
+    if ! grep -q '^DASHSCOPE_BASE_URL=' "$env_file" 2>/dev/null; then
+        upsert_env_var "$env_file" "DASHSCOPE_BASE_URL" "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        log_success "Configured DashScope compatible endpoint"
+    fi
+
+    if [ -n "${DASHSCOPE_API_KEY:-}" ] && ! grep -q '^DASHSCOPE_API_KEY=' "$env_file" 2>/dev/null; then
+        upsert_env_var "$env_file" "DASHSCOPE_API_KEY" "$DASHSCOPE_API_KEY"
+        log_success "Imported DASHSCOPE_API_KEY from environment"
+    elif [ -n "${QWEN_API_KEY:-}" ] && ! grep -q '^DASHSCOPE_API_KEY=' "$env_file" 2>/dev/null; then
+        upsert_env_var "$env_file" "DASHSCOPE_API_KEY" "$QWEN_API_KEY"
+        log_success "Imported QWEN_API_KEY as DASHSCOPE_API_KEY"
+    fi
+
+    chmod 600 "$env_file" 2>/dev/null || true
+
+    if ! "$CONFIG_PYTHON" - "$config_file" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"PyYAML unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+
+path = pathlib.Path(sys.argv[1])
+env_path = path.with_name(".env")
+if path.exists():
+    data = yaml.safe_load(path.read_text()) or {}
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+model = data.get("model")
+if isinstance(model, str):
+    raw = model.strip()
+    if raw.startswith("qwen/"):
+        raw = raw.split("/", 1)[1]
+    elif raw.startswith("alibaba/"):
+        raw = raw.split("/", 1)[1]
+    model = {"default": raw or "qwen3.5-plus", "provider": "alibaba"}
+elif not isinstance(model, dict):
+    model = {"default": "qwen3.5-plus", "provider": "alibaba"}
+else:
+    default = str(model.get("default") or "").strip()
+    has_dashscope_key = False
+    if env_path.exists():
+        has_dashscope_key = any(
+            line.startswith("DASHSCOPE_API_KEY=") and line.split("=", 1)[1].strip()
+            for line in env_path.read_text().splitlines()
+        )
+    if not default:
+        default = "qwen3.5-plus"
+    elif has_dashscope_key and not default.startswith("alibaba/"):
+        default = "qwen3.5-plus"
+    elif default.startswith("qwen/"):
+        default = default.split("/", 1)[1]
+    elif default.startswith("alibaba/"):
+        default = default.split("/", 1)[1]
+    model["default"] = default
+    if has_dashscope_key or not str(model.get("provider") or "").strip():
+        model["provider"] = "alibaba"
+    if model.get("provider") == "alibaba":
+        model.pop("base_url", None)
+data["model"] = model
+
+terminal = data.get("terminal")
+if not isinstance(terminal, dict):
+    terminal = {}
+if not terminal.get("backend") or terminal.get("backend") == "auto":
+    terminal["backend"] = "local"
+data["terminal"] = terminal
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+PY
+    then
+        log_warn "Could not normalize ~/.hermes/config.yaml"
+        return 0
+    fi
+
+    chmod 600 "$config_file" 2>/dev/null || true
+    log_success "Normalized ~/.hermes/config.yaml for direct startup"
+}
+
 # ============================================================================
 # System detection
 # ============================================================================
@@ -1156,6 +1291,8 @@ copy_config_templates() {
     else
         log_info "~/.hermes/config.yaml already exists, keeping it"
     fi
+
+    normalize_hermes_config
 
     # Create SOUL.md if it doesn't exist (global persona file)
     if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
