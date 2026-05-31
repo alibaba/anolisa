@@ -2,7 +2,7 @@
  * agentsight_example.c — AgentSight FFI 调用样例
  *
  * 编译:
- *   gcc -o agentsight_example agentsight_example.c -L./target/release -lagentsight -lpthread -ldl -lm
+ *   gcc -o agentsight_example agentsight_example.c -I./include -L./target/release -lagentsight -lpthread -ldl -lm
  *
  * 运行 (需要 root 权限以加载 eBPF):
  *   sudo LD_LIBRARY_PATH=./target/release ./agentsight_example
@@ -109,8 +109,8 @@ int main(void) {
     /* 日志输出到文件 */
     agentsight_config_set_log_path(cfg, "/tmp/agentsight.log");
 
-    /* 添加 domain 规则 */
-    agentsight_config_add_domain_rule(cfg, "dashscope.aliyuncs.com");
+    /* HTTPS 域规则：触发 SSL probe attach（捕获到该域的 TLS 流量） */
+    agentsight_config_add_https(cfg, "dashscope.aliyuncs.com");
 
     /* ---- 2. 创建实例 ---- */
     AgentsightHandle *handle = agentsight_new(cfg);
