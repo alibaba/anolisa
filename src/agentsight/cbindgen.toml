@@ -11,6 +11,29 @@ style = "both"
 tab_width = 4
 documentation_style = "c99"
 
+#
+# NOTE: two independent workarounds are in play below.
+#
+# (1) The function declarations in `after_includes` are HAND-MAINTAINED.
+#     cbindgen 0.27 does not recognize the Rust 2024 `#[unsafe(no_mangle)]`
+#     attribute and silently skips every exported function, so we paste the
+#     declarations here. build.rs::check_ffi_header_drift cross-checks the
+#     export NAMES on both sides and fails the build on mismatch.
+#     CAVEAT: the drift guard only checks NAMES. Signature drift (return type,
+#     parameter types/order/count) is NOT detected automatically — keep the
+#     C signatures here in lockstep with src/ffi.rs by hand.
+#
+# (2) `item_types = ["structs"]` in [export] is independently required.
+#     Without it, cbindgen would emit `pub const AGENTSIGHT_READ_BLOCK` (and
+#     other unrelated `pub const` items from across the crate) as `#define`s
+#     in the public header, duplicating the macro already written below.
+#     Opaque handles are gated separately by `cbindgen:no-export` doc comments
+#     in src/ffi.rs.
+#
+# TODO: when bumping cbindgen to a version that handles `#[unsafe(no_mangle)]`,
+# drop this block AND `item_types = ["structs"]` AND build.rs's drift guard
+# (it becomes dead code with a misleading panic message).
+#
 after_includes = """
 /* Forward declarations for callback parameter types */
 typedef struct AgentsightHttpsData AgentsightHttpsData;
@@ -32,7 +55,8 @@ AgentsightConfigHandle *agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle *cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle *cfg, const char *path);
 void agentsight_config_add_cmdline_rule(AgentsightConfigHandle *cfg, const char *const *rule, const char *agent_name, int allow);
-void agentsight_config_add_domain_rule(AgentsightConfigHandle *cfg, const char *rule);
+void agentsight_config_add_https(AgentsightConfigHandle *cfg, const char *rule);
+int  agentsight_config_add_http(AgentsightConfigHandle *cfg, const char *target);
 int agentsight_config_load_config(AgentsightConfigHandle *cfg, const char *json_str);
 void agentsight_config_free(AgentsightConfigHandle *cfg);
 
