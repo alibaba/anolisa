@@ -445,6 +445,9 @@ pub struct AgentsightConfig {
     /// Obtain via `stat -c %i /sys/fs/cgroup/<path>` (v2) or
     /// `stat -c %i /sys/fs/cgroup/memory/<path>` (v1).
     pub cgroup_ids: Vec<u64>,
+    /// Enable the observe-only LLM cache-hit shadow analyzer (measures would-be
+    /// cache hits + key precision on real traffic; never serves).
+    pub enable_cache_analysis: bool,
     /// TCP capture targets for plain HTTP capture (empty = disabled).
     /// Each entry specifies destination IP, port, or both.
     pub tcp_targets: Vec<TcpTarget>,
@@ -525,6 +528,7 @@ impl Default for AgentsightConfig {
             enable_filewatch: false,
             cgroup_filter_enabled: false,
             cgroup_ids: Vec::new(),
+            enable_cache_analysis: false,
             tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
@@ -627,6 +631,12 @@ impl AgentsightConfig {
     /// probes are created (the value is baked into the BPF rodata at load).
     pub fn set_cgroup_filter_enabled(mut self, enabled: bool) -> Self {
         self.cgroup_filter_enabled = enabled;
+        self
+    }
+
+    /// Set enable_cache_analysis
+    pub fn set_enable_cache_analysis(mut self, enable: bool) -> Self {
+        self.enable_cache_analysis = enable;
         self
     }
 
