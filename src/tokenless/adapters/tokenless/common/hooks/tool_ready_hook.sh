@@ -47,7 +47,7 @@ is_trusted_file() {
   local file_perms
   file_perms=$(stat -c '%a' "$check_path" 2>/dev/null || stat -f '%Lp' "$check_path" 2>/dev/null || echo "777")
   local other_perms="${file_perms: -1}"
-  if [ "$other_perms" -ge 6 ] 2>/dev/null; then
+  if (( other_perms & 2 )); then
     log_v "BLOCKED: $f is world-writable (perms=$file_perms)"
     return 1
   fi

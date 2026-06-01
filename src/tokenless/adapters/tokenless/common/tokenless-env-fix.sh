@@ -191,11 +191,15 @@ install_via_cargo_build() {
   local manifest="$1"
   local binary="$2"
   local features="${3:-}"
-  local cargo_args="--release --manifest-path $manifest"
-  if [ -n "$features" ]; then
-    cargo_args="$cargo_args --features $features"
+  if [ ! -f "$manifest" ]; then
+    echo "[tokenless-env-fix] BLOCKED: manifest not found: $manifest"
+    return 1
   fi
-  cargo build $cargo_args 2>/dev/null
+  local -a cargo_args=("--release" "--manifest-path" "$manifest")
+  if [ -n "$features" ]; then
+    cargo_args+=("--features" "$features")
+  fi
+  cargo build "${cargo_args[@]}"
   # Find the built binary
   local target_dir
   target_dir=$(dirname "$manifest")/target/release
@@ -233,7 +237,7 @@ install_via_path() {
     export PATH="${path_dir}:${PATH}"
     local shell_rc="${HOME}/.bashrc"
     [ -f "${HOME}/.zshrc" ] && shell_rc="${HOME}/.zshrc"
-    grep -q "${path_dir}" "$shell_rc" 2>/dev/null || echo "export PATH=\"${path_dir}:\$PATH\"" >> "$shell_rc"
+    grep -Fq "export PATH=\"${path_dir}" "$shell_rc" 2>/dev/null || echo "export PATH=\"${path_dir}:\$PATH\"" >> "$shell_rc"
   fi
 }
 
@@ -435,7 +439,7 @@ fix_tool_from_spec() {
     return 1
   fi
   local tool_spec
-  tool_spec=$(jq -c ".\"$tool_name\"" "$SPEC_FILE" 2>/dev/null || echo 'null')
+  tool_spec=$(jq -c --arg key "$tool_name" '.[$key]' "$SPEC_FILE" 2>/dev/null || echo 'null')
   if [ "$tool_spec" = "null" ] || [ -z "$tool_spec" ]; then
     echo "[tokenless-env-fix] no spec for tool: $tool_name"
     return 0
