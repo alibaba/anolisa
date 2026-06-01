@@ -55,6 +55,12 @@ from hook_utils import (
     _RTK_LOCAL_LIB,
     resolve_binary as _resolve_binary_shared,
     warn as _warn_shared,
+    try_parse_json as _try_parse_json,
+    is_skill_file as _is_skill_file,
+    write_context as _write_context,
+    run as _run,
+    parse_version as _parse_version,
+    SKIP_TOOLS as _SKIP_TOOLS_SHARED,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,23 +72,13 @@ logger = logging.getLogger(__name__)
 AGENT_ID = "hermes-agent"
 _MIN_RESPONSE_LEN = 200
 
-_SKIP_TOOLS: set[str] = {
-    "read_file",
-    "list_directory",
-    "glob",
-    "notebook_read",
-    "session_search",
-    "list_sessions",
-}
+_SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {"session_search", "list_sessions"}
 
 _MIN_RTK_VERSION = (0, 35, 0)
 _SHELL_TOOLS: set[str] = {"terminal"}
 
 # Debian/Ubuntu install path (RPM uses /usr/libexec, Debian uses /usr/lib)
 _RTK_LIB_FALLBACK = "/usr/lib/anolisa/tokenless/rtk"
-
-_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
-_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
 
 # ---------------------------------------------------------------------------
 # Binary resolution (with caching)
@@ -115,54 +111,8 @@ def _have(name: str, fallback: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (shared via hook_utils)
 # ---------------------------------------------------------------------------
-
-
-def _try_parse_json(data: str) -> Any:
-    try:
-        return json.loads(data)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-
-def _is_skill_file(text: str) -> bool:
-    if not isinstance(text, str) or not text.startswith("---"):
-        return False
-    for line in text.split("\n", 20)[1:]:
-        if line.startswith("name:") or line.startswith("description:"):
-            return True
-    return False
-
-
-def _run(args: list[str], input_data: str, timeout: int = 10) -> subprocess.CompletedProcess | None:
-    try:
-        return subprocess.run(
-            args, input=input_data, capture_output=True, text=True, timeout=timeout,
-        )
-    except Exception:
-        return None
-
-
-def _parse_version(version_str: str) -> tuple | None:
-    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
-    if m:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return None
-
-
-def _write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)
-    if os.path.islink(_CONTEXT_FILE):
-        os.unlink(_CONTEXT_FILE)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(_CONTEXT_FILE, flags, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(f"{agent_id}\n")
-        f.write(f"{session_id}\n")
-        f.write(f"{tool_use_id}\n")
 
 
 # ---------------------------------------------------------------------------

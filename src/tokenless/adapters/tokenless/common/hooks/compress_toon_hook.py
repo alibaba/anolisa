@@ -105,8 +105,12 @@ def main() -> None:
             input=tool_response,
             capture_output=True, text=True, timeout=10,
         )
-    except Exception:
-        warn("TOON encoding failed. Passing through unchanged.")
+    except Exception as e:
+        warn(f"TOON encoding failed: {e}. Passing through unchanged.")
+        skip()
+
+    if proc.returncode != 0:
+        warn(f"TOON encoding exited with code {proc.returncode}. Passing through unchanged.")
         skip()
 
     toon_output = proc.stdout.strip()
