@@ -79,7 +79,11 @@ def main() -> None:
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
-        warn("Schema compression failed. Passing through unchanged.")
+        warn("Schema compression subprocess failed. Passing through unchanged.")
+        skip()
+
+    if proc.returncode != 0:
+        warn(f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged.")
         skip()
 
     compressed = proc.stdout.strip()

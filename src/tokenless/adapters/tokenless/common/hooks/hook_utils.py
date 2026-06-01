@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 
 
@@ -14,6 +16,18 @@ _TOKENLESS_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "a
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _RTK_LOCAL_SHARE = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk")
 _RTK_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk")
+
+# -- Unified skip-tools set (PascalCase from Claude Code, snake_case from Hermes) --
+
+SKIP_TOOLS: set[str] = {
+    "Read", "read_file", "Glob", "list_directory",
+    "NotebookRead", "notebook_read", "notebookread", "read", "glob",
+}
+
+# -- Context file for rewrite session tracking --
+
+_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
+_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
@@ -65,3 +79,36 @@ def is_skill_file(text: str) -> bool:
         if line.startswith("name:") or line.startswith("description:"):
             return True
     return False
+
+
+def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
+    """Write context file for rtk rewrite session tracking."""
+    os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)
+    if os.path.islink(_CONTEXT_FILE):
+        os.unlink(_CONTEXT_FILE)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(_CONTEXT_FILE, flags, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{agent_id}\n")
+        f.write(f"{session_id}\n")
+        f.write(f"{tool_use_id}\n")
+
+
+def run(args: list[str], input_data: str, timeout: int = 10) -> subprocess.CompletedProcess | None:
+    """Run a subprocess with input data, returning None on failure."""
+    try:
+        return subprocess.run(
+            args, input=input_data, capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+
+
+def parse_version(version_str: str) -> tuple | None:
+    """Parse a version string like '0.35.0' into a (major, minor, patch) tuple."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return None

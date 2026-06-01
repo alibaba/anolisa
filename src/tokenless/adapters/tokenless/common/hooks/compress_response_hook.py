@@ -27,17 +27,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, SKIP_TOOLS, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
 
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_CHARS = 200
-
-_SKIP_TOOLS = {
-    "Read", "read_file", "Glob", "list_directory",
-    "NotebookRead", "read", "glob", "notebookread",
-}
 
 
 # -- env attribution patterns -------------------------------------------------
@@ -106,7 +101,7 @@ def _classify_env_error(parsed: dict) -> tuple[str | None, str | None]:
     error_field = str(parsed.get("error", ""))
     error_text = stderr_text + error_field
 
-    has_error = bool(error_text) or exit_code in (1, 2)
+    has_error = bool(error_text) or (exit_code is not None and exit_code != 0)
     if not has_error:
         return None, None
 
@@ -150,7 +145,7 @@ def main() -> None:
 
     # 3. Skip content-retrieval tools
     tool_name = input_data.get("tool_name", "unknown")
-    if tool_name in _SKIP_TOOLS:
+    if tool_name in SKIP_TOOLS:
         skip()
 
     # 4. Extract tool_response
@@ -215,8 +210,8 @@ def main() -> None:
             if proc.returncode == 0 and proc.stdout.strip():
                 compressed = proc.stdout.strip()
                 used_resp_compression = True
-        except Exception:
-            pass  # Fall through to original
+        except Exception as e:
+            warn(f"Response compression error: {e}")
 
     # 11. Step 2: TOON encoding (via tokenless compress-toon for stats)
     toon_output = ""
@@ -239,8 +234,8 @@ def main() -> None:
                     candidate = proc.stdout.strip()
                     if len(candidate) < len(compressed):
                         toon_output = candidate
-            except Exception:
-                pass
+            except Exception as e:
+                warn(f"TOON encoding error: {e}")
 
     # Determine final output
     final_output = toon_output if toon_output else compressed

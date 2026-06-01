@@ -22,17 +22,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, SKIP_TOOLS, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
 
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_CHARS = 200
-
-_SKIP_TOOLS = {
-    "Read", "read_file", "Glob", "list_directory",
-    "NotebookRead", "read", "glob", "notebookread",
-}
 
 
 # -- main --------------------------------------------------------------------
@@ -54,7 +49,7 @@ def main() -> None:
 
     # 3. Skip content-retrieval tools
     tool_name = input_data.get("tool_name", "unknown")
-    if tool_name in _SKIP_TOOLS:
+    if tool_name in SKIP_TOOLS:
         skip()
 
     # 4. Extract tool_response
@@ -105,8 +100,12 @@ def main() -> None:
             input=tool_response,
             capture_output=True, text=True, timeout=10,
         )
-    except Exception:
-        warn("TOON encoding failed. Passing through unchanged.")
+    except Exception as e:
+        warn(f"TOON encoding failed: {e}. Passing through unchanged.")
+        skip()
+
+    if proc.returncode != 0:
+        warn(f"TOON encoding exited with code {proc.returncode}. Passing through unchanged.")
         skip()
 
     toon_output = proc.stdout.strip()
