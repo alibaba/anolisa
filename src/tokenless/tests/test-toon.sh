@@ -4,6 +4,10 @@
 
 set -uo pipefail
 
+# Temp file for tests (cleaned up on exit)
+tmpfile=$(mktemp /tmp/toon_test_XXXXXX.json)
+trap 'rm -f "$tmpfile"' EXIT
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -85,8 +89,8 @@ assert_contains "$result" '"name":"Alice"' "解码 - name"
 assert_contains "$result" '"age":30' "解码 - age"
 
 info "3.2: 表格数组解码"
-echo -e "users[2]{id,name}:\n  1,Alice\n  2,Bob" | toon -d > /tmp/toon_decode_test.json
-result=$(cat /tmp/toon_decode_test.json)
+echo -e "users[2]{id,name}:\n  1,Alice\n  2,Bob" | toon -d > "$tmpfile"
+result=$(cat "$tmpfile")
 assert_contains "$result" '"users"' "解码表格数组 - users 键"
 # id 是数字，name 是字符串
 if echo "$result" | grep -q '"id":1'; then pass "解码表格数组 - id 为数字"
