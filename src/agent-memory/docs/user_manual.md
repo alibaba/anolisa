@@ -236,7 +236,7 @@ The plugin's contract-name mapping:
 
 | OpenClaw contract | agent-memory MCP tool |
 |---|---|
-| `memory_search` | `memory_search` (Tier B, BM25) |
+| `memory_search` | `memory_search` (Tier B, BM25 default; `mode=vector\|hybrid` with embedding) |
 | `memory_get` | `mem_read` (Tier A) |
 | `memory_observe` | `memory_observe` (Tier B) |
 | `memory_get_context` | `memory_get_context` (Tier B) |
@@ -400,8 +400,13 @@ session's `scratch/` into the persistent store atomically.
 
 ### Tier B — Structured search (3 tools)
 
-`memory_search` runs a BM25 query against the FTS5 index and returns
-ranked snippets. `memory_observe` writes a small frontmatter +
+`memory_search` runs a keyword (BM25) query against the FTS5 index and
+returns ranked snippets. When an embedding backend is configured
+(OpenAI or Ollama), `mode="vector"` enables pure semantic search and
+`mode="hybrid"` fuses BM25 + vector results with reciprocal rank
+fusion for the best of both worlds.
+
+`memory_observe` writes a small frontmatter +
 content blob under `notes/observed/<ULID>.md` so the agent has a
 zero-decision way to record a thought. `memory_get_context` assembles
 a token-bounded markdown preview of the most recently modified files —

@@ -46,6 +46,8 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub index: IndexConfig,
     #[serde(default)]
+    pub embedding: crate::embedding::EmbeddingConfig,
+    #[serde(default)]
     pub mount: MountConfig,
     #[serde(default)]
     pub audit: AuditConfig,
@@ -77,6 +79,7 @@ impl Default for MemoryConfig {
             paths: PathsConfig::default(),
             session: SessionConfig::default(),
             index: IndexConfig::default(),
+            embedding: crate::embedding::EmbeddingConfig::default(),
             mount: MountConfig::default(),
             audit: AuditConfig::default(),
             cgroup: crate::cgroup::CgroupConfig::default(),
@@ -325,6 +328,36 @@ impl AppConfig {
             }
         }
         self.memory.audit.journald = env_bool("MEMORY_AUDIT_JOURNALD", self.memory.audit.journald);
+        // Embedding backend env overrides
+        if let Ok(backend) = std::env::var("MEMORY_EMBEDDING_BACKEND") {
+            match backend.to_lowercase().as_str() {
+                "none" => self.memory.embedding = crate::embedding::EmbeddingConfig::None,
+                "openai" => {
+                    let api_key = std::env::var("MEMORY_OPENAI_API_KEY")
+                        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                        .unwrap_or_default();
+                    let model = std::env::var("MEMORY_OPENAI_MODEL")
+                        .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+                    let base_url = std::env::var("MEMORY_OPENAI_BASE_URL").ok();
+                    self.memory.embedding = crate::embedding::EmbeddingConfig::OpenAI {
+                        api_key,
+                        model,
+                        base_url,
+                    };
+                }
+                "ollama" => {
+                    let model = std::env::var("MEMORY_OLLAMA_MODEL")
+                        .unwrap_or_else(|_| "nomic-embed-text".to_string());
+                    let base_url = std::env::var("MEMORY_OLLAMA_BASE_URL")
+                        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+                    self.memory.embedding =
+                        crate::embedding::EmbeddingConfig::Ollama { model, base_url };
+                }
+                _ => {
+                    tracing::warn!("unknown MEMORY_EMBEDDING_BACKEND={backend:?}; keeping config");
+                }
+            }
+        }
         self.memory.cgroup.enabled = env_bool("MEMORY_CGROUP_ENABLED", self.memory.cgroup.enabled);
         if let Ok(v) = std::env::var("MEMORY_CGROUP_MEMORY_MAX") {
             self.memory.cgroup.memory_max = v;
@@ -362,5 +395,66 @@ impl AppConfig {
     pub fn resolved_session_dir(&self) -> PathBuf {
         let expanded = shellexpand::tilde(&self.memory.session.base_dir);
         PathBuf::from(expanded.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::EmbeddingConfig;
+
+    #[test]
+    fn embedding_config_default_is_none() {
+        let cfg = AppConfig::default();
+        assert!(matches!(cfg.memory.embedding, EmbeddingConfig::None));
+    }
+
+    #[test]
+    fn embedding_config_parses_openai_from_toml() {
+        let toml = r#"
+            [memory.embedding]
+            backend = "openai"
+            api_key = "sk-test"
+            model = "text-embedding-3-large"
+            "#;
+        let cfg: AppConfig = toml::from_str(toml).unwrap();
+        match &cfg.memory.embedding {
+            EmbeddingConfig::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => {
+                assert_eq!(api_key, "sk-test");
+                assert_eq!(model, "text-embedding-3-large");
+                assert!(base_url.is_none());
+            }
+            other => panic!("expected OpenAI, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_config_parses_ollama_from_toml() {
+        let toml = r#"
+            [memory.embedding]
+            backend = "ollama"
+            model = "bge-m3"
+            base_url = "http://gpu-box:11434"
+            "#;
+        let cfg: AppConfig = toml::from_str(toml).unwrap();
+        match &cfg.memory.embedding {
+            EmbeddingConfig::Ollama { model, base_url } => {
+                assert_eq!(model, "bge-m3");
+                assert_eq!(base_url, "http://gpu-box:11434");
+            }
+            other => panic!("expected Ollama, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_config_env_override_defaults_to_none() {
+        // When MEMORY_EMBEDDING_BACKEND is not set, config stays at default (None).
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_overrides();
+        assert!(matches!(cfg.memory.embedding, EmbeddingConfig::None));
     }
 }

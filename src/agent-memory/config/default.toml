@@ -20,3 +20,23 @@ profile = "advanced"
 #   <base_dir>/<ns_kind>-<ns_id>/{README.md, .anolisa/, ...}
 # Override via env: MEMORY_BASE_DIR=/custom/path
 base_dir = "~/.anolisa/memory"
+
+# ── Embedding ─────────────────────────────────────────────────
+# Backend for semantic (vector) search via `memory_search mode=vector|hybrid`.
+# Override via env: MEMORY_EMBEDDING_BACKEND=openai|ollama|none
+#
+# OpenAI: set `api_key` or MEMORY_OPENAI_API_KEY (falls back to OPENAI_API_KEY).
+#   backend = "openai"
+#   api_key  = ""
+#   model    = "text-embedding-3-small"               # or "text-embedding-3-large"
+#
+# Ollama (no auth, needs a running ollama server):
+#   backend = "ollama"
+#   model   = "nomic-embed-text"             # or "bge-m3", "mxbai-embed-large"
+#   base_url = "http://localhost:11434"
+
+[memory.embedding]
+backend = "none"
+# api_key  = ""        # only for openai
+# model    = ""
+# base_url = ""

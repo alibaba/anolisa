@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use crate::embedding::EmbeddingProvider;
 use crate::error::Result;
 use crate::ns::MountPoint;
 
@@ -26,6 +27,12 @@ pub struct SearchHit {
     pub path: String,
     pub snippet: String,
     pub score: f64,
+    /// Whether the snippet contains prompt-injection patterns.  Callers
+    /// in the adapter layer can use this flag to decide whether to
+    /// surface the hit, surface it with extra isolation, or suppress it
+    /// entirely.
+    #[serde(default)]
+    pub suspicious: bool,
 }
 
 /// Owning handle: spawn an IndexWorker that watches `mount`, expose
@@ -35,10 +42,11 @@ pub struct IndexHandle {
     store: Arc<Mutex<BM25Store>>,
     worker: Option<IndexWorker>,
     db_path: PathBuf,
+    pub embedding: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl IndexHandle {
-    pub fn open(mount: &MountPoint) -> Result<Self> {
+    pub fn open(mount: &MountPoint, embedding: Option<Arc<dyn EmbeddingProvider>>) -> Result<Self> {
         let db_path = mount.meta_dir.join("index").join("bm25.db");
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -46,19 +54,45 @@ impl IndexHandle {
         let store = BM25Store::open(&db_path)?;
         let store = Arc::new(Mutex::new(store));
 
-        // Initial full scan + watcher in one worker
-        let worker = IndexWorker::spawn(mount.clone_lite(), Arc::clone(&store))?;
+        // Initial full scan + watcher in one worker.
+        let emb_clone = embedding.clone();
+        let worker = IndexWorker::spawn(mount.clone_lite(), Arc::clone(&store), emb_clone)?;
 
         Ok(Self {
             store,
             worker: Some(worker),
             db_path,
+            embedding,
         })
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().expect("index store poisoned");
         store.search(query, top_k)
+    }
+
+    pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
+        let store = self.store.lock().expect("index store poisoned");
+        let raw = store.search_vec(query_vec, top_k)?;
+        Ok(raw
+            .into_iter()
+            .map(|(path, score)| SearchHit {
+                path,
+                snippet: String::new(),
+                score,
+                suspicious: false,
+            })
+            .collect())
+    }
+
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let store = self.store.lock().expect("index store poisoned");
+        store.search_hybrid(query, query_vec, top_k)
     }
 
     pub fn db_path(&self) -> &std::path::Path {

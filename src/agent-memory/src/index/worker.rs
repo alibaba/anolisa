@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 
+use crate::embedding::EmbeddingProvider;
 use crate::error::{MemoryError, Result};
 use crate::ns::MountPoint;
 
@@ -29,7 +30,11 @@ impl IndexWorker {
     /// inotify/FSEvents watcher to be registered before returning. By the
     /// time this completes, every existing file is indexed and any
     /// subsequent write to the mount tree will be picked up by the watcher.
-    pub fn spawn(mount: MountPointLite, store: Arc<Mutex<BM25Store>>) -> Result<Self> {
+    pub fn spawn(
+        mount: MountPointLite,
+        store: Arc<Mutex<BM25Store>>,
+        embedding: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Result<Self> {
         // 1. Sync full scan so the caller can safely read svc.index.count()
         full_scan(&mount, &store)?;
 
@@ -39,11 +44,14 @@ impl IndexWorker {
         let (ready_tx, ready_rx) = stdmpsc::sync_channel::<Result<()>>(1);
         let mount_clone = mount.clone();
         let store_clone = Arc::clone(&store);
+        let emb_clone = embedding.clone();
 
         let handle = thread::Builder::new()
             .name("agentmem-index".into())
             .spawn(move || {
-                if let Err(e) = run_watcher(mount_clone, store_clone, cancel_rx, ready_tx) {
+                if let Err(e) =
+                    run_watcher(mount_clone, store_clone, emb_clone, cancel_rx, ready_tx)
+                {
                     tracing::warn!("index watcher exited: {e}");
                 }
             })
@@ -108,6 +116,7 @@ impl MountPoint {
 fn run_watcher(
     mount: MountPointLite,
     store: Arc<Mutex<BM25Store>>,
+    embedding: Option<Arc<dyn EmbeddingProvider>>,
     cancel_rx: stdmpsc::Receiver<()>,
     ready_tx: stdmpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
@@ -175,7 +184,13 @@ fn run_watcher(
         // which is O(N) per change. Per-directory rescan in `flush` for
         // events touching a directory is O(depth) and much cheaper.
         if !pending_modify.is_empty() || !pending_remove.is_empty() {
-            flush(&mount, &store, &mut pending_modify, &mut pending_remove)?;
+            flush(
+                &mount,
+                &store,
+                embedding.as_deref(),
+                &mut pending_modify,
+                &mut pending_remove,
+            )?;
         }
     }
 
@@ -209,6 +224,7 @@ fn classify(
 fn flush(
     mount: &MountPointLite,
     store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
     pending_modify: &mut HashSet<PathBuf>,
     pending_remove: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -246,6 +262,12 @@ fn flush(
         .filter_map(|p| relative(mount, &p))
         .collect();
     let mut to_upsert: Vec<(String, i64, u64, String)> = Vec::new();
+    let mut to_upsert_vec: Vec<(String, Vec<f32>)> = Vec::new();
+
+    // If we have an embedding provider, grab the tokio handle so
+    // we can block_on from this dedicated std::thread. If there
+    // is no tokio runtime (unit tests), embedding is skipped.
+    let rt_handle = embedding.and_then(|_| tokio::runtime::Handle::try_current().ok());
 
     for path in pending_modify.drain() {
         let rel = match relative(mount, &path) {
@@ -273,7 +295,14 @@ fn flush(
         };
         if let Some(rel) = relative(mount, &path) {
             let mtime = super::store::mtime_ms_of(&meta);
-            to_upsert.push((rel, mtime, meta.len(), body));
+            to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
+
+            // Compute embedding for this file if provider is available.
+            if let (Some(emb), Some(rt)) = (embedding, rt_handle.as_ref()) {
+                if let Ok(embedding_vec) = rt.block_on(emb.embed(&body)) {
+                    to_upsert_vec.push((rel, embedding_vec.vector));
+                }
+            }
         }
     }
 
@@ -290,6 +319,11 @@ fn flush(
     for (rel, mtime, size, body) in to_upsert {
         if let Err(e) = store.upsert(&rel, mtime, size, &body) {
             tracing::warn!("index upsert failed for {rel}: {e}");
+        }
+    }
+    for (rel, vec) in to_upsert_vec {
+        if let Err(e) = store.upsert_vec(&rel, &vec) {
+            tracing::warn!("index vector upsert failed for {rel}: {e}");
         }
     }
 

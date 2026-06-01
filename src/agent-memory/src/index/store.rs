@@ -20,7 +20,7 @@ pub struct BM25Store {
 /// On open, an older DB is upgraded step-by-step until it reaches this
 /// version; a newer DB causes the open to fail so a downgraded binary
 /// doesn't silently corrupt rows it doesn't understand.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 impl BM25Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -73,6 +73,7 @@ impl BM25Store {
             let tx = conn.transaction()?;
             match at {
                 0 => Self::migrate_0_to_1(&tx)?,
+                1 => Self::migrate_1_to_2(&tx)?,
                 // Future steps insert here, each bumping `at`.
                 n => {
                     return Err(MemoryError::Other(format!(
@@ -103,6 +104,19 @@ impl BM25Store {
                 path UNINDEXED,
                 body,
                 tokenize='trigram'
+            );
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// Schema v2: add `files_vec` for dense embeddings alongside FTS5.
+    fn migrate_1_to_2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS files_vec (
+                path TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL
             );
             "#,
         )?;
@@ -161,8 +175,11 @@ impl BM25Store {
     /// per-file unlinks for every leaf. Without the cascade those rows
     /// would linger as stale FTS hits forever.
     ///
-    /// Wraps everything in one transaction so `files` and `files_fts` stay
-    /// consistent on partial failure.
+    /// Wraps everything in one transaction so `files`, `files_fts`, and
+    /// `files_vec` stay consistent on partial failure (a delete that drops
+    /// the FTS row but leaves the dense-vector row behind would produce an
+    /// orphaned embedding that can never be matched but still wastes space
+    /// and skews later vector-only search results).
     pub fn remove(&mut self, rel_path: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let prefix = format!("{rel_path}/");
@@ -172,10 +189,21 @@ impl BM25Store {
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
-        let existed = !rowids.is_empty();
+        // Same path/prefix cascade for the dense-vector table: it is keyed
+        // by `path` rather than FTS rowid, so it needs its own delete pass.
+        let vec_paths: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT path FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+            let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, String>(0))?;
+            rows.flatten().collect()
+        };
+        let existed = !rowids.is_empty() || !vec_paths.is_empty();
         for rid in rowids {
             tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rid])?;
             tx.execute("DELETE FROM files WHERE rowid = ?1", params![rid])?;
+        }
+        for p in vec_paths {
+            tx.execute("DELETE FROM files_vec WHERE path = ?1", params![p])?;
         }
         tx.commit()?;
         Ok(existed)
@@ -201,15 +229,173 @@ impl BM25Store {
         "#;
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![fts_q, top_k as i64], |row| {
+            let snippet: String = row.get(1)?;
+            // Flag based on the snippet the caller actually sees, not the
+            // full document body: a benign snippet shouldn't be marked
+            // suspicious merely because the surrounding body (never shown
+            // to the model) happens to contain an injection-like term.
+            //
+            // FTS5 wraps matched terms in '«'/»'/'…' markers; they are a
+            // display artifact and would split multi-word patterns (e.g.
+            // "«ignore» all «instruc»…" no longer matches the "ignore all
+            // instructions" regex), so strip them before detection.
+            let clean = strip_snippet_markers(&snippet);
             Ok(SearchHit {
                 path: row.get::<_, String>(0)?,
-                snippet: row.get::<_, String>(1)?,
+                suspicious: crate::safety::looks_like_prompt_injection(&clean),
                 score: row.get::<_, f64>(2)?,
+                snippet,
             })
         })?;
 
         let out: Vec<SearchHit> = rows.flatten().collect();
         Ok(out)
+    }
+
+    /// Store a dense embedding vector for `rel_path`. The vector is
+    /// serialised as a little-endian f32 BLOB.
+    pub fn upsert_vec(&mut self, rel_path: &str, embedding: &[f32]) -> Result<()> {
+        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO files_vec (path, embedding) VALUES (?1, ?2)",
+            params![rel_path, blob],
+        )?;
+        Ok(())
+    }
+
+    /// Vector-only search: returns `(path, cosine_similarity)` ordered
+    /// by descending similarity. The query vector is normalised and each
+    /// stored vector is normalised on-the-fly so the dot product is
+    /// equivalent to cosine similarity.
+    pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        let q_norm = l2_normalise(query_vec);
+
+        let mut stmt = self.conn.prepare("SELECT path, embedding FROM files_vec")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut scores: Vec<(String, f64)> = Vec::new();
+        for row in rows {
+            let (path, blob) = match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let stored = blob_to_f32(&blob);
+            if stored.len() != q_norm.len() {
+                continue;
+            }
+            let similarity = dot_product(&q_norm, &stored) as f64;
+            // Drop NaN/Inf scores: they come from malformed stored vectors
+            // (e.g. zero-norm embeddings whose cosine is undefined). Keeping
+            // them would make the sort comparator non-deterministic because
+            // `partial_cmp(NaN, x)` is `None`, and the `unwrap_or(Equal)`
+            // fallback silently shuffles such rows anywhere in the ranking.
+            if !similarity.is_finite() {
+                tracing::warn!("vector search: skipping non-finite similarity for {path}");
+                continue;
+            }
+            scores.push((path, similarity));
+        }
+
+        // Sort by descending similarity. All entries are finite here, so
+        // `total_cmp` is well-defined and gives a deterministic order.
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scores.truncate(top_k);
+        Ok(scores)
+    }
+
+    /// Hybrid search: combines BM25 keyword ranking with vector cosine
+    /// similarity using reciprocal rank fusion (RRF, k=60).
+    ///
+    /// This method is the one callers should use when both the index and
+    /// an embedding provider are available.
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>> {
+        // Run both search strategies.
+        let bm25_hits = self.search(query, top_k * 2);
+        let vec_hits = self.search_vec(query_vec, top_k * 2);
+
+        let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
+            match (bm25_hits, vec_hits) {
+                (Ok(b), Ok(v)) => (b, v),
+                (Err(e), Ok(v)) => {
+                    tracing::warn!("hybrid search: BM25 failed ({e}); falling back to vector-only");
+                    (Vec::new(), v)
+                }
+                (Ok(b), Err(e)) => {
+                    tracing::warn!("hybrid search: vector failed ({e}); falling back to BM25-only");
+                    (b, Vec::new())
+                }
+                (Err(bm25_err), Err(vec_err)) => {
+                    tracing::warn!(
+                        "hybrid search: both BM25 ({bm25_err}) and vector ({vec_err}) failed"
+                    );
+                    return Ok(Vec::new());
+                }
+            };
+
+        if bm25_hits.is_empty() && vec_hits.is_empty() {
+            return Ok(Vec::new());
+        }
+        if vec_hits.is_empty() {
+            return Ok(bm25_hits.into_iter().take(top_k).collect());
+        }
+        if bm25_hits.is_empty() {
+            // Reconstruct SearchHit from vector-only results.
+            return Ok(vec_hits
+                .into_iter()
+                .take(top_k)
+                .map(|(path, score)| SearchHit {
+                    path,
+                    snippet: String::new(),
+                    score,
+                    suspicious: false,
+                })
+                .collect());
+        }
+
+        // RRF: score = Σ 1/(k + rank_i) for each result set.
+        const RRF_K: f64 = 60.0;
+        let mut rrf: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut snippets: std::collections::HashMap<String, (String, bool)> =
+            std::collections::HashMap::new();
+
+        for (rank, hit) in bm25_hits.iter().enumerate() {
+            let rrf_score = 1.0 / (RRF_K + (rank as f64 + 1.0));
+            *rrf.entry(hit.path.clone()).or_default() += rrf_score;
+            snippets
+                .entry(hit.path.clone())
+                .or_insert((hit.snippet.clone(), hit.suspicious));
+        }
+        for (rank, (path, _)) in vec_hits.iter().enumerate() {
+            let rrf_score = 1.0 / (RRF_K + (rank as f64 + 1.0));
+            *rrf.entry(path.clone()).or_default() += rrf_score;
+            snippets.entry(path.clone()).or_default();
+        }
+
+        let mut merged: Vec<(String, f64)> = rrf.into_iter().collect();
+        // RRF scores are always finite (`1/(60+rank)`, rank≥0), so total_cmp
+        // is safe and matches partial_cmp's behaviour without the NaN hole.
+        merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+        merged.truncate(top_k);
+
+        Ok(merged
+            .into_iter()
+            .map(|(path, score)| {
+                let (snippet, suspicious) = snippets.remove(&path).unwrap_or_default();
+                SearchHit {
+                    path,
+                    snippet,
+                    score,
+                    suspicious,
+                }
+            })
+            .collect())
     }
 
     pub fn count(&self) -> Result<usize> {
@@ -268,6 +454,43 @@ pub(crate) fn mtime_ms_of(meta: &std::fs::Metadata) -> i64 {
     }
 }
 
+// ── vector helpers ─────────────────────────────────────────────
+
+fn l2_normalise(vec: &[f32]) -> Vec<f32> {
+    let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        return vec.to_vec();
+    }
+    vec.iter().map(|x| x / norm).collect()
+}
+
+fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+/// Strip FTS5 `snippet()` highlight/ellipsis markers (`«`, `»`, `…`) so
+/// downstream heuristics see the underlying text. The markers are a
+/// display-only artifact; leaving them in would fragment multi-word
+/// patterns (e.g. "«ignore» all «instruc»…" fails the
+/// "ignore all instructions" regex).
+fn strip_snippet_markers(s: &str) -> String {
+    // Small allocation is fine: snippets are capped at ~16 FTS tokens.
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '«' | '»' | '…' => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +547,30 @@ mod tests {
         // FTS row for the cascaded body is also gone.
         let hits = s.search("alpha", 5).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn remove_drops_orphaned_files_vec_rows() {
+        // Regression: pre-fix `remove()` deleted the FTS row but left the
+        // dense-vector row in `files_vec` behind. An orphaned vector can
+        // never be matched by a BM25 query but still resurfaces in
+        // vector/hybrid search and skews ranking, so removal must purge
+        // both tables in the same transaction.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/a.md", 0, 0, "alpha").unwrap();
+        s.upsert_vec("notes/a.md", &[0.1, 0.2, 0.3]).unwrap();
+        // Sanity: vector search finds the row before removal.
+        let pre = s.search_vec(&[0.1, 0.2, 0.3], 5).unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].0, "notes/a.md");
+
+        assert!(s.remove("notes/a.md").unwrap());
+
+        // FTS row gone.
+        assert!(s.search("alpha", 5).unwrap().is_empty());
+        // Vector row also gone — no orphan left behind.
+        let post = s.search_vec(&[0.1, 0.2, 0.3], 5).unwrap();
+        assert!(post.is_empty(), "orphaned vector row survived remove");
     }
 
     #[test]

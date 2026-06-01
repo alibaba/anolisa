@@ -55,7 +55,8 @@ Core Features:
 - Per-namespace mount under ~/.anolisa/memory/<ns>/ with optional Linux
   user-namespace + private tmpfs isolation; openat2(RESOLVE_BENEATH)
   sandbox for every file open
-- SQLite FTS5 BM25 background index (sub-millisecond search)
+- SQLite FTS5 BM25 background index with optional dense-vector
+  semantic search (OpenAI / Ollama embedding backends)
 - Optional git versioning of the mount tree with auto-commit on writes
 - tar.gz snapshots with atomic per-entry rename swap on restore
 - Optional cgroup v2 memory.max self-limit

@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Prompt-injection safety module (`looksLikePromptInjection` + `escapeMemoryForPrompt`)
+  with 8 heuristics mirrored between Rust core and TypeScript adapter.
+- `SearchHit.suspicious` field automatically populated from full-body injection check.
+- `<relevant-memories>` safety wrapper for all memory content injected into LLM prompts.
+- Auto-recall: `before_prompt_build` hook injects relevant memories each turn.
+- Auto-capture: `agent_end` hook with trigger-based filtering, SHA256 dedup, and
+  injection rejection before persisting observations.
+- Dense-vector semantic search via pluggable `EmbeddingProvider` trait:
+  OpenAI (`/v1/embeddings`) and Ollama (`/api/embed`) backends.
+- `files_vec` table (schema v2) for per-file dense embeddings alongside FTS5 BM25.
+- Hybrid search with reciprocal rank fusion (RRF, k=60) of BM25 + vector scores.
+- `memory_search` `mode` parameter: `bm25` (default), `vector`, `hybrid`.
+- Graceful fallback from vector/hybrid to BM25 when no embedding provider is configured.
+- Embedding computed automatically during index worker flush (phase 2).
+- System prompt integration (`promptBuilder`) with tool usage guidelines.
+- Corpus supplement registration for `memory_search corpus=all` integration.
+- `EmbeddingConfig` (None|OpenAI|Ollama) with TOML parsing and environment variable overrides.
+- 30-second HTTP timeout on embedding API clients.
+
+### Changed
+
+- `memory_search` signature extended with optional `mode` parameter (backward-compatible).
+- Index handle (`IndexHandle`) now carries an optional embedding provider reference.
+- `reqwest` dependency added with `rustls-tls` and `json` features.
+
+### Fixed
+
+- `effectiveMode` in search tool response now reflects the actual mode used.
+- Embedding API empty-response handling: returns zero vector of correct dimensionality
+  instead of dimension-0 vector.
+
 ## [0.1.0] - 2026-05-27
 
 ### Added

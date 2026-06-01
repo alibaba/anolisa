@@ -1,6 +1,6 @@
 {
   "name": "agent-memory",
-  "description": "Agent memory — filesystem memory MCP server. 19 tools across three tiers operating on a per-namespace mount under ~/.anolisa/memory/<ns>/: Tier A file ops (read/write/append/edit/list/grep/diff/mkdir/remove/promote + mem_session_log), Tier B structured (memory_search/memory_observe/memory_get_context), Tier C governance (mem_snapshot/mem_snapshot_list/mem_snapshot_restore/mem_log/mem_revert). Optional Linux user-namespace isolation, SQLite FTS5 BM25 background index, git versioning, tar.gz snapshots, cgroup v2 memory.max, and journald audit fan-out.",
+  "description": "Agent memory — filesystem memory MCP server. 19 tools across three tiers: Tier A file ops (read/write/append/edit/list/grep/diff/mkdir/remove/promote + mem_session_log), Tier B structured (memory_search with optional dense-vector semantic search via OpenAI/Ollama embedding backends + memory_observe + memory_get_context), Tier C governance (mem_snapshot/mem_snapshot_list/mem_snapshot_restore/mem_log/mem_revert). Optional Linux user-namespace isolation, SQLite FTS5 BM25 + vector hybrid background index, git versioning, tar.gz snapshots, cgroup v2 memory.max, and journald audit fan-out.",
   "version": "0.1.0",
   "command": "/usr/bin/agent-memory",
   "args": [],

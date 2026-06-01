@@ -18,6 +18,7 @@ pub struct MemoryService {
     pub audit: Arc<AuditLogger>,
     pub session: Option<Arc<SessionLogService>>,
     pub index: Option<Arc<IndexHandle>>,
+    pub embedding: Option<Arc<dyn crate::embedding::EmbeddingProvider>>,
     pub git: Option<Arc<crate::git_repo::GitHandle>>,
     pub config: AppConfig,
     /// Whether the active mount strategy entered a user namespace.
@@ -57,9 +58,19 @@ impl MemoryService {
             }
         };
 
+        // Build embedding provider from config. Best-effort.
+        let embedding = match crate::embedding::build_provider(&config.memory.embedding) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("embedding provider unavailable: {e}");
+                None
+            }
+        };
+
         // Start the BM25 index worker if enabled.
+        let embedding_clone = embedding.clone();
         let index = if config.memory.index.enabled {
-            match IndexHandle::open(&mount) {
+            match IndexHandle::open(&mount, embedding_clone) {
                 Ok(h) => Some(Arc::new(h)),
                 Err(e) => {
                     tracing::warn!(
@@ -87,6 +98,7 @@ impl MemoryService {
             audit,
             session,
             index,
+            embedding,
             git,
             config,
             entered_userns,
@@ -142,8 +154,13 @@ impl MemoryService {
 
     // ---- Tier B facade methods ----
 
-    pub fn memory_search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-        crate::tools::memory_search(self, query, top_k)
+    pub fn memory_search(
+        &self,
+        query: &str,
+        top_k: usize,
+        mode: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        crate::tools::memory_search(self, query, top_k, mode)
     }
 
     pub fn memory_observe(&self, content: &str, hint: Option<&str>) -> Result<String> {
