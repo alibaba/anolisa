@@ -29,7 +29,8 @@ impl Default for TokenlessConfig {
 impl TokenlessConfig {
     fn config_path() -> PathBuf {
         dirs::home_dir()
-            .unwrap_or_default()
+            .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".tokenless/config.json")
     }
 
