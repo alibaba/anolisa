@@ -19,9 +19,11 @@ BuildRequires:  perl-core
 Requires:       elfutils-libelf
 
 %description
-AgentSight is an eBPF-based AI Agent observability tool that provides zero-intrusion 
-monitoring for AI Agents running on Linux, capturing SSL/TLS encrypted traffic, 
-LLM API calls, token consumption, and process behaviors.
+AgentSight is an eBPF-based AI Agent observability tool that provides
+zero-intrusion monitoring for AI Agents running on Linux, capturing
+SSL/TLS encrypted traffic, LLM API calls, token consumption, and process
+behaviors. Optional control-plane subsystems (e.g. the idle-burst-idle
+scheduler) are explicitly opt-in via per-feature flags.
 
 %prep
 %setup -q

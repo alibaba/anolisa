@@ -2,11 +2,12 @@
 
 [English](README.md)
 
-基于 eBPF 的 AI Agent 可观测性工具，在 Linux 系统上提供零侵入式的 LLM API 调用监控、Token 用量统计、进程行为追踪和 SSL/TLS 流量捕获。AgentSight 是 [ANOLISA](../../README_CN.md) 的可观测性组件。
+基于 eBPF 的 AI Agent 可观测性工具，在 Linux 系统上提供零侵入式的 LLM API 调用监控、Token 用量统计、进程行为追踪和 SSL/TLS 流量捕获。可选的控制面子系统（如 idle-burst-idle 调度器）默认关闭，需通过逐项开关显式启用。AgentSight 是 [ANOLISA](../../README_CN.md) 的可观测性组件。
 
 ## 特性
 
-- **零侵入式监控** — 通过 eBPF 内核探针捕获事件，无需修改 Agent 代码或配置。
+- **零侵入式监控（默认）** — 通过 eBPF 内核探针捕获事件，无需修改 Agent 代码或配置。
+- **可选控制面** — 选定的 eBPF 驱动子系统（如 idle-burst-idle 调度器）会写 cgroup 属性；默认关闭，按需开启，例如 `--enable-scheduler`。
 - **SSL/TLS 流量解密** — 基于 uprobe 拦截 OpenSSL/GnuTLS 库调用，捕获加密连接的明文 HTTP 流量。
 - **LLM Token 精确计量** — 集成 Hugging Face tokenizer，支持 Qwen 等系列模型的精确 Token 计数。
 - **AI Agent 自动发现** — 扫描 `/proc` 并监控 `execve` 事件，动态检测系统上运行的 AI Agent 进程。

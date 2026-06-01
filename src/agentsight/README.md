@@ -2,11 +2,12 @@
 
 [中文版](README_CN.md)
 
-eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. AgentSight is an observability component of [ANOLISA](../../README.md).
+eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. Optional control-plane subsystems (e.g. the idle-burst-idle scheduler) are explicitly opt-in via per-feature flags. AgentSight is an observability component of [ANOLISA](../../README.md).
 
 ## Features
 
-- **Zero-Intrusion Monitoring** — eBPF kernel probes capture events without modifying agent code or configurations.
+- **Zero-Intrusion Monitoring (default)** — eBPF kernel probes capture events without modifying agent code or configurations.
+- **Opt-In Control Plane** — selected eBPF-driven subsystems (e.g. the idle-burst-idle scheduler) write cgroup attributes; off by default, enabled per-feature, e.g. `--enable-scheduler`.
 - **SSL/TLS Traffic Decryption** — uprobe-based interception of OpenSSL/GnuTLS library calls to capture plaintext HTTP traffic.
 - **LLM Token Accounting** — Precise token counting with Hugging Face tokenizer support (Qwen series and more).
 - **AI Agent Auto-Discovery** — Scans `/proc` and monitors `execve` events to dynamically detect running AI agent processes.
