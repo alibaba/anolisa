@@ -534,6 +534,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -545,9 +546,18 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config
           sudo apt-get install -y perl
 
+      - name: Check formatting
+        run: |
+          cd src/agentsight
+          cargo fmt --check
+
+      - name: Lint
+        run: |
+          cd src/agentsight
+          cargo clippy --lib --bins --tests -- -D warnings
+
       - name: Run tests
         run: |
-          rustup component add rustfmt
           cd src/agentsight
           cargo test
 
