@@ -69,7 +69,7 @@ enum Commands {
         workspace: String,
 
         /// Snapshot ID (must be unique within the workspace)
-        #[arg(long, short = 'i')]
+        #[arg(long, short = 'i', value_parser = snapshot_id_value_parser())]
         id: String,
 
         /// Commit message describing the checkpoint
@@ -421,6 +421,23 @@ fn workspace_value_parser() -> impl TypedValueParser<Value = String> {
         } else {
             Ok(s)
         }
+    })
+}
+
+/// Clap value parser for `checkpoint --id`. The snapshot id becomes a path
+/// component (`<snapshots_dir>/<ws_id>/<snapshot_id>`), so empty/whitespace-only
+/// values and path-traversal characters must be rejected — otherwise the
+/// snapshot can be created but never addressed for delete/rollback, leaving an
+/// undeletable record in the index (issue #672).
+fn snapshot_id_value_parser() -> impl TypedValueParser<Value = String> {
+    StringValueParser::new().try_map(|s: String| {
+        if s.trim().is_empty() {
+            return Err("snapshot id must not be empty or whitespace");
+        }
+        if s.contains('/') || s.contains('\\') || s == "." || s == ".." {
+            return Err("snapshot id must not contain path separators or be '.'/'..'");
+        }
+        Ok(s)
     })
 }
 
@@ -1379,6 +1396,48 @@ mod tests {
                 assert_eq!(message.as_deref(), Some("备注"));
             }
             _ => panic!("expected Checkpoint"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_empty_or_whitespace_checkpoint_id() {
+        // Regression for issue #672 — empty/whitespace ids let the user
+        // create snapshots they could never delete.
+        for blank in ["", " ", "   ", "\t"] {
+            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", blank])
+                .err()
+                .unwrap_or_else(|| panic!("expected parse error for id {:?}", blank));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "id {:?} should fail with ValueValidation, got {:?}",
+                blank,
+                err.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_checkpoint_id_with_path_separators() {
+        for bad in ["foo/bar", "..", ".", "a\\b", "/abs"] {
+            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", bad])
+                .err()
+                .unwrap_or_else(|| panic!("expected parse error for id {:?}", bad));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "id {:?} should fail with ValueValidation, got {:?}",
+                bad,
+                err.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_reasonable_checkpoint_ids() {
+        for good in ["snap-1", "msg1-step2", "before-refactor", "v1.2.3"] {
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", good])
+                .unwrap_or_else(|_| panic!("expected acceptance for id {:?}", good));
         }
     }
 

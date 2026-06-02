@@ -16,6 +16,34 @@ fn workspace_not_found(workspace: &str) -> Response {
     }
 }
 
+/// Validate a snapshot id at creation time. Returns `Some(error_response)` if
+/// the id is unusable; `None` if the id is acceptable.
+///
+/// The id is materialized as a path component
+/// (`<snapshots_dir>/<ws_id>/<snapshot_id>`); empty/whitespace-only values and
+/// path-traversal characters would either fail silently or land outside the
+/// snapshots dir, and afterwards the record could not be addressed for
+/// delete/rollback. CLI parsing rejects the same set, this is defense in depth
+/// for any client that talks to the daemon socket directly (issue #672).
+fn snapshot_id_error(id: &str) -> Option<Response> {
+    if id.trim().is_empty() {
+        return Some(Response::Error {
+            code: ErrorCode::InvalidPath,
+            message: "snapshot id must not be empty or whitespace".to_string(),
+        });
+    }
+    if id.contains('/') || id.contains('\\') || id == "." || id == ".." {
+        return Some(Response::Error {
+            code: ErrorCode::InvalidPath,
+            message: format!(
+                "snapshot id '{}' must not contain path separators or be '.'/'..'",
+                id
+            ),
+        });
+    }
+    None
+}
+
 pub async fn checkpoint(
     state: &Arc<DaemonState>,
     workspace: &str,
@@ -24,6 +52,11 @@ pub async fn checkpoint(
     metadata: Option<String>,
     pin: bool,
 ) -> anyhow::Result<Response> {
+    // 0. Validate snapshot id before touching state or filesystem
+    if let Some(resp) = snapshot_id_error(id) {
+        return Ok(resp);
+    }
+
     // 1. Resolve workspace (by ID, absolute path, or relative path)
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
@@ -477,6 +510,102 @@ mod tests {
         // Exact match
         let result = index.resolve_by_prefix("abcdef1234567890abcdef1234567890abcdef12");
         assert!(result.is_ok());
+    }
+
+    // ── Snapshot ID validation tests (issue #672) ──
+
+    #[test]
+    fn snapshot_id_error_rejects_empty_and_whitespace() {
+        for bad in ["", " ", "   ", "\t", "\n"] {
+            let resp = snapshot_id_error(bad)
+                .unwrap_or_else(|| panic!("expected rejection for {:?}", bad));
+            match resp {
+                Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
+                _ => panic!("expected Error response"),
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_id_error_rejects_path_separators_and_dots() {
+        for bad in ["foo/bar", "..", ".", "a\\b", "/abs", "a/b/c"] {
+            let resp = snapshot_id_error(bad)
+                .unwrap_or_else(|| panic!("expected rejection for {:?}", bad));
+            match resp {
+                Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
+                _ => panic!("expected Error response"),
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_id_error_accepts_reasonable_ids() {
+        for good in [
+            "snap-1",
+            "msg1-step2",
+            "before-refactor",
+            "v1.2.3",
+            "中文-id",
+        ] {
+            assert!(
+                snapshot_id_error(good).is_none(),
+                "expected acceptance for {:?}",
+                good
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_empty_id_is_rejected_before_state_lookup() {
+        // No workspace registered — if the id check runs first, we should get
+        // InvalidPath rather than WorkspaceNotFound.
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let resp = checkpoint(&state, "any-ws", "", None, None, false)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidPath);
+                assert!(message.to_lowercase().contains("snapshot id"));
+            }
+            _ => panic!("expected InvalidPath error for empty snapshot id"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_whitespace_id_is_rejected() {
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let resp = checkpoint(&state, "any-ws", "   ", None, None, false)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
+            _ => panic!("expected InvalidPath error for whitespace snapshot id"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_id_with_path_separator_is_rejected() {
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let resp = checkpoint(&state, "any-ws", "foo/bar", None, None, false)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
+            _ => panic!("expected InvalidPath error for id with path separator"),
+        }
     }
 
     // ── Checkpoint duplicate detection test ──
