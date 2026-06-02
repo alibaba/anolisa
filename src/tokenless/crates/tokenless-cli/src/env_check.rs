@@ -1567,6 +1567,124 @@ mod tests {
         std::fs::remove_file(&spec_path).ok();
     }
 
+    #[cfg(unix)]
+    fn make_test_dir(label: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "tokenless-is-trusted-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    fn chmod_file(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(path).unwrap().permissions();
+        perm.set_mode(mode);
+        std::fs::set_permissions(path, perm).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_trusted_path_system_prefixes_unconditional() {
+        // The system-path branch returns early without touching the
+        // filesystem, so non-existent paths still report trusted.
+        use std::path::Path;
+        assert!(is_trusted_path(Path::new("/usr/share/anolisa/x")));
+        assert!(is_trusted_path(Path::new("/usr/libexec/anolisa/x")));
+        assert!(is_trusted_path(Path::new("/usr/lib/anolisa/x")));
+        assert!(is_trusted_path(Path::new("/usr/local/share/anolisa/x")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_trusted_path_rejects_world_writable_parent() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = make_test_dir("ww-parent");
+        if std::fs::metadata(&tmp).unwrap().uid() != current_uid() {
+            // /tmp on hardened multi-user systems may strip our ownership;
+            // the world-writable check is moot in that case.
+            std::fs::remove_dir_all(&tmp).ok();
+            return;
+        }
+        chmod_file(&tmp, 0o777);
+        let f = tmp.join("binary");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        chmod_file(&f, 0o755);
+        assert!(
+            !is_trusted_path(&f),
+            "world-writable parent dir must be rejected"
+        );
+        chmod_file(&tmp, 0o755);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_trusted_path_rejects_world_writable_file() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = make_test_dir("ww-file");
+        if std::fs::metadata(&tmp).unwrap().uid() != current_uid() {
+            std::fs::remove_dir_all(&tmp).ok();
+            return;
+        }
+        chmod_file(&tmp, 0o755);
+        let f = tmp.join("binary");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        chmod_file(&f, 0o777);
+        assert!(
+            !is_trusted_path(&f),
+            "world-writable file mode must be rejected"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_trusted_path_accepts_owned_safe_file() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = make_test_dir("ok");
+        if std::fs::metadata(&tmp).unwrap().uid() != current_uid() {
+            std::fs::remove_dir_all(&tmp).ok();
+            return;
+        }
+        chmod_file(&tmp, 0o755);
+        let f = tmp.join("binary");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        chmod_file(&f, 0o755);
+        assert!(
+            is_trusted_path(&f),
+            "uid-owned non-writable file must be accepted"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_trusted_path_rejects_nonexistent_file() {
+        let nonexistent = std::env::temp_dir().join(format!(
+            "tokenless-nonexistent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(
+            !is_trusted_path(&nonexistent),
+            "non-existent file must be rejected"
+        );
+    }
+
     #[test]
     fn generate_checklist_unknown_status() {
         let results = [ToolReadyResult {
