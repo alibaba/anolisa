@@ -193,7 +193,7 @@ runs:
           -C /tmp/build "${ARCHIVE_NAME}"
 
     # -----------------------------------------------------------------
-    # Step 4: Sign archive (os-skills only)
+    # Step 4.1: Sign archive (os-skills only)
     #
     # Signing is automatically applied when component == os-skills.
     # No external sign parameter needed; the action decides internally.
@@ -218,7 +218,7 @@ runs:
         echo "::warning::SKILL_SIGN_PRIVATE_KEY is not set; os-skills archive will be published UNSIGNED."
 
     # -----------------------------------------------------------------
-    # Step 5: Sign archive (agent-sec-core only)
+    # Step 4.2: Sign archive (agent-sec-core only)
     #
     # Signing is automatically applied when component == agent-sec-core.
     # No external sign parameter needed; the action decides internally.
@@ -243,7 +243,32 @@ runs:
         echo "::warning::SKILL_SIGN_PRIVATE_KEY is not set; agent-sec-core archive will be published UNSIGNED."
 
     # -----------------------------------------------------------------
-    # Step 6: Summarize
+    # Step 4.3: Sign archive (ws-ckpt only)
+    #
+    # Signing is automatically applied when component == ws-ckpt.
+    # No external sign parameter needed; the action decides internally.
+    # -----------------------------------------------------------------
+    - name: Sign archive (ws-ckpt)
+      if: inputs.component == 'ws-ckpt' && inputs.skill-sign-private-key != ''
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.skill-sign-private-key }}
+      run: |
+        bash src/agent-sec-core/tools/sign-skill.sh --batch /tmp/build/${ARCHIVE_NAME}/src/skills
+
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+          -C /tmp/build "${ARCHIVE_NAME}"
+
+        echo "ARCHIVE_SIGNED=true" >> $GITHUB_ENV
+
+    - name: Warn if ws-ckpt signing skipped
+      if: inputs.component == 'ws-ckpt' && inputs.skill-sign-private-key == ''
+      shell: bash
+      run: |
+        echo "::warning::SKILL_SIGN_PRIVATE_KEY is not set; ws-ckpt archive will be published UNSIGNED."
+
+    # -----------------------------------------------------------------
+    # Step 5: Summarize
     # -----------------------------------------------------------------
     - name: Summarize
       shell: bash
@@ -268,7 +293,7 @@ runs:
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
     # -----------------------------------------------------------------
-    # Step 7: Compute checksum
+    # Step 6: Compute checksum
     # -----------------------------------------------------------------
     - name: Compute checksum
       id: checksum
@@ -279,7 +304,7 @@ runs:
         echo "Archive SHA256: ${SHA256}"
 
     # -----------------------------------------------------------------
-    # Step 8: Upload artifact
+    # Step 7: Upload artifact
     # -----------------------------------------------------------------
     - name: Upload artifact
       uses: actions/upload-artifact@v4
