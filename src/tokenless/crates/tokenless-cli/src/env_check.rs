@@ -478,7 +478,7 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
             Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
         _ => {
-// PATH lookup failed — try known install paths. Each candidate
+            // PATH lookup failed — try known install paths. Each candidate
             // must clear is_trusted_path() before we report it as available:
             // otherwise a spoofed $HOME / world-writable directory could let
             // an attacker drop a malicious binary that we'd then exec when
