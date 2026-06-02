@@ -74,6 +74,10 @@ export interface UIState {
   pendingGeminiHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
   shellModeActive: boolean;
+  reverseSearchActive: boolean;
+  commandSearchActive: boolean;
+  completionShowSuggestions: boolean;
+  shellCompletionShowSuggestions: boolean;
   userMessages: string[];
   buffer: TextBuffer;
   inputWidth: number;

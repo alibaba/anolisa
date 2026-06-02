@@ -55,7 +55,7 @@ export interface InputPromptProps {
   shellModeActive: boolean;
   setShellModeActive: (value: boolean) => void;
   approvalMode: ApprovalMode;
-  onEscapePromptChange?: (showPrompt: boolean) => void;
+
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
@@ -102,7 +102,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   shellModeActive,
   setShellModeActive,
   approvalMode,
-  onEscapePromptChange,
   onToggleShortcuts,
   showShortcuts,
   onSuggestionsVisibilityChange,
@@ -112,12 +111,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+
+  // Get search and completion states from UIState (managed by AppContainer)
+  const reverseSearchActive = uiState.reverseSearchActive;
+  const commandSearchActive = uiState.commandSearchActive;
+  const setReverseSearchActive = uiActions.setReverseSearchActive;
+  const setCommandSearchActive = uiActions.setCommandSearchActive;
+
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
-  const [escPressCount, setEscPressCount] = useState(0);
-  const [showEscapePrompt, setShowEscapePrompt] = useState(false);
-  const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [recentPasteTime, setRecentPasteTime] = useState<number | null>(null);
   const pasteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Clear paste timeout on unmount
+  useEffect(
+    () => () => {
+      if (pasteTimeoutRef.current) {
+        clearTimeout(pasteTimeoutRef.current);
+      }
+    },
+    [],
+  );
 
   const [dirs, setDirs] = useState<readonly string[]>(
     config.getWorkspaceContext().getDirectories(),
@@ -128,8 +141,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setDirs(dirsChanged);
     }
   }, [dirs.length, dirsChanged]);
-  const [reverseSearchActive, setReverseSearchActive] = useState(false);
-  const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [shellCompletionTriggered, setShellCompletionTriggered] =
     useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
@@ -177,37 +188,68 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
     commandSearchCompletion.resetCompletionState;
+  const resetShellCompletionState = shellCompletion.resetCompletionState;
+
+  // Register reset callbacks for AppContainer ESC handling
+  useEffect(() => {
+    const cancelReverseSearch = () => {
+      setReverseSearchActive(false);
+      resetReverseSearchCompletionState();
+      buffer.setText(textBeforeReverseSearch);
+      const offset = logicalPosToOffset(
+        buffer.lines,
+        cursorPosition[0],
+        cursorPosition[1],
+      );
+      buffer.moveToOffset(offset);
+      setExpandedSuggestionIndex(-1);
+    };
+    const cancelCommandSearch = () => {
+      setCommandSearchActive(false);
+      resetCommandSearchCompletionState();
+      buffer.setText(textBeforeReverseSearch);
+      const offset = logicalPosToOffset(
+        buffer.lines,
+        cursorPosition[0],
+        cursorPosition[1],
+      );
+      buffer.moveToOffset(offset);
+      setExpandedSuggestionIndex(-1);
+    };
+
+    uiActions.registerCancelReverseSearch(cancelReverseSearch);
+    uiActions.registerCancelCommandSearch(cancelCommandSearch);
+    uiActions.registerResetCompletion(resetCompletionState);
+    uiActions.registerResetShellCompletion(() => {
+      resetShellCompletionState();
+      setShellCompletionTriggered(false);
+      setExpandedSuggestionIndex(-1);
+    });
+  }, [
+    uiActions,
+    setReverseSearchActive,
+    setCommandSearchActive,
+    resetReverseSearchCompletionState,
+    resetCommandSearchCompletionState,
+    resetCompletionState,
+    resetShellCompletionState,
+    buffer,
+    textBeforeReverseSearch,
+    cursorPosition,
+    setShellCompletionTriggered,
+  ]);
+
+  // Sync completion/shellCompletion showSuggestions to UIState
+  useEffect(() => {
+    uiActions.setCompletionShowSuggestions(completion.showSuggestions);
+  }, [uiActions, completion.showSuggestions]);
+  useEffect(() => {
+    uiActions.setShellCompletionShowSuggestions(
+      shellCompletion.showSuggestions,
+    );
+  }, [uiActions, shellCompletion.showSuggestions]);
 
   const showCursor = focus && isShellFocused && !isEmbeddedShellFocused;
-
-  const resetEscapeState = useCallback(() => {
-    if (escapeTimerRef.current) {
-      clearTimeout(escapeTimerRef.current);
-      escapeTimerRef.current = null;
-    }
-    setEscPressCount(0);
-    setShowEscapePrompt(false);
-  }, []);
-
-  // Notify parent component about escape prompt state changes
-  useEffect(() => {
-    if (onEscapePromptChange) {
-      onEscapePromptChange(showEscapePrompt);
-    }
-  }, [showEscapePrompt, onEscapePromptChange]);
-
-  // Clear escape prompt timer on unmount
-  useEffect(
-    () => () => {
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-      }
-      if (pasteTimeoutRef.current) {
-        clearTimeout(pasteTimeoutRef.current);
-      }
-    },
-    [],
-  );
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
@@ -361,13 +403,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
-      // Reset ESC count and hide prompt on any non-ESC key
-      if (key.name !== 'escape') {
-        if (escPressCount > 0 || showEscapePrompt) {
-          resetEscapeState();
-        }
-      }
-
       if (
         key.sequence === '!' &&
         buffer.text === '' &&
@@ -398,81 +433,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onToggleShortcuts();
       }
 
-      if (keyMatchers[Command.ESCAPE](key)) {
-        const cancelSearch = (
-          setActive: (active: boolean) => void,
-          resetCompletion: () => void,
-        ) => {
-          setActive(false);
-          resetCompletion();
-          buffer.setText(textBeforeReverseSearch);
-          const offset = logicalPosToOffset(
-            buffer.lines,
-            cursorPosition[0],
-            cursorPosition[1],
-          );
-          buffer.moveToOffset(offset);
-          setExpandedSuggestionIndex(-1);
-        };
-
-        if (reverseSearchActive) {
-          cancelSearch(
-            setReverseSearchActive,
-            reverseSearchCompletion.resetCompletionState,
-          );
-          return;
-        }
-        if (commandSearchActive) {
-          cancelSearch(
-            setCommandSearchActive,
-            commandSearchCompletion.resetCompletionState,
-          );
-          return;
-        }
-
-        if (shellModeActive) {
-          setShellModeActive(false);
-          setShellCompletionTriggered(false);
-          resetEscapeState();
-          return;
-        }
-
-        if (shellCompletion.showSuggestions) {
-          shellCompletion.resetCompletionState();
-          setShellCompletionTriggered(false);
-          setExpandedSuggestionIndex(-1);
-          resetEscapeState();
-          return;
-        }
-
-        if (completion.showSuggestions) {
-          completion.resetCompletionState();
-          setExpandedSuggestionIndex(-1);
-          resetEscapeState();
-          return;
-        }
-
-        // Handle double ESC for clearing input
-        if (escPressCount === 0) {
-          if (buffer.text === '') {
-            return;
-          }
-          setEscPressCount(1);
-          setShowEscapePrompt(true);
-          if (escapeTimerRef.current) {
-            clearTimeout(escapeTimerRef.current);
-          }
-          escapeTimerRef.current = setTimeout(() => {
-            resetEscapeState();
-          }, 500);
-        } else {
-          // clear input and immediately reset state
-          buffer.setText('');
-          resetCompletionState();
-          resetEscapeState();
-        }
-        return;
-      }
+      // ESC handling moved to AppContainer
+      // InputPrompt no longer handles ESC directly
 
       if (shellModeActive && keyMatchers[Command.REVERSE_SEARCH](key)) {
         setReverseSearchActive(true);
@@ -778,13 +740,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchCompletion,
       handleClipboardImage,
       resetCompletionState,
-      escPressCount,
-      showEscapePrompt,
-      resetEscapeState,
       vimHandleInput,
       reverseSearchActive,
-      textBeforeReverseSearch,
-      cursorPosition,
       recentPasteTime,
       commandSearchActive,
       commandSearchCompletion,
@@ -792,6 +749,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       showShortcuts,
       uiState,
       uiActions,
+      setReverseSearchActive,
+      setCommandSearchActive,
     ],
   );
 
