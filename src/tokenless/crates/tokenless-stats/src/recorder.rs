@@ -77,16 +77,16 @@ impl StatsRecorder {
             [],
         )?;
 
-// Schema migration: add columns introduced in v0.3.0 if missing.
+        // Schema migration: add columns introduced in v0.3.0 if missing.
         // NOTE: pragma_table_info does not support parameterized queries, so
         // column names are interpolated via format!(). The values come from
         // hardcoded literals in the for loop — never from user input.
         for col in &["before_output", "after_output"] {
             let check = conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), []);
-            if let Err(e) = check {
-                if !e.to_string().contains("duplicate column name") {
-                    return Err(StatsError::Database(e));
-                }
+            if let Err(e) = check
+                && !e.to_string().contains("duplicate column name")
+            {
+                return Err(StatsError::Database(e));
             }
         }
 
