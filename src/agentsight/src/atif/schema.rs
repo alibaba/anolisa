@@ -3,7 +3,7 @@
 //! Defines Rust types that serialize to/from the ATIF v1.6 JSON schema.
 //! See: <https://github.com/laude-institute/harbor/blob/main/docs/rfcs/0001-trajectory-format.md>
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Current ATIF schema version
 pub const SCHEMA_VERSION: &str = "ATIF-v1.6";
@@ -265,13 +265,11 @@ mod tests {
             message: None,
             model_name: Some("claude-3".to_string()),
             reasoning_content: None,
-            tool_calls: Some(vec![
-                AtifToolCall {
-                    tool_call_id: "tc1".to_string(),
-                    function_name: "search".to_string(),
-                    arguments: serde_json::json!({"query": "rust"}),
-                },
-            ]),
+            tool_calls: Some(vec![AtifToolCall {
+                tool_call_id: "tc1".to_string(),
+                function_name: "search".to_string(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }]),
             observation: Some(AtifObservation {
                 results: vec![AtifObservationResult {
                     source_call_id: Some("tc1".to_string()),

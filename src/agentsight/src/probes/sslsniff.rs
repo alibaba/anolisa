@@ -5,17 +5,16 @@
 // Exposes a `SslSniff` struct with a builder-style API.
 
 use crate::config;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use libbpf_rs::{
     Link, MapHandle, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::os::fd::AsFd;
 use procfs::process::Process;
+use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -28,6 +27,12 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/sslsniff.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/sslsniff.rs"));
@@ -39,7 +44,7 @@ const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 const POLL_TIMEOUT_MS: u64 = 100;
 
 /// User-space SslEvent - lightweight version of BPF probe_SSL_data_t
-/// 
+///
 /// Unlike the BPF version which has a 512KB fixed-size buffer, this struct
 /// only stores the actual data received, significantly reducing memory usage.
 #[derive(Debug, Clone)]
@@ -69,22 +74,22 @@ impl SslEvent {
         let buf = raw.buf[..buf_size.min(MAX_BUF_SIZE)].to_vec();
 
         // Convert ktime (nanoseconds since boot) to Unix timestamp
-        let ktime_ns = raw.timestamp_ns as u64;
+        let ktime_ns = raw.timestamp_ns;
         let unix_ts_ns = config::ktime_to_unix_ns(ktime_ns);
 
         Self {
-            source: raw.source as u32,
+            source: raw.source,
             timestamp_ns: unix_ts_ns,
-            delta_ns: raw.delta_ns as u64,
-            pid: raw.pid as u32,
-            tid: raw.tid as u32,
-            uid: raw.uid as u32,
-            len: raw.len as u32,
+            delta_ns: raw.delta_ns,
+            pid: raw.pid,
+            tid: raw.tid,
+            uid: raw.uid,
+            len: raw.len,
             rw: raw.rw,
             comm: Self::parse_comm(&raw.comm),
             buf,
             is_handshake: raw.is_handshake != 0,
-            ssl_ptr: raw.ssl_ptr as u64,
+            ssl_ptr: raw.ssl_ptr,
         }
     }
 
@@ -93,11 +98,7 @@ impl SslEvent {
     fn parse_comm<T>(comm: &[T; 16]) -> String {
         debug_assert_eq!(mem::size_of::<T>(), 1);
         let bytes = unsafe { slice::from_raw_parts(comm.as_ptr() as *const u8, 16) };
-        let bytes: Vec<u8> = bytes
-            .iter()
-            .copied()
-            .take_while(|&b| b != 0)
-            .collect();
+        let bytes: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -113,7 +114,9 @@ impl SslEvent {
     }
 
     pub fn is_http_request(&self) -> bool {
-        const METHODS: &[&[u8]] = &[b"GET ", b"POST", b"PUT ", b"DELE", b"HEAD", b"OPTI", b"PATC"];
+        const METHODS: &[&[u8]] = &[
+            b"GET ", b"POST", b"PUT ", b"DELE", b"HEAD", b"OPTI", b"PATC",
+        ];
         METHODS.iter().any(|m| self.buf.starts_with(m))
     }
 
@@ -132,9 +135,8 @@ impl SslEvent {
             return false;
         }
         // Parse 3-byte frame length
-        let length = ((self.buf[0] as usize) << 16)
-            | ((self.buf[1] as usize) << 8)
-            | (self.buf[2] as usize);
+        let length =
+            ((self.buf[0] as usize) << 16) | ((self.buf[1] as usize) << 8) | (self.buf[2] as usize);
         // Frame type must be a known type (0..=9)
         let frame_type = self.buf[3];
         if frame_type > 9 {
@@ -198,11 +200,14 @@ impl SslSniff {
     }
 
     /// Create a new SslSniff with an optional external traced_processes map and shared ring buffer
-    /// 
+    ///
     /// # Arguments
     /// * `traced_processes` - Optional external MapHandle for traced_processes (for map reuse)
     /// * `rb` - Optional external MapHandle for shared ring buffer (for map reuse)
-    pub fn new_with_traced_processes(traced_processes: Option<&MapHandle>, rb: Option<&MapHandle>) -> Result<Self> {
+    pub fn new_with_traced_processes(
+        traced_processes: Option<&MapHandle>,
+        rb: Option<&MapHandle>,
+    ) -> Result<Self> {
         // ── Open + load skeleton ───────────────────────────────────────
         let mut builder = SslsniffSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
@@ -233,6 +238,8 @@ impl SslSniff {
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         // on the heap.  We pin both together inside Self and never move either,
         // so the 'static lifetime cast is sound for the lifetime of Self.
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut SslsniffSkel<'static>) };
 
@@ -261,9 +268,12 @@ impl SslSniff {
         }
 
         // Debug: print all libs found
-        log::debug!("[attach_process] pid={pid}: found {} libs: {:?}", 
-            libs.len(), 
-            libs.iter().map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k))).collect::<Vec<_>>()
+        log::debug!(
+            "[attach_process] pid={pid}: found {} libs: {:?}",
+            libs.len(),
+            libs.iter()
+                .map(|(p, i, k)| (p.as_str(), *i, format!("{k:?}")))
+                .collect::<Vec<_>>()
         );
 
         let mut attached_inodes = Vec::new();
@@ -282,31 +292,25 @@ impl SslSniff {
                 SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
                 SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
                 SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
-                SslLibKind::Boring => {
-                    match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
-                        Ok(ls) => Ok(ls),
-                        Err(sym_err) => {
-                            log::debug!(
-                                "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                            );
-                            match find_boringssl_offsets(&path) {
-                                Some(off) => attach_boringssl_by_offset(
-                                    &mut self.skel,
-                                    &path,
-                                    &off,
-                                    false,
-                                    -1,
-                                ),
-                                None => {
-                                    log::warn!(
-                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
-                                    );
-                                    continue;
-                                }
+                SslLibKind::Boring => match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
+                    Ok(ls) => Ok(ls),
+                    Err(sym_err) => {
+                        log::debug!(
+                            "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                        );
+                        match find_boringssl_offsets(&path) {
+                            Some(off) => {
+                                attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
+                            }
+                            None => {
+                                log::warn!(
+                                    "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
+                                );
+                                continue;
                             }
                         }
                     }
-                }
+                },
             };
 
             match result {
@@ -339,7 +343,10 @@ impl SslSniff {
             for inode in &inodes {
                 self.traced_files.remove(inode);
             }
-            log::debug!("[detach_process] pid={pid}: removed {} inodes from traced_files", inodes.len());
+            log::debug!(
+                "[detach_process] pid={pid}: removed {} inodes from traced_files",
+                inodes.len()
+            );
         }
     }
 
@@ -360,7 +367,7 @@ impl SslSniff {
         let mut rb_builder = RingBufferBuilder::new();
         let binding = self.skel.maps();
         rb_builder
-            .add(&binding.rb(), move |data: &[u8]| {
+            .add(binding.rb(), move |data: &[u8]| {
                 if data.len() < min_sz {
                     return 0;
                 }
@@ -535,7 +542,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         hs_matches[0]
     } else {
         // Multiple matches: choose the one closest before read_off.
-        match hs_matches.iter().filter(|&&o| o < read_off).last() {
+        match hs_matches.iter().filter(|&&o| o < read_off).next_back() {
             Some(&o) => o,
             None => {
                 if verbose {
@@ -675,7 +682,7 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             let path_str = if path_str.ends_with(" (deleted)") {
                 format!("/proc/{pid}/exe")
             } else {
-                format!("/proc/{pid}/root{}", path_str)
+                format!("/proc/{pid}/root{path_str}")
             };
             results.push((path_str, inode, kind));
         }
@@ -684,23 +691,14 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
     Ok(results)
 }
 
-/// Convert a null-terminated byte array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
-fn comm_to_string(comm: &[u8]) -> String {
-    let bytes: Vec<u8> = comm
-        .iter()
-        .copied()
-        .take_while(|&b| b != 0)
-        .collect();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
 // ─── uprobe helpers ───────────────────────────────────────────────────────────
 
 fn make_sym_opts(sym: &str, retprobe: bool) -> UprobeOpts {
-    let mut o = UprobeOpts::default();
-    o.func_name = sym.to_string();
-    o.retprobe = retprobe;
-    o
+    UprobeOpts {
+        func_name: sym.to_string(),
+        retprobe,
+        ..Default::default()
+    }
 }
 
 macro_rules! up {

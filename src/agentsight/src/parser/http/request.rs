@@ -1,22 +1,22 @@
 //! HTTP Request types
 
+use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us};
+use crate::probes::sslsniff::SslEvent;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
-use crate::probes::sslsniff::SslEvent;
-use crate::chrome_trace::{TraceArgs, ToChromeTraceEvent, ChromeTraceEvent, ns_to_us};
-use serde_json::json;
 
 /// 解析后的 HTTP Request
 #[derive(Clone)]
 pub struct ParsedRequest {
-    pub method: String,              // GET, POST, etc.
-    pub path: String,                // /api/chat
-    pub version: u8,                 // 11 for HTTP/1.1
+    pub method: String, // GET, POST, etc.
+    pub path: String,   // /api/chat
+    pub version: u8,    // 11 for HTTP/1.1
     pub headers: HashMap<String, String>,
-    pub body_offset: usize,          // body 在 source_event.buf 中的起始位置
-    pub body_len: usize,             // body 长度
-    pub source_event: Rc<SslEvent>,  // 原始 SslEvent (Rc 避免拷贝)
+    pub body_offset: usize,         // body 在 source_event.buf 中的起始位置
+    pub body_len: usize,            // body 长度
+    pub source_event: Rc<SslEvent>, // 原始 SslEvent (Rc 避免拷贝)
     /// 重组后的完整 body（跨多事件聚合时使用）
     pub reassembled_body: Option<Vec<u8>>,
 }
@@ -34,9 +34,9 @@ impl ParsedRequest {
     pub fn body_str(&self) -> &str {
         std::str::from_utf8(self.body()).unwrap_or("")
     }
-    
+
     /// 尝试将 body 解析为 JSON
-    /// 
+    ///
     /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value。
     /// 如果直接解析失败，会尝试剥离 HTTP chunked transfer encoding 后再解析。
     pub fn json_body(&self) -> Option<serde_json::Value> {
@@ -107,7 +107,7 @@ impl ParsedRequest {
 impl TraceArgs for ParsedRequest {
     fn to_trace_args(&self) -> serde_json::Value {
         let mut args = serde_json::Map::new();
-        
+
         // Basic request info
         args.insert("method".to_string(), json!(&self.method));
         args.insert("path".to_string(), json!(&self.path));
@@ -120,16 +120,16 @@ impl TraceArgs for ParsedRequest {
         args.insert("pid".to_string(), json!(self.source_event.pid));
         args.insert("tid".to_string(), json!(self.source_event.tid));
         args.insert("comm".to_string(), json!(self.source_event.comm_str()));
-        
+
         // Add headers if present
         if !self.headers.is_empty() {
             args.insert("headers".to_string(), json!(&self.headers));
         }
-        
+
         // Add body info if present
         if self.body_len > 0 {
             args.insert("body_length".to_string(), json!(self.body_len));
-            
+
             // Try to parse as JSON first, fallback to full string
             if let Some(json_body) = self.json_body() {
                 args.insert("body".to_string(), json_body);
@@ -140,7 +140,7 @@ impl TraceArgs for ParsedRequest {
                 }
             }
         }
-        
+
         serde_json::Value::Object(args)
     }
 }
@@ -148,10 +148,10 @@ impl TraceArgs for ParsedRequest {
 impl ToChromeTraceEvent for ParsedRequest {
     fn to_chrome_trace_events(&self) -> Vec<ChromeTraceEvent> {
         let ts_us = ns_to_us(self.source_event.timestamp_ns);
-        
+
         // Minimum duration: 10ms = 10,000 microseconds
         const MIN_DUR_US: u64 = 10_000;
-        
+
         let event = ChromeTraceEvent::complete(
             format!("{} {}", self.method, self.path),
             "http.request",
@@ -161,7 +161,7 @@ impl ToChromeTraceEvent for ParsedRequest {
             MIN_DUR_US,
         )
         .with_trace_args(self);
-        
+
         vec![event]
     }
 }
@@ -173,22 +173,22 @@ impl fmt::Debug for ParsedRequest {
             .field("method", &self.method)
             .field("path", &self.path)
             .field("version", &format!("HTTP/1.{}", self.version));
-        
+
         // Format headers
         debug.field("headers", &self.headers);
-        
+
         // Format body with smart detection
         let body = self.body();
         if !body.is_empty() {
             debug.field("body", &format_body(body));
         }
-        
+
         // Add metadata from source_event
         debug
             .field("pid", &self.source_event.pid)
             .field("tid", &self.source_event.tid)
             .field("timestamp_ns", &self.source_event.timestamp_ns);
-        
+
         debug.finish()
     }
 }
@@ -205,7 +205,11 @@ fn format_body(data: &[u8]) -> String {
         format!("(text, {} bytes)\n{}", data.len(), text)
     } else {
         // Binary data - show as base64
-        format!("(binary, {} bytes)\n{}", data.len(), base64::encode(data))
+        format!(
+            "(binary, {} bytes)\n{}",
+            data.len(),
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)
+        )
     }
 }
 
@@ -251,7 +255,7 @@ mod tests {
     #[test]
     fn test_parsed_request_json_body() {
         let json_str = r#"{"key":"value"}"#;
-        let full = format!("POST / HTTP/1.1\r\n\r\n{}", json_str);
+        let full = format!("POST / HTTP/1.1\r\n\r\n{json_str}");
         let bytes = full.as_bytes();
         let event = make_ssl_event(bytes);
         let body_offset = bytes.len() - json_str.len();
@@ -304,9 +308,8 @@ mod tests {
         // replacement chars by from_utf8_lossy) that intentionally place
         // chunk_size past a multi-byte boundary.
         let mut raw: Vec<u8> = b"c27\r\n".to_vec();
-        for _ in 0..4096 {
-            raw.push(0xC2); // invalid stray UTF-8 lead byte
-        }
+        // append 4096 invalid stray UTF-8 lead bytes
+        raw.resize(raw.len() + 4096, 0xC2);
         let lossy = String::from_utf8_lossy(&raw);
         assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
     }
@@ -386,7 +389,7 @@ mod tests {
             source_event: event,
             reassembled_body: None,
         };
-        let debug_str = format!("{:?}", req);
+        let debug_str = format!("{req:?}");
         assert!(debug_str.contains("GET"));
     }
 }

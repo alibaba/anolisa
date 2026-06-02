@@ -11,7 +11,7 @@ use libbpf_rs::{
 };
 use std::{
     mem::MaybeUninit,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -21,6 +21,12 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));
@@ -71,7 +77,7 @@ impl VariableEvent {
 
         // SAFETY: BPF guarantees proper alignment and layout
         let raw_header = unsafe { &*(data.as_ptr() as *const ProcEventHeader) };
-        
+
         // Convert ktime to Unix timestamp
         let mut header = *raw_header;
         header.timestamp_ns = config::ktime_to_unix_ns(raw_header.timestamp_ns);
@@ -134,10 +140,10 @@ impl VariableEvent {
                 .map(|p| start + p)
                 .unwrap_or(buf.len());
 
-            if let Ok(s) = std::str::from_utf8(&buf[start..end]) {
-                if !s.is_empty() {
-                    parts.push(s);
-                }
+            if let Ok(s) = std::str::from_utf8(&buf[start..end])
+                && !s.is_empty()
+            {
+                parts.push(s);
             }
             start = end + 1;
         }
@@ -285,10 +291,10 @@ impl ProcEvent {
                 .position(|&c| c == 0)
                 .map(|p| start + p)
                 .unwrap_or(buf.len());
-            if let Ok(s) = std::str::from_utf8(&buf[start..end]) {
-                if !s.is_empty() {
-                    parts.push(s);
-                }
+            if let Ok(s) = std::str::from_utf8(&buf[start..end])
+                && !s.is_empty()
+            {
+                parts.push(s);
             }
             start = end + 1;
         }
@@ -400,13 +406,15 @@ impl ProcTrace {
                 skel.maps_mut()
                     .traced_processes()
                     .update(&key, &val, libbpf_rs::MapFlags::ANY)
-                    .with_context(|| format!("failed to add pid {} to traced_processes", pid))?;
+                    .with_context(|| format!("failed to add pid {pid} to traced_processes"))?;
             }
         }
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         // on the heap. We pin both together inside Self and never move either,
         // so the 'static lifetime cast is sound for the lifetime of Self.
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut ProctraceSkel<'static>) };
 
@@ -433,7 +441,7 @@ impl ProcTrace {
             .maps_mut()
             .traced_processes()
             .update(&key, &val, libbpf_rs::MapFlags::ANY)
-            .with_context(|| format!("failed to add pid {} to traced_processes", pid))
+            .with_context(|| format!("failed to add pid {pid} to traced_processes"))
     }
 
     /// Remove a PID from the traced_processes map at runtime
@@ -443,7 +451,7 @@ impl ProcTrace {
             .maps_mut()
             .traced_processes()
             .delete(&key)
-            .with_context(|| format!("failed to remove pid {} from traced_processes", pid))
+            .with_context(|| format!("failed to remove pid {pid} from traced_processes"))
     }
 
     /// Create a MapHandle from the traced_processes map for external reuse
@@ -521,7 +529,7 @@ impl ProcTrace {
         let mut rb_builder = RingBufferBuilder::new();
         let binding = self.skel.maps();
         rb_builder
-            .add(&binding.rb(), move |data: &[u8]| {
+            .add(binding.rb(), move |data: &[u8]| {
                 if data.len() < min_sz {
                     return 0;
                 }

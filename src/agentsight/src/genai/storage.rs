@@ -3,14 +3,14 @@
 //! This module provides storage capabilities for GenAI semantic events,
 //! including LLM calls, tool uses, and agent interactions.
 
-use std::path::PathBuf;
-use std::fs::{File, OpenOptions};
-use std::io::{Write, BufWriter, BufRead, BufReader};
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
-use super::semantic::GenAISemanticEvent;
 use super::exporter::GenAIExporter;
+use super::semantic::GenAISemanticEvent;
 
 /// Storage for GenAI semantic events
 pub struct GenAIStore {
@@ -20,14 +20,14 @@ pub struct GenAIStore {
 
 impl GenAIStore {
     /// Create a new GenAI store with the given path
-    pub fn new(path: &PathBuf) -> Self {
+    pub fn new(path: &Path) -> Self {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        
+
         GenAIStore {
-            path: path.clone(),
+            path: path.to_path_buf(),
         }
     }
 
@@ -43,29 +43,32 @@ impl GenAIStore {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        
+
         let mut writer = BufWriter::new(file);
         let json_line = serde_json::to_string(event)?;
-        writeln!(writer, "{}", json_line)?;
+        writeln!(writer, "{json_line}")?;
         writer.flush()?;
-        
+
         Ok(())
     }
 
     /// Add multiple events
-    pub fn add_batch(&self, events: &[GenAISemanticEvent]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn add_batch(
+        &self,
+        events: &[GenAISemanticEvent],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        
+
         let mut writer = BufWriter::new(file);
         for event in events {
             let json_line = serde_json::to_string(event)?;
-            writeln!(writer, "{}", json_line)?;
+            writeln!(writer, "{json_line}")?;
         }
         writer.flush()?;
-        
+
         Ok(())
     }
 
@@ -103,19 +106,19 @@ impl GenAIStore {
         for event in events {
             if let GenAISemanticEvent::LLMCall(call) = event {
                 let call_time = DateTime::from_timestamp_nanos(call.start_timestamp_ns as i64);
-                
-                if let Some(start) = start_time {
-                    if call_time < start {
-                        continue;
-                    }
+
+                if let Some(start) = start_time
+                    && call_time < start
+                {
+                    continue;
                 }
-                
-                if let Some(end) = end_time {
-                    if call_time > end {
-                        continue;
-                    }
+
+                if let Some(end) = end_time
+                    && call_time > end
+                {
+                    continue;
                 }
-                
+
                 calls.push(call);
             }
         }
@@ -124,22 +127,26 @@ impl GenAIStore {
     }
 
     /// Query events by process ID
-    pub fn query_by_pid(&self, pid: i32) -> Result<Vec<GenAISemanticEvent>, Box<dyn std::error::Error>> {
+    pub fn query_by_pid(
+        &self,
+        pid: i32,
+    ) -> Result<Vec<GenAISemanticEvent>, Box<dyn std::error::Error>> {
         let events = self.read_all()?;
-        Ok(events.into_iter().filter(|event| {
-            match event {
+        Ok(events
+            .into_iter()
+            .filter(|event| match event {
                 GenAISemanticEvent::LLMCall(call) => call.pid == pid,
                 GenAISemanticEvent::ToolUse(tool) => tool.pid == pid,
                 GenAISemanticEvent::AgentInteraction(interaction) => interaction.pid == pid,
                 GenAISemanticEvent::StreamChunk(chunk) => chunk.pid == pid,
-            }
-        }).collect())
+            })
+            .collect())
     }
 
     /// Get statistics about stored events
     pub fn get_stats(&self) -> Result<GenAIStoreStats, Box<dyn std::error::Error>> {
         let events = self.read_all()?;
-        
+
         let mut stats = GenAIStoreStats {
             total_events: events.len(),
             llm_calls: 0,
@@ -203,7 +210,7 @@ impl GenAIExporter for GenAIStore {
 
     fn export(&self, events: &[GenAISemanticEvent]) {
         if let Err(e) = self.add_batch(events) {
-            log::warn!("Failed to store GenAI events to JSONL: {}", e);
+            log::warn!("Failed to store GenAI events to JSONL: {e}");
         }
     }
 }

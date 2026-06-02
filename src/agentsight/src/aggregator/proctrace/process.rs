@@ -3,7 +3,7 @@
 //! Defines the `AggregatedProcess` structure for representing a complete
 //! process lifecycle with exec, stdout, stderr, and exit events.
 
-use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us, next_flow_id};
+use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, next_flow_id, ns_to_us};
 
 /// Aggregated process data for a specific PID
 #[derive(Debug, Clone)]
@@ -90,7 +90,8 @@ impl AggregatedProcess {
 
     /// Get the duration in nanoseconds
     pub fn duration_ns(&self) -> u64 {
-        self.end_timestamp_ns.saturating_sub(self.start_timestamp_ns)
+        self.end_timestamp_ns
+            .saturating_sub(self.start_timestamp_ns)
     }
 
     /// Get total stdout data size
@@ -115,7 +116,12 @@ impl AggregatedProcess {
         };
 
         match (stdout_preview.is_empty(), stderr_str.is_empty()) {
-            (false, false) => format!("process: {} | stdout: {} | stderr: {}", self.comm, stdout_preview, self.stderr_size()),
+            (false, false) => format!(
+                "process: {} | stdout: {} | stderr: {}",
+                self.comm,
+                stdout_preview,
+                self.stderr_size()
+            ),
             (false, true) => format!("process: {} | stdout: {}", self.comm, stdout_preview),
             (true, false) => format!("process: {} | stderr: {}", self.comm, self.stderr_size()),
             (true, true) => format!("process: {}", self.comm),
@@ -140,7 +146,7 @@ impl ToChromeTraceEvent for AggregatedProcess {
                 "child_filename": self.filename,
                 "child_args": self.args,
             });
-            
+
             let fork_event = ChromeTraceEvent::complete(
                 format!("fork: {}", self.comm),
                 "process.fork",
@@ -156,10 +162,10 @@ impl ToChromeTraceEvent for AggregatedProcess {
         // 2. Child process lifecycle event
         let stdout_str = self.stdout_string();
         let stderr_str = self.stderr_string();
-        
+
         // Build event name with stdout preview (max 50 chars)
         let name = self.build_event_name(&stdout_str, &stderr_str);
-        
+
         let args = serde_json::json!({
             "pid": self.pid,
             "ppid": self.ppid,

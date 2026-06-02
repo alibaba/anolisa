@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::analyzer::TokenConsumptionBreakdown;
 use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use crate::analyzer::TokenConsumptionBreakdown;
 
 /// A row stored in the token_consumption table (excludes per_message and output_per_block)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ impl TokenConsumptionStore {
         let table_name = table_name.to_string();
 
         conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {table} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_ns         INTEGER NOT NULL,
                 pid                  INTEGER NOT NULL DEFAULT 0,
@@ -131,10 +131,9 @@ impl TokenConsumptionStore {
                 by_role_json         TEXT    NOT NULL DEFAULT '{{}}',
                 output_by_type_json  TEXT    NOT NULL DEFAULT '{{}}'
             );
-            CREATE INDEX IF NOT EXISTS idx_{table}_ts   ON {table}(timestamp_ns);
-            CREATE INDEX IF NOT EXISTS idx_{table}_prov ON {table}(provider);
-            CREATE INDEX IF NOT EXISTS idx_{table}_model ON {table}(model);",
-            table = table_name,
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_ts   ON {table_name}(timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_prov ON {table_name}(provider);
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_model ON {table_name}(model);",
         ))?;
 
         Ok(TokenConsumptionStore { conn, table_name })
@@ -156,10 +155,10 @@ impl TokenConsumptionStore {
         pid: u32,
         comm: &str,
     ) -> anyhow::Result<i64> {
-        let by_role_json = serde_json::to_string(&breakdown.by_role)
-            .unwrap_or_else(|_| "{}".to_string());
-        let output_by_type_json = serde_json::to_string(&breakdown.output_by_type)
-            .unwrap_or_else(|_| "{}".to_string());
+        let by_role_json =
+            serde_json::to_string(&breakdown.by_role).unwrap_or_else(|_| "{}".to_string());
+        let output_by_type_json =
+            serde_json::to_string(&breakdown.output_by_type).unwrap_or_else(|_| "{}".to_string());
 
         let sql = format!(
             "INSERT INTO {} (
@@ -171,23 +170,24 @@ impl TokenConsumptionStore {
             self.table_name
         );
 
-        self.conn.execute(
-            &sql,
-            params![
-                timestamp_ns as i64,
-                pid as i64,
-                comm,
-                breakdown.provider,
-                breakdown.model,
-                breakdown.total_input_tokens as i64,
-                breakdown.total_output_tokens as i64,
-                breakdown.tools_tokens as i64,
-                breakdown.system_prompt_tokens as i64,
-                by_role_json,
-                output_by_type_json,
-            ],
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {}", e))?;
+        self.conn
+            .execute(
+                &sql,
+                params![
+                    timestamp_ns as i64,
+                    pid as i64,
+                    comm,
+                    breakdown.provider,
+                    breakdown.model,
+                    breakdown.total_input_tokens as i64,
+                    breakdown.total_output_tokens as i64,
+                    breakdown.tools_tokens as i64,
+                    breakdown.system_prompt_tokens as i64,
+                    by_role_json,
+                    output_by_type_json,
+                ],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -195,25 +195,27 @@ impl TokenConsumptionStore {
     /// Query records with the given filter.
     ///
     /// Returns individual rows sorted by timestamp descending.
-    pub fn query(&self, filter: &TokenConsumptionFilter) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
+    pub fn query(
+        &self,
+        filter: &TokenConsumptionFilter,
+    ) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
         let mut conditions: Vec<String> = Vec::new();
         let mut bind_idx = 1usize;
 
         if filter.start_ns.is_some() {
-            conditions.push(format!("timestamp_ns >= ?{}", bind_idx));
+            conditions.push(format!("timestamp_ns >= ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.end_ns.is_some() {
-            conditions.push(format!("timestamp_ns <= ?{}", bind_idx));
+            conditions.push(format!("timestamp_ns <= ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.provider.is_some() {
-            conditions.push(format!("provider = ?{}", bind_idx));
+            conditions.push(format!("provider = ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.model.is_some() {
-            conditions.push(format!("model = ?{}", bind_idx));
-            bind_idx += 1;
+            conditions.push(format!("model = ?{bind_idx}"));
         }
 
         let where_clause = if conditions.is_empty() {
@@ -328,7 +330,11 @@ impl TokenConsumptionStore {
     }
 
     /// Query records in a time range
-    pub fn by_time_range(&self, start_ns: u64, end_ns: u64) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
+    pub fn by_time_range(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
         self.query(&TokenConsumptionFilter {
             start_ns: Some(start_ns),
             end_ns: Some(end_ns),
@@ -347,7 +353,7 @@ impl TokenConsumptionStore {
 
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn).map_err(Into::into)
+        wal_checkpoint(&self.conn)
     }
 
     /// Number of stored records

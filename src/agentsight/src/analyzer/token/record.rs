@@ -156,8 +156,8 @@ mod tests {
 
     #[test]
     fn test_with_request_id() {
-        let record = TokenRecord::new(1, "p".to_string(), "o".to_string(), 0, 0)
-            .with_request_id("req-123");
+        let record =
+            TokenRecord::new(1, "p".to_string(), "o".to_string(), 0, 0).with_request_id("req-123");
         assert_eq!(record.request_id, Some("req-123".to_string()));
     }
 

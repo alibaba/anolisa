@@ -10,6 +10,9 @@
 |------|------|
 | `RULES.md` | 测试环境、部署流程、通用规则 |
 | `TEMPLATE.md` | 新建测试用例的模板 |
-| `test_sni.md` | TLS SNI 探针加载与域名匹配 |
-| `test_hermes_sni.md` | 通过 SNI 捕获 Hermes agent（dashscope.aliyuncs.com） |
+| `test_dns.md` | UDP DNS 探针：域名→IP 解析捕获 |
+| `test_hermes_dns.md` | 通过 DNS 捕获 Hermes agent（dashscope.aliyuncs.com） |
+| `test_http.md` | 明文 HTTP（tcpsniff）流量捕获 |
+| `test_connection_scanner.md` | 连接扫描器：活跃连接发现 |
+| `test_ffi_integration.md` | C FFI API 集成 |
 | `test_claude_code.md` | Claude Code BoringSSL 探针、SSE thinking/tool_use 解析、msg_id 会话关联 |

@@ -13,12 +13,12 @@
 //!
 //! Note: This module is for internal use only and not exposed in the public API.
 
-pub mod openai;
 mod anthropic;
+pub mod openai;
 mod utils;
 
+use super::data::TokenData;
 use serde_json::Value;
-use super::data::{TokenData, MessageTokenData, ResponseTokenData};
 
 /// Extract token data from JSON request/response bodies
 ///
@@ -79,4 +79,3 @@ pub enum Provider {
 }
 
 // Re-export utility functions for internal use
-pub use utils::extract_model_from_json;

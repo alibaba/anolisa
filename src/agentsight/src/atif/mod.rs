@@ -6,13 +6,11 @@
 //! This module is independent from the `genai` module — it only depends on
 //! storage query result types and `genai::semantic` types for deserialization.
 
-pub mod schema;
 pub mod converter;
+pub mod schema;
 
+pub use converter::{convert_session_to_atif, convert_trace_to_atif};
 pub use schema::{
-    AtifDocument, AtifAgent, AtifStep, AtifToolCall,
-    AtifObservation, AtifObservationResult,
-    AtifStepMetrics, AtifFinalMetrics,
-    SCHEMA_VERSION,
+    AtifAgent, AtifDocument, AtifFinalMetrics, AtifObservation, AtifObservationResult, AtifStep,
+    AtifStepMetrics, AtifToolCall, SCHEMA_VERSION,
 };
-pub use converter::{convert_trace_to_atif, convert_session_to_atif};

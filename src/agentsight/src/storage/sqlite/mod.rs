@@ -21,15 +21,14 @@ pub use audit::{AuditStore, SqliteStore};
 
 // Re-export token storage
 pub use token::{
-    TokenStore, TokenQuery,
-    TimePeriod, TokenQueryResult, TokenBreakdown, TokenComparison, Trend,
+    TimePeriod, TokenBreakdown, TokenComparison, TokenQuery, TokenQueryResult, TokenStore, Trend,
     format_tokens, format_tokens_with_commas,
 };
 
 // Re-export token consumption storage
 pub use token_consumption::{
-    TokenConsumptionStore, TokenConsumptionRecord,
-    TokenConsumptionFilter, TokenConsumptionQueryResult,
+    TokenConsumptionFilter, TokenConsumptionQueryResult, TokenConsumptionRecord,
+    TokenConsumptionStore,
 };
 
 // Re-export HTTP storage
@@ -39,9 +38,7 @@ pub use http::HttpStore;
 pub use genai::{GenAISqliteStore, PendingCallInfo, SseEnrichment};
 
 // Re-export Interruption SQLite storage
-pub use interruption::{
-    InterruptionStore, InterruptionRecord, InterruptionTypeStat,
-};
+pub use interruption::{InterruptionRecord, InterruptionStore, InterruptionTypeStat};
 
 // Re-export connection utilities
 pub use connection::{create_connection, default_base_path};

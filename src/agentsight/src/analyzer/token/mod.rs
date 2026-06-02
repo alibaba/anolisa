@@ -23,9 +23,9 @@
 //! }
 //! ```
 
-mod record;
 mod data;
 mod parser;
+mod record;
 
 // Extractor submodule for JSON token data extraction
 mod extractor;
@@ -125,12 +125,18 @@ pub fn extract_usage_object(
     let (input_tokens, output_tokens) = match provider {
         LLMProvider::OpenAI => {
             let input = usage.get("prompt_tokens").and_then(|v| v.as_u64())?;
-            let output = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output = usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             (input, output)
         }
         LLMProvider::Anthropic => {
             let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
-            let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output = usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             (input, output)
         }
         LLMProvider::Gemini => {
@@ -212,9 +218,7 @@ pub fn detect_provider_from_endpoint(endpoint: Option<&str>) -> LLMProvider {
         Some(ep) if ep.contains("anthropic.com") || ep.contains("api.anthropic.com") => {
             LLMProvider::Anthropic
         }
-        Some(ep) if ep.contains("generativelanguage.googleapis.com")
-            || ep.contains("gemini") =>
-        {
+        Some(ep) if ep.contains("generativelanguage.googleapis.com") || ep.contains("gemini") => {
             LLMProvider::Gemini
         }
         _ => LLMProvider::Unknown,

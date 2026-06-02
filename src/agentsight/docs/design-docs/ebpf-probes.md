@@ -2,7 +2,7 @@
 
 ## Overview
 
-AgentSight 使用 4 个 eBPF 探针从内核态捕获数据，所有探针共享同一个 ring buffer 和 `traced_processes` BPF map，由 `Probes` 管理器统一协调。
+AgentSight 使用 7 个 eBPF 探针从内核态捕获数据，所有探针共享同一个 ring buffer 和 `traced_processes` BPF map，由 `Probes` 管理器统一协调。
 
 ## Probe Architecture
 
@@ -13,6 +13,9 @@ graph TB
         PT[proctrace.bpf.c<br/>tracepoint: sched_process_exec]
         PM[procmon.bpf.c<br/>tracepoint: sched_process_exec/fork/exit]
         FW[filewatch.bpf.c<br/>tracepoint: do_sys_open]
+        FWR[filewrite.bpf.c<br/>fentry: vfs_write]
+        UD[udpdns.bpf.c<br/>fentry: udp_sendmsg]
+        TS[tcpsniff.bpf.c<br/>fentry: tcp_recvmsg/sendmsg]
     end
 
     subgraph Shared["Shared BPF Maps"]
@@ -24,8 +27,13 @@ graph TB
     PT -->|write| RB
     PM -->|write| RB
     FW -->|write| RB
+    FWR -->|write| RB
+    UD -->|write| RB
+    TS -->|write| RB
     SSL -->|lookup| TM
     FW -->|lookup| TM
+    FWR -->|lookup| TM
+    UD -->|lookup| TM
 
     subgraph Userspace["User Space"]
         P[Probes Poller Thread]
@@ -87,6 +95,39 @@ graph TB
 
 **Purpose**: Monitor Agent processes opening .jsonl files for auxiliary Agent session identification.
 
+### 5. filewrite — File Write Capture
+
+- **BPF Type**: fentry
+- **Attach Point**: `vfs_write`
+- **Filter**: Only PIDs in `traced_processes` writing to `.jsonl` files
+- **Output**: `filewrite_event_t` (pid, filename, written content)
+- **Source**: `src/bpf/filewrite.bpf.c`, `src/bpf/filewrite.h`
+- **Userspace**: `src/probes/filewrite.rs`
+
+**Purpose**: Capture written .jsonl content to recover responseId → sessionId mappings.
+
+### 6. udpdns — DNS Query Capture
+
+- **BPF Type**: fentry
+- **Attach Point**: `udp_sendmsg`
+- **Filter**: PIDs in `traced_processes`, UDP destination port 53
+- **Output**: `udpdns_event_t` (queried domain)
+- **Source**: `src/bpf/udpdns.bpf.c`, `src/bpf/udpdns.h`
+- **Userspace**: `src/probes/udpdns.rs`
+
+**Purpose**: Resolve configured HTTPS/HTTP domain patterns to IPs at runtime for SSL/TCP attach filtering.
+
+### 7. tcpsniff — Plaintext HTTP Capture
+
+- **BPF Type**: fentry/fexit
+- **Attach Point**: `tcp_recvmsg` / `tcp_sendmsg`
+- **Filter**: Configured destination IP/port targets (`tcp_targets`)
+- **Output**: reuses the sslsniff `probe_SSL_data_t` event format
+- **Source**: `src/bpf/tcpsniff.bpf.c`
+- **Userspace**: `src/probes/tcpsniff.rs`
+
+**Purpose**: Capture plaintext (non-TLS) HTTP traffic to configured endpoints, e.g. internal MaaS gateways.
+
 ## Shared Resource Design
 
 ### Ring Buffer (events_rb)
@@ -99,6 +140,8 @@ All probes share one ring buffer, distinguished by `common_event_hdr.source` fie
 | 2 (EVENT_SOURCE_SSL) | sslsniff event | `SslEvent::from_bpf()` |
 | 3 (EVENT_SOURCE_PROCMON) | procmon event | `procmon::Event::from_bytes()` |
 | 4 (EVENT_SOURCE_FILEWATCH) | filewatch event | `FileWatchEvent::from_bytes()` |
+| 5 (EVENT_SOURCE_FILEWRITE) | filewrite event | `FileWriteEvent::from_bytes()` |
+| 6 (EVENT_SOURCE_UDPDNS) | udpdns event | `UdpDnsEvent::from_bytes()` |
 
 **Implementation**: `src/probes/probes.rs:Probes::run()` lines 137-193 — single thread polls ring buffer, dispatches by source field into `Event` enum.
 

@@ -4,8 +4,8 @@
 //! `InterruptionDetector::detect(call)` checks a single call against all
 //! single-call rules and returns any detected interruption events.
 
-use crate::genai::semantic::LLMCall;
 use super::types::{InterruptionEvent, InterruptionType};
+use crate::genai::semantic::LLMCall;
 
 /// Configuration for the interruption detector
 pub struct DetectorConfig {
@@ -46,23 +46,28 @@ impl InterruptionDetector {
         let mut events = Vec::new();
 
         let session_id = call.metadata.get("session_id").cloned();
-        let trace_id   = call.metadata.get("response_id").cloned();
+        let trace_id = call.metadata.get("response_id").cloned();
         let conversation_id = call.metadata.get("conversation_id").cloned();
-        let call_id    = Some(call.call_id.clone());
-        let pid        = Some(call.pid);
+        let call_id = Some(call.call_id.clone());
+        let pid = Some(call.pid);
         let agent_name = call.agent_name.clone();
 
-        let status_code: u16 = call.metadata.get("status_code")
+        let status_code: u16 = call
+            .metadata
+            .get("status_code")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200);
 
         // Helper: scan error message / response body for context-overflow keywords
         let error_text = call.error.as_deref().unwrap_or("");
-        let response_body = call.metadata.get("response_body").map(|s| s.as_str()).unwrap_or("");
-        let combined_error = format!("{} {}", error_text, response_body).to_ascii_lowercase();
+        let response_body = call
+            .metadata
+            .get("response_body")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let combined_error = format!("{error_text} {response_body}").to_ascii_lowercase();
 
-        let is_context_overflow =
-            combined_error.contains("context_length_exceeded")
+        let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")
             || combined_error.contains("context window")
             || combined_error.contains("context_length")
@@ -87,8 +92,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ContextOverflow,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -104,8 +113,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::LlmError,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -113,7 +126,11 @@ impl InterruptionDetector {
         }
 
         // ── 3. SSE truncated ──────────────────────────────────────────────────
-        let is_sse = call.metadata.get("is_sse").map(|s| s == "true").unwrap_or(false);
+        let is_sse = call
+            .metadata
+            .get("is_sse")
+            .map(|s| s == "true")
+            .unwrap_or(false);
         if is_sse
             && call.response.messages.is_empty()
             && call.duration_ns >= self.config.sse_min_duration_ns
@@ -125,36 +142,46 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SseTruncated,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
         }
 
         // ── 4. Token limit (output capped by max_tokens) ──────────────────────
-        let finish_reason = call.response.messages.first()
+        let finish_reason = call
+            .response
+            .messages
+            .first()
             .and_then(|m| m.finish_reason.as_deref());
-        if finish_reason == Some("length") {
-            if let Some(max_tokens) = call.request.max_tokens {
-                if let Some(usage) = &call.token_usage {
-                    let ratio = usage.output_tokens as f64 / max_tokens as f64;
-                    if ratio >= self.config.token_limit_ratio {
-                        let detail = serde_json::json!({
-                            "model": call.model,
-                            "output_tokens": usage.output_tokens,
-                            "max_tokens": max_tokens,
-                            "ratio": ratio,
-                        });
-                        events.push(InterruptionEvent::new(
-                            InterruptionType::TokenLimit,
-                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                            pid, agent_name.clone(),
-                            call.end_timestamp_ns as i64,
-                            Some(detail),
-                        ));
-                    }
-                }
+        if finish_reason == Some("length")
+            && let Some(max_tokens) = call.request.max_tokens
+            && let Some(usage) = &call.token_usage
+        {
+            let ratio = usage.output_tokens as f64 / max_tokens as f64;
+            if ratio >= self.config.token_limit_ratio {
+                let detail = serde_json::json!({
+                    "model": call.model,
+                    "output_tokens": usage.output_tokens,
+                    "max_tokens": max_tokens,
+                    "ratio": ratio,
+                });
+                events.push(InterruptionEvent::new(
+                    InterruptionType::TokenLimit,
+                    session_id.clone(),
+                    trace_id.clone(),
+                    conversation_id.clone(),
+                    call_id.clone(),
+                    pid,
+                    agent_name.clone(),
+                    call.end_timestamp_ns as i64,
+                    Some(detail),
+                ));
             }
         }
 
@@ -163,34 +190,36 @@ impl InterruptionDetector {
         // already exceeds the context window but response still arrives.
         // Detect via input_tokens >= model context ceiling (heuristic: >90% of
         // a well-known ceiling, or when input_tokens >> max_tokens).
-        if finish_reason == Some("length") {
-            if let Some(usage) = &call.token_usage {
-                if let Some(max_tokens) = call.request.max_tokens {
-                    // If input tokens are much larger than the output cap, this
-                    // is almost certainly a context-length issue, not output truncation.
-                    if usage.input_tokens > max_tokens * 4 {
-                        let detail = serde_json::json!({
-                            "model": call.model,
-                            "input_tokens": usage.input_tokens,
-                            "max_tokens": max_tokens,
-                            "finish_reason": "length",
-                            "note": "input_tokens >> max_tokens suggests context overflow",
-                        });
-                        events.push(InterruptionEvent::new(
-                            InterruptionType::ContextOverflow,
-                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                            pid, agent_name.clone(),
-                            call.end_timestamp_ns as i64,
-                            Some(detail),
-                        ));
-                    }
-                }
+        if finish_reason == Some("length")
+            && let Some(usage) = &call.token_usage
+            && let Some(max_tokens) = call.request.max_tokens
+        {
+            // If input tokens are much larger than the output cap, this
+            // is almost certainly a context-length issue, not output truncation.
+            if usage.input_tokens > max_tokens * 4 {
+                let detail = serde_json::json!({
+                    "model": call.model,
+                    "input_tokens": usage.input_tokens,
+                    "max_tokens": max_tokens,
+                    "finish_reason": "length",
+                    "note": "input_tokens >> max_tokens suggests context overflow",
+                });
+                events.push(InterruptionEvent::new(
+                    InterruptionType::ContextOverflow,
+                    session_id.clone(),
+                    trace_id.clone(),
+                    conversation_id.clone(),
+                    call_id.clone(),
+                    pid,
+                    agent_name.clone(),
+                    call.end_timestamp_ns as i64,
+                    Some(detail),
+                ));
             }
         }
 
         events
     }
-
 }
 
 #[cfg(test)]
@@ -231,9 +260,7 @@ mod tests {
             pid: 1234,
             process_name: "agent".to_string(),
             agent_name: Some("TestAgent".to_string()),
-            metadata: HashMap::from([
-                ("status_code".to_string(), "200".to_string()),
-            ]),
+            metadata: HashMap::from([("status_code".to_string(), "200".to_string())]),
         }
     }
 
@@ -250,38 +277,54 @@ mod tests {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
         call.error = Some("context_length_exceeded".to_string());
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_context_overflow_http_413() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "413".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "413".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_context_overflow_response_body() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "400".to_string());
-        call.metadata.insert("response_body".to_string(), "maximum context length is 128k".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
+        call.metadata.insert(
+            "response_body".to_string(),
+            "maximum context length is 128k".to_string(),
+        );
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_llm_error_http_500() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "500".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
@@ -301,7 +344,8 @@ mod tests {
     fn test_detect_sse_truncated() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 2_000_000_000; // > 1 second min
         // response.messages is empty
         let events = detector.detect(&call);
@@ -313,7 +357,8 @@ mod tests {
     fn test_no_sse_truncated_short_duration() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 500_000_000; // < 1 second min
         let events = detector.detect(&call);
         assert!(events.is_empty());
@@ -384,29 +429,41 @@ mod tests {
         }];
         let events = detector.detect(&call);
         // Should have context_overflow (from rule 5)
-        assert!(events.iter().any(|e| e.interruption_type == InterruptionType::ContextOverflow));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow)
+        );
     }
 
     #[test]
     fn test_context_overflow_supersedes_llm_error() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         call.error = Some("context_length_exceeded: max 128000 tokens".to_string());
         let events = detector.detect(&call);
         // Should be context_overflow, NOT llm_error
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_event_metadata_fields() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "500".to_string());
-        call.metadata.insert("session_id".to_string(), "sess-abc".to_string());
-        call.metadata.insert("response_id".to_string(), "trace-xyz".to_string());
-        call.metadata.insert("conversation_id".to_string(), "conv-123".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
+        call.metadata
+            .insert("session_id".to_string(), "sess-abc".to_string());
+        call.metadata
+            .insert("response_id".to_string(), "trace-xyz".to_string());
+        call.metadata
+            .insert("conversation_id".to_string(), "conv-123".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, Some("sess-abc".to_string()));
@@ -440,6 +497,10 @@ mod tests {
             finish_reason: Some("length".to_string()),
         }];
         let events = detector.detect(&call);
-        assert!(events.iter().any(|e| e.interruption_type == InterruptionType::TokenLimit));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit)
+        );
     }
 }

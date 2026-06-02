@@ -55,7 +55,7 @@
 //! agentsight interruption list --last 24 --json
 //! ```
 
-use agentsight::storage::sqlite::{GenAISqliteStore, InterruptionStore, InterruptionRecord};
+use agentsight::storage::sqlite::{GenAISqliteStore, InterruptionRecord, InterruptionStore};
 use structopt::StructOpt;
 
 /// Query and manage AI agent session interruption events.
@@ -216,21 +216,28 @@ impl InterruptionCommand {
         let db_path = default_db_path();
 
         if !db_path.exists() {
-            eprintln!("Database file not found: {:?}", db_path);
+            eprintln!("Database file not found: {db_path:?}");
             std::process::exit(1);
         }
 
         let store = match InterruptionStore::new_with_path(&db_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Error opening interruption database {:?}: {}", db_path, e);
+                eprintln!("Error opening interruption database {db_path:?}: {e}");
                 std::process::exit(1);
             }
         };
 
         match &self.action {
             InterruptionAction::List {
-                last, itype, severity, agent, unresolved, resolved, limit, json,
+                last,
+                itype,
+                severity,
+                agent,
+                unresolved,
+                resolved,
+                limit,
+                json,
             } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
                 let resolved_filter = if *unresolved {
@@ -242,7 +249,8 @@ impl InterruptionCommand {
                 };
 
                 match store.list(
-                    start_ns, end_ns,
+                    start_ns,
+                    end_ns,
                     agent.as_deref(),
                     itype.as_deref(),
                     severity.as_deref(),
@@ -257,31 +265,32 @@ impl InterruptionCommand {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
             }
 
-            InterruptionAction::Get { interruption_id, json } => {
-                match store.get_by_id(interruption_id) {
-                    Ok(Some(record)) => {
-                        if *json {
-                            print_json(&record);
-                        } else {
-                            print_record_detail(&record);
-                        }
-                    }
-                    Ok(None) => {
-                        eprintln!("No interruption found with id: {}", interruption_id);
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        eprintln!("Query error: {}", e);
-                        std::process::exit(1);
+            InterruptionAction::Get {
+                interruption_id,
+                json,
+            } => match store.get_by_id(interruption_id) {
+                Ok(Some(record)) => {
+                    if *json {
+                        print_json(&record);
+                    } else {
+                        print_record_detail(&record);
                     }
                 }
-            }
+                Ok(None) => {
+                    eprintln!("No interruption found with id: {interruption_id}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Query error: {e}");
+                    std::process::exit(1);
+                }
+            },
 
             InterruptionAction::Stats { last, json } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
@@ -291,18 +300,21 @@ impl InterruptionCommand {
                             print_json(&stats);
                         } else {
                             if stats.is_empty() {
-                                println!("No interruption events in the last {} hour(s).", last);
+                                println!("No interruption events in the last {last} hour(s).");
                                 return;
                             }
                             println!("{:<20} {:<10} {:>6}", "TYPE", "SEVERITY", "COUNT");
                             println!("{}", "-".repeat(40));
                             for s in &stats {
-                                println!("{:<20} {:<10} {:>6}", s.interruption_type, s.severity, s.count);
+                                println!(
+                                    "{:<20} {:<10} {:>6}",
+                                    s.interruption_type, s.severity, s.count
+                                );
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -340,17 +352,17 @@ impl InterruptionCommand {
                             });
                             println!("{}", serde_json::to_string_pretty(&output).unwrap());
                         } else {
-                            println!("Unresolved interruptions (last {} hour(s)):", last);
+                            println!("Unresolved interruptions (last {last} hour(s)):");
                             println!();
-                            println!("  Total:    {}", total);
-                            println!("  Critical: {}", critical);
-                            println!("  High:     {}", high);
-                            println!("  Medium:   {}", medium);
-                            println!("  Low:      {}", low);
+                            println!("  Total:    {total}");
+                            println!("  Critical: {critical}");
+                            println!("  High:     {high}");
+                            println!("  Medium:   {medium}");
+                            println!("  Low:      {low}");
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -363,54 +375,55 @@ impl InterruptionCommand {
                             print_json(&rows);
                         } else {
                             if rows.is_empty() {
-                                println!("No interruptions for session: {}", session_id);
+                                println!("No interruptions for session: {session_id}");
                                 return;
                             }
-                            println!("Interruptions for session {}:", session_id);
+                            println!("Interruptions for session {session_id}:");
                             println!();
                             print_records_table(&rows);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Query error: {}", e);
+                        eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
                 }
             }
 
-            InterruptionAction::Conversation { conversation_id, json } => {
-                match store.list_by_conversation(conversation_id) {
-                    Ok(rows) => {
-                        if *json {
-                            print_json(&rows);
-                        } else {
-                            if rows.is_empty() {
-                                println!("No interruptions for conversation: {}", conversation_id);
-                                return;
-                            }
-                            println!("Interruptions for conversation {}:", conversation_id);
-                            println!();
-                            print_records_table(&rows);
+            InterruptionAction::Conversation {
+                conversation_id,
+                json,
+            } => match store.list_by_conversation(conversation_id) {
+                Ok(rows) => {
+                    if *json {
+                        print_json(&rows);
+                    } else {
+                        if rows.is_empty() {
+                            println!("No interruptions for conversation: {conversation_id}");
+                            return;
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("Query error: {}", e);
-                        std::process::exit(1);
+                        println!("Interruptions for conversation {conversation_id}:");
+                        println!();
+                        print_records_table(&rows);
                     }
                 }
-            }
+                Err(e) => {
+                    eprintln!("Query error: {e}");
+                    std::process::exit(1);
+                }
+            },
 
             InterruptionAction::Resolve { interruption_id } => {
                 match store.resolve(interruption_id) {
                     Ok(true) => {
-                        println!("Resolved: {}", interruption_id);
+                        println!("Resolved: {interruption_id}");
                     }
                     Ok(false) => {
-                        eprintln!("No interruption found with id: {}", interruption_id);
+                        eprintln!("No interruption found with id: {interruption_id}");
                         std::process::exit(1);
                     }
                     Err(e) => {
-                        eprintln!("Error resolving interruption: {}", e);
+                        eprintln!("Error resolving interruption: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -453,10 +466,15 @@ fn format_ns(ns: i64) -> String {
     let hour = total_hours % 24;
 
     // Days since epoch to Y-M-D (simplified)
-    let (year, month, day) = days_to_ymd(total_days as i64);
+    let (year, month, day) = days_to_ymd(total_days);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-        year, month, day, hour, min, sec,
+        year,
+        month,
+        day,
+        hour,
+        min,
+        sec,
         nanos_rem / 1_000_000
     )
 }
@@ -494,9 +512,8 @@ fn print_records_table(records: &[InterruptionRecord]) {
     }
 
     println!(
-        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} {}",
-        "INTERRUPTION_ID", "TYPE", "SEVERITY", "OCCURRED_AT", "RESOLVED",
-        "AGENT", "SESSION_ID", "CONVERSATION_ID"
+        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} CONVERSATION_ID",
+        "INTERRUPTION_ID", "TYPE", "SEVERITY", "OCCURRED_AT", "RESOLVED", "AGENT", "SESSION_ID"
     );
     println!("{}", "-".repeat(140));
 
@@ -530,21 +547,36 @@ fn print_record_detail(r: &InterruptionRecord) {
     println!("  ID:           {}", r.interruption_id);
     println!("  Type:         {}", r.interruption_type);
     println!("  Severity:     {}", r.severity);
-    println!("  Occurred At:  {} ({}ns)", format_ns(r.occurred_at_ns), r.occurred_at_ns);
+    println!(
+        "  Occurred At:  {} ({}ns)",
+        format_ns(r.occurred_at_ns),
+        r.occurred_at_ns
+    );
     println!("  Resolved:     {}", if r.resolved { "yes" } else { "no" });
     println!("  Session ID:   {}", r.session_id.as_deref().unwrap_or("-"));
-    println!("  Conversation: {}", r.conversation_id.as_deref().unwrap_or("-"));
+    println!(
+        "  Conversation: {}",
+        r.conversation_id.as_deref().unwrap_or("-")
+    );
     println!("  Trace ID:     {}", r.trace_id.as_deref().unwrap_or("-"));
     println!("  Call ID:      {}", r.call_id.as_deref().unwrap_or("-"));
-    println!("  PID:          {}", r.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()));
+    println!(
+        "  PID:          {}",
+        r.pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
     println!("  Agent:        {}", r.agent_name.as_deref().unwrap_or("-"));
     if let Some(ref detail) = r.detail {
         // Pretty-print JSON detail
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) {
             println!("  Detail:");
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| detail.clone()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| detail.clone())
+            );
         } else {
-            println!("  Detail:       {}", detail);
+            println!("  Detail:       {detail}");
         }
     }
 }
@@ -552,9 +584,9 @@ fn print_record_detail(r: &InterruptionRecord) {
 /// Print any Serialize value as JSON.
 fn print_json<T: serde::Serialize>(value: &T) {
     match serde_json::to_string_pretty(value) {
-        Ok(s) => println!("{}", s),
+        Ok(s) => println!("{s}"),
         Err(e) => {
-            eprintln!("JSON serialization error: {}", e);
+            eprintln!("JSON serialization error: {e}");
             std::process::exit(1);
         }
     }

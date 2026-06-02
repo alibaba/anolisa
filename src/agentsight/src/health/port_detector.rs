@@ -44,7 +44,7 @@ pub fn detect_listening_ports(pid: u32) -> Vec<u16> {
 
 /// Collect all socket inodes owned by the given PID by reading `/proc/[pid]/fd/`.
 fn collect_socket_inodes(pid: u32) -> std::io::Result<HashSet<u64>> {
-    let fd_dir = format!("/proc/{}/fd", pid);
+    let fd_dir = format!("/proc/{pid}/fd");
     let mut inodes = HashSet::new();
 
     for entry in fs::read_dir(&fd_dir)? {
@@ -55,10 +55,12 @@ fn collect_socket_inodes(pid: u32) -> std::io::Result<HashSet<u64>> {
         };
         let link_str = link.to_string_lossy();
         // Socket symlinks look like "socket:[12345]"
-        if let Some(inode_str) = link_str.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
-            if let Ok(inode) = inode_str.parse::<u64>() {
-                inodes.insert(inode);
-            }
+        if let Some(inode_str) = link_str
+            .strip_prefix("socket:[")
+            .and_then(|s| s.strip_suffix(']'))
+            && let Ok(inode) = inode_str.parse::<u64>()
+        {
+            inodes.insert(inode);
         }
     }
 

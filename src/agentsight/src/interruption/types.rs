@@ -22,20 +22,20 @@ impl InterruptionType {
     /// String identifier stored in the database
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::LlmError        => "llm_error",
-            Self::SseTruncated    => "sse_truncated",
-            Self::AgentCrash      => "agent_crash",
-            Self::TokenLimit      => "token_limit",
+            Self::LlmError => "llm_error",
+            Self::SseTruncated => "sse_truncated",
+            Self::AgentCrash => "agent_crash",
+            Self::TokenLimit => "token_limit",
             Self::ContextOverflow => "context_overflow",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "llm_error"        => Some(Self::LlmError),
-            "sse_truncated"    => Some(Self::SseTruncated),
-            "agent_crash"      => Some(Self::AgentCrash),
-            "token_limit"      => Some(Self::TokenLimit),
+            "llm_error" => Some(Self::LlmError),
+            "sse_truncated" => Some(Self::SseTruncated),
+            "agent_crash" => Some(Self::AgentCrash),
+            "token_limit" => Some(Self::TokenLimit),
             "context_overflow" => Some(Self::ContextOverflow),
             _ => None,
         }
@@ -44,11 +44,11 @@ impl InterruptionType {
     /// Default severity for this interruption type
     pub fn default_severity(&self) -> Severity {
         match self {
-            Self::AgentCrash      => Severity::Critical,
-            Self::LlmError        => Severity::High,
-            Self::SseTruncated    => Severity::High,
+            Self::AgentCrash => Severity::Critical,
+            Self::LlmError => Severity::High,
+            Self::SseTruncated => Severity::High,
             Self::ContextOverflow => Severity::High,
-            Self::TokenLimit      => Severity::Medium,
+            Self::TokenLimit => Severity::Medium,
         }
     }
 }
@@ -67,9 +67,9 @@ impl Severity {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Critical => "critical",
-            Self::High     => "high",
-            Self::Medium   => "medium",
-            Self::Low      => "low",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
         }
     }
 
@@ -77,9 +77,9 @@ impl Severity {
     pub fn weight(&self) -> u8 {
         match self {
             Self::Critical => 4,
-            Self::High     => 3,
-            Self::Medium   => 2,
-            Self::Low      => 1,
+            Self::High => 3,
+            Self::Medium => 2,
+            Self::Low => 1,
         }
     }
 }
@@ -159,27 +159,60 @@ mod tests {
         assert_eq!(InterruptionType::SseTruncated.as_str(), "sse_truncated");
         assert_eq!(InterruptionType::AgentCrash.as_str(), "agent_crash");
         assert_eq!(InterruptionType::TokenLimit.as_str(), "token_limit");
-        assert_eq!(InterruptionType::ContextOverflow.as_str(), "context_overflow");
+        assert_eq!(
+            InterruptionType::ContextOverflow.as_str(),
+            "context_overflow"
+        );
     }
 
     #[test]
     fn test_interruption_type_from_str() {
-        assert_eq!(InterruptionType::from_str("llm_error"), Some(InterruptionType::LlmError));
-        assert_eq!(InterruptionType::from_str("sse_truncated"), Some(InterruptionType::SseTruncated));
-        assert_eq!(InterruptionType::from_str("agent_crash"), Some(InterruptionType::AgentCrash));
-        assert_eq!(InterruptionType::from_str("token_limit"), Some(InterruptionType::TokenLimit));
-        assert_eq!(InterruptionType::from_str("context_overflow"), Some(InterruptionType::ContextOverflow));
+        assert_eq!(
+            InterruptionType::from_str("llm_error"),
+            Some(InterruptionType::LlmError)
+        );
+        assert_eq!(
+            InterruptionType::from_str("sse_truncated"),
+            Some(InterruptionType::SseTruncated)
+        );
+        assert_eq!(
+            InterruptionType::from_str("agent_crash"),
+            Some(InterruptionType::AgentCrash)
+        );
+        assert_eq!(
+            InterruptionType::from_str("token_limit"),
+            Some(InterruptionType::TokenLimit)
+        );
+        assert_eq!(
+            InterruptionType::from_str("context_overflow"),
+            Some(InterruptionType::ContextOverflow)
+        );
         assert_eq!(InterruptionType::from_str("unknown"), None);
         assert_eq!(InterruptionType::from_str(""), None);
     }
 
     #[test]
     fn test_interruption_type_default_severity() {
-        assert_eq!(InterruptionType::AgentCrash.default_severity(), Severity::Critical);
-        assert_eq!(InterruptionType::LlmError.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::SseTruncated.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::ContextOverflow.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::TokenLimit.default_severity(), Severity::Medium);
+        assert_eq!(
+            InterruptionType::AgentCrash.default_severity(),
+            Severity::Critical
+        );
+        assert_eq!(
+            InterruptionType::LlmError.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::SseTruncated.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::ContextOverflow.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::TokenLimit.default_severity(),
+            Severity::Medium
+        );
     }
 
     #[test]
@@ -236,7 +269,12 @@ mod tests {
     fn test_interruption_event_new_no_detail() {
         let event = InterruptionEvent::new(
             InterruptionType::AgentCrash,
-            None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             500_000,
             None,
         );
@@ -276,7 +314,12 @@ mod tests {
 
     #[test]
     fn test_severity_serde_roundtrip() {
-        let severities = vec![Severity::Critical, Severity::High, Severity::Medium, Severity::Low];
+        let severities = vec![
+            Severity::Critical,
+            Severity::High,
+            Severity::Medium,
+            Severity::Low,
+        ];
         for s in severities {
             let json = serde_json::to_string(&s).unwrap();
             let back: Severity = serde_json::from_str(&json).unwrap();

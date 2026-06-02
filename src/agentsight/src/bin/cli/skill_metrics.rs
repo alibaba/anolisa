@@ -125,7 +125,7 @@ pub enum SkillMetricsAction {
 impl SkillMetricsCommand {
     pub fn execute(&self) {
         if let Err(e) = self.run() {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }
@@ -241,7 +241,7 @@ impl SkillMetricsCommand {
             if json {
                 println!("{{\"message\": \"No events found in the specified time range\"}}");
             } else {
-                eprintln!("No events found in the last {} hours.", last);
+                eprintln!("No events found in the last {last} hours.");
             }
             return Ok(());
         }
@@ -297,7 +297,7 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
             sorted.sort_by(|a, b| b.1.cmp(a.1));
             println!("  {:30} {:>8}", "Skill", "Count");
             for (name, count) in sorted {
-                println!("  {:30} {:>8}", name, count);
+                println!("  {name:30} {count:>8}");
             }
         }
         println!();
@@ -348,7 +348,7 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
             for entry in &h.rankings {
                 let delta = entry
                     .rank_delta
-                    .map(|d| format!("{:+}", d))
+                    .map(|d| format!("{d:+}"))
                     .unwrap_or_else(|| "-".to_string());
                 println!(
                     "  {:>4} {:30} {:>8} {:>8}",
@@ -366,20 +366,4 @@ fn format_timestamp_ns(ns: i64) -> String {
         .unwrap_or_default()
         .naive_utc();
     dt.format("%m-%d %H:%M").to_string()
-}
-
-fn format_duration_ns(ns: i64) -> String {
-    if ns == 0 {
-        return "0s".to_string();
-    }
-    let secs = ns as f64 / 1_000_000_000.0;
-    if secs < 60.0 {
-        format!("{:.1}s", secs)
-    } else if secs < 3600.0 {
-        format!("{:.1}m", secs / 60.0)
-    } else if secs < 86400.0 {
-        format!("{:.1}h", secs / 3600.0)
-    } else {
-        format!("{:.1}d", secs / 86400.0)
-    }
 }

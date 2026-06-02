@@ -1,8 +1,8 @@
 //! Anthropic token data extraction
 
-use serde_json::Value;
-use super::super::data::{TokenData, MessageTokenData, ResponseTokenData};
+use super::super::data::{MessageTokenData, ResponseTokenData, TokenData};
 use super::utils::extract_model_from_json;
+use serde_json::Value;
 
 /// Extract token data from Anthropic format JSON
 pub fn extract_token_data(
@@ -41,7 +41,9 @@ pub fn extract_token_data(
         if let Some(messages) = req.get("messages").and_then(|m| m.as_array()) {
             for msg in messages {
                 if let Some((role, content)) = extract_message(msg) {
-                    token_data.request_messages.push(MessageTokenData { role, content });
+                    token_data
+                        .request_messages
+                        .push(MessageTokenData { role, content });
                     has_content = true;
                 }
             }
@@ -64,25 +66,28 @@ pub fn extract_token_data(
         if let Some(content) = resp.get("content").and_then(|c| c.as_array()) {
             for block in content {
                 let block_type = block.get("type").and_then(|t| t.as_str());
-                
+
                 match block_type {
                     Some("text") => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            if !text.is_empty() {
-                                token_data.response_content.push(ResponseTokenData {
-                                    content: text.to_string(),
-                                });
-                                has_content = true;
-                            }
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            token_data.response_content.push(ResponseTokenData {
+                                content: text.to_string(),
+                            });
+                            has_content = true;
                         }
                     }
                     Some("tool_use") => {
-                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        if let Some(input) = block.get("input") {
-                            if let Ok(input_str) = serde_json::to_string(input) {
-                                token_data.tool_calls.push(format!("{}: {}", name, input_str));
-                                has_content = true;
-                            }
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        if let Some(input) = block.get("input")
+                            && let Ok(input_str) = serde_json::to_string(input)
+                        {
+                            token_data.tool_calls.push(format!("{name}: {input_str}"));
+                            has_content = true;
                         }
                     }
                     _ => {}
@@ -91,18 +96,14 @@ pub fn extract_token_data(
         }
     }
 
-    if has_content {
-        Some(token_data)
-    } else {
-        None
-    }
+    if has_content { Some(token_data) } else { None }
 }
 
 /// Extract role and content from Anthropic message JSON
 fn extract_message(msg: &Value) -> Option<(String, String)> {
     let role = msg.get("role").and_then(|r| r.as_str())?;
     let content = extract_content(msg.get("content"))?;
-    
+
     if content.is_empty() {
         None
     } else {
@@ -132,12 +133,8 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join("");
-            
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
+
+            if text.is_empty() { None } else { Some(text) }
         }
         _ => None,
     }
@@ -199,7 +196,10 @@ mod tests {
         assert!(token_data.is_some());
 
         let data = token_data.unwrap();
-        assert_eq!(data.system_prompt, Some("You are Claude\nBe helpful".to_string()));
+        assert_eq!(
+            data.system_prompt,
+            Some("You are Claude\nBe helpful".to_string())
+        );
     }
 
     #[test]

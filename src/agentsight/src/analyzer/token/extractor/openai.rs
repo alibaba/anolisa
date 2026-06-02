@@ -1,8 +1,8 @@
 //! OpenAI token data extraction
 
-use serde_json::Value;
-use super::super::data::{TokenData, MessageTokenData, ResponseTokenData};
+use super::super::data::{MessageTokenData, ResponseTokenData, TokenData};
 use super::utils::extract_model_from_json;
+use serde_json::Value;
 
 /// Extract token data from OpenAI format JSON
 pub fn extract_token_data(
@@ -21,7 +21,9 @@ pub fn extract_token_data(
         if let Some(messages) = req.get("messages").and_then(|m| m.as_array()) {
             for msg in messages {
                 if let Some((role, content)) = extract_message(msg) {
-                    token_data.request_messages.push(MessageTokenData { role, content });
+                    token_data
+                        .request_messages
+                        .push(MessageTokenData { role, content });
                     has_content = true;
                 }
             }
@@ -41,7 +43,9 @@ pub fn extract_token_data(
     // Extract from response using shared logic
     if let Some((content, reasoning, tool_calls)) = extract_response_content(response_json) {
         if !content.is_empty() {
-            token_data.response_content.push(ResponseTokenData { content });
+            token_data
+                .response_content
+                .push(ResponseTokenData { content });
             has_content = true;
         }
         if let Some(r) = reasoning {
@@ -54,15 +58,11 @@ pub fn extract_token_data(
         }
     }
 
-    if has_content {
-        Some(token_data)
-    } else {
-        None
-    }
+    if has_content { Some(token_data) } else { None }
 }
 
 /// Extract response content from OpenAI format response JSON
-/// 
+///
 /// Returns a tuple of (content, reasoning_content, tool_calls)
 /// - content: The main response text
 /// - reasoning_content: Optional reasoning/thinking content
@@ -72,7 +72,7 @@ pub fn extract_response_content(
 ) -> Option<(String, Option<String>, Vec<String>)> {
     let resp = response_json?;
     let choices = resp.get("choices").and_then(|c| c.as_array())?;
-    
+
     let mut content = String::new();
     let mut reasoning = None;
     let mut tool_calls = Vec::new();
@@ -81,26 +81,26 @@ pub fn extract_response_content(
     for choice in choices {
         // Support both "message" (standard response) and "delta" (SSE streaming) formats
         let msg_or_delta = choice.get("message").or_else(|| choice.get("delta"));
-        
+
         if let Some(msg) = msg_or_delta {
             // Extract content
-            if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
-                if !c.is_empty() {
-                    content.push_str(c);
-                    has_data = true;
-                }
+            if let Some(c) = msg.get("content").and_then(|c| c.as_str())
+                && !c.is_empty()
+            {
+                content.push_str(c);
+                has_data = true;
             }
 
             // Extract reasoning_content
-            if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str()) {
-                if !r.is_empty() {
-                    // For SSE chunks, accumulate reasoning content
-                    reasoning = match reasoning {
-                        Some(existing) => Some(existing + r),
-                        None => Some(r.to_string()),
-                    };
-                    has_data = true;
-                }
+            if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str())
+                && !r.is_empty()
+            {
+                // For SSE chunks, accumulate reasoning content
+                reasoning = match reasoning {
+                    Some(existing) => Some(existing + r),
+                    None => Some(r.to_string()),
+                };
+                has_data = true;
             }
 
             // Extract tool_calls - only extract function name and arguments
@@ -108,8 +108,9 @@ pub fn extract_response_content(
                 for tool_call in calls {
                     if let Some(func) = tool_call.get("function") {
                         let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        let arguments = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                        let tool_content = format!("{}: {}", name, arguments);
+                        let arguments =
+                            func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                        let tool_content = format!("{name}: {arguments}");
                         if !tool_content.is_empty() {
                             tool_calls.push(tool_content);
                             has_data = true;
@@ -131,7 +132,7 @@ pub fn extract_response_content(
 fn extract_message(msg: &Value) -> Option<(String, String)> {
     let role = msg.get("role").and_then(|r| r.as_str())?;
     let content = extract_content(msg.get("content"))?;
-    
+
     if content.is_empty() {
         None
     } else {
@@ -161,12 +162,8 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join("");
-            
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
+
+            if text.is_empty() { None } else { Some(text) }
         }
         _ => None,
     }
@@ -255,7 +252,10 @@ mod tests {
         assert!(token_data.is_some());
 
         let data = token_data.unwrap();
-        assert_eq!(data.reasoning_content, Some("Let me think about this...".to_string()));
+        assert_eq!(
+            data.reasoning_content,
+            Some("Let me think about this...".to_string())
+        );
     }
 
     #[test]

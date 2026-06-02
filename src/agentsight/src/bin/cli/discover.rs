@@ -34,12 +34,15 @@ impl DiscoverCommand {
         let scanner = AgentScanner::from_rules(&rules, &[]);
         let count = scanner.matcher_count();
 
-        println!("Known AI Agents ({} total):", count);
+        println!("Known AI Agents ({count} total):");
         println!("{}", "=".repeat(60));
         println!();
 
         // Use CmdlineGlobMatcher to list agent info
-        for matcher in agentsight::default_cmdline_rules().iter().filter_map(|rule| CmdlineGlobMatcher::from_config(rule)) {
+        for matcher in agentsight::default_cmdline_rules()
+            .iter()
+            .filter_map(CmdlineGlobMatcher::from_config)
+        {
             let agent = matcher.info();
             println!("  {} ({})", agent.name, agent.category);
             println!("    Process names: {}", agent.process_names.join(", "));
@@ -75,7 +78,7 @@ impl DiscoverCommand {
             } else {
                 cmdline_str
             };
-            println!("    Command:  {}", cmdline);
+            println!("    Command:  {cmdline}");
 
             if self.verbose && !agent.exe_path.is_empty() {
                 println!("    Executable: {}", agent.exe_path);
