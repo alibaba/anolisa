@@ -37,11 +37,13 @@ pub mod storage;
 pub mod chrome_trace;
 pub mod discovery;
 pub mod health;
+pub mod lineage;
 pub mod tokenizer;
 pub mod genai;
 pub mod atif;
 pub mod response_map;
 pub mod interruption;
+pub mod scheduler;
 pub mod skill_metrics;
 #[cfg(feature = "server")]
 pub mod server;
