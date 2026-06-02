@@ -13,9 +13,11 @@
  *      Response Compression strips noise → TOON eliminates JSON format overhead.
  *
  * Stats are recorded automatically by tokenless compress-response.
- * Context passing uses environment variables (TOKENLESS_AGENT_ID,
- * TOKENLESS_SESSION_ID, TOKENLESS_TOOL_USE_ID) which are inherited by
- * child processes and read by RTK's stats patch.
+ * Context is passed to subprocesses via a per-call env merge (buildEnv()) instead
+ * of mutating process.env. Note: envContext itself is a module-level singleton,
+ * so concurrent before_tool_call callbacks can still race on agentId/toolCallId.
+ * Acceptable today because OpenClaw dispatches tool calls sequentially per
+ * session; revisit if that changes.
  */
 
 import { execSync, execFileSync, spawnSync } from "child_process";
@@ -28,10 +30,29 @@ import { existsSync, statSync } from "fs";
 
 const sessionMap: Map<string, string> = new Map();
 
-// ---- Binary availability cache ------------------------------------------------
+// ---- In-memory env context (replaces global process.env mutation) -------------
+
+const envContext: { agentId: string; sessionId: string; toolCallId: string } = {
+  agentId: "openclaw", sessionId: "", toolCallId: "",
+};
+
+function buildEnv(): Record<string, string> {
+  return {
+    ...process.env as Record<string, string>,
+    TOKENLESS_AGENT_ID: envContext.agentId,
+    TOKENLESS_SESSION_ID: envContext.sessionId,
+    TOKENLESS_TOOL_USE_ID: envContext.toolCallId,
+  };
+}
+
+// ---- Binary availability cache (with TTL for negative results) -----------------
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — retry after auto-fix installs
 
 let rtkAvailable: boolean | null = null;
+let rtkCheckedAt: number | null = null;
 let tokenlessAvailable: boolean | null = null;
+let tokenlessCheckedAt: number | null = null;
 
 // Resolved absolute paths — set by check*() functions so subprocess calls
 // use the correct path even when the binary is not on PATH (e.g. RPM installs
@@ -58,8 +79,12 @@ function isExecutable(path: string): boolean {
 
 function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null {
   try {
-    const result = execSync(`sh -c 'command -v ${name}'`, { encoding: "utf-8" }).trim();
-    if (result && result !== "") return result;
+    const result = spawnSync("sh", ["-c", `command -v "$1"`, "--", name], {
+      encoding: "utf-8", timeout: 2000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const output = result.stdout?.trim();
+    if (output && output !== "") return output;
   } catch { /* not on PATH */ }
   for (const fb of fallbacks) {
     if (fb && isExecutable(fb)) return fb;
@@ -68,10 +93,15 @@ function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null 
 }
 
 function checkRtk(): boolean {
+  // Refresh stale false cache (binary may have been installed since last check)
+  if (rtkAvailable === false && rtkCheckedAt && (Date.now() - rtkCheckedAt > CACHE_TTL_MS)) {
+    rtkAvailable = null;
+  }
   if (rtkAvailable !== null) return rtkAvailable;
   const resolved = resolveBinaryPath("rtk", `${LIBEXEC_FALLBACK}/rtk`, `${LIB_FALLBACK}/rtk`, `${LOCAL_FALLBACK}/rtk`, `${LOCAL_LIB}/rtk`, `${LOCAL_BIN}/rtk`);
   if (resolved) { rtkPath = resolved; rtkAvailable = true; }
   else { rtkAvailable = false; }
+  rtkCheckedAt = Date.now();
   return rtkAvailable;
 }
 
@@ -87,10 +117,15 @@ function isSkillContent(message: any): boolean {
 }
 
 function checkTokenless(): boolean {
+  // Refresh stale false cache
+  if (tokenlessAvailable === false && tokenlessCheckedAt && (Date.now() - tokenlessCheckedAt > CACHE_TTL_MS)) {
+    tokenlessAvailable = null;
+  }
   if (tokenlessAvailable !== null) return tokenlessAvailable;
   const resolved = resolveBinaryPath("tokenless", TOKENLESS_FALLBACK, `${LOCAL_FALLBACK}/tokenless`, `${LOCAL_LIB}/tokenless`, `${LOCAL_BIN}/tokenless`);
   if (resolved) { tokenlessPath = resolved; tokenlessAvailable = true; }
   else { tokenlessAvailable = false; }
+  tokenlessCheckedAt = Date.now();
   return tokenlessAvailable;
 }
 
@@ -102,6 +137,7 @@ function tryRtkRewrite(command: string): string | null {
       encoding: "utf-8",
       timeout: 2000,
       stdio: ["ignore", "pipe", "pipe"],
+      env: buildEnv(),
     });
     const rewritten = result.stdout?.trim();
     // Exit code protocol (from rtk rewrite_cmd.rs):
@@ -130,10 +166,11 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
       encoding: "utf-8",
       timeout: 3000,
       input,
+      env: buildEnv(),
     }).trim();
 
-    // Only return the compressed result if it differs from the input
-    if (result === input) {
+    // Only return the compressed result if it is shorter than the input
+    if (result.length >= input.length) {
       return null; // No actual compression occurred
     }
 
@@ -154,6 +191,7 @@ function tryCompressToon(response: any, sessionId?: string, toolCallId?: string)
       encoding: "utf-8",
       timeout: 3000,
       input,
+      env: buildEnv(),
     }).trim();
     if (!toonText || toonText === input) return null;
     if (toonText.length >= beforeChars) return null;
@@ -171,6 +209,7 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
     const result = execFileSync(tokenlessPath, ["env-check", "--tool", toolName, "--json"], {
       encoding: "utf-8",
       timeout: 3000,
+      env: buildEnv(),
     }).trim();
     const parsed = JSON.parse(result);
     const status: string = parsed.status || "UNKNOWN";
@@ -182,6 +221,7 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
     const fixResult = execFileSync(tokenlessPath, ["env-check", "--tool", toolName, "--fix", "--json"], {
       encoding: "utf-8",
       timeout: 10000,
+      env: buildEnv(),
     }).trim();
     const fixParsed = JSON.parse(fixResult);
     const postStatus: string = fixParsed.status || "NOT_READY";
@@ -222,8 +262,7 @@ export default {
       if (event.sessionKey && event.sessionId) {
         sessionMap.set(event.sessionKey, event.sessionId);
       }
-      // Also store in env var for RTK (exec) path
-      process.env.TOKENLESS_SESSION_ID = event.sessionId;
+      envContext.sessionId = event.sessionId;
     },
   );
 
@@ -259,10 +298,10 @@ export default {
         const command = event.params?.command;
         if (typeof command !== "string") return;
 
-        // Set env vars so RTK and response compression can read agent/session/tool IDs
-        process.env.TOKENLESS_AGENT_ID = "openclaw";
-        if (ctx?.sessionId) process.env.TOKENLESS_SESSION_ID = ctx.sessionId;
-        if (ctx?.toolCallId) process.env.TOKENLESS_TOOL_USE_ID = ctx.toolCallId;
+        // Update env context for RTK and response compression
+        envContext.agentId = "openclaw";
+        if (ctx?.sessionId) envContext.sessionId = ctx.sessionId;
+        if (ctx?.toolCallId) envContext.toolCallId = ctx.toolCallId;
 
         const rewritten = tryRtkRewrite(command);
         if (!rewritten) return;
@@ -301,11 +340,11 @@ export default {
         // Resolve sessionId with 4-level priority:
         //   1. ctx.sessionId   — direct from OpenClaw (newer versions)
         //   2. sessionMap[sessionKey] — from session_start mapping
-        //   3. TOKENLESS_SESSION_ID   — env var (set by session_start / before_tool_call)
+        //   3. envContext.sessionId — from session_start / before_tool_call
         //   4. ctx.sessionKey  — always available ("agent:main:main"), best-effort fallback
         const sessionId = ctx?.sessionId
           || (ctx?.sessionKey && sessionMap.get(ctx.sessionKey))
-          || process.env.TOKENLESS_SESSION_ID
+          || envContext.sessionId
           || ctx?.sessionKey;
 
         // Step 1: Response Compression
@@ -341,7 +380,7 @@ export default {
         let totalSavingsPct: number;
 
         if (usedToon) {
-          const before = JSON.stringify(event.message).length;
+          const before = beforeJson.length;
           const after = toonText.length;
           totalSavingsPct = before > 0 ? Math.round(((before - after) / before) * 100) : 0;
           savingsLabel = usedResponseCompression
@@ -360,7 +399,7 @@ export default {
             finalMessage = toonText;
           }
         } else {
-          const before = JSON.stringify(event.message).length;
+          const before = beforeJson.length;
           const after = JSON.stringify(currentMessage).length;
           totalSavingsPct = before > 0 ? Math.round(((before - after) / before) * 100) : 0;
           savingsLabel = "response compressed";
@@ -368,7 +407,7 @@ export default {
         }
 
         if (verbose) {
-          const before = JSON.stringify(event.message).length;
+          const before = beforeJson.length;
           const after = usedToon ? toonText.length : JSON.stringify(finalMessage).length;
           console.log(
             `[tokenless:${savingsLabel}] ${event.toolName}: ${before} -> ${after} chars (${totalSavingsPct}% reduction)`,

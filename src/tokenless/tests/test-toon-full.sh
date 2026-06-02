@@ -55,8 +55,8 @@ fi
 
 # 检查 OpenClaw 配置
 if python3 -c "
-import json
-cfg=json.load(open('$HOME/.openclaw/openclaw.json'))
+import json, os
+cfg=json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
 entries=cfg.get('plugins',{}).get('entries',{})
 assert 'tokenless-openclaw' in entries and entries['tokenless-openclaw'].get('enabled'), 'not enabled'
 assert entries['tokenless-openclaw'].get('config',{}).get('toon_compression_enabled'), 'toon disabled'

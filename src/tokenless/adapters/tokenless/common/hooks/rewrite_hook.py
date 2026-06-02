@@ -75,8 +75,8 @@ def main() -> None:
         if ver and ver < _MIN_RTK_VERSION:
             warn(f"rtk {result.stdout.strip()} is too old (need >= 0.35.0).")
             skip()
-    except Exception:
-        pass  # version check non-fatal
+    except Exception as e:
+        warn(f"rtk version check failed: {e}")
 
     # 3. Check tokenless binary (for stats)
     if not resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
@@ -112,7 +112,8 @@ def main() -> None:
             [rtk_bin, "rewrite", cmd],
             capture_output=True, text=True, timeout=5, env=env,
         )
-    except Exception:
+    except Exception as e:
+        warn(f"rtk rewrite subprocess failed: {e}")
         skip()
 
     # Exit code protocol (from rtk rewrite_cmd.rs):

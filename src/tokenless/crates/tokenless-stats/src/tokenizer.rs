@@ -52,3 +52,54 @@ impl Default for Tokenizer {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens_from_bytes(0), 0);
+        assert_eq!(count_chars(""), 0);
+    }
+
+    #[test]
+    fn ascii_text() {
+        // 11 chars / 4 = 3 tokens
+        assert_eq!(estimate_tokens("hello world"), 3);
+        assert_eq!(count_chars("hello world"), 11);
+    }
+
+    #[test]
+    fn cjk_text() {
+        // 4 CJK chars / 4 = 1 token
+        assert_eq!(estimate_tokens("你好世界"), 1);
+        assert_eq!(count_chars("你好世界"), 4);
+    }
+
+    #[test]
+    fn emoji() {
+        // 2 emoji chars / 4 = 1 token
+        assert_eq!(estimate_tokens("🎉🎊"), 1);
+        assert_eq!(count_chars("🎉🎊"), 2);
+    }
+
+    #[test]
+    fn mixed_text() {
+        // ASCII + CJK mixed
+        let text = "Hello你好";
+        assert_eq!(count_chars(text), 7);
+        assert_eq!(estimate_tokens(text), 2);
+    }
+
+    #[test]
+    fn byte_estimate_vs_char_estimate() {
+        // For ASCII, byte and char estimates should match
+        let text = "abcdef";
+        assert_eq!(
+            estimate_tokens(text),
+            estimate_tokens_from_bytes(text.len())
+        );
+    }
+}
