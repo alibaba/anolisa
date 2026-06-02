@@ -62,9 +62,23 @@ int BPF_PROG(audit_socket_connect, struct socket *sock, struct sockaddr *address
     if (family != AF_INET && family != AF_INET6)
         return ret;   // skip AF_UNIX and friends
 
+    // LSM hook fires before the protocol-level length check, so the sockaddr
+    // fields beyond what addrlen covers may be uninitialized stack residue.
+    // Drop the event rather than read garbage as the destination.
+    if (family == AF_INET  && addrlen < (int)sizeof(struct sockaddr_in))
+        return ret;
+    if (family == AF_INET6 && addrlen < (int)sizeof(struct sockaddr_in6))
+        return ret;
+
     struct lsm_audit_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e)
         return ret;
+
+    // Zero the whole record so any unwritten byte (especially path[]'s tail
+    // after the null terminator) cannot leak previous ringbuf contents — the
+    // ringbuf is shared with sslsniff/filewrite, so leftover bytes can be
+    // real TLS plaintext or file content.
+    __builtin_memset(e, 0, sizeof(*e));
 
     e->source = EVENT_SOURCE_LSM;
     e->kind = LSM_EVENT_CONNECT;
@@ -73,9 +87,6 @@ int BPF_PROG(audit_socket_connect, struct socket *sock, struct sockaddr *address
     e->uid = bpf_get_current_uid_gid();
     e->timestamp_ns = bpf_ktime_get_ns();
     e->family = (u8)family;
-    e->open_flags = 0;
-    e->path[0] = '\0';
-    __builtin_memset(e->daddr, 0, sizeof(e->daddr));
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     if (family == AF_INET) {
@@ -109,8 +120,6 @@ int BPF_PROG(audit_file_open, struct file *file, int ret)
     };
     if (bpf_map_lookup_elem(&file_open_seen, &key))
         return ret;   // already recorded this file for this process
-    u8 one = 1;
-    bpf_map_update_elem(&file_open_seen, &key, &one, BPF_ANY);
 
     // basename from file->f_path.dentry->d_name.name (proven filewrite pattern)
     const unsigned char *name = BPF_CORE_READ(file, f_path.dentry, d_name.name);
@@ -121,23 +130,33 @@ int BPF_PROG(audit_file_open, struct file *file, int ret)
     if (!e)
         return ret;
 
+    // Zero the whole record — see audit_socket_connect for rationale (path[]'s
+    // tail after the null terminator must not leak ringbuf residue).
+    __builtin_memset(e, 0, sizeof(*e));
+
     e->source = EVENT_SOURCE_LSM;
     e->kind = LSM_EVENT_FILE_OPEN;
     e->pid = ns_pid;
     e->tid = (u32)pid_tgid;
     e->uid = bpf_get_current_uid_gid();
     e->timestamp_ns = bpf_ktime_get_ns();
-    e->family = 0;
-    e->dport = 0;
     e->open_flags = BPF_CORE_READ(file, f_flags);
-    __builtin_memset(e->daddr, 0, sizeof(e->daddr));
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     int n = bpf_probe_read_kernel_str(e->path, sizeof(e->path), name);
-    if (n <= 0)
-        e->path[0] = '\0';
+    if (n <= 0) {
+        // Path read failed — discard the slot and DO NOT mark the dedup so a
+        // future open of the same file still gets a chance to be recorded.
+        bpf_ringbuf_discard(e, 0);
+        return ret;
+    }
 
     bpf_ringbuf_submit(e, 0);
+
+    // Mark dedup AFTER successful submit so reserve / read failures above do
+    // not permanently suppress the file for this pid until LRU eviction.
+    u8 one = 1;
+    bpf_map_update_elem(&file_open_seen, &key, &one, BPF_ANY);
     return ret;
 }
 
