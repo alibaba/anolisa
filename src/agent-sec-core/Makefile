@@ -49,6 +49,7 @@ test-python: ## Run Python unit and integration tests
 	cd agent-sec-cli && uv sync
 	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
+	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
 	@echo "🧪 Running skill-ledger e2e tests..."
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
@@ -296,6 +297,7 @@ install-cli-venv: ## User: Create venv, install deps from uv.lock, install wheel
 	@echo "Creating symlink ..."
 	install -d -m 0755 $(BINDIR)
 	ln -sf $(VENV_DIR)/bin/agent-sec-cli $(BINDIR)/agent-sec-cli
+	ln -sf $(VENV_DIR)/bin/agent-sec-daemon $(BINDIR)/agent-sec-daemon
 
 .PHONY: install-skills
 install-skills: ## Install skill files to SKILLDIR
@@ -363,6 +365,7 @@ install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-pl
 .PHONY: uninstall-cli-venv
 uninstall-cli-venv: ## Remove venv and agent-sec-cli symlink
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
+	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon
 	rm -rf $(DESTDIR)$(VENV_DIR)
 
 .PHONY: uninstall-cli-site

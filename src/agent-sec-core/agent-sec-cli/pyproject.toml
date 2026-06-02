@@ -56,6 +56,7 @@ dev = [
 
 [project.scripts]
 agent-sec-cli = "agent_sec_cli.cli:main"
+agent-sec-daemon = "agent_sec_cli.daemon.server:main"
 
 [project.urls]
 Homepage = "https://github.com/alibaba/anolisa"
@@ -80,7 +81,12 @@ include = [
 module-name = "agent_sec_cli._native"
 
 [tool.pytest.ini_options]
-testpaths = ["../tests/unit-test", "../tests/integration-test", "../tests/e2e/cli"]
+testpaths = [
+    "../tests/unit-test",
+    "../tests/integration-test",
+    "../tests/e2e/cli",
+    "../tests/e2e/daemon",
+]
 addopts = "-v"
 
 [tool.coverage.run]
@@ -153,6 +159,7 @@ extend-exclude = "/backend-skill/templates/"
 [tool.isort]
 profile = "black"
 line_length = 100
+known_first_party = ["agent_sec_cli"]
 extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
 
 [[tool.uv.index]]
