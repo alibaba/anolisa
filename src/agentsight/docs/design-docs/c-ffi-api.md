@@ -70,6 +70,11 @@ typedef struct {
     /* 工具定义（JSON 数组字符串） */
     const char* tools;                /* LLMRequest.tools 序列化 JSON 数组; 无工具时为 "[]" */
     uint32_t    tools_len;
+
+    /* 增量输入消息（JSON 数组字符串）：与 SQLite genai_events.input_messages 同一套算法，
+       去掉 system 消息后，保留从最后一个 user 消息开始（含）到末尾的部分 */
+    const char* input_message_delta;
+    uint32_t    input_message_delta_len;
 } AgentsightLLMData;
 ```
 

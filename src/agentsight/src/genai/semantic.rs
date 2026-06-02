@@ -132,6 +132,48 @@ pub struct InputMessage {
     pub name: Option<String>,
 }
 
+/// Compute the incremental ("latest round") input messages from a full request
+/// history: drop all `system` messages, then keep everything from the last
+/// *real* user turn onward (inclusive). Falls back to all non-system messages
+/// when there is no real user message.
+///
+/// A "real user turn" is a `user` message that carries actual text. This is
+/// important for Anthropic-style traffic, which encodes tool results as
+/// `role = "user"` messages whose only content is a `tool_result` (no text).
+/// Anchoring on the last *any* user message would land on such a tool-result
+/// message and drop the user's actual question (the first segment of the
+/// round). Mirrors the skipping logic in `GenAIBuilder::extract_last_user_raw`.
+///
+/// This is the single source of truth for the per-round increment that is
+/// stored in SQLite (`genai_events.input_messages`) and exposed over FFI
+/// (`AgentsightLLMData.input_message_delta`).
+pub fn latest_round_input_messages(messages: &[InputMessage]) -> Vec<&InputMessage> {
+    // A user message that carries actual text (not just a tool_result).
+    fn is_text_user(m: &InputMessage) -> bool {
+        m.role == "user"
+            && m.parts.iter().any(|p| {
+                matches!(p, MessagePart::Text { content } if !content.is_empty())
+            })
+    }
+
+    let non_system: Vec<&InputMessage> =
+        messages.iter().filter(|m| m.role != "system").collect();
+
+    let last = non_system.iter().rposition(|m| is_text_user(m));
+    let Some(mut idx) = last else {
+        return non_system;
+    };
+    // Walk back across a contiguous run of text-bearing user messages so we
+    // anchor on the FIRST message of the user's turn. Agents such as OpenClaw
+    // emit the real question followed by a separate "runtime context" user
+    // message; both are text-bearing, so anchoring on the last one would drop
+    // the actual question.
+    while idx > 0 && is_text_user(non_system[idx - 1]) {
+        idx -= 1;
+    }
+    non_system[idx..].to_vec()
+}
+
 /// Output message (OTel OutputMessage)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputMessage {

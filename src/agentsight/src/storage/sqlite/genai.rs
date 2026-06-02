@@ -493,17 +493,9 @@ impl GenAISqliteStore {
                     }
                 };
                 let input_messages: Option<String> = {
-                    let non_sys: Vec<_> = call
-                        .request
-                        .messages
-                        .iter()
-                        .filter(|m| m.role != "system")
-                        .collect();
-                    let latest = if let Some(idx) = non_sys.iter().rposition(|m| m.role == "user") {
-                        &non_sys[idx..]
-                    } else {
-                        &non_sys[..]
-                    };
+                    let latest = crate::genai::semantic::latest_round_input_messages(
+                        &call.request.messages,
+                    );
                     if latest.is_empty() {
                         None
                     } else {
@@ -1702,18 +1694,9 @@ impl GenAISqliteStore {
 
                 // Extract input messages (incremental: latest round only)
                 let input_messages: Option<String> = {
-                    let non_system: Vec<_> = call
-                        .request
-                        .messages
-                        .iter()
-                        .filter(|m| m.role != "system")
-                        .collect();
-                    let latest =
-                        if let Some(idx) = non_system.iter().rposition(|m| m.role == "user") {
-                            &non_system[idx..]
-                        } else {
-                            &non_system[..]
-                        };
+                    let latest = crate::genai::semantic::latest_round_input_messages(
+                        &call.request.messages,
+                    );
                     if latest.is_empty() {
                         None
                     } else {

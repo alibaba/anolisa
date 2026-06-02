@@ -85,6 +85,10 @@ static void on_llm_event(const AgentsightLLMData *data, void *user_data) {
     if (data->tools && data->tools_len > 0) {
         printf("  tools (%u bytes): %.256s\n", data->tools_len, data->tools);
     }
+    if (data->input_message_delta && data->input_message_delta_len > 0) {
+        printf("  input_message_delta (%u bytes): %.256s\n",
+               data->input_message_delta_len, data->input_message_delta);
+    }
 }
 
 int main(void) {

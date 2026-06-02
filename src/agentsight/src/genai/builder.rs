@@ -94,11 +94,9 @@ impl GenAIBuilder {
             let (input_messages_json, system_instructions_json) = {
                 let sys: Vec<_> = llm_call.request.messages.iter()
                     .filter(|m| m.role == "system").collect();
-                let non_sys: Vec<_> = llm_call.request.messages.iter()
-                    .filter(|m| m.role != "system").collect();
-                let latest = if let Some(idx) = non_sys.iter().rposition(|m| m.role == "user") {
-                    &non_sys[idx..]
-                } else { &non_sys[..] };
+                let latest = crate::genai::semantic::latest_round_input_messages(
+                    &llm_call.request.messages,
+                );
                 (
                     if latest.is_empty() { None } else { serde_json::to_string(&latest).ok() },
                     if sys.is_empty() { None } else { serde_json::to_string(&sys).ok() },

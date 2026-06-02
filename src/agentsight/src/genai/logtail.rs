@@ -238,14 +238,8 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&
                 // 仅保留 token 数量等元数据，不上传用户输入。
                 // 从后往前找最后一条 user message，取它及之后的所有非 system 消息
                 if trace_enabled {
-                    let non_system: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
-                        .filter(|msg| msg.role != "system")
-                        .collect();
-                    let latest_msgs: &[&super::semantic::InputMessage] = if let Some(last_user_idx) = non_system.iter().rposition(|m| m.role == "user") {
-                        &non_system[last_user_idx..]
-                    } else {
-                        &non_system[..]
-                    };
+                    let latest_msgs =
+                        super::semantic::latest_round_input_messages(&call.request.messages);
                     if !latest_msgs.is_empty() {
                         if let Ok(json) = serde_json::to_string(&latest_msgs) {
                             m.insert("gen_ai.input.messages".to_string(),
