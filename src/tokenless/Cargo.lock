@@ -653,6 +653,7 @@ version = "0.4.1"
 dependencies = [
  "chrono",
  "dirs",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

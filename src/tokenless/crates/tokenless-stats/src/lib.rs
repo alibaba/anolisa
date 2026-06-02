@@ -5,6 +5,7 @@
 //! schema compression, response compression, and command rewriting.
 
 pub mod config;
+pub mod home;
 pub mod query;
 pub mod record;
 pub mod recorder;
@@ -19,6 +20,8 @@ pub use query::{format_list, format_show, format_summary};
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 
 pub use config::TokenlessConfig;
+
+pub use home::get_home_dir;
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

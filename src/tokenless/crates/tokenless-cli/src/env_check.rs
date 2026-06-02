@@ -22,6 +22,14 @@ fn current_uid() -> u32 {
 }
 
 #[cfg(unix)]
+/// Check whether a file path is trusted for execution or reading.
+///
+/// Verifies: system path prefix → symlink target resolution → parent directory
+/// owner/world-writable → file owner/world-writable.
+///
+/// KEEP IN SYNC with the shell equivalent in
+/// `adapters/tokenless/common/hooks/tool_ready_hook.sh` (`is_trusted_file`).
+/// Changes to trust criteria must be applied to both implementations.
 fn is_trusted_path(path: &std::path::Path) -> bool {
     // System paths are always trusted
     if path.starts_with("/usr/share")
@@ -545,22 +553,20 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
 }
 
 /// Expand ~/... in paths to HOME directory.
-/// After expansion, verifies the result is still rooted under HOME or /usr;
-/// paths that escape via traversal (~/../../../etc/passwd) are rejected and
-/// the original path is returned unchanged.
+/// Paths that escape via traversal (`~/../../etc/passwd`) are rejected and
+/// the original path is returned unchanged. A component-based check is used
+/// instead of canonicalize so the expansion still works for config paths
+/// that have not been created yet.
 fn expand_path(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
-let home = crate::get_home_dir();
-        let expanded = path.replacen("~", &home, 1);
-        // Canonicalize to resolve any .. traversal, then verify prefix.
-        if let Ok(canon) = std::path::Path::new(&expanded).canonicalize()
-            && (canon.starts_with(&home) || canon.starts_with("/usr"))
+        if std::path::Path::new(path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return canon.display().to_string();
+            return path.to_string();
         }
-        // Fall through: traversal detected or canonicalize failed — return
-        // the original path unchanged (safer than a potentially-escaped result).
-        path.to_string()
+        let home = crate::get_home_dir();
+        path.replacen("~", &home, 1)
     } else {
         path.to_string()
     }
@@ -575,7 +581,7 @@ fn check_config_file(path: &str) -> bool {
 /// Check a permission type.
 fn check_permission(perm: &str) -> bool {
     match perm {
-        "file_read" => fs::read_to_string("/etc/hostname").is_ok(),
+        "file_read" => fs::read_to_string("/proc/self/status").is_ok(),
         "file_write" => {
             let test_path =
                 std::env::temp_dir().join(format!(".tokenless-ready-test-{}", std::process::id()));
@@ -1682,6 +1688,23 @@ mod tests {
         assert!(
             !is_trusted_path(&nonexistent),
             "non-existent file must be rejected"
+        );
+    }
+
+    #[test]
+    fn expand_path_rejects_parent_dir_traversal() {
+        // ParentDir components in ~/... paths are rejected at the syntax
+        // layer so a misconfigured config_files entry like "~/../etc/passwd"
+        // cannot escape the home directory after expansion.
+        let escaped = expand_path("~/../etc/passwd");
+        assert_eq!(
+            escaped, "~/../etc/passwd",
+            "ParentDir-bearing tilde path must be returned unchanged"
+        );
+        let escaped2 = expand_path("~/sub/../../../etc/passwd");
+        assert_eq!(
+            escaped2, "~/sub/../../../etc/passwd",
+            "Deep ParentDir traversal must be returned unchanged"
         );
     }
 

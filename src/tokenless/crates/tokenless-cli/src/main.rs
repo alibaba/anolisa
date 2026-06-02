@@ -171,51 +171,11 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
 
 /// Resolve the current user's home directory.
 ///
-/// Prefers the account-database entry from `getpwuid_r` so an attacker
-/// cannot redirect the path by mutating `$HOME`. Falls back to
-/// `dirs::home_dir()` (which itself reads `$HOME`) only when the syscall
-/// has no result, e.g. minimal containers without an `/etc/passwd` entry.
-/// Returns an empty string on failure — the previous `.` CWD fallback was
-/// dropped because it caused state files to land wherever the binary was
-/// invoked from, which is both unexpected and unsafe.
+/// Re-exports `tokenless_stats::get_home_dir` so both the CLI binary and
+/// shared stats/config code agree on a single passwd-rooted source of
+/// truth (see `tokenless_stats::home`).
 pub fn get_home_dir() -> String {
-    #[cfg(unix)]
-    if let Some(home) = home_dir_from_passwd() {
-        return home;
-    }
-    dirs::home_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-}
-
-#[cfg(unix)]
-fn home_dir_from_passwd() -> Option<String> {
-    use std::ffi::CStr;
-    // SAFETY: getuid is infallible and always safe. getpwuid_r is the
-    // thread-safe variant: we hand it a stack-allocated passwd struct and
-    // a 4 KiB heap buffer, and it never writes past the buffer length we
-    // pass. result is left null when no entry is found, which we detect.
-    let uid = unsafe { libc::getuid() };
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0u8; 4096];
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    let rc = unsafe {
-        libc::getpwuid_r(
-            uid,
-            &mut pwd,
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            &mut result,
-        )
-    };
-    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
-        return None;
-    }
-    // SAFETY: pw_dir points into our buf and is NUL-terminated by the libc
-    // contract. The CStr borrow is short-lived; we copy the bytes out before
-    // pwd/buf are dropped.
-    let home = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_str().ok()?;
-    (!home.is_empty()).then(|| home.to_string())
+    tokenless_stats::get_home_dir()
 }
 
 /// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
@@ -305,26 +265,23 @@ fn run() -> Result<(), (String, i32)> {
 
             let compressor = SchemaCompressor::new();
 
-            let result_json = if batch {
+            let (result_json, after_compact) = if batch {
                 let arr = value
                     .as_array()
                     .ok_or_else(|| ("Expected a JSON array for --batch mode".to_string(), 1))?;
                 let results: Vec<serde_json::Value> =
                     arr.iter().map(|item| compressor.compress(item)).collect();
-                serde_json::to_string_pretty(&results)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?
+                let compact = serde_json::to_string(&results).unwrap_or_default();
+                let pretty = serde_json::to_string_pretty(&results)
+                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                (pretty, compact)
             } else {
                 let result = compressor.compress(&value);
-                serde_json::to_string_pretty(&result)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?
+                let compact = serde_json::to_string(&result).unwrap_or_default();
+                let pretty = serde_json::to_string_pretty(&result)
+                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                (pretty, compact)
             };
-
-            // Compact JSON for accurate size comparison (pretty-print inflates size)
-            let after_compact = serde_json::to_string(
-                &serde_json::from_str::<serde_json::Value>(&result_json)
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
             let before_tokens = estimate_tokens_from_bytes(input.len());
@@ -357,14 +314,10 @@ fn run() -> Result<(), (String, i32)> {
                 .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
             let compressor = ResponseCompressor::new();
-            let result_json = serde_json::to_string_pretty(&compressor.compress(&value))
+            let result = compressor.compress(&value);
+            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
+            let result_json = serde_json::to_string_pretty(&result)
                 .map_err(|e| (format!("Serialization error: {}", e), 2))?;
-
-            let after_compact = serde_json::to_string(
-                &serde_json::from_str::<serde_json::Value>(&result_json)
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
             let before_tokens = estimate_tokens_from_bytes(input.len());

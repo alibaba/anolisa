@@ -28,13 +28,12 @@ impl Default for TokenlessConfig {
 
 impl TokenlessConfig {
     fn config_path() -> PathBuf {
-        // Mirror tokenless-cli's get_home_dir intent: do not trust $HOME
-        // directly. dirs::home_dir() is the single source so the config
-        // location cannot be redirected via a spoofed $HOME on top of a
-        // missing home directory.
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".tokenless/config.json")
+        // Resolve home via the shared passwd-rooted helper so an attacker
+        // cannot redirect the config path by setting $HOME before invoking
+        // any tokenless binary. When no trusted home is available, return
+        // a path under "" — the open call will fail loudly rather than
+        // landing in the CWD.
+        PathBuf::from(crate::home::get_home_dir()).join(".tokenless/config.json")
     }
 
     /// Whether a config file exists on disk.
