@@ -7,8 +7,11 @@ from agent_sec_cli.correlation_context import (
     MAX_CORRELATION_ID_LENGTH,
     TRUNCATED_CORRELATION_ID_SUFFIX,
     TraceContext,
+    clear_invocation_context_for_tests,
     clear_process_trace_context,
     get_current_trace_context,
+    get_invocation_id,
+    init_invocation_context,
     init_process_trace_context,
     parse_trace_context,
     reset_current_trace_context,
@@ -156,3 +159,73 @@ def test_contextvar_none_override_can_clear_process_context_temporarily():
     finally:
         reset_current_trace_context(token)
         clear_process_trace_context()
+
+
+def test_invocation_context_uses_env_value(monkeypatch):
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "caller-invocation")
+
+    try:
+        init_invocation_context()
+
+        assert get_invocation_id() == "caller-invocation"
+    finally:
+        clear_invocation_context_for_tests()
+
+
+def test_invocation_context_strips_env_whitespace(monkeypatch):
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "  caller-invocation  ")
+
+    try:
+        init_invocation_context()
+
+        assert get_invocation_id() == "caller-invocation"
+    finally:
+        clear_invocation_context_for_tests()
+
+
+def test_invocation_context_falls_back_when_env_is_whitespace_only(monkeypatch):
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "   ")
+
+    try:
+        init_invocation_context()
+
+        invocation_id = get_invocation_id()
+        # Whitespace-only env is treated as missing — UUID fallback kicks in.
+        assert invocation_id and invocation_id.strip() == invocation_id
+        assert len(invocation_id) == 36  # uuid4 canonical length
+    finally:
+        clear_invocation_context_for_tests()
+
+
+def test_invocation_context_truncates_oversized_env_value(monkeypatch):
+    clear_invocation_context_for_tests()
+    oversized = "x" * (MAX_CORRELATION_ID_LENGTH + 10)
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", oversized)
+
+    try:
+        init_invocation_context()
+
+        invocation_id = get_invocation_id()
+        assert len(invocation_id) == MAX_CORRELATION_ID_LENGTH
+        assert invocation_id.endswith(TRUNCATED_CORRELATION_ID_SUFFIX)
+    finally:
+        clear_invocation_context_for_tests()
+
+
+def test_generated_invocation_id_is_stable_and_visible_from_worker_threads():
+    clear_invocation_context_for_tests()
+
+    try:
+        init_invocation_context()
+        invocation_id = get_invocation_id()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            worker_invocation_id = executor.submit(get_invocation_id).result()
+    finally:
+        clear_invocation_context_for_tests()
+
+    assert invocation_id
+    assert worker_invocation_id == invocation_id

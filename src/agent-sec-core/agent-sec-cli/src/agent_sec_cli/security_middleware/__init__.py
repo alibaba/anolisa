@@ -7,13 +7,17 @@ Public API
 - ``RequestContext``             — per-call context (usually internal)
 """
 
+import logging
 import sys
+import time
 from pathlib import PurePath
 from typing import Any
 
 from agent_sec_cli.security_middleware import lifecycle, router
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Caller auto-detection
@@ -65,20 +69,56 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
 
     Raises whatever exception the backend raises (after logging it).
     """
-    # TODO: inherit trace_id and session_id from parent context, if any
     ctx = RequestContext(action=action, caller=_detect_caller())
+    started_at = time.perf_counter()
 
     backend = router.get_backend(action)
 
+    logger.debug(
+        "action started",
+        extra={
+            "trace_id": ctx.trace_id,
+            "data": {"action": action, "caller": ctx.caller},
+        },
+    )
     lifecycle.pre_action(ctx, kwargs)
 
     try:
         result = backend.execute(ctx, **kwargs)
     except Exception as exc:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.error(
+            "backend raised an exception",
+            exc_info=True,
+            extra={
+                "trace_id": ctx.trace_id,
+                "data": {
+                    "action": action,
+                    "caller": ctx.caller,
+                    "duration_ms": duration_ms,
+                },
+            },
+        )
         lifecycle.on_error(ctx, exc, kwargs, backend)
         raise
 
     lifecycle.post_action(ctx, result, kwargs, backend)
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    log_level = logging.INFO if result.exit_code == 0 else logging.WARNING
+    logger.log(
+        log_level,
+        "action completed with exit code %d",
+        result.exit_code,
+        extra={
+            "trace_id": ctx.trace_id,
+            "data": {
+                "action": action,
+                "caller": ctx.caller,
+                "duration_ms": duration_ms,
+                "exit_code": result.exit_code,
+            },
+        },
+    )
     return result
 
 

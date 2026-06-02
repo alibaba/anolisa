@@ -4,6 +4,7 @@ The backend preserves the wrapper's legacy defaults and structured event data
 while allowing callers to forward raw seharden arguments directly.
 """
 
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ _MISSING_LOONGSHIELD_ERROR = (
     "If it is already installed, please make sure the `loongshield` binary is "
     "available in PATH."
 )
+logger = logging.getLogger(__name__)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _RULE_STATUS_RE = re.compile(
@@ -74,6 +76,18 @@ class HardeningBackend(BaseBackend):
         )
 
         if not loongshield_path:
+            logger.warning(
+                "loongshield command not found",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "data": {
+                        "action": ctx.action,
+                        "caller": ctx.caller,
+                        "exit_code": 127,
+                        "error_type": "FileNotFoundError",
+                    },
+                },
+            )
             return ActionResult(
                 success=False,
                 exit_code=127,
@@ -90,9 +104,22 @@ class HardeningBackend(BaseBackend):
                 text=True,
             )
         except OSError as exc:
+            exit_code = getattr(exc, "errno", 1) or 1
+            logger.error(
+                "failed to execute loongshield seharden",
+                exc_info=True,
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "data": {
+                        "action": ctx.action,
+                        "caller": ctx.caller,
+                        "exit_code": exit_code,
+                    },
+                },
+            )
             return ActionResult(
                 success=False,
-                exit_code=getattr(exc, "errno", 1) or 1,
+                exit_code=exit_code,
                 error=f"Failed to execute `loongshield seharden`: {exc}",
                 data=data,
             )

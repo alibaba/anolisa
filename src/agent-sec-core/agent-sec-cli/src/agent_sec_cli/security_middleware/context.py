@@ -4,7 +4,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from agent_sec_cli.correlation_context import get_current_trace_context
+from agent_sec_cli.correlation_context import (
+    get_current_trace_context,
+    get_invocation_id,
+)
 
 
 def _new_uuid() -> str:
@@ -29,6 +32,7 @@ class RequestContext:
         call_id:     Optional LLM call correlation ID.
         tool_call_id: Optional tool call correlation ID.
         timestamp:   ISO-8601 timestamp of request creation.  Auto-filled.
+        invocation_id: Process-wide CLI invocation ID. Auto-filled.
     """
 
     action: str
@@ -39,8 +43,11 @@ class RequestContext:
     call_id: str | None = None
     tool_call_id: str | None = None
     timestamp: str = ""
+    invocation_id: str = ""
 
     def __post_init__(self) -> None:
+        if not self.invocation_id:
+            self.invocation_id = get_invocation_id()
         trace_ctx = get_current_trace_context()
         if trace_ctx is not None:
             if not self.trace_id and trace_ctx.trace_id:

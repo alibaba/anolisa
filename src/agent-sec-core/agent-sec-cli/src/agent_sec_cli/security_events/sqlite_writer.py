@@ -4,11 +4,13 @@ Runs alongside the existing JSONL writer (dual-write pattern).
 All exceptions are swallowed — never raises to callers.
 """
 
+import logging
 from pathlib import Path
 
 from agent_sec_cli.security_events.config import get_db_path
 from agent_sec_cli.security_events.orm_store import (
     SqliteStore,
+    is_sqlite_busy_error,
     is_sqlite_corruption_error,
     is_sqlite_schema_error,
 )
@@ -20,6 +22,8 @@ from agent_sec_cli.security_events.sqlite_maintenance import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 
 class SqliteEventWriter:
@@ -54,6 +58,9 @@ class SqliteEventWriter:
         try:
             self._repository.insert(event)
         except DatabaseError as exc:
+            if is_sqlite_busy_error(exc):
+                self._log_busy_drop(event, exc, "insert")
+                return
             if not is_sqlite_corruption_error(exc):
                 if is_sqlite_schema_error(exc):
                     self._store.request_schema_repair()
@@ -63,10 +70,37 @@ class SqliteEventWriter:
                 return
             try:
                 self._repository.insert(event)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as retry_exc:  # noqa: BLE001
+                if is_sqlite_busy_error(retry_exc):
+                    self._log_busy_drop(event, retry_exc, "corruption_retry")
         except (SQLAlchemyError, OSError):
             self._store.dispose()
+
+    def _log_busy_drop(
+        self,
+        event: SecurityEvent,
+        exc: Exception,
+        phase: str,
+    ) -> None:
+        """Emit one best-effort diagnostic record for a dropped SQLite event."""
+        original = getattr(exc, "orig", exc)
+        try:
+            logger.warning(
+                "sqlite busy dropped security event",
+                extra={
+                    "trace_id": event.trace_id,
+                    "data": {
+                        "action": "security_event_sqlite_write",
+                        "category": event.category,
+                        "error_type": type(original).__name__,
+                        "event_id": event.event_id,
+                        "event_type": event.event_type,
+                        "phase": phase,
+                    },
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
         """Best-effort gated prune/WAL checkpoint and dispose pooled connections."""

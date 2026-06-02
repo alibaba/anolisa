@@ -4,7 +4,6 @@ import fcntl
 import json
 import re
 import shutil
-import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -99,11 +98,7 @@ class JsonlEventWriter:
         # Rotate current file to timestamp-named backup
         try:
             shutil.move(self._path, backup_path)
-        except OSError as exc:
-            print(
-                f"{self._error_prefix} rotation failed: {exc}",
-                file=sys.stderr,
-            )
+        except OSError:
             return
 
         # Clean up old backups exceeding backup_count
@@ -189,11 +184,8 @@ class JsonlEventWriter:
                     oldest_path.unlink()
                 except OSError:
                     pass
-        except OSError as exc:
-            print(
-                f"{self._error_prefix} cleanup failed: {exc}",
-                file=sys.stderr,
-            )
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -212,11 +204,8 @@ class JsonlEventWriter:
         with self._lock:
             try:
                 self._append_record(record)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"{self._error_prefix} write error: {exc}",
-                    file=sys.stderr,
-                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def write_or_raise(self, record: Mapping[str, Any]) -> None:
         """Serialize *record* and append it as a single JSONL line.

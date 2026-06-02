@@ -1,6 +1,7 @@
 """Typed repositories backed by the shared SQLite store."""
 
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from agent_sec_cli.security_events.schema import SecurityEvent
 from sqlalchemy import Select, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 _CORRELATION_CANDIDATE_LIMIT = 1000
 
@@ -47,7 +50,7 @@ class SecurityEventRepository:
                 file=sys.stderr,
             )
             return False
-        session_factory = self._store.session_factory()
+        session_factory = self._store.session_factory(raise_on_error=True)
         if session_factory is None:
             return False
 
@@ -176,8 +179,15 @@ class SecurityEventRepository:
         try:
             with session_factory() as session:
                 records = list(session.scalars(stmt).all())
-        except SQLAlchemyError:
-            # TODO(logging): warn with error type, session_id, and run_id once logging is wired.
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "correlation candidate query failed",
+                extra={
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "data": {"error_type": type(exc).__name__},
+                },
+            )
             self._store.dispose()
             return []
 

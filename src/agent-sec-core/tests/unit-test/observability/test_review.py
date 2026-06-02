@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 
 from agent_sec_cli.observability.correlation import CorrelatedSecurityEvent
 from agent_sec_cli.observability.models import ObservabilityEventRecord
@@ -241,6 +242,23 @@ def test_event_detail_omits_security_events_section_when_correlation_fails() -> 
 
     assert "before_agent_run" in text
     assert "Security Events" not in text
+
+
+def test_event_detail_logs_warning_when_correlation_fails(caplog) -> None:
+    record = _record()
+    service = _FakeCorrelationService(error=RuntimeError("database unavailable"))
+
+    with caplog.at_level(logging.WARNING, logger="agent_sec_cli.observability.review"):
+        _render_detail_text(record, service)
+
+    matching = [
+        r for r in caplog.records if r.message == "security correlation lookup failed"
+    ]
+    assert len(matching) == 1
+    rec = matching[0]
+    assert rec.session_id == record.session_id
+    assert rec.run_id == record.run_id
+    assert rec.data == {"error_type": "RuntimeError"}
 
 
 def test_review_app_drills_from_session_to_event_detail() -> None:

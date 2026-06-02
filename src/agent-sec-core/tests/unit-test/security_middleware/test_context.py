@@ -6,7 +6,9 @@ from datetime import datetime
 
 from agent_sec_cli.correlation_context import (
     TraceContext,
+    clear_invocation_context_for_tests,
     clear_process_trace_context,
+    init_invocation_context,
     init_process_trace_context,
 )
 from agent_sec_cli.security_middleware.context import RequestContext
@@ -15,9 +17,11 @@ from agent_sec_cli.security_middleware.context import RequestContext
 class TestRequestContext(unittest.TestCase):
     def setUp(self):
         clear_process_trace_context()
+        clear_invocation_context_for_tests()
 
     def tearDown(self):
         clear_process_trace_context()
+        clear_invocation_context_for_tests()
 
     def test_auto_trace_id_is_valid_uuid(self):
         ctx = RequestContext(action="test")
@@ -95,6 +99,20 @@ class TestRequestContext(unittest.TestCase):
         self.assertEqual(ctx.run_id, "explicit-run")
         self.assertEqual(ctx.call_id, "explicit-call")
         self.assertEqual(ctx.tool_call_id, "explicit-tool")
+
+    def test_invocation_id_comes_from_process_context(self):
+        init_invocation_context()
+
+        ctx = RequestContext(action="code_scan")
+
+        self.assertTrue(ctx.invocation_id)
+
+    def test_explicit_invocation_id_is_preserved(self):
+        init_invocation_context()
+
+        ctx = RequestContext(action="code_scan", invocation_id="explicit-invocation")
+
+        self.assertEqual(ctx.invocation_id, "explicit-invocation")
 
 
 if __name__ == "__main__":

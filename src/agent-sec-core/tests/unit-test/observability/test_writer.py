@@ -185,6 +185,21 @@ def test_observability_sqlite_writer_only_writes_independent_sqlite_index(
     )
 
 
+def test_observability_sqlite_write_or_raise_surfaces_skipped_insert(
+    tmp_path: Path,
+) -> None:
+    class SkippingRepository:
+        def insert(self, record: object) -> bool:
+            return False
+
+    record = validate_observability_record(_payload())
+    writer = ObservabilitySqliteWriter(path=tmp_path / "observability.db")
+    writer._repository = SkippingRepository()
+
+    with pytest.raises(OSError, match="observability SQLite write was skipped"):
+        writer.write_or_raise(record)
+
+
 def test_observability_sqlite_columns_are_core_index_and_correlation_only(
     tmp_path: Path,
 ) -> None:
