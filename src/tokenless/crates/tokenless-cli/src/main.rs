@@ -126,16 +126,35 @@ enum StatsCommands {
     Disable,
 }
 
+/// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
+const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 fn read_input(file: &Option<String>) -> Result<String, String> {
     match file {
         Some(path) => {
-            fs::read_to_string(path).map_err(|e| format!("Failed to read file '{}': {}", path, e))
+            let content = fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            if content.len() > MAX_INPUT_BYTES {
+                return Err(format!(
+                    "Input exceeds {} MiB limit ({} bytes)",
+                    MAX_INPUT_BYTES / (1024 * 1024),
+                    content.len()
+                ));
+            }
+            Ok(content)
         }
         None => {
             let mut buf = String::new();
             io::stdin()
                 .read_to_string(&mut buf)
                 .map_err(|e| format!("Failed to read stdin: {}", e))?;
+            if buf.len() > MAX_INPUT_BYTES {
+                return Err(format!(
+                    "Input exceeds {} MiB limit ({} bytes)",
+                    MAX_INPUT_BYTES / (1024 * 1024),
+                    buf.len()
+                ));
+            }
             Ok(buf)
         }
     }
@@ -190,9 +209,48 @@ fn home_dir_from_passwd() -> Option<String> {
     (!home.is_empty()).then(|| home.to_string())
 }
 
+/// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
+/// is validated to ensure it resides under the user's home directory;
+/// otherwise the env var is ignored and the default path is used. This
+/// prevents an attacker from redirecting the database to a system-critical
+/// location (e.g. `/etc/evil.db`).
 fn get_db_path() -> String {
-    std::env::var("TOKENLESS_STATS_DB")
-        .unwrap_or_else(|_| format!("{}/.tokenless/stats.db", get_home_dir()))
+    let home = get_home_dir();
+    if let Ok(env_path) = std::env::var("TOKENLESS_STATS_DB")
+        && !env_path.is_empty()
+    {
+        // Reject the env var when we have no trusted home anchor:
+        // Path::starts_with("") returns true for every path, which would
+        // let an attacker point the database at any system location.
+        if home.is_empty() {
+            eprintln!(
+                "[tokenless] ignoring TOKENLESS_STATS_DB: no trusted home directory available"
+            );
+            return format!("{}/.tokenless/stats.db", home);
+        }
+        let p = std::path::Path::new(&env_path);
+        // Accept only paths under the user's real home directory.
+        let resolved = p.canonicalize().or_else(|_| {
+            // If the file doesn't exist yet, check the parent directory.
+            p.parent()
+                .map(|parent| {
+                    parent
+                        .canonicalize()
+                        .unwrap_or_else(|_| parent.to_path_buf())
+                })
+                .ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        if let Ok(canon) = resolved
+            && canon.starts_with(&home)
+        {
+            return env_path;
+        }
+        eprintln!(
+            "[tokenless] ignoring TOKENLESS_STATS_DB: path '{}' is outside home directory '{}'",
+            env_path, home
+        );
+    }
+    format!("{}/.tokenless/stats.db", home)
 }
 
 fn ensure_db_dir() -> Result<(), (String, i32)> {
