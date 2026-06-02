@@ -28,9 +28,12 @@ impl Default for TokenlessConfig {
 
 impl TokenlessConfig {
     fn config_path() -> PathBuf {
+        // Mirror tokenless-cli's get_home_dir intent: do not trust $HOME
+        // directly. dirs::home_dir() is the single source so the config
+        // location cannot be redirected via a spoofed $HOME on top of a
+        // missing home directory.
         dirs::home_dir()
-            .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .unwrap_or_default()
             .join(".tokenless/config.json")
     }
 
