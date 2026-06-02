@@ -47,8 +47,16 @@ impl AuditAnalyzer {
         http_record: &HttpRecord,
         token_record: Option<&TokenRecord>,
     ) -> Option<AuditRecord> {
-        // Only create llm_call for SSE responses
-        if !http_record.is_sse {
+        // Create llm_call audit records for SSE responses AND non-streaming
+        // LLM API calls (identified by path). Without this, non-streaming
+        // completions (stream:false) are invisible in audit --type llm.
+        let is_llm_path = http_record.path.contains("/chat/completions")
+            || http_record.path.contains("/v1/messages")
+            || http_record.path.contains("/v1/completions")
+            || http_record
+                .path
+                .contains("/api/v1/copilot/generate_copilot");
+        if !http_record.is_sse && !is_llm_path {
             return None;
         }
 
@@ -88,7 +96,7 @@ impl AuditAnalyzer {
                 output_tokens,
                 cache_creation_tokens,
                 cache_read_tokens,
-                is_sse: true,
+                is_sse: http_record.is_sse,
             },
             session_id: None,
         })
@@ -181,6 +189,7 @@ fn detect_model_from_request(pair: &HttpPair) -> Option<String> {
 mod tests {
     use super::*;
     use crate::aggregator::AggregatedProcess;
+    use crate::analyzer::token::TokenRecord;
 
     #[test]
     fn test_extract_process_action_propagates_session_id() {
@@ -207,5 +216,72 @@ mod tests {
         let record = analyzer.extract_process_action(&proc);
 
         assert_eq!(record.session_id, None);
+    }
+
+    fn make_http_record(path: &str, is_sse: bool, response_body: Option<&str>) -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 0,
+            pid: 1,
+            comm: "test".into(),
+            method: "POST".into(),
+            path: path.into(),
+            status_code: 200,
+            request_headers: "{}".into(),
+            request_body: Some(r#"{"model":"test-model"}"#.into()),
+            response_headers: "{}".into(),
+            response_body: response_body.map(|s| s.to_string()),
+            duration_ns: 1000,
+            is_sse,
+            sse_event_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_nonsse_llm_path_produces_audit() {
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/v1/chat/completions", false, None);
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 100, 20);
+        let result = analyzer.analyze_http(&record, Some(&token));
+        assert!(
+            result.is_some(),
+            "non-SSE LLM path must produce audit record"
+        );
+        let audit = result.unwrap();
+        if let AuditExtra::LlmCall {
+            is_sse,
+            input_tokens,
+            output_tokens,
+            ..
+        } = &audit.extra
+        {
+            assert!(!is_sse, "non-SSE call must have is_sse=false");
+            assert_eq!(*input_tokens, 100);
+            assert_eq!(*output_tokens, 20);
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_nonsse_nonllm_path_no_audit() {
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/api/health", false, None);
+        let result = analyzer.analyze_http(&record, None);
+        assert!(
+            result.is_none(),
+            "non-LLM path must NOT produce audit record"
+        );
+    }
+
+    #[test]
+    fn test_sse_path_produces_audit_with_sse_true() {
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/v1/chat/completions", true, None);
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 50, 10);
+        let result = analyzer.analyze_http(&record, Some(&token));
+        assert!(result.is_some());
+        if let AuditExtra::LlmCall { is_sse, .. } = &result.unwrap().extra {
+            assert!(*is_sse, "SSE call must have is_sse=true");
+        }
     }
 }
