@@ -284,26 +284,23 @@ fn run() -> Result<(), (String, i32)> {
 
             let compressor = SchemaCompressor::new();
 
-            let result_json = if batch {
+            let (result_json, after_compact) = if batch {
                 let arr = value
                     .as_array()
                     .ok_or_else(|| ("Expected a JSON array for --batch mode".to_string(), 1))?;
                 let results: Vec<serde_json::Value> =
                     arr.iter().map(|item| compressor.compress(item)).collect();
-                serde_json::to_string_pretty(&results)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?
+                let compact = serde_json::to_string(&results).unwrap_or_default();
+                let pretty = serde_json::to_string_pretty(&results)
+                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                (pretty, compact)
             } else {
                 let result = compressor.compress(&value);
-                serde_json::to_string_pretty(&result)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?
+                let compact = serde_json::to_string(&result).unwrap_or_default();
+                let pretty = serde_json::to_string_pretty(&result)
+                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                (pretty, compact)
             };
-
-            // Compact JSON for accurate size comparison (pretty-print inflates size)
-            let after_compact = serde_json::to_string(
-                &serde_json::from_str::<serde_json::Value>(&result_json)
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
             let before_tokens = estimate_tokens_from_bytes(input.len());
@@ -336,14 +333,10 @@ fn run() -> Result<(), (String, i32)> {
                 .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
             let compressor = ResponseCompressor::new();
-            let result_json = serde_json::to_string_pretty(&compressor.compress(&value))
+            let result = compressor.compress(&value);
+            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
+            let result_json = serde_json::to_string_pretty(&result)
                 .map_err(|e| (format!("Serialization error: {}", e), 2))?;
-
-            let after_compact = serde_json::to_string(
-                &serde_json::from_str::<serde_json::Value>(&result_json)
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .unwrap_or(result_json.clone());
 
             // If no token savings, output original instead of compressed result
             let before_tokens = estimate_tokens_from_bytes(input.len());

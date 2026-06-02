@@ -23,6 +23,10 @@ if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 
 # --- File trust validation ---
 # User-writable paths must be owned by current user and not world-writable.
+#
+# KEEP IN SYNC with the Rust equivalent in
+# `crates/tokenless-cli/src/env_check/mod.rs` (`is_trusted_path`).
+# Changes to trust criteria must be applied to both implementations.
 is_trusted_file() {
   local f="$1"
   [ -f "$f" ] || return 1
