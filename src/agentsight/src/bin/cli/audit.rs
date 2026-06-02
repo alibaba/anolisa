@@ -44,7 +44,10 @@ impl AuditCommand {
             }
         };
 
-        let event_type = self.event_type.as_ref().and_then(|t| t.parse::<AuditEventType>().ok());
+        let event_type = self
+            .event_type
+            .as_ref()
+            .and_then(|t| t.parse::<AuditEventType>().ok());
 
         if self.summary {
             self.print_summary(&store);
@@ -77,18 +80,21 @@ impl AuditCommand {
 
     fn output_records(&self, records: &[agentsight::AuditRecord], scope: &str) {
         if self.json {
-            let json_records: Vec<serde_json::Value> = records.iter().map(|r| {
-                serde_json::json!({
-                    "id": r.id,
-                    "event_type": r.event_type.to_string(),
-                    "timestamp_ns": r.timestamp_ns,
-                    "pid": r.pid,
-                    "ppid": r.ppid,
-                    "comm": r.comm,
-                    "duration_ns": r.duration_ns,
-                    "extra": r.extra,
+            let json_records: Vec<serde_json::Value> = records
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "event_type": r.event_type.to_string(),
+                        "timestamp_ns": r.timestamp_ns,
+                        "pid": r.pid,
+                        "ppid": r.ppid,
+                        "comm": r.comm,
+                        "duration_ns": r.duration_ns,
+                        "extra": r.extra,
+                    })
                 })
-            }).collect();
+                .collect();
             println!("{}", serde_json::to_string_pretty(&json_records).unwrap());
         } else {
             println!("{}: {} audit events", scope, records.len());

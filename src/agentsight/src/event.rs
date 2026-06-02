@@ -1,8 +1,8 @@
-use crate::probes::proctrace::VariableEvent as ProcEvent;
-use crate::probes::sslsniff::SslEvent;
-use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
+use crate::probes::procmon::Event as ProcMonEvent;
+use crate::probes::proctrace::VariableEvent as ProcEvent;
+use crate::probes::sslsniff::SslEvent;
 use crate::probes::udpdns::UdpDnsEvent;
 
 /// Unified event type that can represent any probe event

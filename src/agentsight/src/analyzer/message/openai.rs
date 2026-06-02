@@ -26,7 +26,10 @@
 //! }
 //! ```
 
-use super::types::{OpenAIRequest, OpenAIResponse, OpenAIChoice, OpenAIChatMessage, MessageRole, OpenAIContent, OpenAiSseChunk};
+use super::types::{
+    MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
+    OpenAiSseChunk,
+};
 
 /// Parser for OpenAI Chat Completions API
 ///
@@ -156,7 +159,8 @@ impl OpenAIParser {
                     if let Some(calls) = &choice.delta.tool_calls {
                         for tc in calls {
                             let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let entry = tool_call_map.entry(idx)
+                            let entry = tool_call_map
+                                .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
                             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                                 if !id.is_empty() {
@@ -187,56 +191,65 @@ impl OpenAIParser {
         } else {
             let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
             sorted_indices.sort();
-            let merged: Vec<serde_json::Value> = sorted_indices.into_iter().filter_map(|idx| {
-                tool_call_map.remove(&idx).map(|(id, name, arguments)| {
-                    serde_json::json!({
-                        "id": id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments
-                        }
+            let merged: Vec<serde_json::Value> = sorted_indices
+                .into_iter()
+                .filter_map(|idx| {
+                    tool_call_map.remove(&idx).map(|(id, name, arguments)| {
+                        serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments
+                            }
+                        })
                     })
                 })
-            }).collect();
-            if merged.is_empty() { None } else { Some(merged) }
+                .collect();
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
         };
 
         // Build aggregated response from chunks
         first_chunk.and_then(|first| {
-            serde_json::from_value::<OpenAiSseChunk>(first.clone()).ok().map(|chunk| {
-                let combined_content = content_parts.join("");
-                let combined_reasoning = if reasoning_parts.is_empty() {
-                    None
-                } else {
-                    Some(reasoning_parts.join(""))
-                };
-                OpenAIResponse {
-                    id: chunk.id,
-                    object: "chat.completion".to_string(),
-                    created: chunk.created,
-                    model: chunk.model,
-                    choices: vec![OpenAIChoice {
-                        index: 0,
-                        message: OpenAIChatMessage {
-                            role: MessageRole::Assistant,
-                            content: Some(OpenAIContent::Text(combined_content)),
-                            reasoning_content: combined_reasoning,
-                            refusal: None,
-                            function_call: None,
-                            tool_calls,
-                            tool_call_id: None,
-                            name: None,
-                            annotations: None,
-                            audio: None,
-                        },
-                        finish_reason,
-                        logprobs: None,
-                    }],
-                    usage: None,
-                    system_fingerprint: chunk.system_fingerprint,
-                }
-            })
+            serde_json::from_value::<OpenAiSseChunk>(first.clone())
+                .ok()
+                .map(|chunk| {
+                    let combined_content = content_parts.join("");
+                    let combined_reasoning = if reasoning_parts.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_parts.join(""))
+                    };
+                    OpenAIResponse {
+                        id: chunk.id,
+                        object: "chat.completion".to_string(),
+                        created: chunk.created,
+                        model: chunk.model,
+                        choices: vec![OpenAIChoice {
+                            index: 0,
+                            message: OpenAIChatMessage {
+                                role: MessageRole::Assistant,
+                                content: Some(OpenAIContent::Text(combined_content)),
+                                reasoning_content: combined_reasoning,
+                                refusal: None,
+                                function_call: None,
+                                tool_calls,
+                                tool_call_id: None,
+                                name: None,
+                                annotations: None,
+                                audio: None,
+                            },
+                            finish_reason,
+                            logprobs: None,
+                        }],
+                        usage: None,
+                        system_fingerprint: chunk.system_fingerprint,
+                    }
+                })
         })
     }
 
@@ -391,7 +404,9 @@ mod tests {
     fn test_matches_path() {
         assert!(OpenAIParser::matches_path("/v1/chat/completions"));
         assert!(OpenAIParser::matches_path("/v1/completions"));
-        assert!(OpenAIParser::matches_path("https://api.openai.com/v1/chat/completions"));
+        assert!(OpenAIParser::matches_path(
+            "https://api.openai.com/v1/chat/completions"
+        ));
         assert!(!OpenAIParser::matches_path("/v1/messages"));
         assert!(!OpenAIParser::matches_path("/v1/embeddings"));
     }
@@ -429,6 +444,9 @@ mod tests {
         assert!(response.is_some());
 
         let response = response.unwrap();
-        assert_eq!(response.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
     }
 }

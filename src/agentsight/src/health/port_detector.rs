@@ -55,7 +55,10 @@ fn collect_socket_inodes(pid: u32) -> std::io::Result<HashSet<u64>> {
         };
         let link_str = link.to_string_lossy();
         // Socket symlinks look like "socket:[12345]"
-        if let Some(inode_str) = link_str.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
+        if let Some(inode_str) = link_str
+            .strip_prefix("socket:[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
             if let Ok(inode) = inode_str.parse::<u64>() {
                 inodes.insert(inode);
             }

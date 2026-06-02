@@ -3,11 +3,11 @@
 //! Handles table creation, record insertion, and querying for HTTP request/response records.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::Path;
 
-use crate::analyzer::HttpRecord;
 use super::connection::{create_connection, wal_checkpoint};
+use crate::analyzer::HttpRecord;
 
 /// SQLite-based HTTP record store
 pub struct HttpStore {
@@ -99,9 +99,7 @@ impl HttpStore {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![since_ns as i64], |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params![since_ns as i64], |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -127,9 +125,7 @@ impl HttpStore {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![pid], |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params![pid], |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -155,9 +151,7 @@ impl HttpStore {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![path_pattern], |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params![path_pattern], |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -182,10 +176,7 @@ impl HttpStore {
     ///
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
-        let sql = format!(
-            "DELETE FROM {} WHERE timestamp_ns < ?1",
-            self.table_name
-        );
+        let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
         let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
         Ok(deleted as u64)
     }

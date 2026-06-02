@@ -13,13 +13,15 @@ use libbpf_rs::{
     Link, MapHandle,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{
-    mem::MaybeUninit,
-    os::fd::AsFd,
-};
+use std::{mem::MaybeUninit, os::fd::AsFd};
 
 // --- Generated skeleton ---
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/udpdns.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/udpdns.rs"));
@@ -129,7 +131,8 @@ impl UdpDnsEvent {
         let raw = unsafe { &*(data.as_ptr() as *const RawUdpDnsEvent) };
 
         // Parse comm (null-terminated)
-        let comm = raw.comm
+        let comm = raw
+            .comm
             .iter()
             .take_while(|&&c| c != 0)
             .map(|&c| c as u8)
@@ -186,7 +189,9 @@ impl UdpDns {
             .reuse_fd(rb.as_fd())
             .context("failed to reuse external rb map for udpdns")?;
 
-        let skel = open_skel.load().context("failed to load udpdns BPF object")?;
+        let skel = open_skel
+            .load()
+            .context("failed to load udpdns BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         let skel =

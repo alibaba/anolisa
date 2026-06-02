@@ -47,20 +47,24 @@ impl ProcTraceParser {
     /// Parse a variable-length process event
     pub fn parse_variable(event: &VariableEvent) -> Option<ParsedProcEvent> {
         match event {
-            VariableEvent::Exec { header, filename: _, args } => {
-                Some(ParsedProcEvent {
-                    event_type: ProcEventType::Exec,
-                    pid: header.pid,
-                    tid: header.tid,
-                    ppid: header.ppid,
-                    ptid: header.ptid,
-                    comm: event.comm_str(),
-                    timestamp_ns: header.timestamp_ns,
-                    args: Some(args.clone()).filter(|s| !s.is_empty()),
-                    stdout_data: None,
-                })
-            }
-            VariableEvent::Stdout { header, payload, .. } => {
+            VariableEvent::Exec {
+                header,
+                filename: _,
+                args,
+            } => Some(ParsedProcEvent {
+                event_type: ProcEventType::Exec,
+                pid: header.pid,
+                tid: header.tid,
+                ppid: header.ppid,
+                ptid: header.ptid,
+                comm: event.comm_str(),
+                timestamp_ns: header.timestamp_ns,
+                args: Some(args.clone()).filter(|s| !s.is_empty()),
+                stdout_data: None,
+            }),
+            VariableEvent::Stdout {
+                header, payload, ..
+            } => {
                 let stdout_data = String::from_utf8(payload.clone()).ok();
                 Some(ParsedProcEvent {
                     event_type: ProcEventType::Stdout,
@@ -74,19 +78,17 @@ impl ProcTraceParser {
                     stdout_data,
                 })
             }
-            VariableEvent::Exit { header, .. } => {
-                Some(ParsedProcEvent {
-                    event_type: ProcEventType::Exit,
-                    pid: header.pid,
-                    tid: header.tid,
-                    ppid: header.ppid,
-                    ptid: header.ptid,
-                    comm: event.comm_str(),
-                    timestamp_ns: header.timestamp_ns,
-                    args: None,
-                    stdout_data: None,
-                })
-            }
+            VariableEvent::Exit { header, .. } => Some(ParsedProcEvent {
+                event_type: ProcEventType::Exit,
+                pid: header.pid,
+                tid: header.tid,
+                ppid: header.ppid,
+                ptid: header.ptid,
+                comm: event.comm_str(),
+                timestamp_ns: header.timestamp_ns,
+                args: None,
+                stdout_data: None,
+            }),
             VariableEvent::Unknown(_) => None,
         }
     }
@@ -145,23 +147,21 @@ impl ProcTraceParser {
                     bp: None,
                 })
             }
-            ProcEventType::Exit => {
-                Some(ChromeTraceEvent {
-                    name: format!("exit: {}", parsed.comm),
-                    cat: "process.exit".to_string(),
-                    ph: "i".to_string(),
-                    ts: ts_us,
-                    dur: None,
-                    pid: parsed.pid,
-                    tid: parsed.tid as u64,
-                    args: Some(json!({
-                        "pid": parsed.pid,
-                        "comm": parsed.comm,
-                    })),
-                    id: None,
-                    bp: None,
-                })
-            }
+            ProcEventType::Exit => Some(ChromeTraceEvent {
+                name: format!("exit: {}", parsed.comm),
+                cat: "process.exit".to_string(),
+                ph: "i".to_string(),
+                ts: ts_us,
+                dur: None,
+                pid: parsed.pid,
+                tid: parsed.tid as u64,
+                args: Some(json!({
+                    "pid": parsed.pid,
+                    "comm": parsed.comm,
+                })),
+                id: None,
+                bp: None,
+            }),
         }
     }
 
@@ -172,18 +172,21 @@ impl ProcTraceParser {
 
     /// Convert multiple variable-length events to Chrome Trace Events
     pub fn to_chrome_trace_events(events: &[VariableEvent]) -> Vec<ChromeTraceEvent> {
-        events.iter().filter_map(Self::to_chrome_trace_event).collect()
+        events
+            .iter()
+            .filter_map(Self::to_chrome_trace_event)
+            .collect()
     }
 }
 
 impl TraceArgs for ParsedProcEvent {
     fn to_trace_args(&self) -> serde_json::Value {
         let mut args = serde_json::Map::new();
-        
+
         // Common fields
         args.insert("pid".to_string(), json!(self.pid));
         args.insert("comm".to_string(), json!(&self.comm));
-        
+
         // Event type specific fields
         match self.event_type {
             ProcEventType::Exec => {
@@ -196,7 +199,7 @@ impl TraceArgs for ParsedProcEvent {
             ProcEventType::Stdout => {
                 if let Some(ref data) = self.stdout_data {
                     args.insert("len".to_string(), json!(data.len()));
-                    
+
                     // Add data preview (truncated)
                     let preview = if data.len() > 200 {
                         format!("{}... ({} bytes total)", &data[..200], data.len())
@@ -210,7 +213,7 @@ impl TraceArgs for ParsedProcEvent {
                 // Exit event has minimal args
             }
         }
-        
+
         serde_json::Value::Object(args)
     }
 }
@@ -232,7 +235,7 @@ impl ParsedProcEvent {
             }
             ProcEventType::Exit => format!("exit: {}", self.comm),
         };
-        
+
         let cat = match self.event_type {
             ProcEventType::Exec => "process.exec",
             ProcEventType::Stdout => "process.stdout",

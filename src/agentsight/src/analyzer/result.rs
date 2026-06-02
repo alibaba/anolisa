@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{AuditRecord, TokenRecord, ParsedApiMessage};
+use super::{AuditRecord, ParsedApiMessage, TokenRecord};
 
 /// Computed prompt token count for a request
 #[derive(Debug, Clone)]

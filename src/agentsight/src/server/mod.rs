@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use actix_cors::Cors;
-use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
-use include_dir::{include_dir, Dir};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use include_dir::{Dir, include_dir};
 
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
@@ -56,9 +56,7 @@ async fn serve_frontend(req: HttpRequest) -> impl Responder {
             } else {
                 mime_for_path(path)
             };
-            HttpResponse::Ok()
-                .content_type(mime)
-                .body(f.contents())
+            HttpResponse::Ok().content_type(mime).body(f.contents())
         }
         None => {
             // SPA fallback: return index.html for unmatched paths
@@ -66,22 +64,33 @@ async fn serve_frontend(req: HttpRequest) -> impl Responder {
                 Some(index) => HttpResponse::Ok()
                     .content_type("text/html; charset=utf-8")
                     .body(index.contents()),
-                None => HttpResponse::NotFound().body("Frontend not embedded. Run `npm run build:embed` first."),
+                None => HttpResponse::NotFound()
+                    .body("Frontend not embedded. Run `npm run build:embed` first."),
             }
         }
     }
 }
 
 fn mime_for_path(path: &str) -> &'static str {
-    if path.ends_with(".html") { "text/html; charset=utf-8" }
-    else if path.ends_with(".js") { "application/javascript; charset=utf-8" }
-    else if path.ends_with(".css") { "text/css; charset=utf-8" }
-    else if path.ends_with(".json") { "application/json" }
-    else if path.ends_with(".svg") { "image/svg+xml" }
-    else if path.ends_with(".png") { "image/png" }
-    else if path.ends_with(".ico") { "image/x-icon" }
-    else if path.ends_with(".woff2") { "font/woff2" }
-    else { "application/octet-stream" }
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".ico") {
+        "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 // ─── Server entry point ───────────────────────────────────────────────────────
@@ -142,12 +151,21 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
-    log::info!("AgentSight API server listening on http://{}:{}", host, port);
-    eprintln!("AgentSight API server listening on http://{}:{}", host, port);
+    log::info!(
+        "AgentSight API server listening on http://{}:{}",
+        host,
+        port
+    );
+    eprintln!(
+        "AgentSight API server listening on http://{}:{}",
+        host, port
+    );
     if has_frontend {
         eprintln!("Dashboard UI: http://{}:{}/", host, port);
     } else {
-        eprintln!("[WARN] Frontend not embedded. Run `npm run build:embed` in dashboard/ then recompile.");
+        eprintln!(
+            "[WARN] Frontend not embedded. Run `npm run build:embed` in dashboard/ then recompile."
+        );
     }
 
     HttpServer::new(move || {

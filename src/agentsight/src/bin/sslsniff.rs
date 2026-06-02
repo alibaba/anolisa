@@ -8,17 +8,20 @@
 use agentsight::config;
 use agentsight::parser::Parser;
 use agentsight::probes::sslsniff::SslSniff;
-use structopt::StructOpt;
 use std::rc::Rc;
 use std::time::Duration;
+use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "sslsniff", about = "Parse and print HTTP/SSE traffic from SSL connections")]
+#[structopt(
+    name = "sslsniff",
+    about = "Parse and print HTTP/SSE traffic from SSL connections"
+)]
 pub struct Command {
     /// Enable verbose/debug output
     #[structopt(short, long)]
     verbose: bool,
-    
+
     /// Target PID
     #[structopt(short, long)]
     pid: i32,
@@ -32,9 +35,11 @@ fn main() {
 
     // Create SSL sniffer
     let mut sniffer = SslSniff::new().expect("Failed to create SSL sniffer");
-    
+
     // Attach to target process
-    sniffer.attach_process(opts.pid).expect("Failed to attach SSL probe");
+    sniffer
+        .attach_process(opts.pid)
+        .expect("Failed to attach SSL probe");
 
     // Start polling
     let _poller = sniffer.run().expect("Failed to start SSL poller");

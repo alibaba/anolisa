@@ -32,7 +32,8 @@ impl AggregatedResponse {
 
     pub fn body_string(&self) -> String {
         let first = std::str::from_utf8(self.body()).unwrap_or("");
-        let sse_body: String = self.sse_events
+        let sse_body: String = self
+            .sse_events
             .iter()
             .map(|event| event.body_str())
             .collect::<Vec<_>>()

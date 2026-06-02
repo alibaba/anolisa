@@ -6,12 +6,12 @@
 //!
 //! 公钥来源：由调用方从 agentsight.json 的 `encryption.public_key` 读取后传入。
 
-use openssl::rsa::{Rsa, Padding};
-use openssl::pkey::Public;
-use openssl::symm::{Cipher, encrypt_aead};
-use openssl::rand::rand_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use openssl::pkey::Public;
+use openssl::rand::rand_bytes;
+use openssl::rsa::{Padding, Rsa};
+use openssl::symm::{Cipher, encrypt_aead};
 
 /// AES-256 密钥长度（32 字节）
 const AES_KEY_LEN: usize = 32;
@@ -35,7 +35,10 @@ impl MessageEncryptor {
     pub fn from_pem(pem: &str) -> Option<Self> {
         match Rsa::public_key_from_pem(pem.as_bytes()) {
             Ok(rsa) => {
-                log::info!("MessageEncryptor initialized (RSA-{} + AES-256-GCM)", rsa.size() * 8);
+                log::info!(
+                    "MessageEncryptor initialized (RSA-{} + AES-256-GCM)",
+                    rsa.size() * 8
+                );
                 Some(MessageEncryptor { rsa })
             }
             Err(e) => {
@@ -64,25 +67,24 @@ impl MessageEncryptor {
             Cipher::aes_256_gcm(),
             &aes_key,
             Some(&nonce),
-            &[],  // AAD (Additional Authenticated Data) - 不使用
+            &[], // AAD (Additional Authenticated Data) - 不使用
             plaintext.as_bytes(),
             &mut tag,
-        ).map_err(|e| format!("AES-256-GCM encryption failed: {}", e))?;
+        )
+        .map_err(|e| format!("AES-256-GCM encryption failed: {}", e))?;
 
         // 4. RSA-OAEP(SHA-256) 加密 AES 密钥
         let mut encrypted_key = vec![0u8; self.rsa.size() as usize];
-        let encrypted_key_len = self.rsa.public_encrypt(
-            &aes_key,
-            &mut encrypted_key,
-            Padding::PKCS1_OAEP,
-        ).map_err(|e| format!("RSA-OAEP encryption failed: {}", e))?;
+        let encrypted_key_len = self
+            .rsa
+            .public_encrypt(&aes_key, &mut encrypted_key, Padding::PKCS1_OAEP)
+            .map_err(|e| format!("RSA-OAEP encryption failed: {}", e))?;
         encrypted_key.truncate(encrypted_key_len);
 
         // 5. 组装二进制输出：[2字节长度] [encrypted_key] [nonce] [ciphertext] [tag]
         let key_len_bytes = (encrypted_key_len as u16).to_be_bytes();
-        let mut output = Vec::with_capacity(
-            2 + encrypted_key_len + NONCE_LEN + ciphertext.len() + TAG_LEN
-        );
+        let mut output =
+            Vec::with_capacity(2 + encrypted_key_len + NONCE_LEN + ciphertext.len() + TAG_LEN);
         output.extend_from_slice(&key_len_bytes);
         output.extend_from_slice(&encrypted_key);
         output.extend_from_slice(&nonce);

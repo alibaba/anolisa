@@ -1,8 +1,7 @@
 //! Token query subcommand
 
 use agentsight::{
-    TimePeriod, TokenQueryResult, format_tokens_with_commas, Trend, TokenStore,
-    SqliteConfig,
+    SqliteConfig, TimePeriod, TokenQueryResult, TokenStore, Trend, format_tokens_with_commas,
 };
 use structopt::StructOpt;
 
@@ -35,7 +34,8 @@ impl TokenCommand {
         // Determine data file path
         // Use the unified database path (agentsight.db) as default,
         // which is where Storage writes all tables.
-        let data_path = self.data_file
+        let data_path = self
+            .data_file
             .as_ref()
             .map(|p| std::path::PathBuf::from(p))
             .unwrap_or_else(|| SqliteConfig::default().db_path());
@@ -80,10 +80,7 @@ impl TokenCommand {
 }
 
 /// Print human-readable summary output
-fn print_human_readable(
-    result: &TokenQueryResult,
-    show_compare: bool,
-) {
+fn print_human_readable(result: &TokenQueryResult, show_compare: bool) {
     // Main result
     println!(
         "{}共消耗 {} tokens。",
@@ -119,6 +116,4 @@ fn print_human_readable(
             format_tokens_with_commas(result.output_tokens)
         );
     }
-
 }
-

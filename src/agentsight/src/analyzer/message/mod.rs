@@ -294,7 +294,10 @@ mod tests {
         assert!(result.is_some());
 
         match result.unwrap() {
-            ParsedApiMessage::OpenAICompletion { request: req, response: resp } => {
+            ParsedApiMessage::OpenAICompletion {
+                request: req,
+                response: resp,
+            } => {
                 assert!(req.is_some());
                 assert!(resp.is_none());
             }
@@ -319,7 +322,10 @@ mod tests {
         assert!(result.is_some());
 
         match result.unwrap() {
-            ParsedApiMessage::AnthropicMessage { request: req, response: resp } => {
+            ParsedApiMessage::AnthropicMessage {
+                request: req,
+                response: resp,
+            } => {
                 assert!(req.is_none());
                 assert!(resp.is_some());
             }
@@ -339,12 +345,18 @@ mod tests {
 
     #[test]
     fn test_detect_provider() {
-        assert_eq!(MessageParser::detect_provider("/v1/messages"), Some("anthropic"));
+        assert_eq!(
+            MessageParser::detect_provider("/v1/messages"),
+            Some("anthropic")
+        );
         assert_eq!(
             MessageParser::detect_provider("/v1/chat/completions"),
             Some("openai")
         );
-        assert_eq!(MessageParser::detect_provider("/v1/completions"), Some("openai"));
+        assert_eq!(
+            MessageParser::detect_provider("/v1/completions"),
+            Some("openai")
+        );
         assert_eq!(MessageParser::detect_provider("/v1/embeddings"), None);
     }
 

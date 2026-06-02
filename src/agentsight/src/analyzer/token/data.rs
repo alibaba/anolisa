@@ -45,7 +45,11 @@ impl TokenData {
     }
 
     /// Add a request message
-    pub fn add_request_message(mut self, role: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn add_request_message(
+        mut self,
+        role: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         self.request_messages.push(MessageTokenData {
             role: role.into(),
             content: content.into(),
@@ -88,38 +92,38 @@ impl TokenData {
     /// Get all request text content combined
     pub fn request_text(&self) -> String {
         let mut parts = Vec::new();
-        
+
         if let Some(ref system) = self.system_prompt {
             parts.push(format!("system: {}", system));
         }
-        
+
         for msg in &self.request_messages {
             parts.push(format!("{}: {}", msg.role, msg.content));
         }
-        
+
         for tool in &self.tools {
             parts.push(format!("tool: {}", tool));
         }
-        
+
         parts.join("\n")
     }
 
     /// Get all response text content combined
     pub fn response_text(&self) -> String {
         let mut parts = Vec::new();
-        
+
         if let Some(ref reasoning) = self.reasoning_content {
             parts.push(format!("reasoning: {}", reasoning));
         }
-        
+
         for content in &self.response_content {
             parts.push(content.content.clone());
         }
-        
+
         for tool_call in &self.tool_calls {
             parts.push(format!("tool_call: {}", tool_call));
         }
-        
+
         parts.join("\n")
     }
 
@@ -130,27 +134,26 @@ impl TokenData {
 
     /// Get messages grouped by role
     pub fn messages_by_role(&self) -> std::collections::HashMap<String, Vec<&MessageTokenData>> {
-        let mut map: std::collections::HashMap<String, Vec<&MessageTokenData>> = 
+        let mut map: std::collections::HashMap<String, Vec<&MessageTokenData>> =
             std::collections::HashMap::new();
-        
+
         for msg in &self.request_messages {
             map.entry(msg.role.clone())
                 .or_insert_with(Vec::new)
                 .push(msg);
         }
-        
+
         map
     }
 
     /// Count messages by role
     pub fn count_by_role(&self) -> std::collections::HashMap<String, usize> {
-        let mut counts: std::collections::HashMap<String, usize> = 
-            std::collections::HashMap::new();
-        
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
         for msg in &self.request_messages {
             *counts.entry(msg.role.clone()).or_insert(0) += 1;
         }
-        
+
         counts
     }
 
@@ -162,31 +165,31 @@ impl TokenData {
     /// Get total character count (rough estimate for token calculation)
     pub fn total_chars(&self) -> usize {
         let mut total = 0;
-        
+
         if let Some(ref system) = self.system_prompt {
             total += system.len();
         }
-        
+
         for msg in &self.request_messages {
             total += msg.content.len();
         }
-        
+
         for tool in &self.tools {
             total += tool.len();
         }
-        
+
         for content in &self.response_content {
             total += content.content.len();
         }
-        
+
         if let Some(ref reasoning) = self.reasoning_content {
             total += reasoning.len();
         }
-        
+
         for tool_call in &self.tool_calls {
             total += tool_call.len();
         }
-        
+
         total
     }
 }
@@ -220,7 +223,10 @@ mod tests {
 
         assert_eq!(data.provider, "openai");
         assert_eq!(data.model, "gpt-4");
-        assert_eq!(data.system_prompt, Some("You are a helpful assistant".to_string()));
+        assert_eq!(
+            data.system_prompt,
+            Some("You are a helpful assistant".to_string())
+        );
         assert_eq!(data.request_messages.len(), 1);
         assert_eq!(data.response_content.len(), 1);
     }
@@ -242,24 +248,22 @@ mod tests {
 
     #[test]
     fn test_add_tool() {
-        let data = TokenData::new("openai", "gpt-4")
-            .add_tool(r#"{"name":"search"}"#);
+        let data = TokenData::new("openai", "gpt-4").add_tool(r#"{"name":"search"}"#);
         assert_eq!(data.tools.len(), 1);
         assert!(data.request_text().contains("tool: {\"name\":\"search\"}"));
     }
 
     #[test]
     fn test_with_reasoning_content() {
-        let data = TokenData::new("openai", "qwen")
-            .with_reasoning_content("Let me think...");
+        let data = TokenData::new("openai", "qwen").with_reasoning_content("Let me think...");
         assert_eq!(data.reasoning_content, Some("Let me think...".to_string()));
         assert!(data.response_text().contains("reasoning: Let me think..."));
     }
 
     #[test]
     fn test_add_tool_call() {
-        let data = TokenData::new("openai", "gpt-4")
-            .add_tool_call(r#"get_weather({"city":"Beijing"})"#);
+        let data =
+            TokenData::new("openai", "gpt-4").add_tool_call(r#"get_weather({"city":"Beijing"})"#);
         assert_eq!(data.tool_calls.len(), 1);
         assert!(data.response_text().contains("tool_call: get_weather"));
     }
@@ -309,12 +313,12 @@ mod tests {
     #[test]
     fn test_total_chars() {
         let data = TokenData::new("openai", "gpt-4")
-            .with_system_prompt("abc")       // 3
+            .with_system_prompt("abc") // 3
             .add_request_message("user", "de") // 2
-            .add_tool("fg")                   // 2
-            .add_response_content("hij")      // 3
-            .with_reasoning_content("kl")     // 2
-            .add_tool_call("mno");            // 3
+            .add_tool("fg") // 2
+            .add_response_content("hij") // 3
+            .with_reasoning_content("kl") // 2
+            .add_tool_call("mno"); // 3
         assert_eq!(data.total_chars(), 15);
     }
 
@@ -339,8 +343,7 @@ mod tests {
 
     #[test]
     fn test_request_text_no_system() {
-        let data = TokenData::new("openai", "gpt-4")
-            .add_request_message("user", "Hello");
+        let data = TokenData::new("openai", "gpt-4").add_request_message("user", "Hello");
         let text = data.request_text();
         assert!(!text.contains("system:"));
         assert!(text.contains("user: Hello"));

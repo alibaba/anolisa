@@ -46,20 +46,20 @@ impl Aggregator {
                 self.http.process_request(req);
                 vec![]
             }
-            ParsedMessage::Response(resp) => {
-                self.http.process_response(resp).into_iter().collect()
-            }
+            ParsedMessage::Response(resp) => self.http.process_response(resp).into_iter().collect(),
             ParsedMessage::SseEvent(sse_event) => {
                 let conn_id = ConnectionId::from_ssl_event(sse_event.source_event());
-                self.http.process_sse_event(&conn_id, sse_event).into_iter().collect()
-            }
-            ParsedMessage::ProcEvent(proc_event) => {
-                self.process
-                    .process_parsed_event(&proc_event)
-                    .map(AggregatedResult::ProcessComplete)
+                self.http
+                    .process_sse_event(&conn_id, sse_event)
                     .into_iter()
                     .collect()
             }
+            ParsedMessage::ProcEvent(proc_event) => self
+                .process
+                .process_parsed_event(&proc_event)
+                .map(AggregatedResult::ProcessComplete)
+                .into_iter()
+                .collect(),
             ParsedMessage::Http2Frames(frames) => {
                 // Use HTTP/2 stream aggregator to correlate frames by stream_id
                 let completed_streams = self.http2.process_frames(frames);
@@ -68,9 +68,11 @@ impl Aggregator {
                     .map(AggregatedResult::Http2StreamComplete)
                     .collect()
             }
-            ParsedMessage::RawData(ssl_event) => {
-                self.http.process_raw_body_data(&ssl_event).into_iter().collect()
-            }
+            ParsedMessage::RawData(ssl_event) => self
+                .http
+                .process_raw_body_data(&ssl_event)
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -91,12 +93,12 @@ impl Aggregator {
             .into_iter()
             .flat_map(|msg| self.process_message(msg))
             .collect();
-        
+
         // Export chrome trace if enabled
         for r in &results {
             export_trace_events(r);
         }
-        
+
         results
     }
 
