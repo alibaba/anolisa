@@ -417,7 +417,7 @@ If OpenClaw plugin installation is needed after RPM installation, run:
 ```bash
 # Check OpenClaw plugin configuration
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-# Should contain "tokenless-openclaw"
+# Should contain "tokenless"
 
 # Check Copilot Shell Hook configuration
 cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
@@ -769,7 +769,7 @@ ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
 
 | Problem | Solution |
 |---------|----------|
-| Plugin not loaded | Check plugin path: `~/.openclaw/plugins/tokenless-openclaw/` |
+| Plugin not loaded | Check plugin path: `~/.openclaw/plugins/tokenless/` |
 | RTK not working | Ensure `rtk` is in `$PATH`, check `rtk_enabled` configuration |
 | Compression not working | Check `response_compression_enabled` configuration |
 | TOON compression not working | Check `toon_compression_enabled` configuration, ensure `toon` binary in PATH |

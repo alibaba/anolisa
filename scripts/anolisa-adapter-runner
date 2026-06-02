@@ -197,7 +197,7 @@ resolve_plugin_component() {
         openclaw)
             case "$pid" in
                 agent-sec)           echo "sec-core" ;;
-                tokenless-openclaw)  echo "tokenless" ;;
+                tokenless)  echo "tokenless" ;;
                 ws-ckpt)             echo "ws-ckpt" ;;
                 *) return 1 ;;
             esac ;;
@@ -218,7 +218,7 @@ target_plugin_id_for_component() {
         openclaw)
             case "$1" in
                 sec-core)  echo "agent-sec" ;;
-                tokenless) echo "tokenless-openclaw" ;;
+                tokenless) echo "tokenless" ;;
                 ws-ckpt)   echo "ws-ckpt" ;;
                 *)         echo "" ;;
             esac ;;
@@ -294,7 +294,7 @@ Options:
   -h, --help                   Show this help
 
 Components: os-skills, sec-core, tokenless, ws-ckpt, agentsight
-Plugin IDs (openclaw): agent-sec, tokenless-openclaw, ws-ckpt
+Plugin IDs (openclaw): agent-sec, tokenless, ws-ckpt
 Plugin IDs (hermes):   agent-sec-core-hermes-plugin, tokenless, ws-ckpt
 EOF
 }

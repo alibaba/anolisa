@@ -212,10 +212,10 @@ hash -r 2>/dev/null || true
 %preun
 # On uninstall ($1=0): clean openclaw plugin and stale config entries
 if [ $1 -eq 0 ]; then
-    PLUGIN_DIR="$HOME/.openclaw/extensions/tokenless-openclaw"
+    PLUGIN_DIR="$HOME/.openclaw/extensions/tokenless"
     if [ -d "$PLUGIN_DIR" ]; then
         if command -v openclaw &>/dev/null; then
-            openclaw plugins uninstall tokenless-openclaw --force || true
+            openclaw plugins uninstall tokenless --force || true
         else
             rm -rf "$PLUGIN_DIR" || true
         fi
@@ -223,8 +223,8 @@ if [ $1 -eq 0 ]; then
     # Remove stale config entries from openclaw.json even if openclaw CLI is unavailable
     OPENCLAW_CFG="$HOME/.openclaw/openclaw.json"
     if [ -f "$OPENCLAW_CFG" ] && command -v jq &>/dev/null; then
-        jq '(.plugins.allow // [] | map(select(. != "tokenless-openclaw"))) as $allow |
-            (.plugins.entries // {} | del(.["tokenless-openclaw"])) as $entries |
+        jq '(.plugins.allow // [] | map(select(. != "tokenless"))) as $allow |
+            (.plugins.entries // {} | del(.["tokenless"])) as $entries |
             .plugins.allow = $allow | .plugins.entries = $entries' \
             "$OPENCLAW_CFG" > "${OPENCLAW_CFG}.tmp" && mv "${OPENCLAW_CFG}.tmp" "$OPENCLAW_CFG"
     fi

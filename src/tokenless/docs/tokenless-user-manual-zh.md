@@ -417,7 +417,7 @@ RPM 包安装后，安装脚本会自动检测并配置已安装的平台。
 ```bash
 # 检查 OpenClaw 插件配置
 cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-# 应包含 "tokenless-openclaw"
+# 应包含 "tokenless"
 
 # 检查 Copilot Shell Hook 配置
 cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
@@ -769,7 +769,7 @@ ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
 
 | 问题 | 解决方案 |
 |------|---------|
-| 插件未加载 | 检查插件路径：`~/.openclaw/plugins/tokenless-openclaw/` |
+| 插件未加载 | 检查插件路径：`~/.openclaw/plugins/tokenless/` |
 | RTK 未生效 | 确认 `rtk` 在 `$PATH` 中，检查 `rtk_enabled` 配置 |
 | 压缩未生效 | 检查 `response_compression_enabled` 配置 |
 | TOON 压缩未生效 | 检查 `toon_compression_enabled` 配置，确认 `toon` 二进制在 PATH 中 |

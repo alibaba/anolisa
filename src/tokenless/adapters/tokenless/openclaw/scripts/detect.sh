@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # detect.sh — Inspect tokenless OpenClaw integration. Read-only.
 #
-# Reports OpenClaw CLI, tokenless-openclaw plugin install state, runtime
+# Reports OpenClaw CLI, tokenless plugin install state, runtime
 # artifact (dist/index.js), and adapter resource. Exits 0 when the OpenClaw
-# CLI and the tokenless-openclaw plugin are both present; non-zero otherwise.
+# CLI and the tokenless plugin are both present; non-zero otherwise.
 set -euo pipefail
 
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
@@ -16,7 +16,7 @@ OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
 export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
 
-PLUGIN_ID="tokenless-openclaw"
+PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }

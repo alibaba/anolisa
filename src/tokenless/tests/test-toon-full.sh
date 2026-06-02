@@ -47,7 +47,7 @@ for cmd in toon tokenless jq openclaw; do
 done
 
 # 检查 OpenClaw 插件
-if [ -f ~/.openclaw/extensions/tokenless-openclaw/index.js ]; then
+if [ -f ~/.openclaw/extensions/tokenless/index.js ]; then
     pass "OpenClaw 插件文件存在"
 else
     fail "OpenClaw 插件文件缺失"
@@ -58,8 +58,8 @@ if python3 -c "
 import json, os
 cfg=json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
 entries=cfg.get('plugins',{}).get('entries',{})
-assert 'tokenless-openclaw' in entries and entries['tokenless-openclaw'].get('enabled'), 'not enabled'
-assert entries['tokenless-openclaw'].get('config',{}).get('toon_compression_enabled'), 'toon disabled'
+assert 'tokenless' in entries and entries['tokenless'].get('enabled'), 'not enabled'
+assert entries['tokenless'].get('config',{}).get('toon_compression_enabled'), 'toon disabled'
 " 2>/dev/null; then
     pass "OpenClaw 插件已启用且 TOON 配置正确"
 else

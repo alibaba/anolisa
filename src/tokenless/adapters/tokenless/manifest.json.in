@@ -21,7 +21,7 @@
     "openclaw": {
       "compatibleVersions": ">=5.0.0",
       "capabilities": {
-        "plugins": ["tokenless-openclaw"]
+        "plugins": ["tokenless"]
       },
       "actions": {
         "detect":    "openclaw/scripts/detect.sh",

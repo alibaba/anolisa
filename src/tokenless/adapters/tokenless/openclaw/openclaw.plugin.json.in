@@ -1,6 +1,6 @@
 {
-  "id": "tokenless-openclaw",
-  "name": "Token-Less",
+  "id": "tokenless",
+  "name": "Tokenless",
   "version": "@VERSION@",
   "description": "Unified RTK command rewriting + response/TOON compression + Tool Ready environment pre-check",
   "activation": {

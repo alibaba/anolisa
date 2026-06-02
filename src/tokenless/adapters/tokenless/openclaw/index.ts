@@ -241,8 +241,8 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
 // ---- Plugin entry point -------------------------------------------------------
 
 export default {
-  id: "tokenless-openclaw",
-  name: "Token-Less",
+  id: "tokenless",
+  name: "Tokenless",
   version: "1.0.0",
   description: "Unified RTK command rewriting + response/TOON compression + Tool Ready",
   register(api: any) {
