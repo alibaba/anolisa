@@ -7,7 +7,12 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-/// Process type classification for lineage tree nodes
+/// Process type classification for lineage tree nodes.
+///
+/// `Skill` is forward-declared for the follow-up scoring task — `classify()`
+/// does NOT currently produce it (today's classifier covers Agent / SubAgent /
+/// Tool only). The variant exists in `from_u32`/`as_u32` so a future BPF-side
+/// scorer can emit it without breaking userspace decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessType {
@@ -15,6 +20,7 @@ pub enum ProcessType {
     Agent,
     SubAgent,
     Tool,
+    /// Forward-declared. Not produced by the current `classify()`.
     Skill,
 }
 
@@ -76,11 +82,26 @@ impl LineageTree {
     }
 
     /// Insert or update a node. Automatically maintains parent→child links.
+    ///
+    /// Also handles PID re-parenting: if the pid already exists under a
+    /// different parent (e.g. PID reuse where the old Exit was missed under
+    /// ringbuf pressure), the stale child entry is removed from the old
+    /// parent's children list before inserting under the new parent.
     pub fn insert(&mut self, node: LineageNode) {
         let pid = node.pid;
         let ppid = node.ppid;
 
-        // Add this pid as a child of its parent
+        // PID-reuse / re-parent: detach from old parent first.
+        if let Some(old_node) = self.nodes.get(&pid) {
+            let old_ppid = old_node.ppid;
+            if old_ppid != ppid {
+                if let Some(old_parent) = self.nodes.get_mut(&old_ppid) {
+                    old_parent.children.retain(|&c| c != pid);
+                }
+            }
+        }
+
+        // Add this pid as a child of its (possibly new) parent.
         if let Some(parent) = self.nodes.get_mut(&ppid) {
             if !parent.children.contains(&pid) {
                 parent.children.push(pid);
@@ -300,5 +321,83 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&100));
         assert!(roots.contains(&300));
+    }
+
+    /// PID-reuse / re-parent: a pid that re-execs (or whose Exit was dropped)
+    /// under a different parent must NOT leave a phantom child entry on the
+    /// old parent. Discriminating: without the cleanup branch in insert(), the
+    /// final assertion below fails — old parent still lists pid 200.
+    #[test]
+    fn test_insert_cleans_old_parent_on_reparent() {
+        let mut tree = LineageTree::new();
+        tree.insert(make_node(100, 1, ProcessType::Agent));
+        tree.insert(make_node(300, 1, ProcessType::Agent));
+        tree.insert(make_node(200, 100, ProcessType::Tool));
+        // Re-insert pid=200 under a different parent (e.g. PID reuse).
+        tree.insert(make_node(200, 300, ProcessType::Tool));
+
+        assert!(
+            tree.get(100).unwrap().children.is_empty(),
+            "old parent 100 must not retain a phantom child 200"
+        );
+        assert_eq!(tree.get(300).unwrap().children, vec![200]);
+        assert_eq!(tree.get(200).unwrap().ppid, 300);
+    }
+
+    /// AGENT_MODE precedence pin (1/2): when the parent is already an Agent,
+    /// a child with has_agent_mode_env=true must classify as Tool — NOT
+    /// promote itself to Agent. The env var is inherited through fork; only
+    /// top-level processes (no tracked parent) are eligible for Agent.
+    /// Discriminating: reordering the match arms in classify() so that
+    /// AGENT_MODE wins over parent_type would flip this case to Agent.
+    #[test]
+    fn test_classify_agent_mode_inherited_under_agent_stays_tool() {
+        let mut tree = LineageTree::new();
+        tree.insert(make_node(100, 1, ProcessType::Agent));
+        tree.insert(make_node(200, 100, ProcessType::Unknown));
+        tree.classify(200, /* has_agent_mode_env */ true, /* matches_agent */ false);
+        assert_eq!(tree.get(200).unwrap().process_type, ProcessType::Tool);
+    }
+
+    /// AGENT_MODE precedence pin (2/2): same rule but parent is SubAgent.
+    /// Inherited AGENT_MODE under a SubAgent is still a Tool.
+    #[test]
+    fn test_classify_agent_mode_inherited_under_subagent_stays_tool() {
+        let mut tree = LineageTree::new();
+        tree.insert(make_node(100, 1, ProcessType::Agent));
+        tree.insert(make_node(200, 100, ProcessType::SubAgent));
+        tree.insert(make_node(300, 200, ProcessType::Unknown));
+        tree.classify(300, /* has_agent_mode_env */ true, /* matches_agent */ false);
+        assert_eq!(tree.get(300).unwrap().process_type, ProcessType::Tool);
+    }
+
+    /// `ProcessType::Skill` is forward-declared. Document the current
+    /// behaviour: classify() never produces Skill regardless of inputs.
+    /// Tightens the contract so a future scorer change is explicit.
+    #[test]
+    fn test_classify_never_produces_skill_today() {
+        let mut tree = LineageTree::new();
+        // Try a variety of parent types + flags; none should yield Skill.
+        for parent_type in [
+            ProcessType::Unknown,
+            ProcessType::Agent,
+            ProcessType::SubAgent,
+            ProcessType::Tool,
+            ProcessType::Skill,
+        ] {
+            tree = LineageTree::new();
+            tree.insert(make_node(100, 1, parent_type));
+            tree.insert(make_node(200, 100, ProcessType::Unknown));
+            for has_env in [false, true] {
+                for matches in [false, true] {
+                    tree.classify(200, has_env, matches);
+                    assert_ne!(
+                        tree.get(200).unwrap().process_type,
+                        ProcessType::Skill,
+                        "classify() must not produce Skill (forward-declared)",
+                    );
+                }
+            }
+        }
     }
 }

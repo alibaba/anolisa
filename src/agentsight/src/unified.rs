@@ -769,14 +769,20 @@ impl AgentSight {
                 let comm = String::from_utf8_lossy(&comm_bytes).into_owned();
 
                 let agent_name = self.pid_agent_name_cache.get(&header.pid).cloned();
-                let matches_agent = agent_name
-                    .as_ref()
-                    .is_some_and(|n| !n.starts_with("agent-mode-"));
-                // Infer AGENT_MODE from cache: if procmon already detected it, the
-                // name starts with "agent-mode-". Avoids redundant /proc/pid/environ I/O.
-                let has_agent_mode = agent_name
-                    .as_ref()
-                    .is_some_and(|n| n.starts_with("agent-mode-"));
+                // Use the lineage tree as the source of truth for AGENT_MODE.
+                // procmon's earlier `ensure_lineage_node` call sets the
+                // `LINEAGE_FLAG_AGENT_MODE` bit on the node; consult that bit
+                // directly instead of a string prefix on the cached display
+                // name (which conflated naming with state-machine input and
+                // would mis-fire if a future cmdline rule named an agent
+                // "agent-mode-...").
+                let has_agent_mode = self
+                    .lineage_tree
+                    .read()
+                    .ok()
+                    .and_then(|t| t.get(header.pid).map(|n| n.has_agent_mode()))
+                    .unwrap_or(false);
+                let matches_agent = agent_name.is_some() && !has_agent_mode;
 
                 let node = crate::lineage::LineageNode {
                     pid: header.pid,
