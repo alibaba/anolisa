@@ -11,7 +11,7 @@ use libbpf_rs::{
 };
 use std::{
     mem::MaybeUninit,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -21,6 +21,7 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
+#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));

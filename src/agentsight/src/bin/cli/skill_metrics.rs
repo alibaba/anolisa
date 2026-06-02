@@ -367,19 +367,3 @@ fn format_timestamp_ns(ns: i64) -> String {
         .naive_utc();
     dt.format("%m-%d %H:%M").to_string()
 }
-
-fn format_duration_ns(ns: i64) -> String {
-    if ns == 0 {
-        return "0s".to_string();
-    }
-    let secs = ns as f64 / 1_000_000_000.0;
-    if secs < 60.0 {
-        format!("{:.1}s", secs)
-    } else if secs < 3600.0 {
-        format!("{:.1}m", secs / 60.0)
-    } else if secs < 86400.0 {
-        format!("{:.1}h", secs / 3600.0)
-    } else {
-        format!("{:.1}d", secs / 86400.0)
-    }
-}

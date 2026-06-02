@@ -738,7 +738,9 @@ impl AgentSight {
 
     /// Install an FFI event sender for C API mode.
     /// When set, completed events are pushed through this channel.
-    pub fn set_ffi_sender(&mut self, sender: FfiEventSender) {
+    /// `pub(crate)` because `FfiEventSender` is a crate-internal type and the
+    /// only caller lives in this crate's FFI layer.
+    pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
         self.ffi_sender = Some(sender);
     }
 
@@ -831,7 +833,7 @@ impl AgentSight {
 
         for (conn_id, state) in drained {
             // Destructure to capture both request AND sse_events
-            let (state_name, request, sse_events) = match state {
+            let (_state_name, request, sse_events) = match state {
                 ConnectionState::RequestPending { request } => ("RequestPending", request, vec![]),
                 ConnectionState::SseActive {
                     request: Some(req),

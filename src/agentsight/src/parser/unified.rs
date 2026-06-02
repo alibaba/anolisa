@@ -50,7 +50,7 @@ impl Parser {
     pub fn parse_ssl_event(&self, ssl_event: Rc<SslEvent>) -> ParseResult {
         log::debug!("parse_ssl_event: length={}", ssl_event.buf_size());
 
-        let comm = ssl_event.comm.trim_end_matches('\0');
+        let _comm = ssl_event.comm.trim_end_matches('\0');
 
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {

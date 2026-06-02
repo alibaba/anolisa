@@ -213,7 +213,6 @@ impl TokenConsumptionStore {
         }
         if filter.model.is_some() {
             conditions.push(format!("model = ?{}", bind_idx));
-            bind_idx += 1;
         }
 
         let where_clause = if conditions.is_empty() {

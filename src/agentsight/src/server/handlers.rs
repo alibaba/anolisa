@@ -1,12 +1,12 @@
 //! API request handlers
 
-use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::{GenAISqliteStore};
-use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket, ToolCallTurnInfo};
+use crate::storage::sqlite::genai::{TimeseriesBucket, ModelTimeseriesBucket};
 use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Prometheus helpers ───────────────────────────────────────────────────────

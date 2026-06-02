@@ -2,7 +2,7 @@
 //!
 //! Handles table creation, record insertion, and querying for HTTP request/response records.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
 

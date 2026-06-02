@@ -18,7 +18,7 @@ mod anthropic;
 mod utils;
 
 use serde_json::Value;
-use super::data::{TokenData, MessageTokenData, ResponseTokenData};
+use super::data::TokenData;
 
 /// Extract token data from JSON request/response bodies
 ///
@@ -79,4 +79,3 @@ pub enum Provider {
 }
 
 // Re-export utility functions for internal use
-pub use utils::extract_model_from_json;

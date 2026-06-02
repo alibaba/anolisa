@@ -151,6 +151,6 @@ fn format_body(data: &[u8]) -> String {
         format!("(text, {} bytes)\n{}", data.len(), text)
     } else {
         // Binary data - show as base64
-        format!("(binary, {} bytes)\n{}", data.len(), base64::encode(data))
+        format!("(binary, {} bytes)\n{}", data.len(), base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data))
     }
 }

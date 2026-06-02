@@ -3,7 +3,7 @@
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
 
-use crate::interruption::{InterruptionEvent, InterruptionType, Severity};
+use crate::interruption::{InterruptionEvent, InterruptionType};
 use super::connection::create_connection;
 
 // ─── API response types ────────────────────────────────────────────────────────

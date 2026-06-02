@@ -7,7 +7,7 @@ use super::http::{ConnectionId, ConnectionState, HttpConnectionAggregator};
 use super::http2::Http2StreamAggregator;
 use super::proctrace::ProcessEventAggregator;
 use super::result::AggregatedResult;
-use crate::chrome_trace::{export_trace_events, ToChromeTraceEvent};
+use crate::chrome_trace::export_trace_events;
 use crate::parser::{ParseResult, ParsedMessage};
 
 /// Unified aggregator for all event types

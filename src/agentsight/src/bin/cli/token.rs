@@ -5,7 +5,6 @@ use agentsight::{
     SqliteConfig,
 };
 use structopt::StructOpt;
-use std::collections::HashMap;
 
 /// Token query subcommand
 #[derive(Debug, StructOpt, Clone)]

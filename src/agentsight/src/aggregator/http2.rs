@@ -4,12 +4,11 @@
 //! by their stream_id and correlating request (client->server) with response (server->client)
 //! to form complete HTTP/2 request/response pairs.
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use lru::LruCache;
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
 use crate::parser::http2::ParsedHttp2Frame;
-use crate::parser::sse::{SseParser, SSEParser};
+use crate::parser::sse::SSEParser;
 use crate::aggregator::http::ConnectionId;
 use crate::aggregator::result::AggregatedResult;
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us};
