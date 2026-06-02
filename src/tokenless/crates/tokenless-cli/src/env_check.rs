@@ -17,7 +17,7 @@ use std::os::unix::fs::MetadataExt;
 
 #[cfg(unix)]
 fn current_uid() -> u32 {
-    // libc::getuid is a FFI call — requires unsafe block per Rust 2024 edition rules.
+    // SAFETY: libc::getuid() is a pure syscall with no preconditions and never fails.
     unsafe { libc::getuid() }
 }
 
@@ -51,6 +51,20 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
         path.to_path_buf()
     };
     // Use symlink_metadata to check the target's metadata (not the symlink itself)
+    // Check the parent directory first — a world-writable directory allows an
+    // attacker to unlink and replace the file (TOCTOU), even if the file itself
+    // has correct ownership and permissions.
+    if let Some(parent) = check_path.parent()
+        && let Ok(parent_meta) = fs::symlink_metadata(parent)
+    {
+        let parent_uid = parent_meta.uid();
+        if parent_uid != current_uid() && parent_uid != 0 {
+            return false;
+        }
+        if parent_meta.mode() & 0o002 != 0 {
+            return false;
+        }
+    }
     match fs::symlink_metadata(&check_path) {
         Ok(meta) => {
             let file_uid = meta.uid();
@@ -456,8 +470,12 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
             Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
         _ => {
-            // PATH lookup failed — try known install paths
-            let home = super::get_home_dir();
+// PATH lookup failed — try known install paths. Each candidate
+            // must clear is_trusted_path() before we report it as available:
+            // otherwise a spoofed $HOME / world-writable directory could let
+            // an attacker drop a malicious binary that we'd then exec when
+            // we run `--version` or any later invocation.
+            let home = crate::get_home_dir();
             let candidates = [
                 format!("/usr/libexec/anolisa/tokenless/{}", dep.binary),
                 format!("/usr/lib/anolisa/tokenless/{}", dep.binary),
@@ -468,18 +486,23 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 .iter()
                 .find(|p| {
                     let path = std::path::Path::new(p);
-                    path.exists()
-                        && std::fs::metadata(path)
-                            .map(|m| {
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    m.permissions().mode() & 0o111 != 0
-                                }
-                                #[cfg(not(unix))]
-                                true
-                            })
-                            .unwrap_or(false)
+                    if !path.exists() {
+                        return false;
+                    }
+                    if !is_trusted_path(path) {
+                        return false;
+                    }
+                    std::fs::metadata(path)
+                        .map(|m| {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                m.permissions().mode() & 0o111 != 0
+                            }
+                            #[cfg(not(unix))]
+                            true
+                        })
+                        .unwrap_or(false)
                 })
                 .cloned()
         }
@@ -522,10 +545,22 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
 }
 
 /// Expand ~/... in paths to HOME directory.
+/// After expansion, verifies the result is still rooted under HOME or /usr;
+/// paths that escape via traversal (~/../../../etc/passwd) are rejected and
+/// the original path is returned unchanged.
 fn expand_path(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
-        let home = super::get_home_dir();
-        path.replacen("~", &home, 1)
+let home = crate::get_home_dir();
+        let expanded = path.replacen("~", &home, 1);
+        // Canonicalize to resolve any .. traversal, then verify prefix.
+        if let Ok(canon) = std::path::Path::new(&expanded).canonicalize()
+            && (canon.starts_with(&home) || canon.starts_with("/usr"))
+        {
+            return canon.display().to_string();
+        }
+        // Fall through: traversal detected or canonicalize failed — return
+        // the original path unchanged (safer than a potentially-escaped result).
+        path.to_string()
     } else {
         path.to_string()
     }
