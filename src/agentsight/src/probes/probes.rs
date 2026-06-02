@@ -24,6 +24,7 @@ use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 use super::udpdns::{UdpDns, RawUdpDnsEvent};
 use crate::config::TcpTarget;
 use super::tcpsniff::TcpSniff;
+use super::lsmaudit::{LsmAudit, RawLsmEvent};
 
 const POLL_TIMEOUT_MS: u64 = 100;
 
@@ -34,6 +35,7 @@ const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
 const EVENT_SOURCE_FILEWRITE: u32 = 5;
 const EVENT_SOURCE_UDPDNS: u32 = 6;
+const EVENT_SOURCE_LSM: u32 = 7;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
@@ -57,6 +59,8 @@ pub struct Probes {
     udpdns: Option<UdpDns>,
     /// TCP sniff probe (captures plain HTTP traffic on configured ports, optional)
     tcpsniff: Option<TcpSniff>,
+    /// LSM audit probe (observe-only security auditing, optional, opt-in)
+    lsmaudit: Option<LsmAudit>,
     /// Shared ring buffer handle (cloned from proctrace) for polling
     rb_handle: MapHandle,
     /// Unified event channel - events are converted to Event type inside the poller
@@ -70,7 +74,7 @@ impl Probes {
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_targets: &[TcpTarget]) -> Result<Self> {
+    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, enable_lsm_audit: bool, tcp_targets: &[TcpTarget]) -> Result<Self> {
         // Create proctrace first - it will own the traced_processes map and ring buffer
         let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
             .context("failed to create proctrace")?;
@@ -126,6 +130,26 @@ impl Probes {
             None
         };
 
+        // Optionally create lsmaudit - observe-only LSM security auditing.
+        // Requires BPF LSM to be active; if not, skip with a warning rather than
+        // failing the whole run.
+        let lsmaudit = if enable_lsm_audit {
+            if !LsmAudit::bpf_lsm_available() {
+                log::warn!(
+                    "LSM audit requested but BPF LSM is not active \
+                     (no 'bpf' in /sys/kernel/security/lsm); skipping lsmaudit probe"
+                );
+                None
+            } else {
+                let la = LsmAudit::new_with_maps(&map_handle, &rb_handle)
+                    .context("failed to create lsmaudit")?;
+                Some(la)
+            }
+        } else {
+            log::info!("LSM audit probe disabled");
+            None
+        };
+
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         
         Ok(Self {
@@ -136,6 +160,7 @@ impl Probes {
             filewrite,
             udpdns,
             tcpsniff,
+            lsmaudit,
             rb_handle,
             event_tx,
             event_rx,
@@ -166,6 +191,11 @@ impl Probes {
             tcp.attach()
                 .context("failed to attach tcpsniff")?;
         }
+        // Attach lsmaudit LSM programs for security auditing (if enabled)
+        if let Some(ref mut la) = self.lsmaudit {
+            la.attach()
+                .context("failed to attach lsmaudit")?;
+        }
         // sslsniff uses uprobes attached per-process via attach_process()
         Ok(())
     }
@@ -193,6 +223,7 @@ impl Probes {
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
         let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
         let udpdns_event_size = mem::size_of::<RawUdpDnsEvent>();
+        let lsm_event_size = mem::size_of::<RawLsmEvent>();
 
         let event_tx = self.event_tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -255,6 +286,14 @@ impl Probes {
                         // UDP DNS event (domain name from DNS query)
                         if data.len() >= udpdns_event_size {
                             super::udpdns::UdpDnsEvent::from_bytes(data).map(Event::UdpDns)
+                        } else {
+                            None
+                        }
+                    }
+                    EVENT_SOURCE_LSM => {
+                        // LSM audit event (socket_connect / file_open)
+                        if data.len() >= lsm_event_size {
+                            super::lsmaudit::LsmEvent::from_bytes(data).map(Event::Lsm)
                         } else {
                             None
                         }

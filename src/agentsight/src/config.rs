@@ -383,6 +383,9 @@ pub struct AgentsightConfig {
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
+    /// Enable LSM security-audit probe (observe-only socket_connect + file_open).
+    /// Requires BPF LSM to be active (`bpf` in /sys/kernel/security/lsm).
+    pub enable_lsm_audit: bool,
     /// TCP capture targets for plain HTTP capture (empty = disabled).
     /// Each entry specifies destination IP, port, or both.
     pub tcp_targets: Vec<TcpTarget>,
@@ -450,6 +453,7 @@ impl Default for AgentsightConfig {
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
             enable_filewatch: false,
+            enable_lsm_audit: false,
             tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
@@ -534,6 +538,12 @@ impl AgentsightConfig {
     /// Set enable_filewatch
     pub fn set_enable_filewatch(mut self, enable: bool) -> Self {
         self.enable_filewatch = enable;
+        self
+    }
+
+    /// Set enable_lsm_audit
+    pub fn set_enable_lsm_audit(mut self, enable: bool) -> Self {
+        self.enable_lsm_audit = enable;
         self
     }
 

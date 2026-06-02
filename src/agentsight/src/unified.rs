@@ -204,7 +204,7 @@ impl AgentSight {
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, config.enable_lsm_audit, &tcp_targets).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -485,6 +485,12 @@ impl AgentSight {
             return None;
         }
 
+        // Handle LSM audit events (observe-only security audit log)
+        if let Event::Lsm(ref lsm_event) = event {
+            self.handle_lsm_event(lsm_event);
+            return None;
+        }
+
         // Handle UDP DNS events (domain-based attachment)
         if let Event::UdpDns(ref dns_event) = event {
             log::debug!(
@@ -683,6 +689,40 @@ impl AgentSight {
         log::debug!("FileWatch: pid={} file={}", event.pid, event.filename);
         if let Some(ref cb) = self.filewatch_callback {
             cb(event.clone());
+        }
+    }
+
+    /// Handle an observe-only LSM audit event by emitting a structured audit log
+    /// line. The probe records, it never denies. (Future work: structured export
+    /// to the audit store / SLS instead of just logging.)
+    fn handle_lsm_event(&self, event: &crate::probes::lsmaudit::LsmEvent) {
+        use crate::probes::lsmaudit::LsmEvent;
+        match event {
+            LsmEvent::Connect(c) => {
+                log::info!(
+                    "[LSM] connect pid={} comm={} dst={}:{}",
+                    c.pid,
+                    c.comm,
+                    c.dst_ip,
+                    c.dport
+                );
+            }
+            LsmEvent::FileOpen(f) => {
+                // Decode the access mode from the low bits of f_flags (O_ACCMODE).
+                let mode = match f.open_flags & 0o3 {
+                    0 => "r",
+                    1 => "w",
+                    2 => "rw",
+                    _ => "?",
+                };
+                log::info!(
+                    "[LSM] open pid={} comm={} mode={} path={}",
+                    f.pid,
+                    f.comm,
+                    mode,
+                    f.path
+                );
+            }
         }
     }
 

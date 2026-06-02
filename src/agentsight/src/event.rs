@@ -4,6 +4,7 @@ use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
 use crate::probes::udpdns::UdpDnsEvent;
+use crate::probes::lsmaudit::LsmEvent;
 
 /// Unified event type that can represent any probe event
 ///
@@ -16,6 +17,7 @@ pub enum Event {
     FileWatch(FileWatchEvent),
     FileWrite(FileWriteEvent),
     UdpDns(UdpDnsEvent),
+    Lsm(LsmEvent),
 }
 
 impl Event {
@@ -28,6 +30,7 @@ impl Event {
             Event::FileWatch(_) => "FileWatch",
             Event::FileWrite(_) => "FileWrite",
             Event::UdpDns(_) => "UdpDns",
+            Event::Lsm(_) => "Lsm",
         }
     }
 }
@@ -107,6 +110,19 @@ impl Event {
     pub fn as_udpdns(&self) -> Option<&UdpDnsEvent> {
         match self {
             Event::UdpDns(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Check if this is an LSM audit event
+    pub fn is_lsm(&self) -> bool {
+        matches!(self, Event::Lsm(_))
+    }
+
+    /// Get LSM audit event if this is one
+    pub fn as_lsm(&self) -> Option<&LsmEvent> {
+        match self {
+            Event::Lsm(e) => Some(e),
             _ => None,
         }
     }
@@ -234,5 +250,32 @@ mod tests {
         assert!(e.as_procmon().is_none());
         assert!(e.as_filewatch().is_none());
         assert!(e.as_filewrite().is_none());
+    }
+
+    fn make_lsm_event() -> LsmEvent {
+        LsmEvent::FileOpen(crate::probes::lsmaudit::LsmFileOpen {
+            pid: 4242,
+            tid: 4242,
+            uid: 0,
+            timestamp_ns: 400,
+            comm: "agent".to_string(),
+            path: "shadow".to_string(),
+            open_flags: 0,
+        })
+    }
+
+    #[test]
+    fn test_event_type_lsm() {
+        let e = Event::Lsm(make_lsm_event());
+        assert_eq!(e.event_type(), "Lsm");
+    }
+
+    #[test]
+    fn test_is_and_as_lsm() {
+        let e = Event::Lsm(make_lsm_event());
+        assert!(e.is_lsm());
+        assert!(!e.is_ssl());
+        assert!(e.as_lsm().is_some());
+        assert!(e.as_ssl().is_none());
     }
 }
