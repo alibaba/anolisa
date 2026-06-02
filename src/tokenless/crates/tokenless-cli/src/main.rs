@@ -265,7 +265,7 @@ fn run() -> Result<(), (String, i32)> {
 
             let compressor = SchemaCompressor::new();
 
-            let (result_json, after_compact) = if batch {
+            let (result_json, after_compact) = if batch || value.is_array() {
                 let arr = value
                     .as_array()
                     .ok_or_else(|| ("Expected a JSON array for --batch mode".to_string(), 1))?;
@@ -287,6 +287,10 @@ fn run() -> Result<(), (String, i32)> {
             let before_tokens = estimate_tokens_from_bytes(input.len());
             let after_tokens = estimate_tokens_from_bytes(after_compact.len());
             let output_text = if after_tokens >= before_tokens {
+                eprintln!(
+                    "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
+                    before_tokens, after_tokens
+                );
                 input.clone()
             } else {
                 result_json.clone()

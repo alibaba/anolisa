@@ -30,6 +30,12 @@ assert_contains() {
     else log_fail "$test_name - Expected: $expected"; fi
 }
 
+assert_not_contains() {
+    local input="$1" unexpected="$2" test_name="$3"
+    if echo "$input" | grep -q "$unexpected"; then log_fail "$test_name - Unexpected: $unexpected"
+    else log_pass "$test_name"; fi
+}
+
 test_schema_compression() {
     log_section "Test 1: Schema Compression"
 
@@ -52,6 +58,13 @@ test_schema_compression() {
     log_info "Test 1.4: Edge cases"
     assert_contains "$(echo '{}' | tokenless compress-schema 2>/dev/null)" '{}' "Empty schema"
     assert_contains "$(echo 'null' | tokenless compress-schema 2>/dev/null)" 'null' "Null schema"
+
+    log_info "Test 1.5: Array input (OpenAI tools format, auto-detected)"
+    local array_schema='[{"type":"function","function":{"name":"f","title":"Remove Me","description":"short","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Also Remove","examples":["ex"]}}}}}]'
+    local arr_compressed=$(echo "$array_schema" | tokenless compress-schema 2>/dev/null)
+    assert_not_contains "$arr_compressed" '"title"' "Array input: titles removed"
+    assert_not_contains "$arr_compressed" '"examples"' "Array input: examples removed"
+    assert_contains "$arr_compressed" '"function"' "Array input: function preserved"
 }
 
 test_response_compression() {
