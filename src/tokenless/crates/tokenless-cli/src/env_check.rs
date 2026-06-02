@@ -963,6 +963,21 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
         .map_err(|e| format!("Failed to wait for env-fix: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface stderr (and stdout) so the caller can show the failure
+        // instead of silently treating an error message as a "success" payload.
+        return Err(format!(
+            "env-fix exited with {}: {}{}",
+            output.status,
+            stderr.trim(),
+            if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" | stdout: {}", stdout.trim())
+            }
+        ));
+    }
     Ok(stdout)
 }
 
