@@ -3,7 +3,7 @@
 //! This module defines GenAI-specific semantic structures that represent
 //! LLM interactions at a higher abstraction level than raw HTTP requests/responses.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// GenAI semantic event types
@@ -294,7 +294,9 @@ mod tests {
         LLMRequest {
             messages: vec![InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Hello".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Hello".to_string(),
+                }],
                 name: None,
             }],
             temperature: Some(0.7),
@@ -315,8 +317,13 @@ mod tests {
     fn test_llm_call_new() {
         let req = make_request();
         let call = LLMCall::new(
-            "call-1".to_string(), 1000, "openai".to_string(),
-            "gpt-4".to_string(), req, 100, "test".to_string(),
+            "call-1".to_string(),
+            1000,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            req,
+            100,
+            "test".to_string(),
         );
         assert_eq!(call.call_id, "call-1");
         assert_eq!(call.end_timestamp_ns, 0);
@@ -331,13 +338,20 @@ mod tests {
     fn test_llm_call_set_response() {
         let req = make_request();
         let mut call = LLMCall::new(
-            "call-2".to_string(), 1000, "anthropic".to_string(),
-            "claude-3".to_string(), req, 200, "agent".to_string(),
+            "call-2".to_string(),
+            1000,
+            "anthropic".to_string(),
+            "claude-3".to_string(),
+            req,
+            200,
+            "agent".to_string(),
         );
         let resp = LLMResponse {
             messages: vec![OutputMessage {
                 role: "assistant".to_string(),
-                parts: vec![MessagePart::Text { content: "Hi".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Hi".to_string(),
+                }],
                 name: None,
                 finish_reason: Some("stop".to_string()),
             }],
@@ -354,24 +368,40 @@ mod tests {
     fn test_llm_call_set_token_usage() {
         let req = make_request();
         let mut call = LLMCall::new(
-            "call-3".to_string(), 0, "openai".to_string(),
-            "gpt-4".to_string(), req, 1, "p".to_string(),
+            "call-3".to_string(),
+            0,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            req,
+            1,
+            "p".to_string(),
         );
         let usage = TokenUsage {
-            input_tokens: 100, output_tokens: 50, total_tokens: 150,
-            cache_creation_input_tokens: None, cache_read_input_tokens: Some(10),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(10),
         };
         call.set_token_usage(usage);
         assert_eq!(call.token_usage.as_ref().unwrap().total_tokens, 150);
-        assert_eq!(call.token_usage.as_ref().unwrap().cache_read_input_tokens, Some(10));
+        assert_eq!(
+            call.token_usage.as_ref().unwrap().cache_read_input_tokens,
+            Some(10)
+        );
     }
 
     #[test]
     fn test_llm_call_set_error() {
         let req = make_request();
         let mut call = LLMCall::new(
-            "call-4".to_string(), 0, "openai".to_string(),
-            "gpt-4".to_string(), req, 1, "p".to_string(),
+            "call-4".to_string(),
+            0,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            req,
+            1,
+            "p".to_string(),
         );
         call.set_error("timeout".to_string());
         assert_eq!(call.error.as_ref().unwrap(), "timeout");
@@ -379,7 +409,9 @@ mod tests {
 
     #[test]
     fn test_message_part_serde_text() {
-        let part = MessagePart::Text { content: "hello world".to_string() };
+        let part = MessagePart::Text {
+            content: "hello world".to_string(),
+        };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         let parsed: MessagePart = serde_json::from_str(&json).unwrap();
@@ -391,7 +423,9 @@ mod tests {
 
     #[test]
     fn test_message_part_serde_reasoning() {
-        let part = MessagePart::Reasoning { content: "thinking...".to_string() };
+        let part = MessagePart::Reasoning {
+            content: "thinking...".to_string(),
+        };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("\"type\":\"reasoning\""));
         let parsed: MessagePart = serde_json::from_str(&json).unwrap();
@@ -411,7 +445,11 @@ mod tests {
         let json = serde_json::to_string(&part).unwrap();
         let parsed: MessagePart = serde_json::from_str(&json).unwrap();
         match parsed {
-            MessagePart::ToolCall { id, name, arguments } => {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(id.unwrap(), "tc-1");
                 assert_eq!(name, "search");
                 assert_eq!(arguments.unwrap()["query"], "rust");
@@ -440,8 +478,11 @@ mod tests {
     #[test]
     fn test_token_usage_serde_roundtrip() {
         let usage = TokenUsage {
-            input_tokens: 500, output_tokens: 200, total_tokens: 700,
-            cache_creation_input_tokens: Some(100), cache_read_input_tokens: Some(50),
+            input_tokens: 500,
+            output_tokens: 200,
+            total_tokens: 700,
+            cache_creation_input_tokens: Some(100),
+            cache_read_input_tokens: Some(50),
         };
         let json = serde_json::to_string(&usage).unwrap();
         let parsed: TokenUsage = serde_json::from_str(&json).unwrap();
@@ -549,7 +590,9 @@ mod tests {
         let input = InputMessage {
             role: "user".to_string(),
             parts: vec![
-                MessagePart::Text { content: "Hello".to_string() },
+                MessagePart::Text {
+                    content: "Hello".to_string(),
+                },
                 MessagePart::ToolCallResponse {
                     id: Some("tc".to_string()),
                     response: json!("ok"),
@@ -565,7 +608,9 @@ mod tests {
 
         let output = OutputMessage {
             role: "assistant".to_string(),
-            parts: vec![MessagePart::Text { content: "Hi".to_string() }],
+            parts: vec![MessagePart::Text {
+                content: "Hi".to_string(),
+            }],
             name: None,
             finish_reason: Some("stop".to_string()),
         };
@@ -578,22 +623,35 @@ mod tests {
     fn test_llm_call_full_serde_roundtrip() {
         let req = make_request();
         let mut call = LLMCall::new(
-            "call-rt".to_string(), 1000, "openai".to_string(),
-            "gpt-4o".to_string(), req, 42, "agent".to_string(),
+            "call-rt".to_string(),
+            1000,
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            req,
+            42,
+            "agent".to_string(),
         );
-        call.set_response(LLMResponse {
-            messages: vec![OutputMessage {
-                role: "assistant".to_string(),
-                parts: vec![MessagePart::Text { content: "world".to_string() }],
-                name: None,
-                finish_reason: Some("stop".to_string()),
-            }],
-            streamed: true,
-            raw_body: None,
-        }, 5000);
+        call.set_response(
+            LLMResponse {
+                messages: vec![OutputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "world".to_string(),
+                    }],
+                    name: None,
+                    finish_reason: Some("stop".to_string()),
+                }],
+                streamed: true,
+                raw_body: None,
+            },
+            5000,
+        );
         call.set_token_usage(TokenUsage {
-            input_tokens: 10, output_tokens: 5, total_tokens: 15,
-            cache_creation_input_tokens: None, cache_read_input_tokens: None,
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         call.metadata.insert("key".to_string(), "value".to_string());
 

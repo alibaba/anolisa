@@ -83,7 +83,6 @@ impl Http2Parser {
                 frames.push(frame);
             }
 
-
             pos = payload_offset + length;
         }
 
@@ -197,10 +196,11 @@ mod tests {
     #[test]
     fn test_parse_incomplete_frame() {
         // Valid header but truncated payload
-        let mut raw = Vec::new();
-        raw.push(0x00); raw.push(0x00); raw.push(0x20); // length = 32
-        raw.push(0x00); // DATA
-        raw.push(0x00); // no flags
+        let mut raw = vec![
+            0x00, 0x00, 0x20, // length = 32
+            0x00, // DATA
+            0x00, // no flags
+        ];
         raw.extend(&[0x00, 0x00, 0x00, 0x01]); // stream 1
         raw.extend(b"short"); // only 5 bytes, not 32
         let event = create_test_event(raw);
@@ -220,7 +220,8 @@ mod tests {
 
     #[test]
     fn test_data_frame_json_body() {
-        let json_payload = br#"{"model":"qwen3.5-plus","messages":[{"role":"user","content":"hello"}]}"#;
+        let json_payload =
+            br#"{"model":"qwen3.5-plus","messages":[{"role":"user","content":"hello"}]}"#;
         let raw = build_frame(0, 0x01, 5, json_payload);
         let event = create_test_event(raw);
         let parser = Http2Parser::new();
@@ -257,18 +258,15 @@ mod tests {
         // Contains a HEADERS frame (len=83) and an incomplete DATA frame (len=16384, truncated)
         // Since we only keep DATA frames, and the DATA frame is truncated, result should be empty
         let sample_data: Vec<u8> = vec![
-            0, 0, 83, 1, 4, 0, 0, 0, 171, 203, 131, 4, 153, 96, 135, 166,
-            177, 164, 209, 208, 85, 169, 60, 133, 99, 184, 88, 36, 227, 75,
-            4, 61, 53, 208, 84, 152, 245, 35, 135, 202, 201, 200, 199, 198,
-            197, 196, 195, 194, 31, 8, 158, 186, 81, 216, 91, 20, 71, 85,
-            156, 11, 196, 1, 28, 117, 240, 180, 86, 138, 208, 227, 145, 151,
-            218, 142, 87, 136, 65, 133, 185, 25, 143, 193, 192, 191, 190, 15,
-            13, 132, 117, 166, 94, 111, 0, 64, 0, 0, 0, 0, 0, 0, 171, 123,
-            34, 109, 111, 100, 101, 108, 34, 58, 34, 113, 119, 101, 110, 51,
-            46, 53, 45, 112, 108, 117, 115, 34, 44, 34, 109, 101, 115, 115,
-            97, 103, 101, 115, 34, 58, 91, 123, 34, 114, 111, 108, 101, 34,
-            58, 34, 115, 121, 115, 116, 101, 109, 34, 44, 34, 99, 111, 110,
-            116, 101, 110, 116, 34, 58, 34, 89, 111, 117,
+            0, 0, 83, 1, 4, 0, 0, 0, 171, 203, 131, 4, 153, 96, 135, 166, 177, 164, 209, 208, 85,
+            169, 60, 133, 99, 184, 88, 36, 227, 75, 4, 61, 53, 208, 84, 152, 245, 35, 135, 202,
+            201, 200, 199, 198, 197, 196, 195, 194, 31, 8, 158, 186, 81, 216, 91, 20, 71, 85, 156,
+            11, 196, 1, 28, 117, 240, 180, 86, 138, 208, 227, 145, 151, 218, 142, 87, 136, 65, 133,
+            185, 25, 143, 193, 192, 191, 190, 15, 13, 132, 117, 166, 94, 111, 0, 64, 0, 0, 0, 0, 0,
+            0, 171, 123, 34, 109, 111, 100, 101, 108, 34, 58, 34, 113, 119, 101, 110, 51, 46, 53,
+            45, 112, 108, 117, 115, 34, 44, 34, 109, 101, 115, 115, 97, 103, 101, 115, 34, 58, 91,
+            123, 34, 114, 111, 108, 101, 34, 58, 34, 115, 121, 115, 116, 101, 109, 34, 44, 34, 99,
+            111, 110, 116, 101, 110, 116, 34, 58, 34, 89, 111, 117,
         ];
         let event = create_test_event(sample_data);
         let parser = Http2Parser::new();

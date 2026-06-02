@@ -12,7 +12,7 @@ use crate::event::Event;
 use crate::parser::http::{HttpParser, ParsedHttpMessage};
 use crate::parser::http2::Http2Parser;
 use crate::parser::proctrace::ProcTraceParser;
-use crate::parser::sse::{SseParser, ParsedSseEvent};
+use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::proctrace::VariableEvent;
 use crate::probes::sslsniff::SslEvent;
 use std::rc::Rc;
@@ -50,7 +50,7 @@ impl Parser {
     pub fn parse_ssl_event(&self, ssl_event: Rc<SslEvent>) -> ParseResult {
         log::debug!("parse_ssl_event: length={}", ssl_event.buf_size());
 
-        let comm = ssl_event.comm.trim_end_matches('\0');
+        let _comm = ssl_event.comm.trim_end_matches('\0');
 
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {
@@ -88,9 +88,9 @@ impl Parser {
             let buf = &ssl_event.buf[..buf_size];
             if buf == b"0\r\n\r\n" {
                 return ParseResult {
-                    messages: vec![ParsedMessage::SseEvent(
-                        ParsedSseEvent::new_done_marker(Rc::clone(&ssl_event))
-                    )],
+                    messages: vec![ParsedMessage::SseEvent(ParsedSseEvent::new_done_marker(
+                        Rc::clone(&ssl_event),
+                    ))],
                 };
             }
         }
@@ -137,10 +137,18 @@ impl Parser {
         match event {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
-            Event::ProcMon(_) => ParseResult { messages: Vec::new() },
-            Event::FileWatch(_) => ParseResult { messages: Vec::new() },
-            Event::FileWrite(_) => ParseResult { messages: Vec::new() },
-            Event::UdpDns(_) => ParseResult { messages: Vec::new() },
+            Event::ProcMon(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::FileWatch(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::FileWrite(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::UdpDns(_) => ParseResult {
+                messages: Vec::new(),
+            },
         }
     }
 

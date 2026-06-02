@@ -24,61 +24,69 @@
 //! sight.run()?;  // blocking event loop
 //! ```
 
-pub mod probes;
+// Crate-wide clippy allows for lints that are either subjective style choices or
+// reflect intentional design here, so we can enforce `clippy -D warnings` in CI
+// without churning these:
+// - type_complexity: a few SQLite row-tuple / callback signatures are clearer
+//   inline than behind a type alias.
+// - large_enum_variant: event/result enums carry one large variant by design;
+//   boxing it would pessimize the common path and complicate call sites.
+// - too_many_arguments: a couple of SQL insert helpers mirror their table columns.
+// - module_inception: `probes::probes` is the established layout.
+// - should_implement_trait: an inherent `from_str` that is not the FromStr trait.
+#![allow(
+    clippy::type_complexity,
+    clippy::large_enum_variant,
+    clippy::too_many_arguments,
+    clippy::module_inception,
+    clippy::should_implement_trait
+)]
+
 pub mod config;
+pub mod probes;
 
 // Re-export config types
 pub use config::{AgentsightConfig, default_base_path};
-pub mod event;
-pub mod parser;
 pub mod aggregator;
 pub mod analyzer;
-pub mod storage;
+pub mod atif;
 pub mod chrome_trace;
 pub mod discovery;
-pub mod health;
-pub mod tokenizer;
+pub mod event;
+pub mod ffi;
 pub mod genai;
-pub mod atif;
-pub mod response_map;
+pub mod health;
 pub mod interruption;
-pub mod skill_metrics;
+pub mod parser;
+pub mod response_map;
 #[cfg(feature = "server")]
 pub mod server;
+pub mod skill_metrics;
+pub mod storage;
+pub mod tokenizer;
 mod unified;
-pub mod ffi;
 
 // Re-export common types for convenience
 pub use aggregator::{
-    Aggregator, AggregatedResult,
-    HttpConnectionAggregator, ConnectionId, ConnectionState,
-    HttpPair,
-    ProcessEventAggregator, AggregatedProcess,
-    AggregatedResponse,
-};
-pub use parser::{
-    HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse,
-    SseParser, ParsedSseEvent,
-    ProcTraceParser, ParsedProcEvent, ProcEventType,
-    Http2Parser, Http2FrameType, ParsedHttp2Frame,
-    Parser, ParsedMessage, ParseResult,
+    AggregatedProcess, AggregatedResponse, AggregatedResult, Aggregator, ConnectionId,
+    ConnectionState, HttpConnectionAggregator, HttpPair, ProcessEventAggregator,
 };
 pub use analyzer::{
-    AuditAnalyzer, AuditEventType, AuditExtra, AuditRecord, AuditSummary,
-    TokenParser, TokenUsage, TokenRecord, LLMProvider,
-    MessageParser, ParsedApiMessage,
-    OpenAIRequest, OpenAIResponse, OpenAIChatMessage, OpenAIContent, OpenAIUsage,
-    AnthropicRequest, AnthropicResponse, AnthropicMessage, AnthropicUsage,
-    MessageRole,
-    AnalysisResult, PromptTokenCount, HttpRecord, Analyzer,
+    AnalysisResult, Analyzer, AnthropicMessage, AnthropicRequest, AnthropicResponse,
+    AnthropicUsage, AuditAnalyzer, AuditEventType, AuditExtra, AuditRecord, AuditSummary,
+    HttpRecord, LLMProvider, MessageParser, MessageRole, OpenAIChatMessage, OpenAIContent,
+    OpenAIRequest, OpenAIResponse, OpenAIUsage, ParsedApiMessage, PromptTokenCount, TokenParser,
+    TokenRecord, TokenUsage,
 };
-pub use chrome_trace::{ChromeTraceEvent, TraceArgs, ToChromeTraceEvent, ns_to_us, next_flow_id};
+pub use chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, next_flow_id, ns_to_us};
+pub use parser::{
+    Http2FrameType, Http2Parser, HttpParser, ParseResult, ParsedHttp2Frame, ParsedHttpMessage,
+    ParsedMessage, ParsedProcEvent, ParsedRequest, ParsedResponse, ParsedSseEvent, Parser,
+    ProcEventType, ProcTraceParser, SseParser,
+};
 pub use storage::{
-    Storage, StorageBackend, SqliteConfig,
-    SqliteStore, AuditStore,
-    TokenStore, TokenQuery,
-    HttpStore,
-    TimePeriod, TokenQueryResult, TokenBreakdown, TokenComparison, Trend,
+    AuditStore, HttpStore, SqliteConfig, SqliteStore, Storage, StorageBackend, TimePeriod,
+    TokenBreakdown, TokenComparison, TokenQuery, TokenQueryResult, TokenStore, Trend,
     format_tokens, format_tokens_with_commas,
 };
 
@@ -92,12 +100,12 @@ pub use probes::FileWatchEvent;
 pub use response_map::ResponseSessionMapper;
 
 // Re-export discovery types
-pub use discovery::{AgentInfo, AgentScanner, CmdlineGlobMatcher, DiscoveredAgent, ProcessContext};
 pub use config::default_cmdline_rules;
+pub use discovery::{AgentInfo, AgentScanner, CmdlineGlobMatcher, DiscoveredAgent, ProcessContext};
 
 // Re-export genai types
 pub use genai::{
-    GenAIBuilder, GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
-    MessagePart, InputMessage, OutputMessage, ToolUse, AgentInteraction, StreamChunk, ToolDefinition,
-    GenAIStore, GenAIStoreStats, LogtailExporter, GenAIExporter,
+    AgentInteraction, GenAIBuilder, GenAIExporter, GenAISemanticEvent, GenAIStore, GenAIStoreStats,
+    InputMessage, LLMCall, LLMRequest, LLMResponse, LogtailExporter, MessagePart, OutputMessage,
+    StreamChunk, ToolDefinition, ToolUse,
 };

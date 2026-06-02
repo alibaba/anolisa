@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::genai::semantic::{
-    GenAISemanticEvent, LLMCall, MessagePart, InputMessage, OutputMessage,
+    GenAISemanticEvent, InputMessage, LLMCall, MessagePart, OutputMessage,
 };
 use crate::storage::sqlite::genai::TraceEventDetail;
 
@@ -30,41 +30,41 @@ pub fn convert_trace_to_atif(
     let mut steps = Vec::new();
 
     // 1. System prompt step
-    if let Some(system_text) = extract_system_prompt(&events[0], parsed[0].as_ref()) {
-        if !system_text.is_empty() {
-            step_counter += 1;
-            steps.push(AtifStep {
-                step_id: step_counter,
-                timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
-                source: "system".to_string(),
-                message: Some(system_text),
-                model_name: None,
-                reasoning_content: None,
-                tool_calls: None,
-                observation: None,
-                metrics: None,
-                extra: None,
-            });
-        }
+    if let Some(system_text) = extract_system_prompt(&events[0], parsed[0].as_ref())
+        && !system_text.is_empty()
+    {
+        step_counter += 1;
+        steps.push(AtifStep {
+            step_id: step_counter,
+            timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
+            source: "system".to_string(),
+            message: Some(system_text),
+            model_name: None,
+            reasoning_content: None,
+            tool_calls: None,
+            observation: None,
+            metrics: None,
+            extra: None,
+        });
     }
 
     // 2. User query step
-    if let Some(user_text) = extract_user_query(&events[0], parsed[0].as_ref()) {
-        if !user_text.is_empty() {
-            step_counter += 1;
-            steps.push(AtifStep {
-                step_id: step_counter,
-                timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
-                source: "user".to_string(),
-                message: Some(user_text),
-                model_name: None,
-                reasoning_content: None,
-                tool_calls: None,
-                observation: None,
-                metrics: None,
-                extra: None,
-            });
-        }
+    if let Some(user_text) = extract_user_query(&events[0], parsed[0].as_ref())
+        && !user_text.is_empty()
+    {
+        step_counter += 1;
+        steps.push(AtifStep {
+            step_id: step_counter,
+            timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
+            source: "user".to_string(),
+            message: Some(user_text),
+            model_name: None,
+            reasoning_content: None,
+            tool_calls: None,
+            observation: None,
+            metrics: None,
+            extra: None,
+        });
     }
 
     // 3. Agent steps
@@ -122,50 +122,47 @@ pub fn convert_session_to_atif(
         }
 
         // System prompt: emit if changed or first time
-        if let Some(system_text) =
-            extract_system_prompt(trace_events[0], trace_parsed.first().and_then(|p| p.as_ref()))
+        if let Some(system_text) = extract_system_prompt(
+            trace_events[0],
+            trace_parsed.first().and_then(|p| p.as_ref()),
+        ) && !system_text.is_empty()
+            && last_system_text.as_deref() != Some(&system_text)
         {
-            if !system_text.is_empty() && last_system_text.as_deref() != Some(&system_text) {
-                step_counter += 1;
-                steps.push(AtifStep {
-                    step_id: step_counter,
-                    timestamp: Some(ns_to_iso8601(
-                        trace_events[0].start_timestamp_ns as u64,
-                    )),
-                    source: "system".to_string(),
-                    message: Some(system_text.clone()),
-                    model_name: None,
-                    reasoning_content: None,
-                    tool_calls: None,
-                    observation: None,
-                    metrics: None,
-                    extra: None,
-                });
-                last_system_text = Some(system_text);
-            }
+            step_counter += 1;
+            steps.push(AtifStep {
+                step_id: step_counter,
+                timestamp: Some(ns_to_iso8601(trace_events[0].start_timestamp_ns as u64)),
+                source: "system".to_string(),
+                message: Some(system_text.clone()),
+                model_name: None,
+                reasoning_content: None,
+                tool_calls: None,
+                observation: None,
+                metrics: None,
+                extra: None,
+            });
+            last_system_text = Some(system_text);
         }
 
         // User query step
-        if let Some(user_text) =
-            extract_user_query(trace_events[0], trace_parsed.first().and_then(|p| p.as_ref()))
+        if let Some(user_text) = extract_user_query(
+            trace_events[0],
+            trace_parsed.first().and_then(|p| p.as_ref()),
+        ) && !user_text.is_empty()
         {
-            if !user_text.is_empty() {
-                step_counter += 1;
-                steps.push(AtifStep {
-                    step_id: step_counter,
-                    timestamp: Some(ns_to_iso8601(
-                        trace_events[0].start_timestamp_ns as u64,
-                    )),
-                    source: "user".to_string(),
-                    message: Some(user_text),
-                    model_name: None,
-                    reasoning_content: None,
-                    tool_calls: None,
-                    observation: None,
-                    metrics: None,
-                    extra: None,
-                });
-            }
+            step_counter += 1;
+            steps.push(AtifStep {
+                step_id: step_counter,
+                timestamp: Some(ns_to_iso8601(trace_events[0].start_timestamp_ns as u64)),
+                source: "user".to_string(),
+                message: Some(user_text),
+                model_name: None,
+                reasoning_content: None,
+                tool_calls: None,
+                observation: None,
+                metrics: None,
+                extra: None,
+            });
         }
 
         // Agent steps
@@ -205,10 +202,7 @@ pub fn convert_session_to_atif(
 
 /// Parse event_json for all events upfront. Returns a Vec of Option<LLMCall>.
 fn parse_all_events(events: &[TraceEventDetail]) -> Vec<Option<LLMCall>> {
-    events
-        .iter()
-        .map(|e| parse_event_json(e))
-        .collect()
+    events.iter().map(parse_event_json).collect()
 }
 
 /// Try to deserialize event_json into an LLMCall.
@@ -252,10 +246,7 @@ fn group_by_trace<'a>(
 }
 
 /// Build agent metadata from events.
-fn build_agent_metadata(
-    events: &[TraceEventDetail],
-    parsed: &[Option<LLMCall>],
-) -> AtifAgent {
+fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>]) -> AtifAgent {
     // Agent name: first non-None agent_name, fallback to process_name
     let name = events
         .iter()
@@ -301,7 +292,8 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
         if let Some(ref tools) = call.request.tools {
             for tool in tools {
                 // Extract tool name for deduplication
-                let name = tool.get("function")
+                let name = tool
+                    .get("function")
                     .and_then(|f| f.get("name"))
                     .or_else(|| tool.get("name"))
                     .and_then(|n| n.as_str())
@@ -318,10 +310,7 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
 }
 
 /// Extract system prompt text from event data.
-fn extract_system_prompt(
-    event: &TraceEventDetail,
-    parsed: Option<&LLMCall>,
-) -> Option<String> {
+fn extract_system_prompt(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Option<String> {
     // Strategy 1: from parsed LLMCall request messages
     if let Some(call) = parsed {
         let text = extract_text_by_role(&call.request.messages, "system");
@@ -339,10 +328,10 @@ fn extract_system_prompt(
             }
         }
         // Might be a plain string
-        if let Ok(s) = serde_json::from_str::<String>(json) {
-            if !s.is_empty() {
-                return Some(s);
-            }
+        if let Ok(s) = serde_json::from_str::<String>(json)
+            && !s.is_empty()
+        {
+            return Some(s);
         }
     }
 
@@ -350,15 +339,12 @@ fn extract_system_prompt(
 }
 
 /// Extract user query text from event data.
-fn extract_user_query(
-    event: &TraceEventDetail,
-    parsed: Option<&LLMCall>,
-) -> Option<String> {
+fn extract_user_query(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Option<String> {
     // Strategy 1: user_query column (already cleaned by builder)
-    if let Some(ref q) = event.user_query {
-        if !q.is_empty() {
-            return Some(q.clone());
-        }
+    if let Some(ref q) = event.user_query
+        && !q.is_empty()
+    {
+        return Some(q.clone());
     }
 
     // Strategy 2: from parsed LLMCall — last user message text
@@ -370,12 +356,12 @@ fn extract_user_query(
     }
 
     // Strategy 3: from input_messages column
-    if let Some(ref json) = event.input_messages {
-        if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
-            let text = extract_last_user_text_from_input(&msgs);
-            if let Some(t) = text {
-                return Some(t);
-            }
+    if let Some(ref json) = event.input_messages
+        && let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json)
+    {
+        let text = extract_last_user_text_from_input(&msgs);
+        if let Some(t) = text {
+            return Some(t);
         }
     }
 
@@ -414,7 +400,11 @@ fn build_agent_step(
                             reasoning_text.push_str(content);
                         }
                     }
-                    MessagePart::ToolCall { id, name, arguments } => {
+                    MessagePart::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => {
                         let tc_id = id
                             .clone()
                             .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
@@ -432,41 +422,45 @@ fn build_agent_step(
         }
     } else {
         // Fallback: parse output_messages column directly
-        if let Some(ref json) = event.output_messages {
-            if let Ok(msgs) = serde_json::from_str::<Vec<OutputMessage>>(json) {
-                for msg in &msgs {
-                    for part in &msg.parts {
-                        match part {
-                            MessagePart::Text { content } => {
-                                if !content.is_empty() {
-                                    if !message_text.is_empty() {
-                                        message_text.push('\n');
-                                    }
-                                    message_text.push_str(content);
+        if let Some(ref json) = event.output_messages
+            && let Ok(msgs) = serde_json::from_str::<Vec<OutputMessage>>(json)
+        {
+            for msg in &msgs {
+                for part in &msg.parts {
+                    match part {
+                        MessagePart::Text { content } => {
+                            if !content.is_empty() {
+                                if !message_text.is_empty() {
+                                    message_text.push('\n');
                                 }
+                                message_text.push_str(content);
                             }
-                            MessagePart::Reasoning { content } => {
-                                if !content.is_empty() {
-                                    if !reasoning_text.is_empty() {
-                                        reasoning_text.push('\n');
-                                    }
-                                    reasoning_text.push_str(content);
-                                }
-                            }
-                            MessagePart::ToolCall { id, name, arguments } => {
-                                let tc_id = id
-                                    .clone()
-                                    .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
-                                tool_calls.push(AtifToolCall {
-                                    tool_call_id: tc_id,
-                                    function_name: name.clone(),
-                                    arguments: arguments
-                                        .clone()
-                                        .unwrap_or(serde_json::Value::Object(Default::default())),
-                                });
-                            }
-                            _ => {}
                         }
+                        MessagePart::Reasoning { content } => {
+                            if !content.is_empty() {
+                                if !reasoning_text.is_empty() {
+                                    reasoning_text.push('\n');
+                                }
+                                reasoning_text.push_str(content);
+                            }
+                        }
+                        MessagePart::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let tc_id = id
+                                .clone()
+                                .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
+                            tool_calls.push(AtifToolCall {
+                                tool_call_id: tc_id,
+                                function_name: name.clone(),
+                                arguments: arguments
+                                    .clone()
+                                    .unwrap_or(serde_json::Value::Object(Default::default())),
+                            });
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -492,16 +486,14 @@ fn build_agent_step(
         } else {
             None
         },
-        cached_tokens: event.cache_read_tokens.and_then(|v| {
-            if v > 0 { Some(v as u32) } else { None }
-        }),
+        cached_tokens: event
+            .cache_read_tokens
+            .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
         extra: None,
     });
 
     // Timestamp: prefer end_timestamp (when response arrived)
-    let timestamp_ns = event
-        .end_timestamp_ns
-        .unwrap_or(event.start_timestamp_ns);
+    let timestamp_ns = event.end_timestamp_ns.unwrap_or(event.start_timestamp_ns);
 
     AtifStep {
         step_id,
@@ -538,7 +530,9 @@ fn latest_round_messages(messages: &[InputMessage]) -> &[InputMessage] {
     // Find the last assistant message that contains a ToolCall part.
     let last_assistant_with_tc = messages.iter().rposition(|m| {
         m.role == "assistant"
-            && m.parts.iter().any(|p| matches!(p, MessagePart::ToolCall { .. }))
+            && m.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::ToolCall { .. }))
     });
 
     if let Some(idx) = last_assistant_with_tc {
@@ -578,22 +572,16 @@ fn build_observation(
         // Strategy 2: from event_json parsed as LLMCall (latest round only)
         if let Some(call) = parse_event_json(next_event) {
             let latest = latest_round_messages(&call.request.messages);
-            collect_tool_responses(
-                latest,
-                &tc_ids,
-                &mut results,
-                &mut matched_by_id,
-            );
+            collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
         }
     }
 
     // Strategy 3: from input_messages column (already incremental — latest round)
-    if results.is_empty() {
-        if let Some(ref json) = next_event.input_messages {
-            if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
-                collect_tool_responses(&msgs, &tc_ids, &mut results, &mut matched_by_id);
-            }
-        }
+    if results.is_empty()
+        && let Some(ref json) = next_event.input_messages
+        && let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json)
+    {
+        collect_tool_responses(&msgs, &tc_ids, &mut results, &mut matched_by_id);
     }
 
     if results.is_empty() {
@@ -623,17 +611,16 @@ fn collect_tool_responses(
                 };
 
                 // Try to match by ID first
-                if let Some(tc_id) = id {
-                    if let Some(&idx) = tc_ids.get(tc_id.as_str()) {
-                        if !matched[idx] {
-                            matched[idx] = true;
-                            results.push(AtifObservationResult {
-                                source_call_id: Some(tc_id.clone()),
-                                content: Some(content_str),
-                            });
-                            continue;
-                        }
-                    }
+                if let Some(tc_id) = id
+                    && let Some(&idx) = tc_ids.get(tc_id.as_str())
+                    && !matched[idx]
+                {
+                    matched[idx] = true;
+                    results.push(AtifObservationResult {
+                        source_call_id: Some(tc_id.clone()),
+                        content: Some(content_str),
+                    });
+                    continue;
                 }
 
                 // Fallback: positional matching
@@ -645,7 +632,7 @@ fn collect_tool_responses(
                     results.push(AtifObservationResult {
                         source_call_id: Some(
                             id.clone()
-                                .unwrap_or_else(|| format!("auto_{}", positional_idx)),
+                                .unwrap_or_else(|| format!("auto_{positional_idx}")),
                         ),
                         content: Some(content_str),
                     });
@@ -691,10 +678,10 @@ fn extract_text_by_role(messages: &[InputMessage], role: &str) -> String {
     for msg in messages {
         if msg.role == role {
             for part in &msg.parts {
-                if let MessagePart::Text { content } = part {
-                    if !content.is_empty() {
-                        parts.push(content.as_str());
-                    }
+                if let MessagePart::Text { content } = part
+                    && !content.is_empty()
+                {
+                    parts.push(content.as_str());
                 }
             }
         }
@@ -746,7 +733,7 @@ fn ns_to_iso8601(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genai::semantic::{InputMessage, OutputMessage, MessagePart};
+    use crate::genai::semantic::{InputMessage, MessagePart};
 
     #[test]
     fn test_ns_to_iso8601() {
@@ -763,21 +750,30 @@ mod tests {
         let messages = vec![
             InputMessage {
                 role: "system".to_string(),
-                parts: vec![MessagePart::Text { content: "You are helpful.".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "You are helpful.".to_string(),
+                }],
                 name: None,
             },
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Hello".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Hello".to_string(),
+                }],
                 name: None,
             },
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "World".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "World".to_string(),
+                }],
                 name: None,
             },
         ];
-        assert_eq!(extract_text_by_role(&messages, "system"), "You are helpful.");
+        assert_eq!(
+            extract_text_by_role(&messages, "system"),
+            "You are helpful."
+        );
         assert_eq!(extract_text_by_role(&messages, "user"), "Hello\nWorld");
         assert_eq!(extract_text_by_role(&messages, "assistant"), "");
     }
@@ -787,44 +783,53 @@ mod tests {
         let messages = vec![
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "First".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "First".to_string(),
+                }],
                 name: None,
             },
             InputMessage {
                 role: "assistant".to_string(),
-                parts: vec![MessagePart::Text { content: "Response".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Response".to_string(),
+                }],
                 name: None,
             },
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Second".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Second".to_string(),
+                }],
                 name: None,
             },
         ];
-        assert_eq!(extract_last_user_text(&messages), Some("Second".to_string()));
+        assert_eq!(
+            extract_last_user_text(&messages),
+            Some("Second".to_string())
+        );
     }
 
     #[test]
     fn test_extract_last_user_text_empty() {
-        let messages = vec![
-            InputMessage {
-                role: "system".to_string(),
-                parts: vec![MessagePart::Text { content: "sys".to_string() }],
-                name: None,
-            },
-        ];
+        let messages = vec![InputMessage {
+            role: "system".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "sys".to_string(),
+            }],
+            name: None,
+        }];
         assert_eq!(extract_last_user_text(&messages), None);
     }
 
     #[test]
     fn test_extract_text_from_input_messages() {
-        let messages = vec![
-            InputMessage {
-                role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Query".to_string() }],
-                name: None,
-            },
-        ];
+        let messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Query".to_string(),
+            }],
+            name: None,
+        }];
         assert_eq!(extract_text_from_input_messages(&messages, "user"), "Query");
     }
 
@@ -833,15 +838,22 @@ mod tests {
         let messages = vec![
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Q1".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Q1".to_string(),
+                }],
                 name: None,
             },
             InputMessage {
                 role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "Q2".to_string() }],
+                parts: vec![MessagePart::Text {
+                    content: "Q2".to_string(),
+                }],
                 name: None,
             },
         ];
-        assert_eq!(extract_last_user_text_from_input(&messages), Some("Q2".to_string()));
+        assert_eq!(
+            extract_last_user_text_from_input(&messages),
+            Some("Q2".to_string())
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Trace subcommand - eBPF-based agent activity tracing
 
 use agentsight::{AgentSight, AgentsightConfig};
-use structopt::StructOpt;
 use daemonize::Daemonize;
+use structopt::StructOpt;
 
 /// Trace subcommand
 #[derive(Debug, StructOpt, Clone)]
@@ -34,32 +34,32 @@ impl TraceCommand {
             self.run_as_daemon();
             return;
         }
-        
+
         self.run_tracing();
     }
-    
+
     /// Run as daemon process
     fn run_as_daemon(&self) {
         println!("Starting agentsight in daemon mode...");
         println!("PID file: {}", self.pid_file);
-        
+
         let daemonize = Daemonize::new()
             .pid_file(&self.pid_file)
             .chown_pid_file(true)
             .working_directory("/tmp");
-        
+
         match daemonize.start() {
             Ok(_) => {
                 // We're now in the daemon process
                 self.run_tracing();
             }
             Err(e) => {
-                eprintln!("Failed to daemonize: {}", e);
+                eprintln!("Failed to daemonize: {e}");
                 std::process::exit(1);
             }
         }
     }
-    
+
     /// Run the actual tracing logic using AgentSight
     fn run_tracing(&self) {
         // Build AgentSight config (empty target_pids means trace all processes).
@@ -78,7 +78,7 @@ impl TraceCommand {
         let mut sight = match AgentSight::new(config) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to create AgentSight: {}", e);
+                eprintln!("Failed to create AgentSight: {e}");
                 std::process::exit(1);
             }
         };
@@ -96,11 +96,11 @@ impl TraceCommand {
         // Run event loop (blocks until running flag is set to false)
         match sight.run() {
             Ok(count) => {
-                println!("\nReceived {} events total", count);
+                println!("\nReceived {count} events total");
                 println!("Token usage data saved. Use 'agentsight token' to query.");
             }
             Err(e) => {
-                eprintln!("Error during tracing: {}", e);
+                eprintln!("Error during tracing: {e}");
                 std::process::exit(1);
             }
         }

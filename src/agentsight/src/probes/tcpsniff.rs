@@ -16,16 +16,18 @@
 use crate::config::{self, TcpTarget};
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle, MapFlags,
+    Link, MapFlags, MapHandle,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{
-    mem::MaybeUninit,
-    net::Ipv4Addr,
-    os::fd::AsFd,
-};
+use std::{mem::MaybeUninit, net::Ipv4Addr, os::fd::AsFd};
 
 // --- Generated skeleton ---
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/tcpsniff.skel.rs"));
 }
@@ -55,7 +57,9 @@ impl TcpSniff {
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
-        let mut open_skel = builder.open().context("failed to open tcpsniff BPF object")?;
+        let mut open_skel = builder
+            .open()
+            .context("failed to open tcpsniff BPF object")?;
 
         // Reuse the shared ring buffer
         open_skel
@@ -93,9 +97,13 @@ impl TcpSniff {
                 .context("failed to disable old recvmsg fexit")?;
         }
 
-        let skel = open_skel.load().context("failed to load tcpsniff BPF object")?;
+        let skel = open_skel
+            .load()
+            .context("failed to load tcpsniff BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut TcpsniffSkel<'static>) };
 
@@ -114,8 +122,7 @@ impl TcpSniff {
             }
             Err(e) => {
                 log::info!(
-                    "TcpSniff: new tcp_recvmsg signature failed ({}), trying old (5.8-5.17)",
-                    e
+                    "TcpSniff: new tcp_recvmsg signature failed ({e}), trying old (5.8-5.17)"
                 );
                 let (obj, skel) = Self::load_skel(rb, true)
                     .context("failed to load tcpsniff with old tcp_recvmsg signature")?;
@@ -157,7 +164,7 @@ impl TcpSniff {
             // key[6..8] = 0 (pad)
 
             map.update(&key, &[dummy], MapFlags::ANY)
-                .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
+                .with_context(|| format!("failed to add target {target:?} to tcp_targets map"))?;
         }
 
         log::info!(
@@ -186,9 +193,9 @@ impl TcpSniff {
         key[4..6].copy_from_slice(&port_be.to_ne_bytes());
 
         map.update(&key, &[dummy], MapFlags::ANY)
-            .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
+            .with_context(|| format!("failed to add target {target:?} to tcp_targets map"))?;
 
-        log::info!("TcpSniff: added runtime target {:?}", target);
+        log::info!("TcpSniff: added runtime target {target:?}");
         Ok(())
     }
 
@@ -244,8 +251,7 @@ impl TcpSniff {
         let n = links.len();
         self._links = links;
         log::info!(
-            "TcpSniff: attached {} BPF programs (tcp_sendmsg fentry, tcp_recvmsg fentry+fexit)",
-            n
+            "TcpSniff: attached {n} BPF programs (tcp_sendmsg fentry, tcp_recvmsg fentry+fexit)"
         );
         Ok(())
     }

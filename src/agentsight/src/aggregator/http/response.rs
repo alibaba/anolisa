@@ -27,12 +27,13 @@ impl AggregatedResponse {
     }
 
     pub fn body(&self) -> &[u8] {
-        &self.parsed.body()
+        self.parsed.body()
     }
 
     pub fn body_string(&self) -> String {
         let first = std::str::from_utf8(self.body()).unwrap_or("");
-        let sse_body: String = self.sse_events
+        let sse_body: String = self
+            .sse_events
             .iter()
             .map(|event| event.body_str())
             .collect::<Vec<_>>()
@@ -42,7 +43,7 @@ impl AggregatedResponse {
         } else if sse_body.is_empty() {
             first.to_string()
         } else {
-            format!("{}{}", first, sse_body)
+            format!("{first}{sse_body}")
         }
     }
 

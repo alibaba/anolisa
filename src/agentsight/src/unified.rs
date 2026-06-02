@@ -145,11 +145,7 @@ impl AgentSight {
                     );
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Failed to load config from {:?}: {}, using embedded defaults",
-                        path,
-                        e
-                    );
+                    log::warn!("Failed to load config from {path:?}: {e}, using embedded defaults");
                     config.cmdline_rules = crate::config::default_cmdline_rules();
                 }
             }
@@ -187,7 +183,7 @@ impl AgentSight {
                 Ok(addrs) => {
                     for addr in addrs {
                         if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-                            log::info!("http domain resolve: {} → {}", domain, ipv4);
+                            log::info!("http domain resolve: {domain} → {ipv4}");
                             tcp_targets.push(crate::config::TcpTarget {
                                 ip: Some(ipv4),
                                 port: None,
@@ -196,15 +192,21 @@ impl AgentSight {
                     }
                 }
                 Err(e) => {
-                    log::warn!("http domain resolve failed for {}: {}", domain, e);
+                    log::warn!("http domain resolve failed for {domain}: {e}");
                 }
             }
         }
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
-        let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
+        let mut probes = Probes::new(
+            &[],
+            config.target_uid,
+            config.enable_filewatch,
+            enable_udpdns,
+            &tcp_targets,
+        )
+        .context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -290,7 +292,7 @@ impl AgentSight {
                     genai_exporters.push(Box::new(store));
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
                 }
             }
         }
@@ -306,22 +308,19 @@ impl AgentSight {
 
                 match LlmTokenizer::from_file(tokenizer_path, &config_path) {
                     Ok(tokenizer) => {
-                        log::info!("Tokenizer loaded from: {:?}", tokenizer_path);
+                        log::info!("Tokenizer loaded from: {tokenizer_path:?}");
                         Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
                     }
                     Err(e) => {
                         log::warn!(
-                            "Failed to load tokenizer from {:?}: {}. Using analyzer without tokenizer.",
-                            tokenizer_path,
-                            e
+                            "Failed to load tokenizer from {tokenizer_path:?}: {e}. Using analyzer without tokenizer."
                         );
                         Analyzer::new()
                     }
                 }
             } else {
                 log::warn!(
-                    "Tokenizer file not found: {:?}. Using analyzer without tokenizer.",
-                    tokenizer_path
+                    "Tokenizer file not found: {tokenizer_path:?}. Using analyzer without tokenizer."
                 );
                 Analyzer::new()
             }
@@ -337,11 +336,11 @@ impl AgentSight {
                 .join("interruption_events.db");
             match InterruptionStore::new_with_path(&db_path) {
                 Ok(store) => {
-                    log::info!("Interruption events store initialized at {:?}", db_path);
+                    log::info!("Interruption events store initialized at {db_path:?}");
                     Some(Arc::new(store))
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize interruption store: {}", e);
+                    log::warn!("Failed to initialize interruption store: {e}");
                     None
                 }
             }
@@ -364,7 +363,7 @@ impl AgentSight {
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                         if let Err(e) = store_ref.mark_interrupted_stale(300) {
-                            log::warn!("Stale-pending scan failed: {}", e);
+                            log::warn!("Stale-pending scan failed: {e}");
                         }
                     }
                 })
@@ -433,20 +432,20 @@ impl AgentSight {
 
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
-        log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Attaching to pid {pid}, agent name: {agent_name}");
         if let Err(e) = probes.add_traced_pid(pid) {
-            log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
+            log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
         if let Err(e) = probes.attach_process(pid as i32) {
-            log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
+            log::error!("Failed to attach SSL probe to pid {pid}: {e}");
         } else {
-            log::info!("Attached to agent: {} (pid={})", agent_name, pid);
+            log::info!("Attached to agent: {agent_name} (pid={pid})");
         }
     }
 
     /// Detach SSL probes from a specific agent process
     pub fn detach_process(&mut self, pid: u32, agent_name: &str) {
-        log::debug!("Detaching from pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Detaching from pid {pid}, agent name: {agent_name}");
         let _ = self.probes.remove_traced_pid(pid).inspect_err(|e| {
             log::error!("failed to delete {pid} from traced pid map: {e}");
         });
@@ -515,14 +514,15 @@ impl AgentSight {
                             if let std::net::IpAddr::V4(ipv4) = addr.ip() {
                                 log::info!(
                                     "[UDP-DNS] Adding http target {} → {}",
-                                    dns_event.domain, ipv4
+                                    dns_event.domain,
+                                    ipv4
                                 );
                                 let target = crate::config::TcpTarget {
                                     ip: Some(ipv4),
                                     port: None,
                                 };
                                 if let Err(e) = self.probes.add_tcp_target(&target) {
-                                    log::warn!("[UDP-DNS] Failed to add tcp target {}: {}", ipv4, e);
+                                    log::warn!("[UDP-DNS] Failed to add tcp target {ipv4}: {e}");
                                 }
                             }
                         }
@@ -530,7 +530,8 @@ impl AgentSight {
                     Err(e) => {
                         log::warn!(
                             "[UDP-DNS] DNS resolve failed for http domain {}: {}",
-                            dns_event.domain, e
+                            dns_event.domain,
+                            e
                         );
                     }
                 }
@@ -558,11 +559,14 @@ impl AgentSight {
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
             for ar in &mut analysis_results {
-                if let crate::analyzer::AnalysisResult::Token(t) = ar {
-                    if t.agent.is_none() {
-                        t.agent = self.pid_agent_name_cache.get(&t.pid).cloned()
-                            .or_else(|| Some(t.comm.clone()));
-                    }
+                if let crate::analyzer::AnalysisResult::Token(t) = ar
+                    && t.agent.is_none()
+                {
+                    t.agent = self
+                        .pid_agent_name_cache
+                        .get(&t.pid)
+                        .cloned()
+                        .or_else(|| Some(t.comm.clone()));
                 }
             }
 
@@ -586,7 +590,7 @@ impl AgentSight {
                             }
                             for event in &output.events {
                                 if let Err(e) = sqlite_store.complete_pending(event) {
-                                    log::warn!("Failed to complete pending call: {}", e);
+                                    log::warn!("Failed to complete pending call: {e}");
                                 }
                             }
                             // Export to non-SQLite exporters only (SQLite already written)
@@ -631,7 +635,7 @@ impl AgentSight {
             if self.ffi_sender.is_none() {
                 for analysis_result in &analysis_results {
                     if let Err(e) = self.storage.store(analysis_result) {
-                        log::warn!("Failed to store analysis result: {}", e);
+                        log::warn!("Failed to store analysis result: {e}");
                     } else {
                         log::debug!("Analysis result saved");
                     }
@@ -650,14 +654,11 @@ impl AgentSight {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
                 let cmdline_args =
-                    crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+                    crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {
-                    log::debug!(
-                        "ProcMon: pid={} denied by cmdline rule, skipping attach",
-                        pid
-                    );
+                    log::debug!("ProcMon: pid={pid} denied by cmdline rule, skipping attach");
                     return;
                 }
 
@@ -712,7 +713,7 @@ impl AgentSight {
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
             if let Some(result) = self.try_process() {
-                log::trace!("[Event {}] Processed", result);
+                log::trace!("[Event {result}] Processed");
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();
@@ -738,7 +739,9 @@ impl AgentSight {
 
     /// Install an FFI event sender for C API mode.
     /// When set, completed events are pushed through this channel.
-    pub fn set_ffi_sender(&mut self, sender: FfiEventSender) {
+    /// `pub(crate)` because `FfiEventSender` is a crate-internal type and the
+    /// only caller lives in this crate's FFI layer.
+    pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
         self.ffi_sender = Some(sender);
     }
 
@@ -797,7 +800,7 @@ impl AgentSight {
                             }
                         }
                         if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {}", e);
+                            log::warn!("Failed to store interruption event: {e}");
                         }
                         // Also stamp genai_events row with interruption_type
                         if let Some(ref sqlite) = self.genai_sqlite_store {
@@ -831,7 +834,7 @@ impl AgentSight {
 
         for (conn_id, state) in drained {
             // Destructure to capture both request AND sse_events
-            let (state_name, request, sse_events) = match state {
+            let (_state_name, request, sse_events) = match state {
                 ConnectionState::RequestPending { request } => ("RequestPending", request, vec![]),
                 ConnectionState::SseActive {
                     request: Some(req),
@@ -851,7 +854,7 @@ impl AgentSight {
                     let pid = pending.pid;
 
                     if let Err(e) = store.insert_pending(&pending) {
-                        log::warn!("[DrainCheck] FAIL persist: {}", e);
+                        log::warn!("[DrainCheck] FAIL persist: {e}");
                         continue;
                     }
                     // ── Session ID reconciliation ──────────────────────────
@@ -860,157 +863,134 @@ impl AgentSight {
                     // Look up the real session_id from completed records for the same PID.
                     match store.lookup_session_for_pid(pid) {
                         Ok(Some(ref real_session_id)) => {
-                            if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
-                                if let Err(e) = store.update_session_id(&call_id, real_session_id) {
-                                    log::warn!("[DrainCheck] FAIL update session_id: {}", e);
-                                }
+                            if pending.session_id.as_deref() != Some(real_session_id.as_str())
+                                && let Err(e) = store.update_session_id(&call_id, real_session_id)
+                            {
+                                log::warn!("[DrainCheck] FAIL update session_id: {e}");
                             }
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            log::warn!("[DrainCheck] FAIL lookup session: {}", e);
+                            log::warn!("[DrainCheck] FAIL lookup session: {e}");
                         }
                     }
 
                     // ── SSE enrichment ────────────────────────────────────
                     // Parse captured SSE events for model, trace_id, tokens, output content
-                    if !sse_events.is_empty() {
-                        if let Some(mut enrichment) =
+                    if !sse_events.is_empty()
+                        && let Some(mut enrichment) =
                             GenAIBuilder::extract_sse_enrichment(&sse_events)
-                        {
-                            // If SSE didn't carry usage data (stream was interrupted before
-                            // the final chunk), compute tokens via the real tokenizer.
-                            if enrichment.input_tokens.is_none()
-                                || enrichment.output_tokens.is_none()
+                    {
+                        // If SSE didn't carry usage data (stream was interrupted before
+                        // the final chunk), compute tokens via the real tokenizer.
+                        if enrichment.input_tokens.is_none() || enrichment.output_tokens.is_none() {
+                            let model_name = enrichment
+                                .model
+                                .as_deref()
+                                .or(pending.model.as_deref())
+                                .unwrap_or("unknown");
+                            if let Ok(tokenizer) =
+                                crate::tokenizer::get_global_tokenizer(model_name)
                             {
-                                let model_name = enrichment
-                                    .model
-                                    .as_deref()
-                                    .or(pending.model.as_deref())
-                                    .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                // ── input tokens ──
+                                if enrichment.input_tokens.is_none()
+                                    && let Some(body) = request.json_body()
+                                    && let Some(messages) =
+                                        body.get("messages").and_then(|m| m.as_array())
                                 {
-                                    // ── input tokens ──
-                                    if enrichment.input_tokens.is_none() {
-                                        if let Some(body) = request.json_body() {
-                                            if let Some(messages) =
-                                                body.get("messages").and_then(|m| m.as_array())
-                                            {
-                                                let mut msgs = messages.clone();
-                                                // Parse tool_calls.arguments from string to object
-                                                for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg
-                                                        .get_mut("tool_calls")
-                                                        .and_then(|tc| tc.as_array_mut())
-                                                    {
-                                                        for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function")
-                                                            {
-                                                                if let Some(a) = f
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                {
-                                                                    if let Ok(p) =
-                                                                        serde_json::from_str::<
-                                                                            serde_json::Value,
-                                                                        >(
-                                                                            a
-                                                                        )
-                                                                    {
-                                                                        f["arguments"] = p;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let tools_json: Option<Vec<serde_json::Value>> =
-                                                    body.get("tools")
-                                                        .and_then(|t| t.as_array())
-                                                        .map(|a| a.to_vec());
-                                                let count = match tokenizer
-                                                    .apply_chat_template_with_tools(
-                                                        &msgs,
-                                                        tools_json.as_deref(),
-                                                        true,
-                                                    ) {
-                                                    Ok(formatted) => {
-                                                        tokenizer.count(&formatted).unwrap_or(0)
-                                                    }
-                                                    Err(_) => {
-                                                        // Fallback: raw message count
-                                                        msgs.iter()
-                                                            .filter_map(|m| {
-                                                                serde_json::to_string(m).ok()
-                                                            })
-                                                            .map(|s| {
-                                                                tokenizer.count(&s).unwrap_or(0)
-                                                            })
-                                                            .sum()
-                                                    }
-                                                };
-                                                if count > 0 {
-                                                    enrichment.input_tokens = Some(count as i64);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // ── output tokens ──
-                                    if enrichment.output_tokens.is_none() {
-                                        use crate::analyzer::token::extract_response_content;
-                                        let mut all_content = String::new();
-                                        let mut all_reasoning = String::new();
-                                        let mut all_tool_calls = Vec::new();
-                                        for ev in &sse_events {
-                                            if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) =
-                                                    extract_response_content(Some(&chunk))
+                                    let mut msgs = messages.clone();
+                                    // Parse tool_calls.arguments from string to object
+                                    for msg in msgs.iter_mut() {
+                                        if let Some(tcs) = msg
+                                            .get_mut("tool_calls")
+                                            .and_then(|tc| tc.as_array_mut())
+                                        {
+                                            for tc in tcs.iter_mut() {
+                                                if let Some(f) = tc.get_mut("function")
+                                                    && let Some(a) =
+                                                        f.get("arguments").and_then(|a| a.as_str())
+                                                    && let Ok(p) =
+                                                        serde_json::from_str::<serde_json::Value>(a)
                                                 {
-                                                    if !content.is_empty() {
-                                                        all_content.push_str(&content);
-                                                    }
-                                                    if let Some(r) = reasoning {
-                                                        if !r.is_empty() {
-                                                            all_reasoning.push_str(&r);
-                                                        }
-                                                    }
-                                                    for tc in tool_calls {
-                                                        if !tc.is_empty() {
-                                                            all_tool_calls.push(tc);
-                                                        }
-                                                    }
+                                                    f["arguments"] = p;
                                                 }
                                             }
                                         }
-                                        let mut total = 0usize;
-                                        if !all_reasoning.is_empty() {
-                                            let wrapped =
-                                                format!("<think>\n{}\n</think>\n\n", all_reasoning);
-                                            total += tokenizer.count(&wrapped).unwrap_or(0);
+                                    }
+                                    let tools_json: Option<Vec<serde_json::Value>> = body
+                                        .get("tools")
+                                        .and_then(|t| t.as_array())
+                                        .map(|a| a.to_vec());
+                                    let count = match tokenizer.apply_chat_template_with_tools(
+                                        &msgs,
+                                        tools_json.as_deref(),
+                                        true,
+                                    ) {
+                                        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+                                        Err(_) => {
+                                            // Fallback: raw message count
+                                            msgs.iter()
+                                                .filter_map(|m| serde_json::to_string(m).ok())
+                                                .map(|s| tokenizer.count(&s).unwrap_or(0))
+                                                .sum()
                                         }
-                                        if !all_content.is_empty() {
-                                            total += tokenizer.count(&all_content).unwrap_or(0);
-                                        }
-                                        if !all_tool_calls.is_empty() {
-                                            total += tokenizer
-                                                .count(&all_tool_calls.join(""))
-                                                .unwrap_or(0);
-                                        }
-                                        if total > 0 {
-                                            enrichment.output_tokens = Some(total as i64);
+                                    };
+                                    if count > 0 {
+                                        enrichment.input_tokens = Some(count as i64);
+                                    }
+                                }
+                                // ── output tokens ──
+                                if enrichment.output_tokens.is_none() {
+                                    use crate::analyzer::token::extract_response_content;
+                                    let mut all_content = String::new();
+                                    let mut all_reasoning = String::new();
+                                    let mut all_tool_calls = Vec::new();
+                                    for ev in &sse_events {
+                                        if let Some(chunk) = ev.json_body()
+                                            && let Some((content, reasoning, tool_calls)) =
+                                                extract_response_content(Some(&chunk))
+                                        {
+                                            if !content.is_empty() {
+                                                all_content.push_str(&content);
+                                            }
+                                            if let Some(r) = reasoning
+                                                && !r.is_empty()
+                                            {
+                                                all_reasoning.push_str(&r);
+                                            }
+                                            for tc in tool_calls {
+                                                if !tc.is_empty() {
+                                                    all_tool_calls.push(tc);
+                                                }
+                                            }
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
+                                    let mut total = 0usize;
+                                    if !all_reasoning.is_empty() {
+                                        let wrapped =
+                                            format!("<think>\n{all_reasoning}\n</think>\n\n");
+                                        total += tokenizer.count(&wrapped).unwrap_or(0);
+                                    }
+                                    if !all_content.is_empty() {
+                                        total += tokenizer.count(&all_content).unwrap_or(0);
+                                    }
+                                    if !all_tool_calls.is_empty() {
+                                        total +=
+                                            tokenizer.count(&all_tool_calls.join("")).unwrap_or(0);
+                                    }
+                                    if total > 0 {
+                                        enrichment.output_tokens = Some(total as i64);
+                                    }
                                 }
+                            } else {
+                                log::warn!(
+                                    "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
+                                    enrichment.model.as_deref().or(pending.model.as_deref())
+                                );
                             }
-                            if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
-                                log::warn!("[DrainCheck] FAIL enrich SSE: {}", e);
-                            }
+                        }
+                        if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
+                            log::warn!("[DrainCheck] FAIL enrich SSE: {e}");
                         }
                     }
                 }

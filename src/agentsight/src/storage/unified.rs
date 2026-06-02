@@ -40,9 +40,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::sqlite::connection::default_base_path;
+use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
-use super::sqlite::{AuditStore, TokenStore, HttpStore, TokenConsumptionStore};
-use super::sqlite::connection::{default_base_path};
 
 /// Storage backend type
 #[derive(Debug, Clone, Default)]
@@ -208,7 +208,7 @@ impl Storage {
         if let AnalysisResult::Http(_) = result {
             return Ok(0);
         }
-        log::debug!("Storing analysis result: {:?}", result);
+        log::debug!("Storing analysis result: {result:?}");
         let id = match result {
             AnalysisResult::Audit(record) => self.audit_store.insert(record),
             AnalysisResult::Token(record) => self.token_store.insert(record),
@@ -221,23 +221,21 @@ impl Storage {
                 Ok(0)
             }
             AnalysisResult::Http(record) => self.http_store.insert(record),
-            AnalysisResult::TokenConsumption(breakdown) => {
-                self.token_consumption_store.insert(
-                    breakdown,
-                    breakdown.timestamp_ns,
-                    breakdown.pid,
-                    &breakdown.comm,
-                )
-            }
+            AnalysisResult::TokenConsumption(breakdown) => self.token_consumption_store.insert(
+                breakdown,
+                breakdown.timestamp_ns,
+                breakdown.pid,
+                &breakdown.comm,
+            ),
         }?;
 
         // Auto-purge check: trigger every `purge_interval` inserts
         if self.purge_interval > 0 && self.retention_days > 0 {
             let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % self.purge_interval == 0 {
-                if let Err(e) = self.purge_expired() {
-                    log::warn!("Auto-purge failed: {}", e);
-                }
+            if count % self.purge_interval == 0
+                && let Err(e) = self.purge_expired()
+            {
+                log::warn!("Auto-purge failed: {e}");
             }
         }
 
@@ -274,8 +272,12 @@ impl Storage {
         if total_deleted > 0 {
             log::info!(
                 "Purged {} expired records (retention={}d, audit={}, token={}, http={}, consumption={})",
-                total_deleted, self.retention_days,
-                audit_deleted, token_deleted, http_deleted, consumption_deleted,
+                total_deleted,
+                self.retention_days,
+                audit_deleted,
+                token_deleted,
+                http_deleted,
+                consumption_deleted,
             );
         }
 
@@ -316,9 +318,9 @@ impl Storage {
         // Only need one successful checkpoint since all stores share the same db,
         // but we try on audit_store first and fall through if it fails.
         if let Err(e) = self.audit_store.checkpoint() {
-            log::warn!("Audit store checkpoint failed: {}, trying token store", e);
+            log::warn!("Audit store checkpoint failed: {e}, trying token store");
             if let Err(e2) = self.token_store.checkpoint() {
-                log::warn!("Token store checkpoint failed: {}, trying http store", e2);
+                log::warn!("Token store checkpoint failed: {e2}, trying http store");
                 self.http_store.checkpoint()?;
             }
         }
@@ -330,7 +332,7 @@ impl Storage {
 impl Drop for Storage {
     fn drop(&mut self) {
         if let Err(e) = self.checkpoint() {
-            log::warn!("WAL checkpoint during Storage drop failed: {}", e);
+            log::warn!("WAL checkpoint during Storage drop failed: {e}");
         }
     }
 }

@@ -9,7 +9,7 @@
 //! use agentsight::aggregator::AggregatedResult;
 //!
 //! let analyzer = Analyzer::new();
-//! 
+//!
 //! // Analyze aggregated result
 //! for result in analyzer.analyze_aggregated(&aggregated_result) {
 //!     match result {
@@ -21,13 +21,16 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
+use crate::analyzer::token::extract_response_content;
 use crate::parser::sse::ParsedSseEvent;
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
-use crate::analyzer::token::extract_response_content;
 
-use super::{AuditAnalyzer, TokenParser, MessageParser, AuditRecord, TokenRecord, TokenUsage, ParsedApiMessage, AnalysisResult, PromptTokenCount, HttpRecord};
-use super::result::{TokenConsumptionBreakdown, MessageTokenCount, OutputTokenCount};
+use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
+use super::{
+    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
+    TokenRecord, TokenUsage,
+};
 
 /// Token count result for request messages
 #[derive(Debug, Clone)]
@@ -83,9 +86,8 @@ pub fn count_request_tokens(
     chat_template: &LlmTokenizer,
 ) -> Option<RequestTokenCount> {
     // Extract messages
-    let messages = request_json.get("messages")
-        .and_then(|m| m.as_array())?;
-    
+    let messages = request_json.get("messages").and_then(|m| m.as_array())?;
+
     if messages.is_empty() {
         return None;
     }
@@ -97,29 +99,34 @@ pub fn count_request_tokens(
     let template_messages: Vec<serde_json::Value> = messages.to_vec();
 
     // Extract tools JSON array for passing to template
-    let tools_json: Option<Vec<serde_json::Value>> = request_json.get("tools")
+    let tools_json: Option<Vec<serde_json::Value>> = request_json
+        .get("tools")
         .and_then(|t| t.as_array())
         .map(|arr| arr.to_vec());
 
     // Count tools tokens separately (for informational breakdown)
-    let mut tools_tokens: usize = tools_json.as_ref()
-        .map(|arr| arr.iter()
-            .filter_map(|t| serde_json::to_string(t).ok())
-            .filter_map(|s| tokenizer.count(&s).ok())
-            .sum())
+    let mut tools_tokens: usize = tools_json
+        .as_ref()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| serde_json::to_string(t).ok())
+                .filter_map(|s| tokenizer.count(&s).ok())
+                .sum()
+        })
         .unwrap_or(0);
 
     // Use apply_chat_template_with_tools to format all messages WITH tools
     // This ensures the tools instruction text is included in the total count
     let tools_slice = tools_json.as_deref();
-    let total_tokens = match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
-        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-        Err(e) => {
-            log::warn!("Failed to apply chat template with tools: {}", e);
-            // Fallback: count raw content + tools separately
-            0
-        }
-    };
+    let total_tokens =
+        match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(e) => {
+                log::warn!("Failed to apply chat template with tools: {e}");
+                // Fallback: count raw content + tools separately
+                0
+            }
+        };
 
     // Count per-message tokens: first calculate raw token counts, then distribute total_tokens by percentage
     // Step 1: Calculate raw token count for each message
@@ -130,21 +137,26 @@ pub fn count_request_tokens(
             .ok()
             .and_then(|s| tokenizer.count(&s).ok())
             .unwrap_or(0);
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
+        let role = msg
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("unknown")
+            .to_string();
         if role == "tool" {
             tokens += tools_tokens;
             tools_tokens = 0;
         }
         raw_per_message.push((role, tokens));
     }
-    
+
     // Step 2: Calculate total raw tokens and distribute total_tokens by percentage
     let raw_total: usize = raw_per_message.iter().map(|(_, t)| *t).sum();
-    
+
     if raw_total > 0 {
         // Distribute total_tokens proportionally based on raw token percentages
         for (role, raw_tokens) in raw_per_message.iter() {
-            let actual_tokens = ((*raw_tokens as f64 / raw_total as f64) * total_tokens as f64).round() as usize;
+            let actual_tokens =
+                ((*raw_tokens as f64 / raw_total as f64) * total_tokens as f64).round() as usize;
             *by_role.entry(role.clone()).or_insert(0) += actual_tokens;
             per_message.push(MessageTokenCount {
                 role: role.clone(),
@@ -213,10 +225,10 @@ pub fn count_response_tokens(
             if !content.is_empty() {
                 all_content.push_str(&content);
             }
-            if let Some(r) = reasoning {
-                if !r.is_empty() {
-                    all_reasoning.push_str(&r);
-                }
+            if let Some(r) = reasoning
+                && !r.is_empty()
+            {
+                all_reasoning.push_str(&r);
             }
             for tc in tool_calls {
                 if !tc.is_empty() {
@@ -227,18 +239,20 @@ pub fn count_response_tokens(
     }
 
     let mut has_content = false;
-    
+
     // NOTE: API output token count includes:
     // - Model-generated text markers like <think>...</think> (these ARE counted)
     // - NOT special control tokens like <|im_start|>, <|im_end|> (these are NOT counted)
-    
+
     // Add reasoning content with <think> wrapper (model generates these markers)
     if !all_reasoning.is_empty() {
         has_content = true;
-        
+
         // Format: <think>\n{reasoning}\n</think>\n\n
-        let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
-        let tokens = tokenizer.count(&reasoning_with_tags).unwrap_or(all_reasoning.len() / 4);
+        let reasoning_with_tags = format!("<think>\n{all_reasoning}\n</think>\n\n");
+        let tokens = tokenizer
+            .count(&reasoning_with_tags)
+            .unwrap_or(all_reasoning.len() / 4);
         *by_type.entry("reasoning".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "reasoning".to_string(),
@@ -249,8 +263,10 @@ pub fn count_response_tokens(
     // Add text content
     if !all_content.is_empty() {
         has_content = true;
-        
-        let tokens = tokenizer.count(&all_content).unwrap_or(all_content.len() / 4);
+
+        let tokens = tokenizer
+            .count(&all_content)
+            .unwrap_or(all_content.len() / 4);
         *by_type.entry("text".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "text".to_string(),
@@ -267,7 +283,6 @@ pub fn count_response_tokens(
     // - Following chunks: ": {...}" (colon + arguments fragments)
     // We need to aggregate all chunks first to get the complete tool call
     if !all_tool_calls.is_empty() {
-        
         // Aggregate all chunks: first chunk has "name: ", rest have ": fragment"
         let mut aggregated = String::new();
         for tc in &all_tool_calls {
@@ -280,7 +295,7 @@ pub fn count_response_tokens(
                 aggregated.push_str(fragment);
             }
         }
-        
+
         // Now parse the aggregated "name: arguments" string
         let (name, arguments) = if let Some(pos) = aggregated.find(": ") {
             (&aggregated[..pos], &aggregated[pos + 2..])
@@ -290,7 +305,7 @@ pub fn count_response_tokens(
         } else {
             ("", aggregated.as_str())
         };
-        
+
         // Build Qwen tool_call template format:
         // <tool_call>
         // <function={name}>
@@ -303,7 +318,7 @@ pub fn count_response_tokens(
         tool_call_str.push_str("<tool_call>\n<function=");
         tool_call_str.push_str(name);
         tool_call_str.push_str(">\n");
-        
+
         // Parse arguments JSON and format each parameter
         if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(arguments) {
             if let Some(obj) = args_json.as_object() {
@@ -324,14 +339,16 @@ pub fn count_response_tokens(
         } else {
             // Fallback: use raw arguments string
             tool_call_str.push_str(arguments);
-            tool_call_str.push_str("\n");
+            tool_call_str.push('\n');
         }
-        
+
         tool_call_str.push_str("</function>\n</tool_call>");
-        
+
         has_content = true;
-        
-        let tokens = tokenizer.count(&tool_call_str).unwrap_or(tool_call_str.len() / 4);
+
+        let tokens = tokenizer
+            .count(&tool_call_str)
+            .unwrap_or(tool_call_str.len() / 4);
         *by_type.entry("tool_calls".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "tool_calls".to_string(),
@@ -401,10 +418,7 @@ impl Analyzer {
     /// let chat_template = ChatTemplateType::Qwen.create_template();
     /// let analyzer = Analyzer::with_tokenizer(Box::new(tokenizer), chat_template);
     /// ```
-    pub fn with_tokenizer(
-        tokenizer: LlmTokenizer,
-        chat_template: LlmTokenizer,
-    ) -> Self {
+    pub fn with_tokenizer(tokenizer: LlmTokenizer, chat_template: LlmTokenizer) -> Self {
         Analyzer {
             audit: AuditAnalyzer::new(),
             token: TokenParser::new(),
@@ -424,7 +438,7 @@ impl Analyzer {
         let mut results = Vec::new();
 
         // 1. Audit analysis for process actions (non-HTTP)
-        if let AggregatedResult::ProcessComplete(process) = result {
+        if let AggregatedResult::ProcessComplete(_process) = result {
             if let Some(record) = self.audit.analyze(result) {
                 results.push(AnalysisResult::Audit(record));
             }
@@ -459,41 +473,40 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
-            if token_result.is_none() && http_record.is_sse {
-                if let Some(body) = &http_record.response_body {
-                    if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
-                        if let Some(last) = x.last() {
-                            let parser = TokenParser::new();
-                            if let Some(usage) = parser.parse_json(last) {
-                                let record = TokenRecord::new(
-                                    http_record.pid,
-                                    http_record.comm.clone(),
-                                    usage.provider.to_string(),
-                                    usage.input_tokens,
-                                    usage.output_tokens,
-                                )
-                                .with_model(usage.model.clone().unwrap_or_default())
-                                .with_cache_tokens(
-                                    usage.cache_creation_input_tokens.unwrap_or(0),
-                                    usage.cache_read_input_tokens.unwrap_or(0),
-                                );
+            if token_result.is_none()
+                && http_record.is_sse
+                && let Some(body) = &http_record.response_body
+                && let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body)
+                && let Some(last) = x.last()
+            {
+                let parser = TokenParser::new();
+                if let Some(usage) = parser.parse_json(last) {
+                    let record = TokenRecord::new(
+                        http_record.pid,
+                        http_record.comm.clone(),
+                        usage.provider.to_string(),
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    )
+                    .with_model(usage.model.clone().unwrap_or_default())
+                    .with_cache_tokens(
+                        usage.cache_creation_input_tokens.unwrap_or(0),
+                        usage.cache_read_input_tokens.unwrap_or(0),
+                    );
 
-                                token_result = Some(record);
-                            }
-                        }
-                    }
+                    token_result = Some(record);
                 }
             }
 
             // Extract audit from HttpRecord (only for SSE responses / LLM calls)
             // Pass token_result so audit record gets populated token counts
-            if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref()) {
+            if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref())
+            {
                 results.push(AnalysisResult::Audit(audit_record));
             }
 
             results.push(AnalysisResult::Http(http_record));
         }
-
 
         if let Some(record) = token_result {
             results.push(AnalysisResult::Token(record));
@@ -545,7 +558,8 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         sse_events: &[ParsedSseEvent],
     ) -> Option<AnalysisResult> {
-        self.message.parse_by_path_with_sse(path, request_body, sse_events)
+        self.message
+            .parse_by_path_with_sse(path, request_body, sse_events)
             .map(AnalysisResult::Message)
     }
 
@@ -556,10 +570,12 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let usage = sse_events.iter().rev()
+        let usage = sse_events
+            .iter()
+            .rev()
             .find_map(|e| self.token.parse_event(e))?;
 
-        let mut record = TokenRecord::new(
+        let record = TokenRecord::new(
             pid,
             comm.to_string(),
             usage.provider.to_string(),
@@ -575,7 +591,7 @@ impl Analyzer {
         // NOTE: tool_calls and reasoning_content extraction from SSE events
         // is handled in genai::builder via direct SSE response body parsing.
 
-        if record.total_tokens() ==0 {
+        if record.total_tokens() == 0 {
             return None;
         }
 
@@ -605,7 +621,8 @@ impl Analyzer {
         let request_json_ref = request_json.as_ref()?;
 
         // Extract model name
-        let model = request_json_ref.get("model")
+        let model = request_json_ref
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown");
 
@@ -613,7 +630,7 @@ impl Analyzer {
         let tokenizer = match get_global_tokenizer(model) {
             Ok(t) => t,
             Err(e) => {
-                log::debug!("Failed to get tokenizer for model '{}': {}", model, e);
+                log::debug!("Failed to get tokenizer for model '{model}': {e}");
                 return None;
             }
         };
@@ -626,42 +643,48 @@ impl Analyzer {
         };
 
         // Count input tokens from request messages using chat template
-        let input_tokens = if let Some(messages) = request_json_ref.get("messages").and_then(|m| m.as_array()) {
+        let input_tokens = if let Some(messages) =
+            request_json_ref.get("messages").and_then(|m| m.as_array())
+        {
             if messages.is_empty() {
                 0
             } else {
                 // Clone messages for in-place modification of tool_calls.arguments
                 let mut msgs = messages.clone();
-                
+
                 // Process tool_calls arguments: parse JSON string to object in place
                 for msg in msgs.iter_mut() {
-                    if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                    if let Some(tool_calls) =
+                        msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
+                    {
                         for tool_call in tool_calls.iter_mut() {
-                            if let Some(func) = tool_call.get_mut("function") {
-                                if let Some(args) = func.get("arguments") {
-                                    if let Some(args_str) = args.as_str() {
-                                        // Try to parse arguments string as JSON object
-                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
-                                            func["arguments"] = parsed;
-                                        }
-                                    }
+                            if let Some(func) = tool_call.get_mut("function")
+                                && let Some(args) = func.get("arguments")
+                                && let Some(args_str) = args.as_str()
+                            {
+                                // Try to parse arguments string as JSON object
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(args_str)
+                                {
+                                    func["arguments"] = parsed;
                                 }
                             }
                         }
                     }
                 }
-                
+
                 // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref.get("tools")
+                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
+                    .get("tools")
                     .and_then(|t| t.as_array())
                     .map(|arr| arr.to_vec());
                 let tools_slice = tools_json.as_deref();
-                
+
                 // Apply chat template with tools to get the actual prompt sent to LLM
                 match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
                     Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
                     Err(e) => {
-                        log::warn!("Failed to apply chat template: {}, falling back to raw count", e);
+                        log::warn!("Failed to apply chat template: {e}, falling back to raw count");
                         // Fallback: count raw message content
                         let mut total = 0u64;
                         for msg in &msgs {
@@ -684,20 +707,21 @@ impl Analyzer {
             let mut all_tool_calls = Vec::new();
 
             for event in sse_events {
-                if let Some(chunk) = event.json_body() {
-                    if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(&chunk)) {
-                        if !content.is_empty() {
-                            all_content.push_str(&content);
-                        }
-                        if let Some(r) = reasoning {
-                            if !r.is_empty() {
-                                all_reasoning.push_str(&r);
-                            }
-                        }
-                        for tc in tool_calls {
-                            if !tc.is_empty() {
-                                all_tool_calls.push(tc);
-                            }
+                if let Some(chunk) = event.json_body()
+                    && let Some((content, reasoning, tool_calls)) =
+                        extract_response_content(Some(&chunk))
+                {
+                    if !content.is_empty() {
+                        all_content.push_str(&content);
+                    }
+                    if let Some(r) = reasoning
+                        && !r.is_empty()
+                    {
+                        all_reasoning.push_str(&r);
+                    }
+                    for tc in tool_calls {
+                        if !tc.is_empty() {
+                            all_tool_calls.push(tc);
                         }
                     }
                 }
@@ -707,7 +731,7 @@ impl Analyzer {
 
             // Count reasoning tokens
             if !all_reasoning.is_empty() {
-                let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                let reasoning_with_tags = format!("<think>\n{all_reasoning}\n</think>\n\n");
                 total += tokenizer.count(&reasoning_with_tags).unwrap_or(0) as u64;
             }
 
@@ -748,20 +772,29 @@ impl Analyzer {
                 let req = &pair.request;
                 let resp = &pair.response;
 
-                let request_body = req.json_body()
+                let request_body = req
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
-                let response_body = resp.parsed.json_body()
+                let response_body = resp
+                    .parsed
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = resp.parsed.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
                 Some(HttpRecord {
@@ -773,9 +806,12 @@ impl Analyzer {
                     status_code: resp.status_code(),
                     request_headers: serde_json::to_string(&req.headers).unwrap_or_default(),
                     request_body,
-                    response_headers: serde_json::to_string(&resp.parsed.headers).unwrap_or_default(),
+                    response_headers: serde_json::to_string(&resp.parsed.headers)
+                        .unwrap_or_default(),
                     response_body,
-                    duration_ns: resp.end_timestamp_ns().saturating_sub(req.source_event.timestamp_ns),
+                    duration_ns: resp
+                        .end_timestamp_ns()
+                        .saturating_sub(req.source_event.timestamp_ns),
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -784,12 +820,16 @@ impl Analyzer {
                 let req = &pair.request;
                 let resp = &pair.response;
 
-                let request_body = req.json_body()
+                let request_body = req
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
                 // For SSE responses, aggregate all SSE event JSON payloads
@@ -809,20 +849,27 @@ impl Analyzer {
                     status_code: resp.status_code(),
                     request_headers: serde_json::to_string(&req.headers).unwrap_or_default(),
                     request_body,
-                    response_headers: serde_json::to_string(&resp.parsed.headers).unwrap_or_default(),
+                    response_headers: serde_json::to_string(&resp.parsed.headers)
+                        .unwrap_or_default(),
                     response_body,
-                    duration_ns: resp.end_timestamp_ns().saturating_sub(req.source_event.timestamp_ns),
+                    duration_ns: resp
+                        .end_timestamp_ns()
+                        .saturating_sub(req.source_event.timestamp_ns),
                     is_sse: true,
                     sse_event_count: resp.sse_event_count(),
                 })
             }
             AggregatedResult::RequestOnly { request, .. } => {
-                let request_body = request.json_body()
+                let request_body = request
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = request.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
                 Some(HttpRecord {
@@ -846,17 +893,22 @@ impl Analyzer {
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)
-                let (response_body, sse_event_count) = if let Some(sse_json) = stream.response_sse_json_array() {
-                    // Successfully parsed as SSE
-                    let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
-                    (Some(serde_json::to_string(&sse_json).unwrap_or_default()), event_count)
-                } else {
-                    // Not SSE, try regular JSON or raw text
-                    let body = stream.response_json_body()
-                        .map(|v| serde_json::to_string(&v).unwrap_or_default())
-                        .or_else(|| stream.response_body_str());
-                    (body, 0)
-                };
+                let (response_body, sse_event_count) =
+                    if let Some(sse_json) = stream.response_sse_json_array() {
+                        // Successfully parsed as SSE
+                        let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
+                        (
+                            Some(serde_json::to_string(&sse_json).unwrap_or_default()),
+                            event_count,
+                        )
+                    } else {
+                        // Not SSE, try regular JSON or raw text
+                        let body = stream
+                            .response_json_body()
+                            .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                            .or_else(|| stream.response_body_str());
+                        (body, 0)
+                    };
 
                 Some(HttpRecord {
                     timestamp_ns: stream.start_timestamp_ns,
@@ -869,7 +921,9 @@ impl Analyzer {
                     request_body,
                     response_headers: stream.response_headers_json(),
                     response_body,
-                    duration_ns: stream.end_timestamp_ns.saturating_sub(stream.start_timestamp_ns),
+                    duration_ns: stream
+                        .end_timestamp_ns
+                        .saturating_sub(stream.start_timestamp_ns),
                     is_sse: sse_event_count > 0,
                     sse_event_count,
                 })
@@ -898,19 +952,21 @@ impl Analyzer {
         comm: &str,
     ) -> Option<TokenRecord> {
         let usage = self.token.parse_event(event)?;
-        
-        Some(TokenRecord::new(
-            pid,
-            comm.to_string(),
-            usage.provider.to_string(),
-            usage.input_tokens,
-            usage.output_tokens,
+
+        Some(
+            TokenRecord::new(
+                pid,
+                comm.to_string(),
+                usage.provider.to_string(),
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+            .with_model(usage.model.clone().unwrap_or_default())
+            .with_cache_tokens(
+                usage.cache_creation_input_tokens.unwrap_or(0),
+                usage.cache_read_input_tokens.unwrap_or(0),
+            ),
         )
-        .with_model(usage.model.clone().unwrap_or_default())
-        .with_cache_tokens(
-            usage.cache_creation_input_tokens.unwrap_or(0),
-            usage.cache_read_input_tokens.unwrap_or(0),
-        ))
     }
 
     /// Analyze an SSE event and return AnalysisResult
@@ -924,78 +980,6 @@ impl Analyzer {
     ) -> Option<AnalysisResult> {
         self.analyze_sse_event_full(event, pid, comm)
             .map(AnalysisResult::Token)
-    }
-
-    /// Compute prompt tokens for a parsed API message
-    ///
-    /// This method uses the tokenizer to compute the actual prompt token count
-    /// from the request messages.
-    fn compute_prompt_tokens(
-        &self,
-        msg_result: &AnalysisResult,
-        tokenizer: &LlmTokenizer,
-        chat_template: &LlmTokenizer,
-    ) -> Option<PromptTokenCount> {
-        let messages = match msg_result {
-            AnalysisResult::Message(ParsedApiMessage::OpenAICompletion { request, .. }) => {
-                request.as_ref()?.messages.clone()
-            }
-            _ => return None,
-        };
-
-        let provider = match msg_result {
-            AnalysisResult::Message(msg) => msg.provider().to_string(),
-            _ => "unknown".to_string(),
-        };
-
-        let model = match msg_result {
-            AnalysisResult::Message(msg) => msg.model().unwrap_or("unknown").to_string(),
-            _ => "unknown".to_string(),
-        };
-
-        let message_count = messages.len();
-
-        // Convert messages to JSON values
-        let messages_json: Vec<serde_json::Value> = messages
-            .iter()
-            .filter_map(|m| serde_json::to_value(m).ok())
-            .collect();
-
-        // Apply chat template and count tokens
-        match chat_template.apply_chat_template(&messages_json, true) {
-            Ok(formatted_prompt) => {
-                match tokenizer.count(&formatted_prompt) {
-                    Ok(prompt_tokens) => {
-                        // Compute per-message token counts
-                        let per_message_tokens: Vec<usize> = messages
-                            .iter()
-                            .filter_map(|m| {
-                                let msg_json = serde_json::to_value(m).ok()?;
-                                let content = msg_json.get("content")?.as_str()?.to_string();
-                                tokenizer.count(&content).ok()
-                            })
-                            .collect();
-
-                        Some(PromptTokenCount {
-                            provider,
-                            model,
-                            message_count,
-                            prompt_tokens,
-                            per_message_tokens,
-                            formatted_prompt,
-                        })
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to count tokens: {}", e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to apply chat template: {}", e);
-                None
-            }
-        }
     }
 
     /// Get reference to the audit analyzer
@@ -1032,7 +1016,8 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         response_body: Option<&serde_json::Value>,
     ) -> Option<AnalysisResult> {
-        self.message.parse_by_path(path, request_body, response_body)
+        self.message
+            .parse_by_path(path, request_body, response_body)
             .map(AnalysisResult::Message)
     }
 
@@ -1046,207 +1031,18 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         response_body: Option<&serde_json::Value>,
     ) -> Option<ParsedApiMessage> {
-        self.message.parse_by_path(path, request_body, response_body)
-    }
-
-    /// Compute token consumption using apply_chat_template for accurate counting
-    ///
-    /// This function directly uses the Jinja2 template to format messages and count tokens,
-    /// avoiding intermediate conversions and providing more accurate results.
-    fn compute_token_consumption_with_template(
-        &self,
-        messages: &[serde_json::Value],
-        model: &str,
-        provider: &str,
-        tools: Vec<String>,
-        system_prompt: Option<String>,
-        response_jsons: &[serde_json::Value],
-        pid: u32,
-        comm: String,
-    ) -> Option<TokenConsumptionBreakdown> {
-        let (tokenizer, chat_template) = match (&self.tokenizer, &self.chat_template) {
-            (Some(t), Some(ct)) => (t, ct),
-            _ => {
-                log::warn!("Tokenizer or chat template not available, cannot compute accurate token consumption");
-                return None;
-            }
-        };
-
-        let mut by_role: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut per_message: Vec<MessageTokenCount> = Vec::new();
-
-        // Prepare messages for apply_chat_template
-        let mut template_messages: Vec<serde_json::Value> = messages.to_vec();
-        
-        // Add system prompt as first message if present and not already in messages
-        if let Some(ref system) = system_prompt {
-            if !template_messages.is_empty() && template_messages[0].get("role") != Some(&serde_json::Value::String("system".to_string())) {
-                let system_msg = serde_json::json!({
-                    "role": "system",
-                    "content": system
-                });
-                template_messages.insert(0, system_msg);
-            }
-        }
-
-        // Count tools tokens
-        let tools_tokens: usize = tools.iter()
-            .filter_map(|tool| tokenizer.count(tool).ok())
-            .sum();
-
-        // Use apply_chat_template to format all messages and count total tokens
-        let total_msg_tokens = match chat_template.apply_chat_template(&template_messages, true) {
-            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-            Err(e) => {
-                log::warn!("Failed to apply chat template: {}", e);
-                // Fallback: count raw content
-                messages.iter()
-                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                    .filter_map(|c| tokenizer.count(c).ok())
-                    .sum()
-            }
-        };
-
-        // Count per-message tokens using incremental approach
-        for (i, msg) in messages.iter().enumerate() {
-            let partial_messages: Vec<serde_json::Value> = template_messages.iter().take(i + 1).cloned().collect();
-            let tokens = match chat_template.apply_chat_template(&partial_messages, false) {
-                Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-                Err(_) => {
-                    // Fallback: count content only
-                    msg.get("content").and_then(|c| c.as_str())
-                        .and_then(|c| tokenizer.count(c).ok())
-                        .unwrap_or(0)
-                }
-            };
-            
-            // Calculate this message's tokens by subtracting previous total
-            let prev_total: usize = per_message.iter().map(|m| m.tokens).sum();
-            let msg_tokens = tokens.saturating_sub(prev_total);
-            
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-            *by_role.entry(role.clone()).or_insert(0) += msg_tokens;
-            
-            per_message.push(MessageTokenCount {
-                role,
-                tokens: msg_tokens,
-            });
-        }
-
-        // Count system prompt tokens separately
-        let system_prompt_tokens = if let Some(ref system) = system_prompt {
-            tokenizer.count(system).unwrap_or(system.len() / 4)
-        } else {
-            0
-        };
-
-        // Total input = tools + all messages (system is included in messages)
-        let total_input = tools_tokens + total_msg_tokens;
-
-        // Compute output token breakdown from response
-        let (output_by_type, output_per_block) = self.compute_output_token_breakdown_from_json(
-            response_jsons,
-            tokenizer,
-            chat_template,
-        );
-
-        let total_output_tokens: usize = output_by_type.values().sum();
-
-        Some(TokenConsumptionBreakdown {
-            timestamp_ns: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-            pid,
-            comm,
-            provider: provider.to_string(),
-            model: model.to_string(),
-            total_input_tokens: total_input,
-            total_output_tokens,
-            by_role,
-            per_message,
-            tools_tokens,
-            system_prompt_tokens,
-            output_by_type,
-            output_per_block,
-        })
-    }
-
-    /// Compute output token breakdown from SSE response JSONs
-    ///
-    /// Directly processes SSE chunks using extract_response_content which now supports
-    /// both "message" and "delta" formats, eliminating the need for aggregate_sse_chunks.
-    fn compute_output_token_breakdown_from_json(
-        &self,
-        response_jsons: &[serde_json::Value],
-        tokenizer: &LlmTokenizer,
-        _chat_template: &LlmTokenizer,
-    ) -> (std::collections::HashMap<String, usize>, Vec<OutputTokenCount>) {
-        let mut output_by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut output_per_block: Vec<OutputTokenCount> = Vec::new();
-
-        // Accumulate content from all SSE chunks (extract_response_content now supports delta format)
-        let mut all_content = String::new();
-        let mut all_reasoning = String::new();
-        let mut all_tool_calls = Vec::new();
-
-        for chunk in response_jsons {
-            if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(chunk)) {
-                if !content.is_empty() {
-                    all_content.push_str(&content);
-                }
-                if let Some(r) = reasoning {
-                    if !r.is_empty() {
-                        all_reasoning.push_str(&r);
-                    }
-                }
-                for tc in tool_calls {
-                    if !tc.is_empty() {
-                        all_tool_calls.push(tc);
-                    }
-                }
-            }
-        }
-
-        // Handle text content
-        if !all_content.is_empty() {
-            let tokens = tokenizer.count(&all_content).unwrap_or(all_content.len() / 4);
-            *output_by_type.entry("text".to_string()).or_insert(0) += tokens;
-            output_per_block.push(OutputTokenCount {
-                content_type: "text".to_string(),
-                tokens,
-            });
-        }
-
-        // Handle reasoning content
-        if !all_reasoning.is_empty() {
-            let tokens = tokenizer.count(&all_reasoning).unwrap_or(all_reasoning.len() / 4);
-            *output_by_type.entry("reasoning".to_string()).or_insert(0) += tokens;
-            output_per_block.push(OutputTokenCount {
-                content_type: "reasoning".to_string(),
-                tokens,
-            });
-        }
-
-        // Handle tool calls - aggregate all tool calls and count once
-        if !all_tool_calls.is_empty() {
-            let aggregated_tool_calls = all_tool_calls.join("");
-            let tokens = tokenizer.count(&aggregated_tool_calls).unwrap_or(aggregated_tool_calls.len() / 4);
-            *output_by_type.entry("tool_calls".to_string()).or_insert(0) += tokens;
-            output_per_block.push(OutputTokenCount {
-                content_type: "tool_calls".to_string(),
-                tokens,
-            });
-        }
-
-        (output_by_type, output_per_block)
+        self.message
+            .parse_by_path(path, request_body, response_body)
     }
 
     /// Analyze AggregatedResult and extract token consumption breakdown
     ///
     /// This is a convenience method that combines extract_token_data and
     /// compute_token_consumption into a single call.
-    pub fn analyze_token_consumption(&self, result: &AggregatedResult) -> Option<TokenConsumptionBreakdown> {
+    pub fn analyze_token_consumption(
+        &self,
+        result: &AggregatedResult,
+    ) -> Option<TokenConsumptionBreakdown> {
         // Extract context (pid, comm) from the aggregated result (SseComplete only)
         let (pid, comm, request_json, response_jsons, path) = match result {
             AggregatedResult::SseComplete(pair) => (
@@ -1268,7 +1064,9 @@ impl Analyzer {
         let (tokenizer, chat_template) = match (&self.tokenizer, &self.chat_template) {
             (Some(t), Some(ct)) => (t, ct),
             _ => {
-                log::warn!("Tokenizer or chat template not available, cannot compute accurate token consumption");
+                log::warn!(
+                    "Tokenizer or chat template not available, cannot compute accurate token consumption"
+                );
                 return None;
             }
         };
@@ -1277,7 +1075,8 @@ impl Analyzer {
         let request_json_ref = request_json.as_ref()?;
 
         // Extract model
-        let model = request_json_ref.get("model")
+        let model = request_json_ref
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -1287,7 +1086,8 @@ impl Analyzer {
             "anthropic"
         } else {
             "openai"
-        }.to_string();
+        }
+        .to_string();
 
         // Count request tokens
         let request_count = count_request_tokens(request_json_ref, tokenizer, chat_template)?;

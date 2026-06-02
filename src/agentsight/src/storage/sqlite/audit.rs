@@ -3,11 +3,11 @@
 //! Handles table creation, record insertion, and querying for audit events.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 
 /// SQLite-based audit event store
 pub struct AuditStore {
@@ -28,7 +28,7 @@ impl AuditStore {
 
         // Create table and indexes with dynamic table name
         let create_table_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type    TEXT NOT NULL,
                 timestamp_ns  INTEGER NOT NULL,
@@ -37,16 +37,14 @@ impl AuditStore {
                 comm          TEXT NOT NULL,
                 duration_ns   INTEGER DEFAULT 0,
                 extra         TEXT
-            );",
-            table_name
+            );"
         );
         let create_index_sql = format!(
-            "CREATE INDEX IF NOT EXISTS idx_{}_ts ON {}(timestamp_ns);
-             CREATE INDEX IF NOT EXISTS idx_{}_type ON {}(event_type);
-             CREATE INDEX IF NOT EXISTS idx_{}_pid ON {}(pid);",
-            table_name, table_name, table_name, table_name, table_name, table_name
+            "CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name}(timestamp_ns);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_type ON {table_name}(event_type);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_pid ON {table_name}(pid);"
         );
-        conn.execute_batch(&format!("{}{}", create_table_sql, create_index_sql))?;
+        conn.execute_batch(&format!("{create_table_sql}{create_index_sql}"))?;
 
         Ok(AuditStore { conn, table_name })
     }
@@ -100,10 +98,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![
-                Box::new(since_ns as i64),
-                Box::new(type_str.clone()),
-            ];
+            query_params = vec![Box::new(since_ns as i64), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
@@ -118,16 +113,14 @@ impl AuditStore {
             query_params.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse audit record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse audit record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -151,10 +144,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![
-                Box::new(pid),
-                Box::new(type_str.clone()),
-            ];
+            query_params = vec![Box::new(pid), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
@@ -169,16 +159,14 @@ impl AuditStore {
             query_params.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse audit record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse audit record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -189,10 +177,7 @@ impl AuditStore {
     ///
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
-        let sql = format!(
-            "DELETE FROM {} WHERE timestamp_ns < ?1",
-            self.table_name
-        );
+        let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
         let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
         Ok(deleted as u64)
     }
@@ -230,12 +215,10 @@ impl AuditStore {
             std::collections::HashMap::new();
 
         {
-            let mut stmt = self.conn.prepare(
-                &format!(
-                    "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
-                    self.table_name
-                ),
-            )?;
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
+                self.table_name
+            ))?;
             let rows = stmt.query_map(params![since_ns as i64], |row| {
                 let extra_str: String = row.get(0)?;
                 Ok(extra_str)
@@ -243,16 +226,16 @@ impl AuditStore {
 
             for row in rows.flatten() {
                 if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row) {
-                    total_input_tokens +=
-                        extra.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    total_input_tokens += extra
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     total_output_tokens += extra
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     if let Some(provider) = extra.get("provider").and_then(|v| v.as_str()) {
-                        *provider_counts
-                            .entry(provider.to_string())
-                            .or_insert(0) += 1;
+                        *provider_counts.entry(provider.to_string()).or_insert(0) += 1;
                     }
                 }
             }
@@ -303,18 +286,18 @@ impl AuditStore {
 
 /// Parse a database row into an AuditRecord
 fn row_to_record(row: &rusqlite::Row) -> Result<AuditRecord> {
-    let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let event_type_str: String = row.get(1).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let timestamp_ns: i64 = row.get(2).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let pid: u32 = row.get(3).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let ppid: Option<u32> = row.get(4).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let comm: String = row.get(5).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let duration_ns: i64 = row.get(6).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let extra_str: String = row.get(7).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let event_type_str: String = row.get(1).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let timestamp_ns: i64 = row.get(2).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pid: u32 = row.get(3).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ppid: Option<u32> = row.get(4).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let comm: String = row.get(5).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let duration_ns: i64 = row.get(6).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let extra_str: String = row.get(7).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event_type: AuditEventType = event_type_str
         .parse()
-        .map_err(|e: String| anyhow::anyhow!("{}", e))?;
+        .map_err(|e: String| anyhow::anyhow!("{e}"))?;
 
     let extra: AuditExtra =
         serde_json::from_str(&extra_str).context("Failed to deserialize extra JSON")?;
@@ -337,16 +320,16 @@ fn extract_cmdline_from_extra(extra_str: &str, comm: &str) -> String {
     // Try to parse as ProcessAction extra
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(extra_str) {
         // Try args first (full command line)
-        if let Some(args) = json.get("args").and_then(|v| v.as_str()) {
-            if !args.is_empty() {
-                return args.to_string();
-            }
+        if let Some(args) = json.get("args").and_then(|v| v.as_str())
+            && !args.is_empty()
+        {
+            return args.to_string();
         }
         // Try filename as fallback
-        if let Some(filename) = json.get("filename").and_then(|v| v.as_str()) {
-            if !filename.is_empty() {
-                return filename.to_string();
-            }
+        if let Some(filename) = json.get("filename").and_then(|v| v.as_str())
+            && !filename.is_empty()
+        {
+            return filename.to_string();
         }
     }
     // Fallback to comm (process name, max 16 chars)

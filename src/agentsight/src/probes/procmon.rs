@@ -9,12 +9,15 @@ use libbpf_rs::{
     Link, MapHandle,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{
-    mem::MaybeUninit,
-    os::fd::AsFd,
-};
+use std::{mem::MaybeUninit, os::fd::AsFd};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/procmon.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/procmon.rs"));
@@ -60,7 +63,8 @@ impl Event {
         let raw = unsafe { &*(data.as_ptr() as *const ProcMonEvent) };
 
         // Parse comm (null-terminated)
-        let comm = raw.comm
+        let comm = raw
+            .comm
             .iter()
             .take_while(|&&c| c != 0)
             .map(|&c| c as u8)
@@ -142,6 +146,8 @@ impl ProcMon {
         let skel = open_skel.load().context("failed to load BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
+        #[allow(clippy::unnecessary_cast)]
+        // lifetime laundering to 'static (clippy ignores the lifetime change)
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut ProcmonSkel<'static>) };
 

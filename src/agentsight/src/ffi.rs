@@ -4,12 +4,18 @@
 //! AgentSight runs a background pipeline thread; completed events are pushed
 //! into an `mpsc` channel and the caller is notified via `eventfd`.
 //! The caller consumes events by calling `agentsight_read()` with callbacks.
+//!
+//! The `extern "C"` entry points are `unsafe` because they take caller-provided
+//! raw pointers; their safety contracts (pointer validity, ownership, lifetime)
+//! are documented in `docs/design-docs/c-ffi-api.md` rather than per-function,
+//! so `missing_safety_doc` is allowed for this module.
+#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use crate::analyzer::HttpRecord;
 use crate::config::AgentsightConfig;
@@ -249,18 +255,29 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
 
 fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let response_id = call.metadata.get("response_id").map(|s| safe_cstring(s));
-    let conversation_id = call.metadata.get("conversation_id").map(|s| safe_cstring(s));
+    let conversation_id = call
+        .metadata
+        .get("conversation_id")
+        .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
     let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
 
     // Construct request_url from metadata
-    let server_addr = call.metadata.get("server.address").cloned().unwrap_or_default();
-    let server_port = call.metadata.get("server.port").cloned().unwrap_or_default();
+    let server_addr = call
+        .metadata
+        .get("server.address")
+        .cloned()
+        .unwrap_or_default();
+    let server_port = call
+        .metadata
+        .get("server.port")
+        .cloned()
+        .unwrap_or_default();
     let path = call.metadata.get("path").cloned().unwrap_or_default();
     let url = if server_port.is_empty() {
-        format!("https://{}{}", server_addr, path)
+        format!("https://{server_addr}{path}")
     } else {
-        format!("https://{}:{}{}", server_addr, server_port, path)
+        format!("https://{server_addr}:{server_port}{path}")
     };
     let request_url = safe_cstring(&url);
 
@@ -272,10 +289,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("status_code")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let is_sse: bool = call
-        .metadata
-        .get("is_sse")
-        .map_or(false, |s| s == "true");
+    let is_sse: bool = call.metadata.get("is_sse").is_some_and(|s| s == "true");
 
     let finish_reason = call
         .response
@@ -297,10 +311,8 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
             None => (false, 0, 0, 0, 0, 0),
         };
 
-    let req_messages_json =
-        serde_json::to_string(&call.request.messages).unwrap_or_default();
-    let resp_messages_json =
-        serde_json::to_string(&call.response.messages).unwrap_or_default();
+    let req_messages_json = serde_json::to_string(&call.request.messages).unwrap_or_default();
+    let resp_messages_json = serde_json::to_string(&call.response.messages).unwrap_or_default();
     let req_messages = safe_cstring(&req_messages_json);
     let resp_messages = safe_cstring(&resp_messages_json);
 
@@ -395,9 +407,7 @@ unsafe fn dispatch_event(
 /// The pointer is valid until the next API call on the same thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn agentsight_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr())
-    })
+    LAST_ERROR.with(|e| e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
 }
 
 // ---- Configuration ----
@@ -568,9 +578,7 @@ pub unsafe extern "C" fn agentsight_config_free(cfg: *mut AgentsightConfigHandle
 /// Create a new AgentSight handle.  Does NOT start the pipeline yet.
 /// Returns NULL on failure (call `agentsight_last_error()` for details).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn agentsight_new(
-    cfg: *mut AgentsightConfigHandle,
-) -> *mut AgentsightHandle {
+pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mut AgentsightHandle {
     // Create eventfd
     let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     if efd < 0 {
@@ -648,7 +656,7 @@ fn ffi_background_thread(
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("agentsight background thread: AgentSight::new failed: {}", e);
+            log::error!("agentsight background thread: AgentSight::new failed: {e}");
             return;
         }
     };
@@ -794,7 +802,7 @@ mod tests {
         let mut cfg = new_cfg();
         let json = r#"{"verbose":1,"log_path":"/tmp/test.log"}"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.log_path, Some("/tmp/test.log".to_string()));
     }
 
@@ -814,7 +822,10 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert!(cfg.cmdline_rules[0].allow);
-        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
+        assert_eq!(
+            cfg.cmdline_rules[0].agent_name,
+            Some("Claude Code".to_string())
+        );
         assert!(!cfg.cmdline_rules[1].allow);
         assert!(cfg.cmdline_rules[1].agent_name.is_none());
     }
@@ -884,8 +895,8 @@ mod tests {
         let buf = copy_process_name(name);
         assert_eq!(buf[15], 0); // NUL-terminated
         // First 15 chars should match
-        for i in 0..15 {
-            assert_eq!(buf[i] as u8, name.as_bytes()[i]);
+        for (i, &b) in name.as_bytes().iter().take(15).enumerate() {
+            assert_eq!(buf[i] as u8, b);
         }
     }
 
@@ -903,7 +914,7 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Hermes".to_string()));
-        assert_eq!(cfg.cmdline_rules[0].allow, true);
+        assert!(cfg.cmdline_rules[0].allow);
         assert_eq!(cfg.cmdline_rules[1].agent_name, Some("Cosh".to_string()));
     }
 
@@ -933,7 +944,7 @@ mod tests {
             "https": [{"rule": ["*.openai.com"]}]
         }"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.cmdline_rules.len(), 1);
         assert_eq!(cfg.https_rules.len(), 1);
     }

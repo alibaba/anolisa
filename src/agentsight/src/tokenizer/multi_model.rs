@@ -10,7 +10,6 @@ use anyhow::{Result, anyhow};
 use hf_hub::api::sync::{Api, ApiBuilder};
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static GLOBAL_TOKENIZER: OnceCell<Mutex<MultiModelTokenizer>> = OnceCell::new();
@@ -124,35 +123,32 @@ impl MultiModelTokenizer {
 
         // Map model name to HuggingFace model ID
         let hf_model_id = map_to_hf_model_id(model_name);
-        
+
         // Try lookup with HF model ID (in case same HF ID was registered under different name)
-        if hf_model_id != model_name {
-            if let Some(tokenizer) = self.get(hf_model_id) {
-                // Cache under original model name too
-                let entry = self.tokenizers.get(hf_model_id).cloned();
-                if let Some(entry) = entry {
-                    self.tokenizers.insert(model_name.to_string(), entry);
-                }
-                return Ok(tokenizer);
+        if hf_model_id != model_name
+            && let Some(tokenizer) = self.get(hf_model_id)
+        {
+            // Cache under original model name too
+            let entry = self.tokenizers.get(hf_model_id).cloned();
+            if let Some(entry) = entry {
+                self.tokenizers.insert(model_name.to_string(), entry);
             }
+            return Ok(tokenizer);
         }
 
         // Register from HuggingFace Hub using mapped ID
         self.register_from_hf(hf_model_id)?;
 
         // If we used a different HF ID, also cache under original model name
-        if hf_model_id != model_name {
-            if let Some(entry) = self.tokenizers.get(hf_model_id).cloned() {
-                self.tokenizers.insert(model_name.to_string(), entry);
-            }
+        if hf_model_id != model_name
+            && let Some(entry) = self.tokenizers.get(hf_model_id).cloned()
+        {
+            self.tokenizers.insert(model_name.to_string(), entry);
         }
 
         // Return the tokenizer
         self.get(model_name).ok_or_else(|| {
-            anyhow!(
-                "Failed to get tokenizer after registration for model '{}'",
-                model_name
-            )
+            anyhow!("Failed to get tokenizer after registration for model '{model_name}'")
         })
     }
 
