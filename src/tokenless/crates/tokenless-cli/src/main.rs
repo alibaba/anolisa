@@ -327,6 +327,10 @@ fn run() -> Result<(), (String, i32)> {
             let before_tokens = estimate_tokens_from_bytes(input.len());
             let after_tokens = estimate_tokens_from_bytes(after_compact.len());
             let output_text = if after_tokens >= before_tokens {
+                eprintln!(
+                    "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
+                    before_tokens, after_tokens
+                );
                 input.clone()
             } else {
                 result_json.clone()
@@ -447,6 +451,10 @@ fn run() -> Result<(), (String, i32)> {
             let before_tokens = estimate_tokens_from_bytes(input.len());
             let after_tokens = estimate_tokens_from_bytes(output.len());
             let display = if output.is_empty() || after_tokens >= before_tokens {
+                eprintln!(
+                    "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
+                    before_tokens, after_tokens
+                );
                 input.clone()
             } else {
                 output
