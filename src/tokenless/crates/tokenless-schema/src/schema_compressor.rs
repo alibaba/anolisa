@@ -30,6 +30,7 @@ pub struct SchemaCompressor {
     drop_examples: bool,
     drop_titles: bool,
     drop_markdown: bool,
+    max_depth: usize,
 }
 
 impl Default for SchemaCompressor {
@@ -40,6 +41,15 @@ impl Default for SchemaCompressor {
             drop_examples: true,
             drop_titles: true,
             drop_markdown: true,
+            // Bound recursion to keep deeply-nested or pathological schemas
+            // (e.g. attacker-crafted ~1000-level JSON) from blowing the stack.
+            // Schemas tolerate more depth than runtime responses because
+            // OpenAPI/JSON-Schema definitions legitimately stack anyOf /
+            // oneOf / allOf branches several layers deep — 8 (the
+            // ResponseCompressor default) would truncate real-world tool
+            // descriptions. 32 keeps a wide safety margin below the
+            // ~1024-frame default stack while leaving real schemas intact.
+            max_depth: 32,
         }
     }
 }
@@ -77,6 +87,12 @@ impl SchemaCompressor {
     /// Set whether to drop markdown formatting from descriptions
     pub fn with_drop_markdown(mut self, drop: bool) -> Self {
         self.drop_markdown = drop;
+        self
+    }
+
+    /// Set the maximum recursion depth for nested schemas
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
         self
     }
 
@@ -144,6 +160,13 @@ impl SchemaCompressor {
 
     /// Recursively compress a JSON Schema
     pub fn compress_json_schema(&self, schema: &mut Value, depth: usize) {
+        // Stack-overflow guard for pathological schemas. Beyond max_depth we
+        // stop descending — the deepest nodes keep their original shape, which
+        // is acceptable since this path is best-effort token reduction.
+        if depth >= self.max_depth {
+            return;
+        }
+
         let Some(obj) = schema.as_object_mut() else {
             return;
         };
@@ -547,6 +570,38 @@ mod tests {
                 .get("title")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn max_depth_stops_recursion() {
+        // Build a 100-level schema and verify with_max_depth bounds the
+        // recursive descent — descriptions below the limit must be left
+        // untouched, descriptions above must be truncated.
+        let compressor = SchemaCompressor::new().with_max_depth(5);
+        let long_desc = "x".repeat(400);
+        let mut schema = json!({
+            "type": "string",
+            "description": long_desc.clone(),
+        });
+        for _ in 0..100 {
+            schema = json!({
+                "type": "object",
+                "description": long_desc.clone(),
+                "properties": {"nested": schema},
+            });
+        }
+        let result = compressor.compress(&schema);
+        // Top-level description (depth 0) must be truncated.
+        let top = result["description"].as_str().unwrap();
+        assert!(top.chars().count() <= 256);
+        // Walk down 10 levels — well past max_depth — and confirm we still
+        // see the original 400-char description (recursion stopped early).
+        let mut node = &result;
+        for _ in 0..10 {
+            node = &node["properties"]["nested"];
+        }
+        let deep = node["description"].as_str().unwrap();
+        assert_eq!(deep.chars().count(), 400);
     }
 
     #[test]

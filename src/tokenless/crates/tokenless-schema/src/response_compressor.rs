@@ -30,6 +30,13 @@ impl Default for ResponseCompressor {
             truncate_arrays_at: 16,
             drop_nulls: true,
             drop_empty_fields: true,
+            // Runtime responses rarely nest beyond a handful of levels in
+            // practice, so 8 trades aggressive token savings (collapsing
+            // deeply-nested structures to a `<...truncated...>` marker) for
+            // a tiny risk of losing useful detail. SchemaCompressor defaults
+            // to 32 because schema definitions stack anyOf/oneOf/allOf
+            // branches that legitimately need the extra depth — see
+            // `SchemaCompressor::default()`.
             max_depth: 8,
             add_truncation_marker: true,
         }
