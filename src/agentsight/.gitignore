@@ -1,0 +1,3 @@
+# Generated C header — written on every `cargo build` by build.rs via cbindgen.
+# Consumers regenerate locally; do NOT commit.
+/include/
