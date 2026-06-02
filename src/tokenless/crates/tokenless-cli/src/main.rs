@@ -126,16 +126,44 @@ enum StatsCommands {
     Disable,
 }
 
+/// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
+const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 fn read_input(file: &Option<String>) -> Result<String, String> {
+    // Cap stream reads at MAX_INPUT_BYTES + 1 via Read::take so a hostile
+    // input cannot allocate gigabytes before the size check fires. The
+    // post-read length comparison catches the truncated-at-limit case so
+    // we still reject (rather than silently process a partial buffer).
+    let limit = MAX_INPUT_BYTES as u64 + 1;
+    let too_large = || {
+        format!(
+            "Input exceeds {} MiB limit",
+            MAX_INPUT_BYTES / (1024 * 1024)
+        )
+    };
     match file {
         Some(path) => {
-            fs::read_to_string(path).map_err(|e| format!("Failed to read file '{}': {}", path, e))
+            let mut content = String::new();
+            fs::File::open(path)
+                .map_err(|e| format!("Failed to open file '{}': {}", path, e))?
+                .take(limit)
+                .read_to_string(&mut content)
+                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            if content.len() > MAX_INPUT_BYTES {
+                return Err(too_large());
+            }
+            Ok(content)
         }
         None => {
             let mut buf = String::new();
             io::stdin()
+                .lock()
+                .take(limit)
                 .read_to_string(&mut buf)
                 .map_err(|e| format!("Failed to read stdin: {}", e))?;
+            if buf.len() > MAX_INPUT_BYTES {
+                return Err(too_large());
+            }
             Ok(buf)
         }
     }
@@ -190,9 +218,60 @@ fn home_dir_from_passwd() -> Option<String> {
     (!home.is_empty()).then(|| home.to_string())
 }
 
+/// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
+/// is validated to ensure it resides under the user's home directory;
+/// otherwise the env var is ignored and the default path is used. This
+/// prevents an attacker from redirecting the database to a system-critical
+/// location (e.g. `/etc/evil.db`).
 fn get_db_path() -> String {
-    std::env::var("TOKENLESS_STATS_DB")
-        .unwrap_or_else(|_| format!("{}/.tokenless/stats.db", get_home_dir()))
+    let home = get_home_dir();
+    if let Ok(env_path) = std::env::var("TOKENLESS_STATS_DB")
+        && !env_path.is_empty()
+    {
+        match validate_db_path(&env_path, &home) {
+            Ok(path) => return path,
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
+        }
+    }
+    format!("{}/.tokenless/stats.db", home)
+}
+
+/// Validate a TOKENLESS_STATS_DB candidate against the user's home directory.
+/// Returns the original path on success, or a human-readable rejection reason.
+///
+/// Extracted from `get_db_path` so unit tests can exercise the bypass paths
+/// (ParentDir traversal, nonexistent parents, missing home anchor) without
+/// mutating process-wide env vars.
+fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
+    // Reject when we have no trusted home anchor:
+    // Path::starts_with("") returns true for every path, which would
+    // let an attacker point the database at any system location.
+    if home.is_empty() {
+        return Err("no trusted home directory available".to_string());
+    }
+    let p = std::path::Path::new(env_path);
+    // Accept only paths under the user's real home directory.
+    // For not-yet-created DB files, the parent directory MUST itself
+    // canonicalize — falling back to an unresolved parent would let
+    // `~/x/../../etc/evil.db` slip past the starts_with(&home) check,
+    // since Path::starts_with matches components literally and an
+    // unresolved path still begins with the home prefix.
+    let resolved = p
+        .canonicalize()
+        .or_else(|_| {
+            p.parent()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                .and_then(|parent| parent.canonicalize())
+        })
+        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
+    if resolved.starts_with(home) {
+        Ok(env_path.to_string())
+    } else {
+        Err(format!(
+            "path '{}' is outside home directory '{}'",
+            env_path, home
+        ))
+    }
 }
 
 fn ensure_db_dir() -> Result<(), (String, i32)> {
@@ -511,5 +590,93 @@ fn main() {
     if let Err((msg, code)) = run() {
         eprintln!("Error: {}", msg);
         process::exit(code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_subdir(label: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "tokenless-db-validate-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            label
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn validate_db_path_rejects_empty_home() {
+        // No trusted home anchor means starts_with("") would match
+        // any path, so the function must short-circuit to rejection.
+        let err = validate_db_path("/tmp/whatever.db", "").unwrap_err();
+        assert!(err.contains("no trusted home"));
+    }
+
+    #[test]
+    fn validate_db_path_accepts_path_inside_home() {
+        let home = temp_subdir("inside");
+        let canon_home = std::fs::canonicalize(&home).unwrap();
+        let inner = canon_home.join("stats.db");
+        let result =
+            validate_db_path(inner.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap();
+        assert_eq!(result, inner.to_str().unwrap());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn validate_db_path_rejects_path_outside_home() {
+        let home = temp_subdir("outside-home");
+        let canon_home = std::fs::canonicalize(&home).unwrap();
+        // Pick a known-existing directory that is NOT under home.
+        let outside = std::path::Path::new("/etc/hosts");
+        if !outside.exists() {
+            std::fs::remove_dir_all(&home).ok();
+            return;
+        }
+        let err = validate_db_path("/etc/hosts", canon_home.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("outside home"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn validate_db_path_rejects_parent_dir_bypass_with_existing_parent() {
+        // ~/foo/../../etc/evil.db where /etc exists: canonicalize() of
+        // the parent resolves to /etc, which must fail starts_with(home).
+        let home = temp_subdir("pd-existing");
+        let canon_home = std::fs::canonicalize(&home).unwrap();
+        let escape = canon_home.join("foo/../../etc/evil.db");
+        let err =
+            validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap_err();
+        // Either "outside home" (parent canonicalized away from home) or
+        // "cannot be resolved" (parent itself unreachable). Both are valid
+        // rejections — what matters is no Ok return.
+        assert!(err.contains("outside home") || err.contains("cannot be resolved"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
+        // ~/nonexistent-path/../../etc/evil.db where nonexistent-path
+        // doesn't exist: parent canonicalize() ALSO fails, so without the
+        // hardening this path would slip through via the old fallback.
+        let home = temp_subdir("pd-nonexistent");
+        let canon_home = std::fs::canonicalize(&home).unwrap();
+        let escape = canon_home.join("does-not-exist-xyz/../../etc/evil.db");
+        let result = validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "ParentDir bypass via nonexistent intermediate must be rejected; got {:?}",
+            result
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 }
