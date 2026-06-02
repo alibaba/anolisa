@@ -77,8 +77,10 @@ impl StatsRecorder {
             [],
         )?;
 
-        // Schema migration: add columns introduced in v0.3.0 if missing
-        #[allow(clippy::collapsible_if)]
+// Schema migration: add columns introduced in v0.3.0 if missing.
+        // NOTE: pragma_table_info does not support parameterized queries, so
+        // column names are interpolated via format!(). The values come from
+        // hardcoded literals in the for loop — never from user input.
         for col in &["before_output", "after_output"] {
             let check = conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), []);
             if let Err(e) = check {
@@ -93,15 +95,28 @@ impl StatsRecorder {
         })
     }
 
+    /// Acquire the connection guard, recovering from poison rather than failing.
+    ///
+    /// A poisoned mutex means a previous holder panicked while holding the
+    /// lock. For our single-statement workload (no multi-step transactions),
+    /// the SQLite connection itself remains usable — so we clear the poison
+    /// and reuse the underlying guard rather than dropping the call. This
+    /// keeps stats recording fail-soft after a transient panic instead of
+    /// permanently breaking every subsequent query.
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            eprintln!(
+                "[tokenless-stats] WARNING: mutex was poisoned by a previous panic; recovering: {}",
+                poisoned
+            );
+            self.conn.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     /// Record a statistics entry
     pub fn record(&self, record: &StatsRecord) -> StatsResult<i64> {
-        let conn = self.conn.lock().map_err(|e| {
-            self.conn.clear_poison();
-            StatsError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some(format!("Lock poisoned: {}", e)),
-            ))
-        })?;
+        let conn = self.lock_conn();
 
         conn.execute(
             "INSERT INTO stats (
@@ -133,13 +148,7 @@ impl StatsRecorder {
 
     /// Query all records, newest first, with optional limit
     pub fn all_records(&self, limit: Option<usize>) -> StatsResult<Vec<StatsRecord>> {
-        let conn = self.conn.lock().map_err(|e| {
-            self.conn.clear_poison();
-            StatsError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some(format!("Lock poisoned: {}", e)),
-            ))
-        })?;
+        let conn = self.lock_conn();
 
         const SELECT_COLS: &str =
             "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
@@ -184,13 +193,7 @@ impl StatsRecorder {
 
     /// Get a single record by database ID
     pub fn record_by_id(&self, id: i64) -> StatsResult<Option<StatsRecord>> {
-        let conn = self.conn.lock().map_err(|e| {
-            self.conn.clear_poison();
-            StatsError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some(format!("Lock poisoned: {}", e)),
-            ))
-        })?;
+        let conn = self.lock_conn();
 
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
@@ -210,13 +213,7 @@ impl StatsRecorder {
 
     /// Get record count
     pub fn count(&self) -> StatsResult<usize> {
-        let conn = self.conn.lock().map_err(|e| {
-            self.conn.clear_poison();
-            StatsError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some(format!("Lock poisoned: {}", e)),
-            ))
-        })?;
+        let conn = self.lock_conn();
 
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))?;
         Ok(count as usize)
@@ -224,13 +221,7 @@ impl StatsRecorder {
 
     /// Clear all records and reset auto-increment
     pub fn clear(&self) -> StatsResult<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            self.conn.clear_poison();
-            StatsError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some(format!("Lock poisoned: {}", e)),
-            ))
-        })?;
+        let conn = self.lock_conn();
 
         conn.execute_batch("DELETE FROM stats; DELETE FROM sqlite_sequence WHERE name='stats';")?;
         Ok(())
@@ -243,9 +234,20 @@ impl StatsRecorder {
             id: row.get(0)?,
             timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
                 .map(|dt| dt.with_timezone(&chrono::Local))
-                .unwrap_or_else(|_| chrono::Local::now()),
-            operation: OperationType::from_str(&row.get::<_, String>(2)?)
-                .unwrap_or(OperationType::CompressSchema),
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[tokenless-stats] corrupt timestamp, using current time: {}",
+                        e
+                    );
+                    chrono::Local::now()
+                }),
+            operation: OperationType::from_str(&row.get::<_, String>(2)?).unwrap_or_else(|e| {
+                eprintln!(
+                    "[tokenless-stats] unknown operation type, falling back to compress-schema: {}",
+                    e
+                );
+                OperationType::CompressSchema
+            }),
             agent_id,
             source_pid: row.get(4)?,
             session_id: row.get(5)?,
