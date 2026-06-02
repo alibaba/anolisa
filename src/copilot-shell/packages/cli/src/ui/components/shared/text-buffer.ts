@@ -2001,11 +2001,15 @@ export function useTextBuffer({
     dispatch({ type: 'move_to_offset', payload: { offset } });
   }, []);
 
-  const returnValue: TextBuffer = useMemo(
-    () => ({
+  const returnValue: TextBuffer = useMemo(() => {
+    // Calculate offset from current cursor position
+    const offset = logicalPosToOffset(lines, cursorRow, cursorCol);
+
+    return {
       lines,
       text,
       cursor: [cursorRow, cursorCol],
+      offset,
       preferredCol,
       selectionAnchor,
 
@@ -2066,70 +2070,69 @@ export function useTextBuffer({
       vimMoveToLastLine,
       vimMoveToLine,
       vimEscapeInsertMode,
-    }),
-    [
-      lines,
-      text,
-      cursorRow,
-      cursorCol,
-      preferredCol,
-      selectionAnchor,
-      visualLines,
-      renderedVisualLines,
-      visualCursor,
-      visualScrollRow,
-      setText,
-      insert,
-      newline,
-      backspace,
-      del,
-      move,
-      undo,
-      redo,
-      replaceRange,
-      replaceRangeByOffset,
-      moveToOffset,
-      deleteWordLeft,
-      deleteWordRight,
-      killLineRight,
-      killLineLeft,
-      handleInput,
-      openInExternalEditor,
-      vimDeleteWordForward,
-      vimDeleteWordBackward,
-      vimDeleteWordEnd,
-      vimChangeWordForward,
-      vimChangeWordBackward,
-      vimChangeWordEnd,
-      vimDeleteLine,
-      vimChangeLine,
-      vimDeleteToEndOfLine,
-      vimChangeToEndOfLine,
-      vimChangeMovement,
-      vimMoveLeft,
-      vimMoveRight,
-      vimMoveUp,
-      vimMoveDown,
-      vimMoveWordForward,
-      vimMoveWordBackward,
-      vimMoveWordEnd,
-      vimDeleteChar,
-      vimInsertAtCursor,
-      vimAppendAtCursor,
-      vimOpenLineBelow,
-      vimOpenLineAbove,
-      vimAppendAtLineEnd,
-      vimInsertAtLineStart,
-      vimMoveToLineStart,
-      vimMoveToLineEnd,
-      vimMoveToFirstNonWhitespace,
-      vimMoveToFirstLine,
-      vimMoveToLastLine,
-      vimMoveToLine,
-      vimEscapeInsertMode,
-      visualToLogicalMap,
-    ],
-  );
+    };
+  }, [
+    lines,
+    text,
+    cursorRow,
+    cursorCol,
+    preferredCol,
+    selectionAnchor,
+    visualLines,
+    renderedVisualLines,
+    visualCursor,
+    visualScrollRow,
+    setText,
+    insert,
+    newline,
+    backspace,
+    del,
+    move,
+    undo,
+    redo,
+    replaceRange,
+    replaceRangeByOffset,
+    moveToOffset,
+    deleteWordLeft,
+    deleteWordRight,
+    killLineRight,
+    killLineLeft,
+    handleInput,
+    openInExternalEditor,
+    vimDeleteWordForward,
+    vimDeleteWordBackward,
+    vimDeleteWordEnd,
+    vimChangeWordForward,
+    vimChangeWordBackward,
+    vimChangeWordEnd,
+    vimDeleteLine,
+    vimChangeLine,
+    vimDeleteToEndOfLine,
+    vimChangeToEndOfLine,
+    vimChangeMovement,
+    vimMoveLeft,
+    vimMoveRight,
+    vimMoveUp,
+    vimMoveDown,
+    vimMoveWordForward,
+    vimMoveWordBackward,
+    vimMoveWordEnd,
+    vimDeleteChar,
+    vimInsertAtCursor,
+    vimAppendAtCursor,
+    vimOpenLineBelow,
+    vimOpenLineAbove,
+    vimAppendAtLineEnd,
+    vimInsertAtLineStart,
+    vimMoveToLineStart,
+    vimMoveToLineEnd,
+    vimMoveToFirstNonWhitespace,
+    vimMoveToFirstLine,
+    vimMoveToLastLine,
+    vimMoveToLine,
+    vimEscapeInsertMode,
+    visualToLogicalMap,
+  ]);
   return returnValue;
 }
 
@@ -2138,6 +2141,11 @@ export interface TextBuffer {
   lines: string[]; // Logical lines
   text: string;
   cursor: [number, number]; // Logical cursor [row, col]
+  /**
+   * Absolute offset of cursor position in text (code-point based).
+   * Useful for operations like placeholder range checks.
+   */
+  offset: number;
   /**
    * When the user moves the caret vertically we try to keep their original
    * horizontal column even when passing through shorter lines.  We remember

@@ -2011,5 +2011,125 @@ describe('Unicode helper functions', () => {
       expect(cpLen('hello 你好 world')).toBe(14); // 5 + 1 + 2 + 1 + 5 = 14
       expect(cpLen('hello مرحبا world')).toBe(17);
     });
+
+    it('should handle emoji/non-BMP characters correctly', () => {
+      // Single emoji (surrogate pair in UTF-16, but 1 code point)
+      expect(cpLen('🚀')).toBe(1);
+      expect(cpLen('😀')).toBe(1);
+      expect(cpLen('🎉')).toBe(1);
+
+      // Multiple emojis
+      expect(cpLen('🚀😀')).toBe(2);
+      expect(cpLen('🎉🎉🎉')).toBe(3);
+
+      // Mixed ASCII and emoji
+      expect(cpLen('hi🚀')).toBe(3);
+      expect(cpLen('🚀hello')).toBe(6);
+
+      // Complex emoji sequences
+      expect(cpLen('👨‍👩‍👧‍👦')).toBe(7); // Family emoji (ZWJ sequence)
+    });
+
+    it('should verify UTF-16 vs code-point length difference (the bug we fixed)', () => {
+      // This test documents the exact scenario that caused the placeholder backspace bug
+      const emoji = '🚀';
+      const placeholder = '[📎 paste 100 chars]'; // Contains 📎 emoji (also surrogate pair)
+
+      // UTF-16 length (JS String.length)
+      expect(emoji.length).toBe(2); // Surrogate pair
+      expect(placeholder.length).toBe(20); // 📎 also a surrogate pair
+
+      // Code-point length (cpLen)
+      expect(cpLen(emoji)).toBe(1);
+      expect(cpLen(placeholder)).toBe(19); // 📎 = 1 code point
+
+      // The difference: emoji.length vs cpLen(emoji)
+      // If we used .length for offset calculation but cpLen for cursor,
+      // the offset would be wrong by 1 for each emoji before the placeholder
+    });
+  });
+
+  describe('offset/position operations with emoji', () => {
+    it('should correctly calculate offsets with emoji prefix (placeholder backspace scenario)', () => {
+      // Simulate the InputPrompt placeholder backspace scenario
+      const emojiPrefix = '🚀';
+      const placeholder = '[📎 paste 100 chars]'; // Contains 📎 emoji (also surrogate pair)
+      const text = emojiPrefix + placeholder;
+
+      // Cursor at end of text (after placeholder)
+      // 🚀 = 1 code point, 📎 = 1 code point, rest = 17 chars
+      // placeholder code-point length = 1 + 17 = 19
+      const totalCodePoints = cpLen(text); // 1 + 19 = 20
+
+      // Calculate placeholder start using code-point semantics
+      const placeholderStart = totalCodePoints - cpLen(placeholder); // 20 - 19 = 1
+      const placeholderEnd = totalCodePoints; // 20
+
+      // offsetToLogicalPos should correctly handle emoji
+      const startPos = offsetToLogicalPos(text, placeholderStart);
+      expect(startPos).toEqual([0, 1]); // After 🚀, at start of placeholder
+
+      const endPos = offsetToLogicalPos(text, placeholderEnd);
+      expect(endPos).toEqual([0, 20]); // End of placeholder
+
+      // Verify logicalPosToOffset inverse
+      const lines = [text];
+      const startOffset = logicalPosToOffset(lines, 0, 1);
+      expect(startOffset).toBe(1); // Code-point offset after 🚀
+
+      const endOffset = logicalPosToOffset(lines, 0, 20);
+      expect(endOffset).toBe(20); // Code-point offset at end
+    });
+
+    it('should correctly slice text with emoji using code-point offsets', () => {
+      // This test is documented in textUtils.test.ts (cpSlice tests)
+      // The key point: cpSlice uses code-point indices, not UTF-16 indices
+      // When slicing emoji-containing text, cpSlice correctly handles surrogate pairs
+      // Example: emoji before placeholder means UTF-16 indices are off by 1
+      // Using cpLen and code-point offsets avoids this bug
+      // See textUtils.test.ts for actual cpSlice assertions
+    });
+
+    it('should handle multiple emojis before placeholder', () => {
+      const emojis = '🚀😀🎉'; // 3 code points
+      const placeholder = '[test]';
+      const text = emojis + placeholder;
+
+      // Total code-point length
+      expect(cpLen(text)).toBe(9); // 3 + 6
+
+      // Placeholder position in code-point terms
+      const placeholderStart = 3;
+      const placeholderEnd = 9;
+
+      // offsetToLogicalPos should work correctly
+      expect(offsetToLogicalPos(text, placeholderStart)).toEqual([0, 3]);
+      expect(offsetToLogicalPos(text, placeholderEnd)).toEqual([0, 9]);
+
+      // Verify logicalPosToOffset
+      const lines = [text];
+      expect(logicalPosToOffset(lines, 0, 3)).toBe(3);
+      expect(logicalPosToOffset(lines, 0, 9)).toBe(9);
+    });
+
+    it('should handle emoji on multiple lines', () => {
+      const line1 = '🚀hello'; // 6 code points
+      const placeholder = '[paste]';
+      const text = line1 + '\n' + placeholder;
+
+      // Placeholder on second line, starting at code-point offset 7 (6 + newline)
+      const totalLen = cpLen(text);
+      const placeholderLen = cpLen(placeholder);
+      const placeholderStart = totalLen - placeholderLen;
+
+      // offsetToLogicalPos should find placeholder on line 1
+      const startPos = offsetToLogicalPos(text, placeholderStart);
+      expect(startPos[0]).toBe(1); // Second line
+      expect(startPos[1]).toBe(0); // Start of placeholder
+
+      const endPos = offsetToLogicalPos(text, totalLen);
+      expect(endPos[0]).toBe(1);
+      expect(endPos[1]).toBe(7);
+    });
   });
 });

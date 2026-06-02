@@ -48,6 +48,10 @@ export default {
   'to quit': '退出',
   'for newline': '换行',
   'to clear screen': '清屏',
+  // ============================================================================
+  // Paste Placeholder
+  // ============================================================================
+  'input.paste.placeholder': '[粘贴内容 {{charCount}} 字符]',
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',

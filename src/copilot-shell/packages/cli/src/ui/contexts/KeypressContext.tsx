@@ -60,6 +60,7 @@ export type KeypressHandler = (key: Key) => void;
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
+  pasteWorkaround: boolean;
 }
 
 const KeypressContext = createContext<KeypressContextValue | undefined>(
@@ -799,7 +800,9 @@ export function KeypressProvider({
   ]);
 
   return (
-    <KeypressContext.Provider value={{ subscribe, unsubscribe }}>
+    <KeypressContext.Provider
+      value={{ subscribe, unsubscribe, pasteWorkaround }}
+    >
       {children}
     </KeypressContext.Provider>
   );
