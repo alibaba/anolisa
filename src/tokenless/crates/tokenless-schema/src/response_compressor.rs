@@ -134,23 +134,39 @@ impl ResponseCompressor {
         }
     }
 
-    /// Compress a string value, truncating if necessary
+    /// Compress a string value, truncating if necessary.
+    /// When a truncation marker is added, the marker length is reserved so the
+    /// final output stays within `truncate_strings_at` characters. If the
+    /// configured limit is too small to fit both the marker and a content
+    /// character, the marker is dropped so the output never exceeds the limit.
     fn compress_string(&self, s: &str) -> Value {
         let char_count = s.chars().count();
         if char_count <= self.truncate_strings_at {
             return Value::String(s.to_string());
         }
 
+        const MARKER: &str = "… (truncated)";
+        let marker_len = MARKER.chars().count();
+        // Only attach the marker when the limit can fit it plus at least one
+        // content character; otherwise dropping the marker is the only way to
+        // honor truncate_strings_at.
+        let attach_marker = self.add_truncation_marker && self.truncate_strings_at > marker_len;
+        let target = if attach_marker {
+            self.truncate_strings_at - marker_len
+        } else {
+            self.truncate_strings_at
+        };
+
         let truncate_pos = s
             .char_indices()
-            .nth(self.truncate_strings_at)
+            .nth(target)
             .map(|(i, _)| i)
             .unwrap_or(s.len());
 
         let truncated = &s[..truncate_pos];
 
-        if self.add_truncation_marker {
-            Value::String(format!("{}… (truncated)", truncated))
+        if attach_marker {
+            Value::String(format!("{}{}", truncated, MARKER))
         } else {
             Value::String(truncated.to_string())
         }
@@ -411,7 +427,7 @@ mod tests {
     #[test]
     fn test_nested_object_recursive_compression() {
         let compressor = ResponseCompressor::new()
-            .with_truncate_strings_at(10)
+            .with_truncate_strings_at(20)
             .with_drop_nulls(true);
 
         let nested = json!({
