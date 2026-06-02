@@ -65,6 +65,9 @@ pub struct AgentSight {
     /// Direct reference to the SQLite GenAI store for two-phase pending/complete writes.
     /// `None` when SLS is configured (SQLite exporter is not registered in that case).
     genai_sqlite_store: Option<Arc<GenAISqliteStore>>,
+    /// Observe-only LLM cache-hit shadow analyzer (opt-in). Held for the periodic
+    /// reporter thread and the shutdown finalize; also registered as an exporter.
+    cache_analysis: Option<Arc<crate::genai::cache_shadow::CacheAnalyzer>>,
     /// Interruption event detector (online rules)
     interruption_detector: InterruptionDetector,
     /// Interruption event store (SQLite)
@@ -295,6 +298,18 @@ impl AgentSight {
             }
         }
 
+        // Optionally register the observe-only LLM cache-hit shadow analyzer.
+        let cache_analysis = if config.enable_cache_analysis {
+            let analyzer = Arc::new(crate::genai::cache_shadow::CacheAnalyzer::new(
+                config.storage_base_path.clone(),
+            ));
+            log::info!("LLM cache-hit shadow analyzer enabled (observe-only)");
+            genai_exporters.push(Box::new(Arc::clone(&analyzer)));
+            Some(analyzer)
+        } else {
+            None
+        };
+
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
             if Path::new(tokenizer_path).exists() {
@@ -371,6 +386,11 @@ impl AgentSight {
                 .ok();
         }
 
+        // Spawn the periodic cache-shadow reporter (logs + persists snapshots).
+        if let Some(ref analyzer) = cache_analysis {
+            crate::genai::cache_shadow::spawn_reporter(Arc::clone(analyzer));
+        }
+
         Ok(AgentSight {
             probes,
             parser: Parser::new(),
@@ -379,6 +399,7 @@ impl AgentSight {
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
+            cache_analysis,
             interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
             interruption_store,
             storage,
@@ -733,6 +754,10 @@ impl AgentSight {
         self.running.store(false, Ordering::SeqCst);
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
+        // Write the final cache-shadow report (idempotent under Drop double-call)
+        if let Some(ref analyzer) = self.cache_analysis {
+            analyzer.finalize();
+        }
         // poller will be dropped automatically when AgentSight is dropped
     }
 

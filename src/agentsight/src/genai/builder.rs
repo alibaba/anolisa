@@ -1187,7 +1187,7 @@ impl GenAIBuilder {
     ///
     /// [Tue 2026-03-31 17:19 GMT+8] 用户实际输入
     /// ```
-    fn strip_user_query_prefix(text: &str) -> String {
+    pub(crate) fn strip_user_query_prefix(text: &str) -> String {
         // 查找最后一个 [timestamp] 模式，取其后的内容
         // 格式: [Day YYYY-MM-DD HH:MM TZ] 或 [Day, DD Mon YYYY HH:MM:SS TZ]
         if let Some(pos) = text.rfind(']') {
