@@ -99,6 +99,15 @@ step()  { echo -e "\n${CYAN}${BOLD}==> $*${NC}"; }
 
 cmd_exists() { command -v "$1" &>/dev/null; }
 
+perl_module_exists() {
+    local module="$1"
+    cmd_exists perl && perl -M"$module" -e1 &>/dev/null
+}
+
+shell_args() {
+    printf '%q ' "$@"
+}
+
 # Extract first semver (X.Y.Z) from a string.
 # Examples: "rustc 1.91.0 (abc 2024)" -> "1.91.0", "v22.21.1" -> "22.21.1"
 extract_ver() {
@@ -1251,19 +1260,25 @@ check_ebpf_deps() {
     if ! cmd_exists llvm-config && ! cmd_exists llvm-config-*; then missing+=("llvm"); fi
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
-        local pkgs=("libbpf-devel" "libbpf-static" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "perl-IPC-Cmd" "perl-FindBin" "pkg-config")
+        local pkgs=("libbpf-devel" "libbpf-static" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "pkg-config")
         local pkg
         for pkg in "${pkgs[@]}"; do
             if ! rpm -q "$pkg" &>/dev/null; then
                 missing+=("$pkg")
             fi
         done
+        if ! perl_module_exists "IPC::Cmd"; then
+            missing+=("perl(IPC::Cmd)")
+        fi
+        if ! perl_module_exists "FindBin"; then
+            missing+=("perl(FindBin)")
+        fi
 
         if [[ ${#missing[@]} -eq 0 ]]; then
             ok "All eBPF packages present"
         else
             warn "Missing eBPF packages: ${missing[*]}"
-            info "Install with: ${BOLD}sudo dnf install -y ${missing[*]}${NC}"
+            info "Install with: ${BOLD}sudo dnf install -y $(shell_args "${missing[@]}")${NC}"
 
             if $INSTALL_DEPS; then
                 info "Installing missing eBPF packages ..."
