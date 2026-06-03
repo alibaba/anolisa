@@ -218,6 +218,7 @@ build_agent_sec_core() {
     rm -f "$pkg_dir/linux-sandbox/rust-toolchain.toml"
     cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"
     cp -p "${SEC_DIR}/scripts/agent-sec-cli-wrapper.sh" "$pkg_dir/scripts/"
+    cp -p "${SEC_DIR}/scripts/agent-sec-daemon-wrapper.sh" "$pkg_dir/scripts/"
     cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
     cp "${SEC_DIR}/Makefile" "$pkg_dir/"
     tar -cf - -C "${SEC_DIR}" adapters/ | tar -xf - -C "$pkg_dir/"

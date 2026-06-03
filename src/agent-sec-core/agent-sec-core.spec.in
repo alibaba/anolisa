@@ -73,6 +73,7 @@ Built with maturin as a Rust native Python extension.
 %files -n agent-sec-cli
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
+%attr(0755,root,root) /usr/bin/agent-sec-daemon
 /opt/agent-sec/lib/python3.11/site-packages/*
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/adapters

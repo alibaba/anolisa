@@ -73,6 +73,8 @@ jobs:
           dnf install -y scripts/rpmbuild/RPMS/**/*.rpm
           echo "=== Verify CLI ==="
           agent-sec-cli --help
+          echo "=== Verify daemon ==="
+          agent-sec-daemon --help
           echo "=== Verify sandbox ==="
           linux-sandbox --help
           echo "=== Verify site-packages ==="
