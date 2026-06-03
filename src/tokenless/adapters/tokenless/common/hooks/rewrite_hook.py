@@ -26,6 +26,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    forward_stderr,
     parse_version,
     resolve_binary,
     skip,
@@ -110,6 +111,7 @@ def main() -> None:
             timeout=5,
             env=env,
         )
+        forward_stderr(proc)
     except Exception as e:
         warn(f"rtk rewrite subprocess failed: {e}")
         skip()

@@ -7,15 +7,22 @@ import shutil
 import subprocess
 import sys
 
-
 # -- FHS fallback paths (ANOLISA spec) ----------------------------------------
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL_SHARE = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless")
-_TOKENLESS_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless")
+_TOKENLESS_LOCAL_SHARE = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+)
+_TOKENLESS_LOCAL_LIB = os.path.join(
+    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+)
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = os.path.join(os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk")
-_RTK_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_SHARE = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+)
+_RTK_LOCAL_LIB = os.path.join(
+    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk"
+)
 
 # -- Unified skip-tools set (PascalCase from Claude Code, snake_case from Hermes) --
 
@@ -105,12 +112,24 @@ def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
         f.write(f"{tool_use_id}\n")
 
 
+def forward_stderr(proc: subprocess.CompletedProcess) -> None:
+    """Forward subprocess stderr on failure (non-zero exit) via warn()."""
+    if proc.returncode != 0 and proc.stderr:
+        warn(proc.stderr.rstrip())
+
+
 def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.CompletedProcess | None:
     """Run a subprocess with input data, returning None on failure."""
     try:
-        return subprocess.run(
-            args, input=input_data, capture_output=True, text=True, timeout=timeout,
+        proc = subprocess.run(
+            args,
+            input=input_data,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
+        forward_stderr(proc)
+        return proc
     except Exception:
         return None
 

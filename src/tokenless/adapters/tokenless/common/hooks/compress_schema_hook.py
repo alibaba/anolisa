@@ -18,7 +18,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+from hook_utils import (
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
+    forward_stderr,
+    resolve_binary,
+    skip,
+    warn,
+)
 
 # -- constants ---------------------------------------------------------------
 
@@ -41,9 +49,13 @@ def _is_json_array(data: str) -> bool:
 
 def main() -> None:
     # 1. Check tokenless binary
-    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
+    tokenless_bin = resolve_binary(
+        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+    )
     if not tokenless_bin:
-        warn("tokenless is not installed or not in PATH. Schema compression hook disabled.")
+        warn(
+            "tokenless is not installed or not in PATH. Schema compression hook disabled."
+        )
         skip()
 
     # 2. Read stdin JSON
@@ -76,14 +88,19 @@ def main() -> None:
         proc = subprocess.run(
             cmd,
             input=tools_json,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+        forward_stderr(proc)
     except Exception:
         warn("Schema compression subprocess failed. Passing through unchanged.")
         skip()
 
     if proc.returncode != 0:
-        warn(f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged.")
+        warn(
+            f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged."
+        )
         skip()
 
     compressed = proc.stdout.strip()

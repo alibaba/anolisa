@@ -22,7 +22,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, SKIP_TOOLS, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+from hook_utils import (
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
+    SKIP_TOOLS,
+    forward_stderr,
+    is_skill_file,
+    resolve_binary,
+    skip,
+    try_parse_json,
+    unwrap_string_json,
+    warn,
+)
 
 # -- constants ---------------------------------------------------------------
 
@@ -35,7 +47,9 @@ _MIN_RESPONSE_CHARS = 200
 
 def main() -> None:
     # 1. Resolve binaries
-    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
+    tokenless_bin = resolve_binary(
+        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+    )
     if not tokenless_bin:
         warn("tokenless is not installed. TOON compression hook disabled.")
         skip()
@@ -98,14 +112,19 @@ def main() -> None:
         proc = subprocess.run(
             cmd,
             input=tool_response,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+        forward_stderr(proc)
     except Exception as e:
         warn(f"TOON encoding failed: {e}. Passing through unchanged.")
         skip()
 
     if proc.returncode != 0:
-        warn(f"TOON encoding exited with code {proc.returncode}. Passing through unchanged.")
+        warn(
+            f"TOON encoding exited with code {proc.returncode}. Passing through unchanged."
+        )
         skip()
 
     toon_output = proc.stdout.strip()

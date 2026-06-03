@@ -29,7 +29,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hook_utils import resolve_binary, skip, warn, try_parse_json, unwrap_string_json, is_skill_file, SKIP_TOOLS, _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+from hook_utils import (
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
+    SKIP_TOOLS,
+    forward_stderr,
+    is_skill_file,
+    resolve_binary,
+    skip,
+    try_parse_json,
+    unwrap_string_json,
+    warn,
+)
 
 # -- constants ---------------------------------------------------------------
 
@@ -58,9 +70,13 @@ _ENV_PATTERNS: list[tuple[list[str], str, str]] = [
     ),
     (
         [
-            "Connection refused", "ECONNREFUSED",
-            "Connection timed out", "ETIMEDOUT",
-            "curl: (7)", "curl: (6)", "network is unreachable",
+            "Connection refused",
+            "ECONNREFUSED",
+            "Connection timed out",
+            "ETIMEDOUT",
+            "curl: (7)",
+            "curl: (6)",
+            "network is unreachable",
         ],
         "ENV_NETWORK",
         "Check network connectivity and DNS resolution",
@@ -111,7 +127,9 @@ def _classify_env_error(parsed: dict) -> tuple[str | None, str | None]:
         for pat in patterns:
             if pat in error_text:
                 if category == "ENV_DEPENDENCY_MISSING":
-                    fix_hint = fix_hint.replace("{missing}", _extract_missing_cmd(error_text))
+                    fix_hint = fix_hint.replace(
+                        "{missing}", _extract_missing_cmd(error_text)
+                    )
                 return category, fix_hint
 
     return None, None
@@ -143,7 +161,9 @@ def _warn_subprocess(label: str, proc: subprocess.CompletedProcess) -> None:
 
 def main() -> None:
     # 1. Resolve binaries
-    tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
+    tokenless_bin = resolve_binary(
+        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+    )
     if not tokenless_bin:
         warn("tokenless is not installed. Response compression hook disabled.")
         skip()
@@ -189,7 +209,9 @@ def main() -> None:
 
     # 9. Environment attribution analysis
     env_attribution = ""
-    attr_category, attr_fix_hint = _classify_env_error(parsed if isinstance(parsed, dict) else {})
+    attr_category, attr_fix_hint = _classify_env_error(
+        parsed if isinstance(parsed, dict) else {}
+    )
     if attr_category:
         env_attribution = (
             f"[tokenless:env] {tool_name} failed: "
@@ -231,6 +253,7 @@ def main() -> None:
                 input=tool_response,
                 capture_output=True, text=True, timeout=3,
             )
+            forward_stderr(proc)
             if proc.returncode == 0 and proc.stdout.strip():
                 candidate = proc.stdout.strip()
                 if len(candidate) < len(tool_response):
@@ -258,6 +281,7 @@ def main() -> None:
                     input=compressed,
                     capture_output=True, text=True, timeout=1,
                 )
+                forward_stderr(proc)
                 if proc.returncode == 0 and proc.stdout.strip():
                     candidate = proc.stdout.strip()
                     if len(candidate) < len(compressed):
