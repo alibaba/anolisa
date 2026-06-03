@@ -244,7 +244,6 @@ def _daemon_disabled() -> bool:
 def _daemon_unavailable_message(detail: str) -> str:
     return (
         "Error: agent-sec daemon is unavailable for scan-prompt. "
-        "Start agent-sec-core.service and retry. "
         f"Detail: {detail}"
     )
 

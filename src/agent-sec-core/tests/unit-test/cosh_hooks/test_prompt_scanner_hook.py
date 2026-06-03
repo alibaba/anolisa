@@ -6,9 +6,8 @@ integration-style tests.
 
 Tests cover:
 1. verdict → decision mapping (pass, warn, deny, error, unknown)
-2. Error verdict fails open (warmup no longer handled in _format_cosh)
-3. Model directory detection + permanent warmup suppression logic
-4. Subprocess integration: pipe JSON into the hook and verify stdout
+2. Error verdict fails open
+3. Subprocess integration: pipe JSON into the hook and verify stdout
 """
 
 import io
@@ -16,7 +15,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 # Path to the standalone cosh hook script
 _COSH_HOOK = str(
@@ -30,13 +28,7 @@ _COSH_HOOK = str(
 # Import helpers for direct unit testing
 sys.path.insert(0, str(Path(_COSH_HOOK).parent))
 import prompt_scanner_hook  # noqa: E402
-from prompt_scanner_hook import (  # noqa: E402
-    _cleanup_warmup_marker,
-    _format_cosh,
-    _is_model_downloaded,
-    _is_warmup_reminded,
-    _mark_warmup_reminded,
-)
+from prompt_scanner_hook import _format_cosh  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Unit tests: _format_cosh
@@ -91,21 +83,9 @@ class TestFormatCoshDeny:
 
 
 class TestFormatCoshError:
-    """verdict=error → fail-open allow (warmup handled in main, not _format_cosh)."""
+    """verdict=error → fail-open allow."""
 
-    def test_error_with_warmup_hint_returns_allow(self):
-        """_format_cosh no longer handles warmup — it just fails open."""
-        result = json.loads(
-            _format_cosh(
-                {
-                    "verdict": "error",
-                    "summary": "Model not found. Run agent-sec-cli scan-prompt warmup",
-                }
-            )
-        )
-        assert result["decision"] == "allow"
-
-    def test_error_without_warmup_hint_returns_allow(self):
+    def test_error_returns_allow(self):
         result = json.loads(
             _format_cosh(
                 {
@@ -132,112 +112,6 @@ class TestFormatCoshUnknown:
         """When verdict key is missing, default is 'pass' → allow."""
         result = json.loads(_format_cosh({}))
         assert result["decision"] == "allow"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: model detection & suppression
-# ---------------------------------------------------------------------------
-
-
-class TestModelDetection:
-    """_is_model_downloaded checks for config.json two levels under cache dir,
-    mirroring ModelManager._resolve_local_model_path."""
-
-    def test_returns_false_when_cache_dir_missing(self):
-        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", Path("/nonexistent")):
-            assert _is_model_downloaded() is False
-
-    def test_returns_false_when_no_config_json(self, tmp_path):
-        model_dir = tmp_path / "some-org" / "some-model"
-        model_dir.mkdir(parents=True)
-        # No config.json → not downloaded
-        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
-            assert _is_model_downloaded() is False
-
-    def test_returns_true_when_config_json_exists(self, tmp_path):
-        model_dir = tmp_path / "some-org" / "some-model"
-        model_dir.mkdir(parents=True)
-        (model_dir / "config.json").write_text("{}")
-        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
-            assert _is_model_downloaded() is True
-
-    def test_decoupled_from_specific_model_name(self, tmp_path):
-        """Any model with config.json qualifies — no hardcoded model name."""
-        model_dir = tmp_path / "future-org" / "future-model-v3"
-        model_dir.mkdir(parents=True)
-        (model_dir / "config.json").write_text("{}")
-        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
-            assert _is_model_downloaded() is True
-
-    def test_model_safetensors_alone_does_not_count(self, tmp_path):
-        """model.safetensors without config.json (e.g. incomplete download) → False."""
-        model_dir = tmp_path / "some-org" / "some-model"
-        model_dir.mkdir(parents=True)
-        (model_dir / "model.safetensors").write_text("")
-        with patch("prompt_scanner_hook._MODEL_CACHE_DIR", tmp_path):
-            assert _is_model_downloaded() is False
-
-
-class TestWarmupSuppression:
-    """Permanent marker-based suppression: ask once, then allow forever."""
-
-    def test_not_reminded_initially(self, tmp_path):
-        marker = tmp_path / "warmup-reminded"
-        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
-            assert _is_warmup_reminded() is False
-
-    def test_mark_creates_marker(self, tmp_path):
-        marker = tmp_path / "warmup-reminded"
-        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
-            with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", tmp_path):
-                _mark_warmup_reminded()
-                assert marker.exists()
-                assert _is_warmup_reminded() is True
-
-    def test_suppression_is_permanent(self, tmp_path):
-        """Once reminded, marker persists — no TTL expiry."""
-        marker = tmp_path / "warmup-reminded"
-        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
-            with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", tmp_path):
-                _mark_warmup_reminded()
-                # Even after "a long time", still suppressed
-                assert _is_warmup_reminded() is True
-
-    def test_mark_best_effort_on_failure(self):
-        """_mark_warmup_reminded should not raise on permission errors."""
-        with patch("prompt_scanner_hook._REMINDER_MARKER_DIR", Path("/nonexistent")):
-            with patch(
-                "prompt_scanner_hook._REMINDER_MARKER_FILE",
-                Path("/nonexistent/warmup-reminded"),
-            ):
-                # Should not raise
-                _mark_warmup_reminded()
-
-
-class TestWarmupCleanup:
-    """_cleanup_warmup_marker removes the marker when the model is present."""
-
-    def test_cleanup_removes_existing_marker(self, tmp_path):
-        marker = tmp_path / "warmup-reminded"
-        marker.write_text("reminded")
-        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
-            _cleanup_warmup_marker()
-            assert not marker.exists()
-
-    def test_cleanup_is_noop_when_no_marker(self, tmp_path):
-        marker = tmp_path / "warmup-reminded"
-        # marker does not exist yet
-        with patch("prompt_scanner_hook._REMINDER_MARKER_FILE", marker):
-            _cleanup_warmup_marker()  # should not raise
-            assert not marker.exists()
-
-    def test_cleanup_best_effort_on_failure(self):
-        """_cleanup_warmup_marker should not raise on permission errors."""
-        with patch(
-            "prompt_scanner_hook._REMINDER_MARKER_FILE",
-            Path("/nonexistent/warmup-reminded"),
-        ):
-            _cleanup_warmup_marker()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +158,8 @@ class TestCoshHookSubprocess:
         assert output["decision"] == "allow"
 
     def test_injects_trace_context_into_scan_prompt_command(
-        self, monkeypatch, capsys, tmp_path
+        self, monkeypatch, capsys
     ):
-        model_dir = tmp_path / "org" / "model"
-        model_dir.mkdir(parents=True)
-        (model_dir / "config.json").write_text("{}")
         captured = {}
 
         def fake_run(args, **kwargs):
@@ -301,7 +172,6 @@ class TestCoshHookSubprocess:
                 stderr="",
             )
 
-        monkeypatch.setattr(prompt_scanner_hook, "_MODEL_CACHE_DIR", tmp_path)
         monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
         monkeypatch.setattr(
             prompt_scanner_hook.sys,
