@@ -12,19 +12,29 @@ mod unified;
 // Re-export from sqlite module
 pub use sqlite::{
     // Audit storage
-    AuditStore, SqliteStore,
-    // Token storage
-    TokenStore, TokenQuery,
-    TimePeriod, TokenQueryResult, TokenBreakdown, TokenComparison, Trend,
-    format_tokens, format_tokens_with_commas,
-    // Token consumption storage
-    TokenConsumptionStore, TokenConsumptionRecord,
-    TokenConsumptionFilter, TokenConsumptionQueryResult,
+    AuditStore,
     // HTTP storage
     HttpStore,
+    SqliteStore,
+    TimePeriod,
+    TokenBreakdown,
+    TokenComparison,
+    TokenConsumptionFilter,
+    TokenConsumptionQueryResult,
+    TokenConsumptionRecord,
+    // Token consumption storage
+    TokenConsumptionStore,
+    TokenQuery,
+    TokenQueryResult,
+    // Token storage
+    TokenStore,
+    Trend,
     // Connection utilities
-    create_connection, default_base_path,
+    create_connection,
+    default_base_path,
+    format_tokens,
+    format_tokens_with_commas,
 };
 
 // Re-export unified storage
-pub use unified::{Storage, StorageBackend, SqliteConfig};
+pub use unified::{SqliteConfig, Storage, StorageBackend};

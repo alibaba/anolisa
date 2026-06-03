@@ -32,14 +32,12 @@ pub use result::AggregatedResult;
 
 // Re-export HTTP types
 pub use http::{
-    HttpConnectionAggregator, ConnectionId, ConnectionState,
-    HttpPair, ParsedRequest, AggregatedResponse,
+    AggregatedResponse, ConnectionId, ConnectionState, HttpConnectionAggregator, HttpPair,
+    ParsedRequest,
 };
 
 // Re-export HTTP/2 types
-pub use http2::{
-    Http2StreamAggregator, Http2Stream, Http2StreamState, StreamId, StreamDirection,
-};
+pub use http2::{Http2Stream, Http2StreamAggregator, Http2StreamState, StreamDirection, StreamId};
 
 // Re-export proctrace types
-pub use proctrace::{ProcessEventAggregator, AggregatedProcess};
+pub use proctrace::{AggregatedProcess, ProcessEventAggregator};

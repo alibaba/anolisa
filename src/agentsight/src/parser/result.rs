@@ -3,12 +3,12 @@
 //! This module defines the `ParsedMessage` and `ParseResult` types
 //! representing the output from parsing events.
 
-use std::rc::Rc;
 use crate::parser::http::{ParsedRequest, ParsedResponse};
-use crate::parser::sse::ParsedSseEvent;
-use crate::parser::proctrace::ParsedProcEvent;
 use crate::parser::http2::ParsedHttp2Frame;
+use crate::parser::proctrace::ParsedProcEvent;
+use crate::parser::sse::ParsedSseEvent;
 use crate::probes::sslsniff::SslEvent;
+use std::rc::Rc;
 
 /// Parsed message from events
 #[derive(Debug, Clone)]

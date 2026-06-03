@@ -4,12 +4,15 @@
 //! [`ChatTemplate`] trait, replacing the previous separate `QwenTokenizer` and
 //! `QwenChatTemplate` types.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
-use llm_tokenizer::{Decoder as _, Encoder as _, HuggingFaceTokenizer, TokenizerTrait, chat_template::ChatTemplateParams};
+use llm_tokenizer::{
+    Decoder as _, Encoder as _, HuggingFaceTokenizer, TokenizerTrait,
+    chat_template::ChatTemplateParams,
+};
 
 /// Unified tokenizer + chat template adapter wrapping `llm-tokenizer` crate.
 ///
@@ -38,24 +41,31 @@ impl LlmTokenizer {
     /// # Arguments
     /// * `tokenizer_path` - Path to the tokenizer.json file
     /// * `config_path` - Path to the tokenizer_config.json file (for chat template)
-    pub fn from_file<P: AsRef<Path>>(
-        tokenizer_path: P,
-        config_path: P,
-    ) -> Result<Self> {
+    pub fn from_file<P: AsRef<Path>>(tokenizer_path: P, config_path: P) -> Result<Self> {
         let tokenizer_path = tokenizer_path.as_ref();
         let config_path = config_path.as_ref();
-        let tokenizer_str = tokenizer_path.to_str()
+        let tokenizer_str = tokenizer_path
+            .to_str()
             .ok_or_else(|| anyhow!("Tokenizer path is not valid UTF-8: {:?}", tokenizer_path))?;
-        let config_str = config_path.to_str()
+        let config_str = config_path
+            .to_str()
             .ok_or_else(|| anyhow!("Config path is not valid UTF-8: {:?}", config_path))?;
 
         // Use HuggingFaceTokenizer with explicit chat template config
-        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template(tokenizer_str, Some(config_str))
-            .map_err(|e| anyhow!("Failed to load tokenizer from '{}': {}", tokenizer_path.display(), e))?;
+        let tokenizer =
+            HuggingFaceTokenizer::from_file_with_chat_template(tokenizer_str, Some(config_str))
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to load tokenizer from '{}': {}",
+                        tokenizer_path.display(),
+                        e
+                    )
+                })?;
 
         Ok(Self {
             inner: Arc::new(tokenizer),
-            model_name: tokenizer_path.file_stem()
+            model_name: tokenizer_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string(),
@@ -64,14 +74,18 @@ impl LlmTokenizer {
 
     /// Encode text with special tokens.
     pub fn encode_with_special_tokens(&self, text: &str) -> Result<Vec<u32>> {
-        let encoding = self.inner.encode(text, true)
+        let encoding = self
+            .inner
+            .encode(text, true)
             .map_err(|e| anyhow!("Failed to encode text with special tokens: {}", e))?;
         Ok(encoding.token_ids().to_vec())
     }
 
     /// Encode text without special tokens.
     pub fn encode_without_special_tokens(&self, text: &str) -> Result<Vec<u32>> {
-        let encoding = self.inner.encode(text, false)
+        let encoding = self
+            .inner
+            .encode(text, false)
             .map_err(|e| anyhow!("Failed to encode text: {}", e))?;
         Ok(encoding.token_ids().to_vec())
     }
@@ -89,20 +103,23 @@ impl LlmTokenizer {
         add_generation_prompt: bool,
     ) -> Result<String> {
         // Use the llm-tokenizer crate's built-in chat template support
-        self.inner.apply_chat_template(
-            messages,
-            ChatTemplateParams {
-                add_generation_prompt,
-                tools,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| anyhow!("Failed to apply chat template: {}", e))
+        self.inner
+            .apply_chat_template(
+                messages,
+                ChatTemplateParams {
+                    add_generation_prompt,
+                    tools,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| anyhow!("Failed to apply chat template: {}", e))
     }
 
     /// Count tokens in text
     pub fn count(&self, text: &str) -> Result<usize> {
-        let encoding = self.inner.encode(text, false)
+        let encoding = self
+            .inner
+            .encode(text, false)
             .map_err(|e| anyhow!("Failed to encode text: {}", e))?;
         Ok(encoding.token_ids().len())
     }
@@ -114,7 +131,8 @@ impl LlmTokenizer {
 
     /// Decode token IDs back to text
     pub fn decode(&self, tokens: &[u32]) -> Result<String> {
-        self.inner.decode(tokens, false)
+        self.inner
+            .decode(tokens, false)
             .map_err(|e| anyhow!("Failed to decode tokens: {}", e))
     }
 
@@ -125,13 +143,19 @@ impl LlmTokenizer {
 
     /// Count tokens with special token recognition
     pub fn count_with_special_tokens(&self, text: &str) -> Result<usize> {
-        let encoding = self.inner.encode(text, true)
+        let encoding = self
+            .inner
+            .encode(text, true)
             .map_err(|e| anyhow!("Failed to encode text with special tokens: {}", e))?;
         Ok(encoding.token_ids().len())
     }
 
     /// Apply chat template to JSON messages
-    pub fn apply_chat_template(&self, messages: &[Value], add_generation_prompt: bool) -> Result<String> {
+    pub fn apply_chat_template(
+        &self,
+        messages: &[Value],
+        add_generation_prompt: bool,
+    ) -> Result<String> {
         self.do_apply_chat_template(messages, None, add_generation_prompt)
     }
 

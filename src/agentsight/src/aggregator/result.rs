@@ -3,11 +3,11 @@
 //! This module defines the `AggregatedResult` enum which represents
 //! the output of aggregating parsed messages from various sources.
 
-use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent};
-use crate::parser::http2::ParsedHttp2Frame;
-use super::http::{ConnectionId, HttpPair, ParsedRequest, AggregatedResponse};
+use super::http::{AggregatedResponse, ConnectionId, HttpPair, ParsedRequest};
 use super::http2::Http2Stream;
 use super::proctrace::AggregatedProcess;
+use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent};
+use crate::parser::http2::ParsedHttp2Frame;
 
 /// Aggregated result from any aggregator
 #[derive(Debug, Clone)]
@@ -52,7 +52,6 @@ impl AggregatedResult {
     }
 }
 
-
 impl ToChromeTraceEvent for AggregatedResult {
     fn to_chrome_trace_events(&self) -> Vec<ChromeTraceEvent> {
         match self {
@@ -62,17 +61,16 @@ impl ToChromeTraceEvent for AggregatedResult {
             AggregatedResult::RequestOnly { .. } => {
                 log::warn!("RequestOnly: {:?}", self);
                 vec![]
-            },
+            }
             AggregatedResult::ResponseOnly { .. } => {
                 log::warn!("ResponseOnly: {:?}", self);
                 vec![]
-            },
-            AggregatedResult::Http2Frames { frames, .. } => {
-                frames.iter().flat_map(|f| f.to_chrome_trace_events()).collect()
-            },
-            AggregatedResult::Http2StreamComplete(stream) => {
-                stream.to_chrome_trace_events()
-            },
+            }
+            AggregatedResult::Http2Frames { frames, .. } => frames
+                .iter()
+                .flat_map(|f| f.to_chrome_trace_events())
+                .collect(),
+            AggregatedResult::Http2StreamComplete(stream) => stream.to_chrome_trace_events(),
         }
     }
 }

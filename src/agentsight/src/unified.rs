@@ -203,8 +203,14 @@ impl AgentSight {
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
-        let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
+        let mut probes = Probes::new(
+            &[],
+            config.target_uid,
+            config.enable_filewatch,
+            enable_udpdns,
+            &tcp_targets,
+        )
+        .context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -515,14 +521,19 @@ impl AgentSight {
                             if let std::net::IpAddr::V4(ipv4) = addr.ip() {
                                 log::info!(
                                     "[UDP-DNS] Adding http target {} → {}",
-                                    dns_event.domain, ipv4
+                                    dns_event.domain,
+                                    ipv4
                                 );
                                 let target = crate::config::TcpTarget {
                                     ip: Some(ipv4),
                                     port: None,
                                 };
                                 if let Err(e) = self.probes.add_tcp_target(&target) {
-                                    log::warn!("[UDP-DNS] Failed to add tcp target {}: {}", ipv4, e);
+                                    log::warn!(
+                                        "[UDP-DNS] Failed to add tcp target {}: {}",
+                                        ipv4,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -530,7 +541,8 @@ impl AgentSight {
                     Err(e) => {
                         log::warn!(
                             "[UDP-DNS] DNS resolve failed for http domain {}: {}",
-                            dns_event.domain, e
+                            dns_event.domain,
+                            e
                         );
                     }
                 }
@@ -560,7 +572,10 @@ impl AgentSight {
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
-                        t.agent = self.pid_agent_name_cache.get(&t.pid).cloned()
+                        t.agent = self
+                            .pid_agent_name_cache
+                            .get(&t.pid)
+                            .cloned()
                             .or_else(|| Some(t.comm.clone()));
                     }
                 }

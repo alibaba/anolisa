@@ -174,9 +174,7 @@ impl SysomParser {
     ///
     /// Returns `None` if `llmParamString` is absent or cannot be decoded.
     pub fn parse_request(body: &serde_json::Value) -> Option<SysomRequest> {
-        let llm_param_string = body
-            .get("llmParamString")
-            .and_then(|v| v.as_str())?;
+        let llm_param_string = body.get("llmParamString").and_then(|v| v.as_str())?;
 
         let params: SysomLlmParams = serde_json::from_str(llm_param_string)
             .map_err(|e| {

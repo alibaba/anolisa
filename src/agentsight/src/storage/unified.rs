@@ -40,9 +40,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::sqlite::connection::default_base_path;
+use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
-use super::sqlite::{AuditStore, TokenStore, HttpStore, TokenConsumptionStore};
-use super::sqlite::connection::{default_base_path};
 
 /// Storage backend type
 #[derive(Debug, Clone, Default)]
@@ -221,14 +221,12 @@ impl Storage {
                 Ok(0)
             }
             AnalysisResult::Http(record) => self.http_store.insert(record),
-            AnalysisResult::TokenConsumption(breakdown) => {
-                self.token_consumption_store.insert(
-                    breakdown,
-                    breakdown.timestamp_ns,
-                    breakdown.pid,
-                    &breakdown.comm,
-                )
-            }
+            AnalysisResult::TokenConsumption(breakdown) => self.token_consumption_store.insert(
+                breakdown,
+                breakdown.timestamp_ns,
+                breakdown.pid,
+                &breakdown.comm,
+            ),
         }?;
 
         // Auto-purge check: trigger every `purge_interval` inserts
@@ -274,8 +272,12 @@ impl Storage {
         if total_deleted > 0 {
             log::info!(
                 "Purged {} expired records (retention={}d, audit={}, token={}, http={}, consumption={})",
-                total_deleted, self.retention_days,
-                audit_deleted, token_deleted, http_deleted, consumption_deleted,
+                total_deleted,
+                self.retention_days,
+                audit_deleted,
+                token_deleted,
+                http_deleted,
+                consumption_deleted,
             );
         }
 

@@ -21,7 +21,12 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));
@@ -72,7 +77,7 @@ impl VariableEvent {
 
         // SAFETY: BPF guarantees proper alignment and layout
         let raw_header = unsafe { &*(data.as_ptr() as *const ProcEventHeader) };
-        
+
         // Convert ktime to Unix timestamp
         let mut header = *raw_header;
         header.timestamp_ns = config::ktime_to_unix_ns(raw_header.timestamp_ns);

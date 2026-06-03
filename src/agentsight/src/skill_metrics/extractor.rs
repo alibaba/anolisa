@@ -64,9 +64,7 @@ pub fn extract_skill_downloads(event: &TraceEventDetail) -> Vec<SkillDownloadRec
         .as_deref()
         .map(|name| {
             let lower = name.to_lowercase();
-            COSH_AGENT_PATTERNS
-                .iter()
-                .any(|&pat| lower.contains(pat))
+            COSH_AGENT_PATTERNS.iter().any(|&pat| lower.contains(pat))
         })
         .unwrap_or(false);
 
@@ -531,7 +529,7 @@ Some text after"#;
             total_tokens: 0,
             input_messages: None,
             output_messages: None,
-            system_instructions: None,  // cosh doesn't put skills in system message
+            system_instructions: None, // cosh doesn't put skills in system message
             agent_name: Some("Cosh".into()),
             process_name: Some("node".into()),
             pid: Some(9999),
@@ -569,13 +567,29 @@ Some text after"#;
         let tmp = std::env::temp_dir().join(format!("agentsight_test_{}", std::process::id()));
         // Create: tmp/ai/install-copaw/SKILL.md  and  tmp/network/SKILL.md
         fs::create_dir_all(tmp.join("ai").join("install-copaw")).unwrap();
-        fs::write(tmp.join("ai").join("install-copaw").join("SKILL.md"), "---\nname: install-copaw\n---").unwrap();
+        fs::write(
+            tmp.join("ai").join("install-copaw").join("SKILL.md"),
+            "---\nname: install-copaw\n---",
+        )
+        .unwrap();
         fs::create_dir_all(tmp.join("network")).unwrap();
-        fs::write(tmp.join("network").join("SKILL.md"), "---\nname: network\n---").unwrap();
+        fs::write(
+            tmp.join("network").join("SKILL.md"),
+            "---\nname: network\n---",
+        )
+        .unwrap();
 
         let names = scan_skills_dir_recursive(&tmp.to_string_lossy(), 2);
-        assert!(names.contains(&"install-copaw".to_string()), "expected install-copaw in {:?}", names);
-        assert!(names.contains(&"network".to_string()), "expected network in {:?}", names);
+        assert!(
+            names.contains(&"install-copaw".to_string()),
+            "expected install-copaw in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"network".to_string()),
+            "expected network in {:?}",
+            names
+        );
 
         // cleanup
         let _ = fs::remove_dir_all(&tmp);

@@ -32,13 +32,13 @@
 
 pub mod http;
 pub mod http2;
-pub mod sse;
 pub mod proctrace;
 mod result;
+pub mod sse;
 mod unified;
 
 // Re-export result types
-pub use result::{ParsedMessage, ParseResult};
+pub use result::{ParseResult, ParsedMessage};
 
 // Re-export unified parser
 pub use unified::Parser;
@@ -47,10 +47,10 @@ pub use unified::Parser;
 pub use http::{HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse};
 
 // Re-export SSE types
-pub use sse::{SseParser, ParsedSseEvent};
+pub use sse::{ParsedSseEvent, SseParser};
 
 // Re-export proctrace types
-pub use proctrace::{ProcTraceParser, ParsedProcEvent, ProcEventType};
+pub use proctrace::{ParsedProcEvent, ProcEventType, ProcTraceParser};
 
 // Re-export HTTP/2 types
-pub use http2::{Http2Parser, Http2FrameType, ParsedHttp2Frame};
+pub use http2::{Http2FrameType, Http2Parser, ParsedHttp2Frame};

@@ -1,5 +1,5 @@
-use crate::probes::sslsniff::SslEvent;
 use super::event::{ParsedSseEvent, SSEEvent, SSEEvents};
+use crate::probes::sslsniff::SslEvent;
 use std::rc::Rc;
 
 /// SSE Parser - parses SSE stream data into events (legacy version)
@@ -80,7 +80,7 @@ impl SseParser {
 
     /// Parse SslEvent and extract SSE events
     /// Returns Vec of ParsedSseEvent
-    /// 
+    ///
     /// Note: For multi-line data fields, data is concatenated with '\n' separators.
     /// The data_offset points to the first data line, data_len covers all data content
     /// including internal newlines.
@@ -100,7 +100,7 @@ impl SseParser {
 
         // Use split_inclusive to properly track byte offsets with \r\n line endings
         let lines_iter = text.split_inclusive('\n');
-        
+
         for line_with_end in lines_iter {
             // Remove trailing \r\n or \n for parsing, but keep track of original length
             let line = line_with_end.trim_end_matches('\n').trim_end_matches('\r');
@@ -124,7 +124,11 @@ impl SseParser {
                         let first_line_byte_len = first_line_bytes.len();
                         // Account for \r if present in original data
                         let has_crlf = data_parts[0].ends_with('\r');
-                        let adjusted_len = if has_crlf { first_line_byte_len - 1 } else { first_line_byte_len };
+                        let adjusted_len = if has_crlf {
+                            first_line_byte_len - 1
+                        } else {
+                            first_line_byte_len
+                        };
                         (data_start.unwrap_or(0), adjusted_len)
                     } else {
                         (0, 0)
@@ -154,17 +158,18 @@ impl SseParser {
                 // "If the line contains a U+003A COLON character (':'), collect the characters
                 // on the line before the first U+003A COLON character (':'), and let field be that string.
                 // Collect the characters on the line after the first U+003A COLON character (':'),
-                // and let value be that string. If value starts with a U+0020 SPACE character, 
+                // and let value be that string. If value starts with a U+0020 SPACE character,
                 // remove it from value."
                 let has_space_after_colon = value.starts_with(' ');
                 let value_stripped = value.strip_prefix(' ').unwrap_or(value);
-                
+
                 // Calculate value_start in the original buffer
                 // line_start: start of line in buffer
                 // field.len() + 1: skip field and colon
                 // +1 if there was a space after colon
-                let value_start = line_start + field.len() + 1 + if has_space_after_colon { 1 } else { 0 };
-                
+                let value_start =
+                    line_start + field.len() + 1 + if has_space_after_colon { 1 } else { 0 };
+
                 match field {
                     "id" => current_id = Some(value_stripped.to_string()),
                     "event" => current_event = Some(value_stripped.to_string()),
@@ -256,7 +261,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
-        
+
         let evt = &events[0];
         assert_eq!(evt.id, None);
         assert_eq!(evt.event, None);
@@ -272,7 +277,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
-        
+
         let evt = &events[0];
         assert_eq!(evt.id, Some("123".to_string()));
         assert_eq!(evt.event, Some("message".to_string()));
@@ -287,7 +292,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 2);
-        
+
         assert_eq!(events[0].data(), b"first");
         assert_eq!(events[1].data(), b"second");
     }
@@ -300,7 +305,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
-        
+
         let evt = &events[0];
         assert!(evt.is_done());
     }
@@ -313,7 +318,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
-        
+
         let evt = &events[0];
         // Multi-line data: offset points to first line "line1"
         // data_len is the length of first line only (5)
@@ -330,7 +335,7 @@ mod tests {
 
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
-        
+
         let evt = &events[0];
         assert_eq!(evt.data(), b"hello");
     }
@@ -428,7 +433,8 @@ mod tests {
 
     #[test]
     fn test_legacy_parse_stream_with_id_event_retry() {
-        let result = SSEParser::parse_stream("id: 42\nevent: update\nretry: 1000\ndata: payload\n\n");
+        let result =
+            SSEParser::parse_stream("id: 42\nevent: update\nretry: 1000\ndata: payload\n\n");
         assert_eq!(result.len(), 1);
         let evt = &result.events[0];
         assert_eq!(evt.id, Some("42".to_string()));
