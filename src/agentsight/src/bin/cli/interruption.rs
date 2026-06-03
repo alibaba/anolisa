@@ -466,7 +466,7 @@ fn format_ns(ns: i64) -> String {
     let hour = total_hours % 24;
 
     // Days since epoch to Y-M-D (simplified)
-    let (year, month, day) = days_to_ymd(total_days as i64);
+    let (year, month, day) = days_to_ymd(total_days);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         year,
@@ -512,15 +512,8 @@ fn print_records_table(records: &[InterruptionRecord]) {
     }
 
     println!(
-        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} {}",
-        "INTERRUPTION_ID",
-        "TYPE",
-        "SEVERITY",
-        "OCCURRED_AT",
-        "RESOLVED",
-        "AGENT",
-        "SESSION_ID",
-        "CONVERSATION_ID"
+        "{:<34} {:<18} {:<10} {:<22} {:<10} {:<14} {:<16} CONVERSATION_ID",
+        "INTERRUPTION_ID", "TYPE", "SEVERITY", "OCCURRED_AT", "RESOLVED", "AGENT", "SESSION_ID"
     );
     println!("{}", "-".repeat(140));
 

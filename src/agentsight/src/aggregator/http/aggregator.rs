@@ -80,20 +80,20 @@ impl HttpConnectionAggregator {
 
     /// Insert connection state, logging if an unrelated entry is evicted by LRU
     fn insert(&mut self, key: ConnectionId, state: ConnectionState) {
-        if let Some((evicted_key, evicted_state)) = self.connections.push(key, state) {
-            if evicted_key != key {
-                log::warn!(
-                    "[HttpAggregator] LRU evicted conn={:?} state={} | capacity={}",
-                    evicted_key,
-                    match evicted_state {
-                        ConnectionState::Idle => "Idle",
-                        ConnectionState::RequestPending { .. } => "RequestPending",
-                        ConnectionState::RequestBodyPending { .. } => "RequestBodyPending",
-                        ConnectionState::SseActive { .. } => "SseActive",
-                    },
-                    self.connections.cap(),
-                );
-            }
+        if let Some((evicted_key, evicted_state)) = self.connections.push(key, state)
+            && evicted_key != key
+        {
+            log::warn!(
+                "[HttpAggregator] LRU evicted conn={:?} state={} | capacity={}",
+                evicted_key,
+                match evicted_state {
+                    ConnectionState::Idle => "Idle",
+                    ConnectionState::RequestPending { .. } => "RequestPending",
+                    ConnectionState::RequestBodyPending { .. } => "RequestBodyPending",
+                    ConnectionState::SseActive { .. } => "SseActive",
+                },
+                self.connections.cap(),
+            );
         }
     }
 

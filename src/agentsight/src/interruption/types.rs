@@ -30,6 +30,7 @@ impl InterruptionType {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "llm_error" => Some(Self::LlmError),
@@ -107,6 +108,7 @@ pub struct InterruptionEvent {
 
 impl InterruptionEvent {
     /// Create a new unresolved interruption event with auto-generated ID
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         itype: InterruptionType,
         session_id: Option<String>,

@@ -138,9 +138,7 @@ impl TokenData {
             std::collections::HashMap::new();
 
         for msg in &self.request_messages {
-            map.entry(msg.role.clone())
-                .or_insert_with(Vec::new)
-                .push(msg);
+            map.entry(msg.role.clone()).or_default().push(msg);
         }
 
         map

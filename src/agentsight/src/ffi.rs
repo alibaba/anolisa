@@ -3,6 +3,7 @@
 //! Implements the **eventfd + read** model described in `docs/design-docs/c-ffi-api.md`:
 //! AgentSight runs a background pipeline thread; completed events are pushed
 //! into an `mpsc` channel and the caller is notified via `eventfd`.
+#![allow(clippy::missing_safety_doc, clippy::large_enum_variant)]
 //! The caller consumes events by calling `agentsight_read()` with callbacks.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -290,7 +291,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("status_code")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let is_sse: bool = call.metadata.get("is_sse").map_or(false, |s| s == "true");
+    let is_sse: bool = call.metadata.get("is_sse").is_some_and(|s| s == "true");
 
     let finish_reason = call
         .response

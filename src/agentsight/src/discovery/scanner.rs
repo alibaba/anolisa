@@ -36,11 +36,11 @@ impl AgentScanner {
     pub fn from_rules(cmdline_rules: &[CmdlineRule], https_rules: &[HttpsRule]) -> Self {
         let matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
-            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .filter_map(CmdlineGlobMatcher::from_config)
             .collect();
         let deny_matchers: Vec<CmdlineGlobMatcher> = cmdline_rules
             .iter()
-            .filter_map(|r| CmdlineGlobMatcher::from_deny_rule(r))
+            .filter_map(CmdlineGlobMatcher::from_deny_rule)
             .collect();
         let domain_patterns: Vec<String> = https_rules.iter().map(|r| r.pattern.clone()).collect();
         Self {

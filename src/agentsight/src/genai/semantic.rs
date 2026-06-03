@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 /// GenAI semantic event types
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum GenAISemanticEvent {
     /// LLM API call with request/response
     LLMCall(LLMCall),

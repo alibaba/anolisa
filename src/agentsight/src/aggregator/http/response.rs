@@ -27,7 +27,7 @@ impl AggregatedResponse {
     }
 
     pub fn body(&self) -> &[u8] {
-        &self.parsed.body()
+        self.parsed.body()
     }
 
     pub fn body_string(&self) -> String {

@@ -128,6 +128,7 @@ impl FileWrite {
             .context("failed to load filewrite BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
+        #[allow(clippy::unnecessary_cast)]
         let skel =
             unsafe { Box::from_raw(Box::into_raw(Box::new(skel)) as *mut FilewriteSkel<'static>) };
 

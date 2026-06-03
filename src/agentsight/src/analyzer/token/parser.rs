@@ -70,19 +70,18 @@ impl TokenParser {
     /// Internal method to parse JSON and extract token usage
     pub fn parse_json(&self, json: &serde_json::Value) -> Option<TokenUsage> {
         // 1. Check for message_start event (Anthropic streaming)
-        if json.get("type").and_then(|v| v.as_str()) == Some("message_start") {
-            if let Some(message) = json.get("message") {
-                if let Some(usage) = message.get("usage") {
-                    return extract_usage_object(usage, LLMProvider::Anthropic, json);
-                }
-            }
+        if json.get("type").and_then(|v| v.as_str()) == Some("message_start")
+            && let Some(message) = json.get("message")
+            && let Some(usage) = message.get("usage")
+        {
+            return extract_usage_object(usage, LLMProvider::Anthropic, json);
         }
 
         // 2. Check for message_delta event (Anthropic streaming final)
-        if json.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
-            if let Some(usage) = json.get("usage") {
-                return extract_usage_object(usage, LLMProvider::Anthropic, json);
-            }
+        if json.get("type").and_then(|v| v.as_str()) == Some("message_delta")
+            && let Some(usage) = json.get("usage")
+        {
+            return extract_usage_object(usage, LLMProvider::Anthropic, json);
         }
 
         // 3. Check for usage object directly (OpenAI and compatible APIs)

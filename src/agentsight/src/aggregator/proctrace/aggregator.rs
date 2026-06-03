@@ -107,10 +107,10 @@ impl ProcessEventAggregator {
                 None
             }
             ProcEventType::Stdout => {
-                if let Some(aggregated) = self.aggregates.get_mut(&event.pid) {
-                    if let Some(ref data) = event.stdout_data {
-                        aggregated.add_stdout(data.as_bytes(), event.timestamp_ns);
-                    }
+                if let Some(aggregated) = self.aggregates.get_mut(&event.pid)
+                    && let Some(ref data) = event.stdout_data
+                {
+                    aggregated.add_stdout(data.as_bytes(), event.timestamp_ns);
                 }
                 None
             }

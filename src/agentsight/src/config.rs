@@ -198,15 +198,14 @@ impl FromStr for TcpTarget {
             }
         };
 
-        if s.starts_with(':') {
+        if let Some(rest) = s.strip_prefix(':') {
             // ":port" — port-only
-            let port = parse_port(&s[1..])?;
+            let port = parse_port(rest)?;
             Ok(TcpTarget { ip: None, port })
         } else if s.contains(':') {
             // "ip:port" (either side may be `*`)
-            let mut parts = s.rsplitn(2, ':');
-            let port_str = parts.next().unwrap();
-            let ip_str = parts.next().unwrap();
+            let (ip_str, port_str) = s.rsplit_once(':').unwrap();
+
             let ip = parse_ip(ip_str)?;
             let port = parse_port(port_str)?;
             Ok(TcpTarget { ip, port })
@@ -334,6 +333,7 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
 /// Parse a JSON config string into cmdline rules, https rules, and http targets.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
+#[allow(clippy::type_complexity)]
 pub fn parse_json_rules(
     json: &str,
 ) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {

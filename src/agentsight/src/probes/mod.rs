@@ -1,5 +1,6 @@
 pub mod filewatch;
 pub mod filewrite;
+#[allow(clippy::module_inception)]
 pub mod probes;
 pub mod procmon;
 pub mod proctrace;

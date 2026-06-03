@@ -354,7 +354,7 @@ impl TokenConsumptionStore {
 
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn).map_err(Into::into)
+        wal_checkpoint(&self.conn)
     }
 
     /// Number of stored records

@@ -57,9 +57,9 @@ impl AnthropicParser {
     /// ```
     pub fn parse_request(body: &serde_json::Value) -> Option<AnthropicRequest> {
         // Quick validation - must have model, messages, and max_tokens fields
-        if !body.get("model").is_some()
-            || !body.get("messages").is_some()
-            || !body.get("max_tokens").is_some()
+        if body.get("model").is_none()
+            || body.get("messages").is_none()
+            || body.get("max_tokens").is_none()
         {
             log::trace!(
                 "Anthropic request missing required fields: model, messages, or max_tokens"

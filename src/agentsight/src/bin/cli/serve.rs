@@ -25,9 +25,9 @@ impl ServeCommand {
         let db_path = self
             .db
             .as_ref()
-            .map(|p| std::path::PathBuf::from(p))
+            .map(std::path::PathBuf::from)
             // Default to genai_events.db — the same file the tracer writes to
-            .unwrap_or_else(|| GenAISqliteStore::default_path());
+            .unwrap_or_else(GenAISqliteStore::default_path);
 
         let host = self.host.clone();
         let port = self.port;

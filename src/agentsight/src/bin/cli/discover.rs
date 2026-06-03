@@ -41,7 +41,7 @@ impl DiscoverCommand {
         // Use CmdlineGlobMatcher to list agent info
         for matcher in agentsight::default_cmdline_rules()
             .iter()
-            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+            .filter_map(CmdlineGlobMatcher::from_config)
         {
             let agent = matcher.info();
             println!("  {} ({})", agent.name, agent.category);

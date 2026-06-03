@@ -721,6 +721,7 @@ pub async fn interruption_session_counts(
     match istore.count_unresolved_by_session_detailed(start_ns, end_ns) {
         Ok(rows) => {
             // Group by session_id
+            #[allow(clippy::type_complexity)]
             let mut map: std::collections::HashMap<
                 String,
                 (
@@ -787,6 +788,7 @@ pub async fn interruption_conversation_counts(
 
     match istore.count_unresolved_by_conversation_detailed(start_ns, end_ns) {
         Ok(rows) => {
+            #[allow(clippy::type_complexity)]
             let mut map: std::collections::HashMap<
                 String,
                 (
@@ -1337,10 +1339,10 @@ fn compute_skill_metrics_response(
     mut options: crate::skill_metrics::MetricOptions,
 ) -> HttpResponse {
     // Apply granularity from query params
-    if let Some(ref g) = query.granularity {
-        if g == "day" {
-            options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
-        }
+    if let Some(ref g) = query.granularity
+        && g == "day"
+    {
+        options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
     }
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);

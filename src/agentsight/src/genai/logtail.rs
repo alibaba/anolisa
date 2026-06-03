@@ -270,13 +270,13 @@ pub fn events_to_flat_records(
                     .iter()
                     .filter(|msg| msg.role == "system")
                     .collect();
-                if !system_msgs.is_empty() {
-                    if let Ok(json) = serde_json::to_string(&system_msgs) {
-                        m.insert(
-                            "gen_ai.system_instructions".to_string(),
-                            MessageEncryptor::maybe_encrypt(encryptor, &json),
-                        );
-                    }
+                if !system_msgs.is_empty()
+                    && let Ok(json) = serde_json::to_string(&system_msgs)
+                {
+                    m.insert(
+                        "gen_ai.system_instructions".to_string(),
+                        MessageEncryptor::maybe_encrypt(encryptor, &json),
+                    );
                 }
 
                 // ── gen_ai.input.messages (增量：只取最新一轮) ──
@@ -286,25 +286,26 @@ pub fn events_to_flat_records(
                 if trace_enabled {
                     let latest_msgs =
                         super::semantic::latest_round_input_messages(&call.request.messages);
-                    if !latest_msgs.is_empty() {
-                        if let Ok(json) = serde_json::to_string(&latest_msgs) {
-                            m.insert(
-                                "gen_ai.input.messages".to_string(),
-                                MessageEncryptor::maybe_encrypt(encryptor, &json),
-                            );
-                        }
+                    if !latest_msgs.is_empty()
+                        && let Ok(json) = serde_json::to_string(&latest_msgs)
+                    {
+                        m.insert(
+                            "gen_ai.input.messages".to_string(),
+                            MessageEncryptor::maybe_encrypt(encryptor, &json),
+                        );
                     }
                 }
 
                 // ── gen_ai.output.messages (parts-based with finish_reason) ──
                 // 同样受 trace_enabled 控制，不上传模型响应内容。
-                if trace_enabled && !call.response.messages.is_empty() {
-                    if let Ok(json) = serde_json::to_string(&call.response.messages) {
-                        m.insert(
-                            "gen_ai.output.messages".to_string(),
-                            MessageEncryptor::maybe_encrypt(encryptor, &json),
-                        );
-                    }
+                if trace_enabled
+                    && !call.response.messages.is_empty()
+                    && let Ok(json) = serde_json::to_string(&call.response.messages)
+                {
+                    m.insert(
+                        "gen_ai.output.messages".to_string(),
+                        MessageEncryptor::maybe_encrypt(encryptor, &json),
+                    );
                 }
 
                 // ── 加密标记字段 ──

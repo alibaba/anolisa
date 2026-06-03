@@ -28,7 +28,7 @@ fn metadata_agent() -> ureq::Agent {
 /// 获取 owner account ID（带缓存）：首次调用请求阿里云 ECS metadata（超时1秒），
 /// 失败返回空字符串。后续调用直接返回缓存值。
 pub fn get_owner_account_id() -> &'static str {
-    OWNER_ACCOUNT_ID.get_or_init(|| fetch_owner_account_id())
+    OWNER_ACCOUNT_ID.get_or_init(fetch_owner_account_id)
 }
 
 /// 实际请求 owner-account-id
@@ -57,7 +57,7 @@ fn fetch_owner_account_id() -> String {
 /// 获取实例ID（带缓存）：首次调用请求阿里云 ECS metadata（超时1秒），
 /// 失败则回退到 hostname。后续调用直接返回缓存值。
 pub fn get_instance_id() -> &'static str {
-    INSTANCE_ID.get_or_init(|| fetch_instance_id())
+    INSTANCE_ID.get_or_init(fetch_instance_id)
 }
 
 /// 实际请求 instance-id
