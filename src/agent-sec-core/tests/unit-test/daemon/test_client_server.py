@@ -7,7 +7,6 @@ import logging
 import os
 import socket
 import stat
-import sys
 import time
 from pathlib import Path
 
@@ -15,10 +14,6 @@ from agent_sec_cli.daemon.client import DaemonClient
 from agent_sec_cli.daemon.errors import (
     DaemonProtocolError,
     DaemonRuntimePathError,
-)
-from agent_sec_cli.daemon.health import (
-    build_health_snapshot,
-    create_default_registry,
 )
 from agent_sec_cli.daemon.protocol import (
     DaemonRequest,
@@ -541,27 +536,6 @@ def test_prepare_socket_path_rejects_symlink_runtime_directory(tmp_path: Path):
         raise AssertionError("expected symlink runtime directory to fail")
 
 
-def test_health_does_not_import_heavy_modules(tmp_path: Path):
-    heavy_prefixes = (
-        "agent_sec_cli.code_scanner",
-        "agent_sec_cli.pii_checker",
-        "agent_sec_cli.prompt_scanner",
-        "agent_sec_cli.security_middleware",
-        "agent_sec_cli.skill_ledger",
-    )
-    before = _matching_modules(heavy_prefixes)
-
-    snapshot = build_health_snapshot(
-        DaemonRuntime(socket_path=tmp_path / "daemon.sock")
-    )
-    registry = create_default_registry()
-
-    assert snapshot["status"] == "ok"
-    assert snapshot["prompt_scan"]["status"] == "pending"
-    assert registry.methods() == ("daemon.health",)
-    assert _matching_modules(heavy_prefixes) == before
-
-
 def test_completion_log_is_emitted_when_inflight_request_is_cancelled(
     tmp_path: Path, caplog
 ):
@@ -668,14 +642,3 @@ async def _send_daemon_request(
     writer.close()
     await writer.wait_closed()
     return parse_response_line(line)
-
-
-def _matching_modules(prefixes: tuple[str, ...]) -> set[str]:
-    return {
-        module_name
-        for module_name in sys.modules
-        if any(
-            module_name == prefix or module_name.startswith(f"{prefix}.")
-            for prefix in prefixes
-        )
-    }

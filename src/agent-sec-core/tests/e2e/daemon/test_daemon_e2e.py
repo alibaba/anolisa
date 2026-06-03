@@ -130,6 +130,38 @@ def test_daemon_unknown_method_returns_structured_error(
     assert _has_request_log(output, "e2e-unknown", "unknown.method")
 
 
+def test_daemon_scan_prompt_returns_unavailable_until_model_ready(
+    daemon_command: list[str], tmp_path: Path
+) -> None:
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    process = _start_daemon(daemon_command, socket_path, tmp_path)
+
+    try:
+        response = _call_daemon(
+            socket_path,
+            {
+                "id": "e2e-scan-prompt-not-ready",
+                "method": "scan-prompt",
+                "params": {
+                    "text": "hello",
+                    "mode": "standard",
+                    "source": "e2e",
+                },
+            },
+        )
+    finally:
+        output = _stop_daemon(process)
+
+    assert response["id"] == "e2e-scan-prompt-not-ready"
+    assert response["ok"] is False
+    assert response["exit_code"] == 1
+    assert response["error"]["code"] == "unavailable"
+    assert "prompt scanner is not ready" in response["stderr"]
+    assert "status=pending" in response["stderr"]
+    assert output.returncode == 0
+    assert _has_request_log(output, "e2e-scan-prompt-not-ready", "scan-prompt")
+
+
 def test_daemon_returns_busy_when_connection_limit_is_exhausted(
     daemon_command: list[str], tmp_path: Path
 ) -> None:
@@ -213,6 +245,7 @@ def _start_daemon(
     env = os.environ.copy()
     env.pop("AGENT_SEC_DAEMON_SOCKET", None)
     env["AGENT_SEC_DATA_DIR"] = str(tmp_path / "data")
+    env["AGENT_SEC_DAEMON_PROMPT_PRELOAD"] = "0"
     env["PYTHONUNBUFFERED"] = "1"
     if xdg_runtime_dir is not None:
         env["XDG_RUNTIME_DIR"] = str(xdg_runtime_dir)

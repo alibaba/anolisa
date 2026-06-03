@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from agent_sec_cli.daemon.errors import BadRequestError, PayloadTooLargeError
-from agent_sec_cli.daemon.health import create_default_registry
 from agent_sec_cli.daemon.protocol import (
     MAX_TIMEOUT_MS,
     DaemonRequest,
@@ -79,7 +78,7 @@ def test_dispatch_rejects_unknown_method(tmp_path: Path):
         request = DaemonRequest(id="req-unknown", method="unknown.method")
         response = await dispatch_request(
             request,
-            create_default_registry(),
+            MethodRegistry(),
             DaemonRuntime(socket_path=tmp_path / "daemon.sock"),
         )
         return response

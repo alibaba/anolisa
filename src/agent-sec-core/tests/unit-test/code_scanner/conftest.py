@@ -19,9 +19,7 @@ _TESTDATA_DIR = pathlib.Path(__file__).resolve().parent / "testdata"
 if str(_TESTDATA_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_TESTDATA_DIR.parent))
 
-from testdata.scan_test_data import (  # noqa: E402
-    BASH_SCAN_TEST_CASES as _RAW_BASH,
-)
+from testdata.scan_test_data import BASH_SCAN_TEST_CASES as _RAW_BASH  # noqa: E402
 from testdata.scan_test_data import PYTHON_SCAN_TEST_CASES as _RAW_PYTHON
 from testdata.scan_test_data import SCAN_TEST_CASES as _RAW_ALL
 

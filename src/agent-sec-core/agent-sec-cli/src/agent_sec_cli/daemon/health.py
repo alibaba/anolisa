@@ -4,11 +4,7 @@ import os
 from typing import Any
 
 from agent_sec_cli.daemon.protocol import DaemonRequest
-from agent_sec_cli.daemon.registry import (
-    HandlerResult,
-    MethodRegistry,
-    MethodSpec,
-)
+from agent_sec_cli.daemon.registry import HandlerResult, MethodRegistry, MethodSpec
 from agent_sec_cli.daemon.runtime import DaemonRuntime
 
 
@@ -30,9 +26,8 @@ def health_handler(_request: DaemonRequest, runtime: DaemonRuntime) -> HandlerRe
     return HandlerResult(data=build_health_snapshot(runtime))
 
 
-def create_default_registry() -> MethodRegistry:
-    """Create the C02 daemon registry with only daemon.health registered."""
-    registry = MethodRegistry()
+def register_health_methods(registry: MethodRegistry) -> None:
+    """Register daemon health methods."""
     registry.register(
         MethodSpec(
             method="daemon.health",
@@ -43,4 +38,3 @@ def create_default_registry() -> MethodRegistry:
             access_log=True,
         )
     )
-    return registry

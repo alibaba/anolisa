@@ -24,7 +24,8 @@ from agent_sec_cli.daemon.errors import (
     ResponseTooLargeError,
     ShutdownError,
 )
-from agent_sec_cli.daemon.health import create_default_registry
+from agent_sec_cli.daemon.handlers.prompt_scan import register_prompt_scan_methods
+from agent_sec_cli.daemon.health import register_health_methods
 from agent_sec_cli.daemon.jobs import register_default_jobs
 from agent_sec_cli.daemon.protocol import (
     DEFAULT_MAX_REQUEST_BYTES,
@@ -49,6 +50,14 @@ DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 2.0
 DEFAULT_REQUEST_READ_TIMEOUT_MS = 5000
 SocketIdentity = tuple[int, int]
+
+
+def create_default_registry() -> MethodRegistry:
+    """Create the default daemon method registry."""
+    registry = MethodRegistry()
+    register_health_methods(registry)
+    register_prompt_scan_methods(registry)
+    return registry
 
 
 class SingleInstanceLock:
