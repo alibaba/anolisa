@@ -24,6 +24,8 @@ class PromptRuntimeState:
     model: str | None = None
     loaded: bool = False
     last_error: str | None = None
+    last_started_at: str | None = None
+    last_finished_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable prompt state."""
@@ -32,6 +34,8 @@ class PromptRuntimeState:
             "model": self.model,
             "loaded": self.loaded,
             "last_error": self.last_error,
+            "last_started_at": self.last_started_at,
+            "last_finished_at": self.last_finished_at,
         }
 
 

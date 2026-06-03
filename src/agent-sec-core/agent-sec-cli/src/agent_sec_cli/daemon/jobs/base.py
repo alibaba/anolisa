@@ -197,22 +197,6 @@ class JobManager:
         return self._started
 
 
-def register_default_jobs(job_manager: JobManager) -> None:
-    """Register daemon jobs that should start with every daemon instance.
-
-    Jobs registered here must subclass ``BackgroundJob`` and provide:
-    ``name`` for the stable health identifier, ``start()`` for async startup,
-    ``stop()`` for graceful async shutdown, and ``status()`` for the
-    JSON-serializable health snapshot. Periodic jobs should subclass
-    ``PeriodicBackgroundJob`` instead, pass ``interval_seconds`` to its
-    constructor, and implement ``run_once()`` for one scheduled iteration.
-    """
-    # C02 has no default background jobs. Future daemon jobs should be added
-    # here with job_manager.register(MyJob()) so every daemon startup path uses
-    # the same registration order and lifecycle semantics.
-    pass
-
-
 def next_cycle_start(
     started_monotonic: float,
     finished_monotonic: float,

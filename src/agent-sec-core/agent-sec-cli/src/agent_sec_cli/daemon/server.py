@@ -108,7 +108,7 @@ class DaemonServer:
         self.max_connections = max_connections
         self.request_read_timeout_ms = request_read_timeout_ms
         self.runtime = DaemonRuntime(socket_path=resolved_socket_path)
-        register_default_jobs(self.runtime.jobs)
+        register_default_jobs(self.runtime.jobs, self.runtime.prompt_scan)
         self._server: asyncio.Server | None = None
         self._lock: SingleInstanceLock | None = None
         self._active_connections = 0
