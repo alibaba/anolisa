@@ -1,2 +1,2 @@
 description = "Show tokenless compression stats summary"
-run = "tokenless stats --summary {{args}}"
+run = "tokenless stats summary {{args}}"
