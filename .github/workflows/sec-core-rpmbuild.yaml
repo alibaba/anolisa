@@ -101,7 +101,12 @@ jobs:
           from packaging.version import Version
 
           with open('src/agent-sec-core/agent-sec-cli/requirements.txt') as f:
-              reqs = [l.strip() for l in f if l.strip() and not l.strip().startswith('#')]
+              reqs = []
+              for line in f:
+                  s = line.strip().rstrip('\\').strip()
+                  if not s or s.startswith('#') or s.startswith('--hash='):
+                      continue
+                  reqs.append(s)
           failed = []
           skipped = 0
           for raw in reqs:

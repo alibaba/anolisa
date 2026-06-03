@@ -200,7 +200,7 @@ build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin sta
 
 .PHONY: export-requirements
 export-requirements: ## Re-export agent-sec-cli/requirements.txt from uv.lock
-	cd agent-sec-cli && uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
+	cd agent-sec-cli && uv export --frozen --no-dev --no-emit-project -o requirements.txt
 
 .PHONY: download-deps
 download-deps: ## Download ALL Python deps for agent-sec-cli (requires network)
@@ -208,6 +208,7 @@ download-deps: ## Download ALL Python deps for agent-sec-cli (requires network)
 	pip3 download --dest $(BUILD_DIR)/wheels/ --no-cache-dir \
 		--python-version 3.11.6 --only-binary=:all: \
 		--timeout 60 \
+		--require-hashes \
 		--index-url https://pypi.org/simple/ \
 		--extra-index-url https://download.pytorch.org/whl/cpu \
 		-r agent-sec-cli/requirements.txt
