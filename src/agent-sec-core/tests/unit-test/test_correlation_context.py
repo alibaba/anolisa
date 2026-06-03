@@ -11,6 +11,7 @@ from agent_sec_cli.correlation_context import (
     get_current_trace_context,
     init_process_trace_context,
     parse_trace_context,
+    parse_trace_context_payload,
     reset_current_trace_context,
     set_current_trace_context,
 )
@@ -119,6 +120,25 @@ def test_parse_trace_context_does_not_log_env_session_conflicts(
 
     assert ctx == TraceContext(session_id="json-session")
     assert "AGENT_SEC_SESSION_ID" not in caplog.text
+
+
+def test_parse_trace_context_payload_accepts_structured_mapping():
+    ctx = parse_trace_context_payload(
+        {
+            "traceId": "trace-1",
+            "session_id": "session-1",
+            "run_id": " run-1 ",
+            "toolCallId": "tool-1",
+            "ignored": "value",
+        }
+    )
+
+    assert ctx == TraceContext(
+        trace_id="trace-1",
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="tool-1",
+    )
 
 
 def test_process_trace_context_is_visible_from_worker_threads():

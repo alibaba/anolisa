@@ -107,6 +107,15 @@ def parse_trace_context(value: str | None) -> TraceContext | None:
     if not isinstance(payload, dict):
         raise ValueError("trace context must be a JSON object")
 
+    return parse_trace_context_payload(payload)
+
+
+def parse_trace_context_payload(
+    payload: Mapping[str, Any] | None,
+) -> TraceContext | None:
+    """Normalize a structured trace context payload into snake_case fields."""
+    if payload is None:
+        return None
     return TraceContext(**_normalized_fields(payload))
 
 

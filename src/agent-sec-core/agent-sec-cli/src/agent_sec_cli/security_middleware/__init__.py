@@ -2,15 +2,23 @@
 
 Public API
 ----------
-- ``invoke(action, **kwargs)``  — the sole entry point
-- ``ActionResult``              — structured return type
-- ``RequestContext``             — per-call context (usually internal)
+- ``invoke(action, **kwargs)`` — CLI/local entry point with caller auto-detection
+- ``invoke_with_context(...)`` — explicit context entry point for daemon/plugin paths
+- ``ActionResult``             — structured return type
+- ``RequestContext``           — per-call context (usually internal)
 """
 
 import sys
+from collections.abc import Mapping
 from pathlib import PurePath
 from typing import Any
 
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    parse_trace_context_payload,
+    reset_current_trace_context,
+    set_current_trace_context,
+)
 from agent_sec_cli.security_middleware import lifecycle, router
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
@@ -65,10 +73,42 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
 
     Raises whatever exception the backend raises (after logging it).
     """
-    # TODO: inherit trace_id and session_id from parent context, if any
     ctx = RequestContext(action=action, caller=_detect_caller())
+    return _execute_action(ctx, kwargs)
 
-    backend = router.get_backend(action)
+
+def invoke_with_context(
+    action: str,
+    *,
+    caller: str,
+    trace_context: Mapping[str, Any] | TraceContext | None = None,
+    **kwargs: Any,
+) -> ActionResult:
+    """Invoke a security action with explicit daemon/plugin request context.
+
+    This entry point is intended for long-running processes, such as the daemon,
+    where caller identity and trace metadata must come from the request instead
+    of being inferred from the Python call stack or process-level CLI state.
+    """
+    normalized_caller = caller.strip() if caller.strip() else "unknown"
+    token = set_current_trace_context(_coerce_trace_context(trace_context))
+    try:
+        ctx = RequestContext(action=action, caller=normalized_caller)
+        return _execute_action(ctx, kwargs)
+    finally:
+        reset_current_trace_context(token)
+
+
+def _coerce_trace_context(
+    trace_context: Mapping[str, Any] | TraceContext | None,
+) -> TraceContext | None:
+    if isinstance(trace_context, TraceContext) or trace_context is None:
+        return trace_context
+    return parse_trace_context_payload(trace_context)
+
+
+def _execute_action(ctx: RequestContext, kwargs: dict[str, Any]) -> ActionResult:
+    backend = router.get_backend(ctx.action)
 
     lifecycle.pre_action(ctx, kwargs)
 
@@ -82,4 +122,9 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
     return result
 
 
-__all__: list[str] = ["invoke", "ActionResult", "RequestContext"]
+__all__: list[str] = [
+    "invoke",
+    "invoke_with_context",
+    "ActionResult",
+    "RequestContext",
+]
