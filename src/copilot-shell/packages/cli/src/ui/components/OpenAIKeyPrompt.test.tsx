@@ -6,7 +6,8 @@
 
 import { act } from 'react';
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import chalk from 'chalk';
 import { OpenAIKeyPrompt, credentialSchema } from './OpenAIKeyPrompt.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -17,8 +18,20 @@ vi.mock('../hooks/useKeypress.js', () => ({
 }));
 
 describe('OpenAIKeyPrompt', () => {
+  // chalk is a process-wide singleton; save/restore so we don't leak ANSI
+  // settings into unrelated tests sharing the same Vitest worker.
+  let originalChalkLevel: typeof chalk.level;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    // Force chalk to emit ANSI codes so cursor (chalk.inverse) is distinguishable
+    // from regular padding spaces in the rendered frame.
+    originalChalkLevel = chalk.level;
+    chalk.level = 1;
+  });
+
+  afterEach(() => {
+    chalk.level = originalChalkLevel;
   });
 
   // ─── 基础渲染 ───────────────────────────────────────────────────────────────
@@ -405,6 +418,92 @@ describe('OpenAIKeyPrompt', () => {
 
       // Should no longer show original key prefix
       expect(lastFrame()).not.toContain('sk-');
+    });
+
+    it('should render visible cursor on active apiKey field (empty value)', async () => {
+      // DeepSeek (leaf) → defaults straight to provider field; navigate to apiKey.
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+        />,
+      );
+
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      expect(lastFrame()).toContain(chalk.inverse(' '));
+    });
+
+    it('should render cursor at end of value when typing into apiKey', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+        />,
+      );
+
+      await pressKey({ name: 'return', sequence: '\r' });
+      for (const ch of ['a', 'b', 'c', 'd']) {
+        await pressKey({ sequence: ch });
+      }
+
+      // maskApiKey('abcd') → 'abc*'; cursor sits at the end
+      expect(lastFrame()).toContain(`abc*${chalk.inverse(' ')}`);
+    });
+
+    it('should not render cursor on non-active fields', () => {
+      // Provider is the active field on initial render for a leaf provider.
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // apiKey / baseUrl / model fields are visible but inactive — no inverse cursor present.
+      expect(lastFrame()).not.toContain(chalk.inverse(' '));
+    });
+
+    it('should render cursor on active Model field after navigating from apiKey', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://api.deepseek.com"
+          defaultApiKey="sk-abcdef"
+        />,
+      );
+
+      // provider → apiKey → model (DeepSeek is non-custom, so Base URL is skipped)
+      await pressKey({ name: 'return', sequence: '\r' });
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      // default model 'deepseek-chat' with cursor at end
+      expect(lastFrame()).toContain(`deepseek-chat${chalk.inverse(' ')}`);
+    });
+
+    it('should render cursor on active Base URL field for custom provider', async () => {
+      // Use custom provider so Base URL is editable.
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt onSubmit={vi.fn()} onCancel={vi.fn()} />,
+      );
+
+      // Navigate down through the provider list to the custom entry (last one).
+      // OPENAI_PROVIDERS has 8 entries; default index 0 (DashScope) → press ↓ 7 times to reach custom.
+      for (let i = 0; i < 7; i++) {
+        await pressKey({ name: 'down', sequence: '' });
+      }
+      // Enter to leave provider field; for custom (no subProviders) → apiKey directly.
+      await pressKey({ name: 'return', sequence: '\r' });
+      // apiKey → baseUrl (custom)
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      // Empty base URL on custom → only the cursor shows
+      expect(lastFrame()).toContain(chalk.inverse(' '));
     });
 
     it('should delete single char on backspace after user clears and types new key', async () => {

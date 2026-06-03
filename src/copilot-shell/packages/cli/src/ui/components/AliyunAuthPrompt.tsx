@@ -8,6 +8,7 @@ import type React from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
+import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -503,7 +504,7 @@ export function AliyunAuthPrompt({
             <Text>
               {currentField === 'accessKeyId' ? '> ' : '  '}
               {currentField === 'accessKeyId'
-                ? accessKeyId || ' '
+                ? `${accessKeyId}${chalk.inverse(' ')}`
                 : maskedAccessKeyId || ' '}
             </Text>
           </Box>
@@ -523,7 +524,9 @@ export function AliyunAuthPrompt({
           <Box flexGrow={1}>
             <Text>
               {currentField === 'accessKeySecret' ? '> ' : '  '}
-              {maskedSecret || ' '}
+              {currentField === 'accessKeySecret'
+                ? `${maskedSecret}${chalk.inverse(' ')}`
+                : maskedSecret || ' '}
             </Text>
           </Box>
         </Box>
@@ -538,7 +541,9 @@ export function AliyunAuthPrompt({
           <Box flexGrow={1}>
             <Text>
               {currentField === 'model' ? '> ' : '  '}
-              {model}
+              {currentField === 'model'
+                ? `${model}${chalk.inverse(' ')}`
+                : model || ' '}
             </Text>
           </Box>
         </Box>
