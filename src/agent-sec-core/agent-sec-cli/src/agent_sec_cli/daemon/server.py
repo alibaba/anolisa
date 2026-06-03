@@ -24,7 +24,9 @@ from agent_sec_cli.daemon.errors import (
     ResponseTooLargeError,
     ShutdownError,
 )
-from agent_sec_cli.daemon.handlers.prompt_scan import register_prompt_scan_methods
+from agent_sec_cli.daemon.handlers.prompt_scan import (
+    register_prompt_scan_methods,
+)
 from agent_sec_cli.daemon.health import register_health_methods
 from agent_sec_cli.daemon.jobs import register_default_jobs
 from agent_sec_cli.daemon.protocol import (

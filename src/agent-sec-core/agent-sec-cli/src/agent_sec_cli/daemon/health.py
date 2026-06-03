@@ -4,7 +4,11 @@ import os
 from typing import Any
 
 from agent_sec_cli.daemon.protocol import DaemonRequest
-from agent_sec_cli.daemon.registry import HandlerResult, MethodRegistry, MethodSpec
+from agent_sec_cli.daemon.registry import (
+    HandlerResult,
+    MethodRegistry,
+    MethodSpec,
+)
 from agent_sec_cli.daemon.runtime import DaemonRuntime
 
 
