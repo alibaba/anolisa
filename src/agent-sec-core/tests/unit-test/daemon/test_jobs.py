@@ -8,11 +8,13 @@ from agent_sec_cli.daemon.jobs import (
     JobManager,
     JobStatus,
     PeriodicBackgroundJob,
-    PromptModelPreloadJob,
-    next_cycle_start,
-    register_default_jobs,
 )
-from agent_sec_cli.daemon.jobs.prompt_preload import _preload_prompt_model_sync
+from agent_sec_cli.daemon.jobs.base import next_cycle_start
+from agent_sec_cli.daemon.jobs.prompt_preload import (
+    PromptModelPreloadJob,
+    _preload_prompt_model_sync,
+)
+from agent_sec_cli.daemon.jobs.registry import register_default_jobs
 from agent_sec_cli.daemon.runtime import PromptRuntimeState
 
 
