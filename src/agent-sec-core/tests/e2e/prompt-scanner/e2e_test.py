@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""E2E tests for prompt-scanner via CLI.
+"""E2E tests for prompt-scanner via CLI backed by the daemon.
 
 Tests exercise the full CLI pipeline:
   agent-sec-cli scan-prompt --text "<prompt>" [--mode <fast|standard|strict>]
+  -> agent-sec daemon scan-prompt request
 
 The test suite:
   A. Basic functionality (empty input, safe prompt, injection, jailbreak)

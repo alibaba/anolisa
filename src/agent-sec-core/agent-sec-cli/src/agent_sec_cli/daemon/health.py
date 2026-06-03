@@ -39,6 +39,6 @@ def register_health_methods(registry: MethodRegistry) -> None:
             lifecycle="admin",
             queue="admin",
             timeout_ms=1000,
-            access_log=True,
+            access_log=False,
         )
     )

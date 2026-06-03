@@ -233,6 +233,7 @@ class DaemonServer:
         started = time.monotonic()
         response: DaemonResponse | None = None
         began_request = False
+        access_log = True
 
         try:
             line = await asyncio.wait_for(
@@ -243,6 +244,7 @@ class DaemonServer:
             request = parse_request_line(line, max_request_bytes=self.max_request_bytes)
             request_id = request.id
             method = request.method
+            access_log = _access_log_enabled(self.registry, method)
             self.runtime.begin_request()
             began_request = True
             response = await dispatch_request(request, self.registry, self.runtime)
@@ -264,14 +266,15 @@ class DaemonServer:
                 asyncio.CancelledError,
             ):
                 bytes_out, response = await self._write_response(writer, response)
-            _log_request_completion(
-                request_id=request_id,
-                method=method,
-                response=response,
-                started=started,
-                bytes_in=bytes_in,
-                bytes_out=bytes_out,
-            )
+            if access_log:
+                _log_request_completion(
+                    request_id=request_id,
+                    method=method,
+                    response=response,
+                    started=started,
+                    bytes_in=bytes_in,
+                    bytes_out=bytes_out,
+                )
 
     async def _write_response(
         self,
@@ -394,6 +397,7 @@ def prepare_socket_path(socket_path: Path) -> SingleInstanceLock:
 
 def configure_logging() -> None:
     """Initialize daemon diagnostic logging."""
+    # TODO: Consider rate-limited async logging for slow or blocking stdout/stderr sinks.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
@@ -482,6 +486,13 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
     if hasattr(signal, "SIGHUP"):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signal.SIGHUP, _log_sighup_noop)
+
+
+def _access_log_enabled(registry: MethodRegistry, method: str) -> bool:
+    try:
+        return registry.get(method).access_log
+    except DaemonError:
+        return True
 
 
 def _log_request_completion(

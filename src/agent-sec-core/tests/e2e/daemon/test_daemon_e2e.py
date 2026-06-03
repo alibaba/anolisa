@@ -74,7 +74,7 @@ def test_daemon_health_over_unix_socket(
 
     assert not socket_path.exists()
     assert output.returncode == 0
-    assert _has_request_log(output, "e2e-health", "daemon.health")
+    assert not _has_request_log(output, "e2e-health", "daemon.health")
 
 
 def test_daemon_uses_xdg_runtime_dir_by_default(

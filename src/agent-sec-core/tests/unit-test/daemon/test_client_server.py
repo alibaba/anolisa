@@ -299,6 +299,42 @@ def test_daemon_server_rejects_oversized_handler_response(tmp_path: Path, caplog
     assert matching_logs[-1]["error_code"] == "payload_too_large"
 
 
+def test_daemon_server_suppresses_method_access_log(tmp_path: Path, caplog):
+    caplog.set_level(logging.INFO, logger="agent-sec-core.daemon")
+
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        registry = MethodRegistry()
+        registry.register(
+            MethodSpec(
+                method="quiet",
+                handler=lambda _request, _runtime: HandlerResult(data={"ok": True}),
+                lifecycle="test",
+                access_log=False,
+            )
+        )
+        server = DaemonServer(socket_path=socket_path, registry=registry)
+        await server.start()
+        try:
+            response = await _send_daemon_request(
+                socket_path, DaemonRequest(id="req-quiet", method="quiet")
+            )
+        finally:
+            await server.stop()
+
+        return response
+
+    response = asyncio.run(scenario())
+
+    assert response.ok is True
+    matching_logs = [
+        record
+        for record in caplog.records
+        if record.name == "agent-sec-core.daemon" and "req-quiet" in record.message
+    ]
+    assert matching_logs == []
+
+
 def test_idle_request_read_times_out_and_releases_connection(tmp_path: Path):
     async def scenario():
         socket_path = tmp_path / "runtime" / "daemon.sock"

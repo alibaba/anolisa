@@ -1,0 +1,295 @@
+"""Daemon fixtures for prompt-scanner e2e tests."""
+
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TextIO
+
+import pytest
+
+SOCKET_ENV = "AGENT_SEC_DAEMON_SOCKET"
+DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
+PROMPT_PRELOAD_ENV = "AGENT_SEC_DAEMON_PROMPT_PRELOAD"
+READY_TIMEOUT_ENV = "AGENT_SEC_PROMPT_E2E_READY_TIMEOUT_SECONDS"
+DEFAULT_READY_TIMEOUT_SECONDS = 600
+
+
+@dataclass
+class DaemonOutput:
+    stdout: str
+    stderr: str
+    returncode: int
+
+
+@dataclass
+class DaemonProcess:
+    process: subprocess.Popen[str]
+    stdout_path: Path
+    stderr_path: Path
+    stdout_file: TextIO
+    stderr_file: TextIO
+
+
+@pytest.fixture(scope="module")
+def daemon_command() -> list[str]:
+    """Return the installed daemon binary or a source-tree module fallback."""
+    daemon_bin = shutil.which("agent-sec-daemon")
+    if daemon_bin:
+        return [daemon_bin]
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import agent_sec_cli.daemon.server"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode == 0:
+        return [sys.executable, "-m", "agent_sec_cli.daemon.server"]
+
+    pytest.fail(
+        "agent-sec-daemon is unavailable and agent_sec_cli.daemon.server "
+        f"cannot be imported: {result.stderr}"
+    )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def prompt_scan_daemon(
+    daemon_command: list[str],
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Start a daemon with prompt model preload enabled for all CLI e2e cases."""
+    tmp_path = tmp_path_factory.mktemp("prompt_scan_daemon")
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    data_dir = tmp_path / "data"
+
+    saved_env = {
+        SOCKET_ENV: os.environ.get(SOCKET_ENV),
+        DATA_DIR_ENV: os.environ.get(DATA_DIR_ENV),
+        PROMPT_PRELOAD_ENV: os.environ.get(PROMPT_PRELOAD_ENV),
+    }
+
+    daemon = _start_daemon(daemon_command, socket_path, data_dir)
+    output: DaemonOutput | None = None
+    try:
+        _wait_for_prompt_scan_ready(socket_path, daemon)
+        os.environ[SOCKET_ENV] = str(socket_path)
+        os.environ[DATA_DIR_ENV] = str(data_dir)
+        yield
+    finally:
+        output = _stop_daemon(daemon)
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert output.returncode == 0
+
+
+def _start_daemon(
+    daemon_command: list[str],
+    socket_path: Path,
+    data_dir: Path,
+) -> DaemonProcess:
+    env = os.environ.copy()
+    env.pop(SOCKET_ENV, None)
+    env[DATA_DIR_ENV] = str(data_dir)
+    env[PROMPT_PRELOAD_ENV] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    log_dir = data_dir.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / "daemon.stdout.log"
+    stderr_path = log_dir / "daemon.stderr.log"
+    stdout_file = stdout_path.open("w+", encoding="utf-8")
+    stderr_file = stderr_path.open("w+", encoding="utf-8")
+
+    command = [
+        *daemon_command,
+        "serve",
+        "--socket",
+        str(socket_path),
+        "--request-read-timeout-ms",
+        "30000",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        text=True,
+        env=env,
+    )
+    daemon = DaemonProcess(
+        process=process,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        stdout_file=stdout_file,
+        stderr_file=stderr_file,
+    )
+    _wait_for_health(socket_path, daemon)
+    return daemon
+
+
+def _stop_daemon(
+    daemon: DaemonProcess,
+    stop_signal: signal.Signals = signal.SIGINT,
+) -> DaemonOutput:
+    process = daemon.process
+    if process.poll() is None:
+        process.send_signal(stop_signal)
+
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    daemon.stdout_file.close()
+    daemon.stderr_file.close()
+
+    return DaemonOutput(
+        stdout=_read_log_file(daemon.stdout_path),
+        stderr=_read_log_file(daemon.stderr_path),
+        returncode=0 if process.returncode is None else process.returncode,
+    )
+
+
+def _wait_for_health(socket_path: Path, daemon: DaemonProcess) -> None:
+    deadline = time.monotonic() + 10
+    last_error: Exception | None = None
+
+    while time.monotonic() < deadline:
+        _assert_process_running(daemon)
+        if socket_path.exists():
+            try:
+                response = _call_daemon(
+                    socket_path,
+                    {"id": "prompt-e2e-wait-health", "method": "daemon.health"},
+                )
+            except OSError as exc:
+                last_error = exc
+            else:
+                if response.get("ok") is True:
+                    return
+        time.sleep(0.05)
+
+    raise AssertionError(f"daemon did not become healthy; last_error={last_error!r}")
+
+
+def _wait_for_prompt_scan_ready(
+    socket_path: Path,
+    daemon: DaemonProcess,
+) -> None:
+    timeout_seconds = int(
+        os.environ.get(READY_TIMEOUT_ENV, str(DEFAULT_READY_TIMEOUT_SECONDS))
+    )
+    deadline = time.monotonic() + timeout_seconds
+    last_state: dict[str, Any] | None = None
+    last_error: Exception | None = None
+
+    while time.monotonic() < deadline:
+        _assert_process_running(daemon)
+        try:
+            response = _call_daemon(
+                socket_path,
+                {
+                    "id": "prompt-e2e-wait-prompt-ready",
+                    "method": "daemon.health",
+                },
+            )
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.5)
+            continue
+
+        if response.get("ok") is not True:
+            error = response.get("error") or {}
+            if error.get("code") == "busy":
+                last_state = {"status": "busy"}
+                time.sleep(0.5)
+                continue
+            raise AssertionError(f"daemon health request failed: {response!r}")
+
+        prompt_state = response["data"]["prompt_scan"]
+        last_state = prompt_state
+
+        if prompt_state.get("status") == "ready" and prompt_state.get("loaded") is True:
+            return
+        if prompt_state.get("status") == "degraded":
+            raise AssertionError(
+                "daemon prompt scanner preload failed; " f"state={prompt_state!r}"
+            )
+        time.sleep(0.5)
+
+    raise AssertionError(
+        "daemon prompt scanner did not become ready within "
+        f"{timeout_seconds}s; last_state={last_state!r}; last_error={last_error!r}"
+    )
+
+
+def _assert_process_running(daemon: DaemonProcess) -> None:
+    process = daemon.process
+    if process.poll() is None:
+        return
+
+    stdout = _read_log_file(daemon.stdout_path)
+    stderr = _read_log_file(daemon.stderr_path)
+    raise AssertionError(
+        f"daemon exited before prompt-scanner e2e; returncode={process.returncode}; "
+        f"stdout={stdout!r}; stderr={stderr!r}"
+    )
+
+
+def _read_log_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+def _call_daemon(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+    raw_request = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client_socket:
+        client_socket.settimeout(5)
+        client_socket.connect(str(socket_path))
+        client_socket.sendall(raw_request)
+        raw_response = _read_response(client_socket)
+
+    response = json.loads(raw_response.decode("utf-8"))
+    assert isinstance(response, dict)
+    return response
+
+
+def _read_response(client_socket: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    total_bytes = 0
+
+    while True:
+        chunk = client_socket.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total_bytes += len(chunk)
+        if total_bytes > 4 * 1024 * 1024:
+            raise AssertionError("daemon response exceeded e2e read limit")
+        if b"\n" in chunk:
+            break
+
+    if not chunks:
+        raise AssertionError("daemon returned an empty response")
+
+    raw_response, _separator, _remaining = b"".join(chunks).partition(b"\n")
+    return raw_response
