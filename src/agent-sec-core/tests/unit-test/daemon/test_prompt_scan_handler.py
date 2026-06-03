@@ -1,5 +1,6 @@
 """Tests for daemon scan-prompt handler."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ def test_prompt_scan_handler_rejects_when_prompt_runtime_not_ready(tmp_path: Pat
     )
 
     with pytest.raises(UnavailableError, match="prompt scanner is not ready"):
-        prompt_scan_handler(request, runtime)
+        asyncio.run(prompt_scan_handler(request, runtime))
 
 
 @pytest.mark.parametrize(
@@ -84,7 +85,7 @@ def test_prompt_scan_handler_unavailable_message_describes_preload_state(
     )
 
     with pytest.raises(UnavailableError) as exc_info:
-        prompt_scan_handler(request, runtime)
+        asyncio.run(prompt_scan_handler(request, runtime))
 
     message = exc_info.value.message
     for expected_part in expected_parts:
@@ -120,7 +121,7 @@ def test_prompt_scan_handler_invokes_middleware_with_request_context(
         trace_context={"trace_id": "trace-1"},
     )
 
-    result = prompt_scan_handler(request, runtime)
+    result = asyncio.run(prompt_scan_handler(request, runtime))
 
     assert captured == {
         "trace_context": {"trace_id": "trace-1"},
@@ -155,7 +156,7 @@ def test_prompt_scan_handler_preserves_action_result_error(
     )
     request = DaemonRequest(id="req-prompt", method="scan-prompt")
 
-    result = prompt_scan_handler(request, runtime)
+    result = asyncio.run(prompt_scan_handler(request, runtime))
 
     assert result.stderr == "prompt_scan error: no input text provided"
     assert result.exit_code == 1

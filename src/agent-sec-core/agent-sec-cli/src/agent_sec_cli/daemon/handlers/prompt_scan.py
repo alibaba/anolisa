@@ -1,5 +1,6 @@
 """Daemon handler for the scan-prompt CLI-compatible method."""
 
+import asyncio
 from typing import Any
 
 from agent_sec_cli.daemon.errors import UnavailableError
@@ -26,7 +27,7 @@ def register_prompt_scan_methods(registry: MethodRegistry) -> None:
     )
 
 
-def prompt_scan_handler(
+async def prompt_scan_handler(
     request: DaemonRequest, runtime: DaemonRuntime
 ) -> HandlerResult:
     """Execute prompt scanning through security middleware."""
@@ -34,7 +35,8 @@ def prompt_scan_handler(
         raise UnavailableError(_prompt_unavailable_message(runtime))
 
     params = request.params
-    result = _invoke_prompt_scan(
+    result = await asyncio.to_thread(
+        _invoke_prompt_scan,
         trace_context=request.trace_context,
         text=_string_param(params, "text"),
         mode=_string_param(params, "mode", default="standard"),
