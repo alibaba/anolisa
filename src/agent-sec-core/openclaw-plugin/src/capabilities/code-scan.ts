@@ -31,6 +31,16 @@ export const codeScan: SecurityCapability = {
         const verdict = scanResult.verdict;
         const findings = scanResult.findings ?? [];
 
+        // Self-protect: force block if the command would disable this plugin
+        const selfProtectFinding = findings.find(
+          (f: any) => f.rule_id === "shell-self-protect-openclaw",
+        );
+        if (selfProtectFinding) {
+          const msg = `[agent-sec-core] 自我保护：该命令将禁用 agent-sec 安全插件。如果您确实需要禁用，请手动执行以下命令：\n\n  ${command}\n\n出于安全原因，AI agent 无法执行此操作。`;
+          api.logger.warn(`[scan-code] SELF-PROTECT block — ${command}`);
+          return { block: true, blockReason: msg };
+        }
+
         if (verdict === "pass" || findings.length === 0) {
           api.logger.info(`[scan-code] ✅ pass — allowing command`);
           return undefined;

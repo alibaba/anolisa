@@ -70,6 +70,24 @@ class CodeScanCapability(AgentSecCoreCapability):
             )
             return None
 
+        # Self-protect: force block if the command would disable this plugin
+        findings = scan.get("findings", [])
+        self_protect = next(
+            (f for f in findings if f.get("rule_id") == "shell-self-protect-hermes"),
+            None,
+        )
+        if self_protect:
+            msg = (
+                "[agent-sec-core] 自我保护：该命令将禁用 agent-sec 安全插件。"
+                "如果您确实需要禁用，请手动执行以下命令：\n\n"
+                f"  {code}\n\n"
+                "出于安全原因，AI agent 无法执行此操作。"
+            )
+            logger.warning(
+                f"[agent-sec-core] {self.id} SELF-PROTECT block tool={tool_name} code={code[:120]}"
+            )
+            return {"action": "block", "message": msg}
+
         verdict = scan.get("verdict", "pass")
 
         # warn and deny are separate branches (coding convention), same behavior

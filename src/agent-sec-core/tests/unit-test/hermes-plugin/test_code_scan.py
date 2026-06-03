@@ -192,3 +192,85 @@ class TestCodeScanPreToolCall:
         mock_cli.return_value = CliResult(stdout="not json", stderr="", exit_code=0)
         result = capability._on_pre_tool_call("terminal", {"command": "echo hello"})
         assert result is None
+
+
+class TestCodeScanSelfProtect:
+    """Tests for self-protect forced block behavior."""
+
+    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    def test_self_protect_hermes_disable_blocks(self, mock_cli, capability_observe):
+        """Self-protect rule forces block even when enable_block=False."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "rule_id": "shell-self-protect-hermes",
+                            "desc_en": "disables agent-sec plugin",
+                            "desc_zh": "禁用 agent-sec 插件",
+                        }
+                    ],
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+        result = capability_observe._on_pre_tool_call(
+            "terminal",
+            {"command": "hermes plugins disable agent-sec-core-hermes-plugin"},
+        )
+        assert result is not None
+        assert result["action"] == "block"
+        assert "自我保护" in result["message"]
+
+    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    def test_self_protect_hermes_remove_blocks(self, mock_cli, capability_observe):
+        """Self-protect rule forces block for remove command."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "rule_id": "shell-self-protect-hermes",
+                            "desc_en": "removes agent-sec plugin",
+                            "desc_zh": "移除 agent-sec 插件",
+                        }
+                    ],
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+        result = capability_observe._on_pre_tool_call(
+            "terminal",
+            {"command": "hermes plugins remove agent-sec-core-hermes-plugin"},
+        )
+        assert result is not None
+        assert result["action"] == "block"
+        assert "手动执行" in result["message"]
+
+    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    def test_self_protect_other_plugin_not_blocked(self, mock_cli, capability_observe):
+        """Non-self-protect findings respect enable_block=False (observe mode)."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {
+                            "rule_id": "shell-recursive-delete",
+                            "desc_en": "dangerous rm",
+                            "desc_zh": "危险删除",
+                        }
+                    ],
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+        result = capability_observe._on_pre_tool_call(
+            "terminal", {"command": "rm -rf /"}
+        )
+        assert result is None

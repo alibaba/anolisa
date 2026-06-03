@@ -1113,6 +1113,128 @@ PY_OBFUSCATION_CASES = [
     ("exec(open('script.py').read())", "python", "py-obfuscation", 0),
 ]
 
+SHELL_SELF_PROTECT_OPENCLAW_CASES = [
+    # === True Positives: config set disabled ===
+    (
+        "openclaw config set plugins.entries.agent-sec.enabled false",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw  config  set  plugins.entries.agent-sec.enabled  false",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "echo hi && openclaw config set plugins.entries.agent-sec.enabled false",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw config set plugins.entries.agent-sec.enabled false && openclaw gateway restart",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    # === True Positives: plugins disable/uninstall/remove ===
+    ("openclaw plugins disable agent-sec", "bash", "shell-self-protect-openclaw", 1),
+    ("openclaw plugins uninstall agent-sec", "bash", "shell-self-protect-openclaw", 1),
+    ("openclaw plugins remove agent-sec", "bash", "shell-self-protect-openclaw", 1),
+    (
+        "openclaw plugins uninstall agent-sec --force",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw  plugins  disable  agent-sec",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "OPENCLAW_STATE_DIR=/tmp openclaw plugins uninstall agent-sec --force",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw plugins disable agent-sec 2>&1",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    # === True Negatives ===
+    (
+        "openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    (
+        "openclaw config set plugins.entries.other-plugin.enabled false",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    (
+        "openclaw config set plugins.entries.agent-sec.enabled true",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    (
+        "openclaw plugins uninstall tokenless --force",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    ("openclaw plugins disable tokenless", "bash", "shell-self-protect-openclaw", 0),
+    ("openclaw plugins install agent-sec", "bash", "shell-self-protect-openclaw", 0),
+    ("openclaw gateway restart", "bash", "shell-self-protect-openclaw", 0),
+]
+
+SHELL_SELF_PROTECT_HERMES_CASES = [
+    # === True Positives ===
+    (
+        "hermes plugins disable agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins remove agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes  plugins  disable  agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "HERMES_HOME=/tmp hermes plugins remove agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    # === True Negatives ===
+    (
+        "hermes plugins enable agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        0,
+    ),
+    ("hermes plugins disable other-plugin", "bash", "shell-self-protect-hermes", 0),
+    ("hermes plugins remove tokenless", "bash", "shell-self-protect-hermes", 0),
+    ("hermes plugins list", "bash", "shell-self-protect-hermes", 0),
+]
+
 # =====================================================================
 # Language-level aggregation
 # =====================================================================
