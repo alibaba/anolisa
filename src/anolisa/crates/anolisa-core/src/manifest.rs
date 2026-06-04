@@ -1,146 +1,1173 @@
-//! Component manifest TOML parsing.
+//! Manifest v2 schema.
+//!
+//! This module hosts the canonical typed representation of the TOML manifests
+//! shipped under `src/anolisa/manifests/`. Two top-level shapes exist:
+//!
+//! * `CapabilityManifest` — user-facing capability definition.
+//! * `ComponentManifest` — concrete component (runtime or osbase substrate).
+//!
+//! All deserialization is *tolerant*: missing optional fields default and we
+//! accept both the new canonical TOML layout (per `templates/*.toml`) and the
+//! current bundled fixture layout. Unknown keys are silently ignored so that
+//! schema growth in either direction does not break existing artifacts.
 
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::Path;
+use crate::distribution::ArtifactType;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-/// Top-level manifest structure parsed from `component.toml`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Manifest {
-    pub component: ComponentSection,
-    pub build: Option<BuildSection>,
-    pub install: Option<InstallSection>,
-    pub environment: Option<EnvironmentSection>,
-    pub dependencies: Option<DependenciesSection>,
-    #[serde(default)]
-    pub features: Vec<FeatureSection>,
-    #[serde(default)]
-    pub adapters: Vec<AdapterSection>,
+/// Default schema version applied when the TOML omits it.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// CapabilityManifest
+// ---------------------------------------------------------------------------
+
+/// Canonical capability manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "CapabilityManifestRaw")]
+pub struct CapabilityManifest {
+    /// Schema version after tolerant parsing.
+    pub schema_version: u32,
+    /// User-facing capability metadata.
+    pub capability: CapabilityMeta,
+    /// Component names backing this capability.
+    pub components: Vec<String>,
+    /// Feature names enabled unless the caller overrides them.
+    pub default_features: Vec<String>,
+    /// Capability-level host requirements.
+    pub env_requirements: EnvRequirements,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AdapterSection {
-    /// Target framework name: `cosh`, `openclaw`, `hermes`, `mcp`, ...
-    pub framework: String,
-    /// Adapter classification — drives default install behavior.
-    pub kind: AdapterKind,
-    /// Build-output source path (relative to component build root).
-    pub source: String,
-    /// Install destination, supports placeholders (`{datadir}`, `{component}`).
-    pub dest: String,
-    /// Optional detection hint (binary name, paths). Authoritative rules live
-    /// in the framework probe; this is just a manifest-side annotation.
-    #[serde(default)]
-    pub detect: std::collections::HashMap<String, toml::Value>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum AdapterKind {
-    /// Bundled with ANOLISA (e.g. `cosh`); installed by default with the capability.
-    FirstParty,
-    /// External framework (e.g. `openclaw`, `hermes`); opt-in via `--with-adapter`.
-    ThirdParty,
-    /// Open protocol (e.g. `mcp`); installed to a standard advertise location.
-    Protocol,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ComponentSection {
+/// User-facing metadata for a capability manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityMeta {
+    /// Stable CLI name.
     pub name: String,
-    pub version: String,
-    pub layer: String,
-    pub domain: Option<String>,
+    /// Human-readable list/status summary.
     pub description: String,
+    /// Capability layer label; defaults preserve older fixture layouts.
+    pub layer: String,
+    /// Stability channel shown in list/status surfaces.
+    pub stability: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct BuildSection {
-    pub system: String,
+#[derive(Deserialize)]
+struct CapabilityManifestRaw {
+    #[serde(default = "current_schema_version", alias = "manifest_version")]
+    schema_version: u32,
+    capability: CapabilityMetaRaw,
     #[serde(default)]
-    pub targets: Vec<String>,
-    #[serde(default)]
-    pub toolchain: HashMap<String, String>,
-    #[serde(default)]
-    pub pre_build: Vec<String>,
+    implementation: ImplementationRaw,
+    #[serde(default, alias = "env_requirements")]
+    requires_env: EnvRequirementsRaw,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct InstallSection {
+#[derive(Deserialize)]
+struct CapabilityMetaRaw {
+    name: String,
     #[serde(default)]
+    description: String,
+    #[serde(default = "default_capability_layer")]
+    layer: String,
+    #[serde(default = "default_stability")]
+    stability: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ImplementationRaw {
+    #[serde(default)]
+    components: Vec<String>,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
+}
+
+impl From<CapabilityManifestRaw> for CapabilityManifest {
+    fn from(raw: CapabilityManifestRaw) -> Self {
+        let ImplementationRaw {
+            components,
+            features,
+        } = raw.implementation;
+        let mut default_features: Vec<String> = features.into_values().flatten().collect();
+        default_features.sort();
+        default_features.dedup();
+        Self {
+            schema_version: raw.schema_version,
+            capability: CapabilityMeta {
+                name: raw.capability.name,
+                description: raw.capability.description,
+                layer: raw.capability.layer,
+                stability: raw.capability.stability,
+            },
+            components,
+            default_features,
+            env_requirements: raw.requires_env.into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ComponentManifest
+// ---------------------------------------------------------------------------
+
+/// Canonical runtime / osbase component manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ComponentManifestRaw")]
+pub struct ComponentManifest {
+    /// Schema version after tolerant parsing.
+    pub schema_version: u32,
+    /// Component identity and layer metadata.
+    pub component: ComponentMeta,
+    /// Source tree or release source declaration.
+    pub source: SourceSpec,
+    /// Structured selector list. Each entry says "for this install_mode + OS
+    /// family + arch (+optional libc/pkg_base), prefer these artifact types
+    /// in order". The resolver feeds `preferred_artifact_types` into
+    /// `ResolveQuery` as the tiebreaker.
+    pub distribution_selectors: Vec<DistributionSelector>,
+    /// Build backend declaration for source builds.
+    pub build: BuildSpec,
+    /// Files, services, and capabilities installed by this component.
+    pub install: InstallSpec,
+    /// Component-level host requirements.
+    pub env_requirements: EnvRequirements,
+    /// Structured dependency lists. `build`, `runtime`, and `components`
+    /// stay separate so downstream consumers can reason about each kind
+    /// (e.g. resolver only follows `components`, doctor only checks
+    /// `runtime`).
+    pub dependencies: DependenciesSpec,
+    /// Feature toggles exposed by this component manifest.
+    pub features: Vec<FeatureSpec>,
+    /// All adapter declarations preserved verbatim; downstream tooling
+    /// can inspect `framework`/`plugin_id`/`source`/`dest`/`detect`
+    /// without re-parsing the TOML.
+    pub adapters: Vec<AdapterSpec>,
+    /// All `[[health_checks]]` entries in source order. The old single
+    /// `health` field would silently drop everything after the first.
+    pub health_checks: Vec<HealthSpec>,
+}
+
+/// Structured distribution selector, surfaced for downstream consumers
+/// (resolver, planner, doctor).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DistributionSelector {
+    /// Optional install-mode selector.
+    #[serde(default)]
+    pub install_mode: Option<String>,
+    /// Accepted OS names.
+    #[serde(default)]
+    pub os: Vec<String>,
+    /// Accepted CPU architectures.
+    #[serde(default)]
+    pub arch: Vec<String>,
+    /// Optional libc selector.
+    #[serde(default)]
+    pub libc: Option<String>,
+    /// Optional package-base selector such as `rpm` or `deb`.
+    #[serde(default)]
+    pub pkg_base: Option<String>,
+    /// Artifact-type preference used only after target filtering.
+    #[serde(default)]
+    pub preferred_artifact_types: Vec<ArtifactType>,
+}
+
+/// Component identity and placement metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentMeta {
+    /// Stable component name.
+    pub name: String,
+    /// Component version expected by planners.
+    pub version: String,
+    /// Architecture layer label (`runtime`, `osbase`, ...).
+    pub layer: String,
+    /// Optional domain label for capability grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+/// Source declaration for source-build capable components.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SourceSpec {
+    /// Source kind (`git`, `path`, `archive`, ...).
+    pub kind: String,
+    /// Local source path, when the source is already staged.
+    pub path: Option<String>,
+    /// Remote source URL, when source must be fetched.
+    pub url: Option<String>,
+}
+
+/// Build backend declaration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildSpec {
+    /// Backend name such as `cargo`.
+    pub backend: String,
+    /// Expected output paths or target names.
+    pub outputs: Vec<String>,
+}
+
+/// Install contract emitted by a component manifest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InstallSpec {
+    /// Supported install modes.
     pub modes: Vec<String>,
-    #[serde(default)]
-    pub files: Vec<InstallFile>,
-    #[serde(default)]
+    /// Files copied or extracted during install.
+    pub files: Vec<InstallFileSpec>,
+    /// Service units managed by lifecycle operations.
     pub services: Vec<String>,
+    /// Linux capability assignments requested for installed files.
+    pub capabilities: Vec<InstallCapabilitySpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct InstallFile {
-    pub source: String,
-    pub dest: String,
-    #[serde(default = "default_mode")]
-    pub mode: String,
-    pub symlink: Option<String>,
+/// One file mapping in an install contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallFileSpec {
+    /// Source path inside an artifact or source tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Destination path after layout placeholder expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
 }
 
-fn default_mode() -> String {
-    "0755".to_string()
+impl InstallFileSpec {
+    /// Destination if present, otherwise legacy single-path source.
+    pub fn install_path(&self) -> Option<&str> {
+        self.dest.as_deref().or(self.source.as_deref())
+    }
+
+    /// Human-readable mapping for plans and warnings.
+    pub fn display(&self) -> String {
+        match (self.source.as_deref(), self.dest.as_deref()) {
+            (Some(source), Some(dest)) => format!("{source} -> {dest}"),
+            (Some(source), None) => source.to_string(),
+            (None, Some(dest)) => dest.to_string(),
+            (None, None) => "<empty>".to_string(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct EnvironmentSection {
-    pub requires_os: Option<String>,
-    #[serde(default)]
-    pub requires_arch: Vec<String>,
-    pub requires_kernel: Option<String>,
-    #[serde(default)]
-    pub requires_env: HashMap<String, String>,
-    #[serde(default)]
-    pub incompatible_env: Vec<String>,
+/// Linux capability assignment for an installed file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallCapabilitySpec {
+    /// Path receiving capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Capability names, e.g. `CAP_BPF`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct DependenciesSection {
-    #[serde(default)]
+impl InstallCapabilitySpec {
+    /// Human-readable capability assignment for plans and warnings.
+    pub fn display(&self) -> String {
+        match (self.path.as_deref(), self.caps.is_empty()) {
+            (Some(path), false) => format!("{path}: {}", self.caps.join("+")),
+            (Some(path), true) => path.to_string(),
+            (None, false) => self.caps.join("+"),
+            (None, true) => "<empty>".to_string(),
+        }
+    }
+}
+
+/// Optional feature declared by a component manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureSpec {
+    /// Stable feature name.
+    pub name: String,
+    /// Human-readable summary.
+    pub description: String,
+    /// Whether this feature is enabled by default.
+    pub default: bool,
+}
+
+/// Structured dependency lists, preserving the original `[dependencies]`
+/// kind for each entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependenciesSpec {
+    /// Build-time dependencies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub build: Vec<String>,
-    #[serde(default)]
+    /// Runtime dependencies checked by doctor/status flows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime: Vec<String>,
-    #[serde(default)]
+    /// Component dependencies followed by planners.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct FeatureSection {
-    pub name: String,
-    pub label: String,
-    #[serde(default)]
-    pub default: bool,
-    #[serde(default)]
-    pub requires_env: HashMap<String, String>,
-    #[serde(default)]
-    pub conflicts_with: Vec<String>,
+impl DependenciesSpec {
+    /// True when every kind list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.build.is_empty() && self.runtime.is_empty() && self.components.is_empty()
+    }
 }
 
-impl Manifest {
-    /// Parse a manifest from a TOML file path.
+/// One `[[adapters]]` entry. We keep every field the loader can parse so
+/// later tooling (adapter registry, doctor, build planner) does not have
+/// to re-read the TOML. `detect` is captured as a free-form map because
+/// each framework defines its own probe shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterSpec {
+    /// Adapter display or manifest name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Framework this adapter targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    /// Adapter kind (`first-party`, `third-party`, `protocol`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Framework-native plugin identifier, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// Source path inside the component artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Destination path after layout placeholder expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// Framework-specific detection hints preserved as TOML values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub detect: BTreeMap<String, toml::Value>,
+}
+
+/// One `[[health_checks]]` entry. Multiple checks per component are
+/// expected (binary probe + systemd unit + http endpoint, etc.) so we
+/// keep the entire list rather than only the first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HealthSpec {
+    /// Optional stable health-check name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Health-check kind (`file`, `command`, `systemd`, ...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// Command line for command-style checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Probe path for binary/file checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// Service unit for service-manager checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Optional checks degrade instead of failing when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ComponentManifestRaw {
+    #[serde(default = "current_schema_version", alias = "manifest_version")]
+    schema_version: u32,
+    component: ComponentMetaRaw,
+    #[serde(default)]
+    source: Option<SourceRaw>,
+    #[serde(default)]
+    distribution: Option<DistributionRaw>,
+    #[serde(default)]
+    build: Option<BuildRaw>,
+    #[serde(default)]
+    install: Option<InstallRaw>,
+    #[serde(default, alias = "env_requirements")]
+    environment: EnvRequirementsRaw,
+    #[serde(default)]
+    dependencies: DependenciesRaw,
+    #[serde(default)]
+    features: Vec<FeatureRaw>,
+    #[serde(default)]
+    adapters: Vec<AdapterRaw>,
+    #[serde(default, alias = "health")]
+    health_checks: Vec<HealthCheckRaw>,
+}
+
+#[derive(Deserialize)]
+struct ComponentMetaRaw {
+    name: String,
+    version: String,
+    #[serde(default = "default_runtime_layer")]
+    layer: String,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SourceRaw {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    upstream: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct DistributionRaw {
+    #[serde(default)]
+    selectors: Vec<DistributionSelectorRaw>,
+}
+
+#[derive(Deserialize, Default)]
+struct DistributionSelectorRaw {
+    #[serde(default)]
+    install_mode: Option<String>,
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default)]
+    arch: Vec<String>,
+    #[serde(default)]
+    libc: Option<String>,
+    #[serde(default)]
+    pkg_base: Option<String>,
+    #[serde(default)]
+    preferred_artifact_types: Vec<ArtifactType>,
+}
+
+impl From<DistributionSelectorRaw> for DistributionSelector {
+    fn from(raw: DistributionSelectorRaw) -> Self {
+        Self {
+            install_mode: raw.install_mode,
+            os: raw.os,
+            arch: raw.arch,
+            libc: raw.libc,
+            pkg_base: raw.pkg_base,
+            preferred_artifact_types: raw.preferred_artifact_types,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct BuildRaw {
+    #[serde(default, alias = "backend")]
+    system: Option<String>,
+    #[serde(default, alias = "outputs")]
+    targets: Vec<String>,
+    #[serde(default)]
+    outputs_named: Vec<BuildOutputRaw>,
+}
+
+#[derive(Deserialize)]
+struct BuildOutputRaw {
+    name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct InstallRaw {
+    #[serde(default)]
+    modes: Vec<String>,
+    #[serde(default)]
+    files: Vec<InstallFileRaw>,
+    #[serde(default)]
+    services: Vec<String>,
+    #[serde(default)]
+    capabilities: Vec<InstallCapabilityRaw>,
+}
+
+#[derive(Deserialize, Default)]
+struct InstallFileRaw {
+    #[serde(default)]
+    dest: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct InstallCapabilityRaw {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    caps: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct DependenciesRaw {
+    #[serde(default)]
+    build: Vec<String>,
+    #[serde(default)]
+    runtime: Vec<String>,
+    #[serde(default)]
+    components: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FeatureRaw {
+    name: String,
+    #[serde(default, alias = "label")]
+    description: String,
+    #[serde(default)]
+    default: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct AdapterRaw {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    framework: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    plugin_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    dest: Option<String>,
+    #[serde(default)]
+    detect: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct HealthCheckRaw {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    probe: Option<String>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    optional: Option<bool>,
+}
+
+impl From<ComponentManifestRaw> for ComponentManifest {
+    fn from(raw: ComponentManifestRaw) -> Self {
+        let component = ComponentMeta {
+            name: raw.component.name,
+            version: raw.component.version,
+            layer: raw.component.layer,
+            domain: raw.component.domain,
+        };
+
+        let source = raw.source.map(source_from_raw).unwrap_or_default();
+
+        let distribution_selectors = raw
+            .distribution
+            .map(|d| {
+                d.selectors
+                    .into_iter()
+                    .map(DistributionSelector::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let build = raw
+            .build
+            .map(|b| {
+                let mut outputs = b.targets;
+                outputs.extend(b.outputs_named.into_iter().map(|o| o.name));
+                BuildSpec {
+                    backend: b.system.unwrap_or_default(),
+                    outputs,
+                }
+            })
+            .unwrap_or_default();
+
+        let install = raw
+            .install
+            .map(|i| {
+                let files = i
+                    .files
+                    .into_iter()
+                    .map(|f| InstallFileSpec {
+                        source: f.source,
+                        dest: f.dest,
+                    })
+                    .filter(|f| f.install_path().is_some())
+                    .collect();
+                let capabilities = i
+                    .capabilities
+                    .into_iter()
+                    .map(|c| InstallCapabilitySpec {
+                        path: c.path,
+                        caps: c.caps,
+                    })
+                    .filter(|c| c.path.is_some() || !c.caps.is_empty())
+                    .collect();
+                InstallSpec {
+                    modes: i.modes,
+                    files,
+                    services: i.services,
+                    capabilities,
+                }
+            })
+            .unwrap_or_default();
+
+        let dependencies = DependenciesSpec {
+            build: raw.dependencies.build,
+            runtime: raw.dependencies.runtime,
+            components: raw.dependencies.components,
+        };
+
+        let features = raw
+            .features
+            .into_iter()
+            .map(|f| FeatureSpec {
+                name: f.name,
+                description: f.description,
+                default: f.default,
+            })
+            .collect();
+
+        let adapters: Vec<AdapterSpec> = raw
+            .adapters
+            .into_iter()
+            .map(|a| AdapterSpec {
+                name: a.name,
+                framework: a.framework,
+                kind: a.kind,
+                plugin_id: a.plugin_id,
+                source: a.source,
+                dest: a.dest,
+                detect: a.detect,
+            })
+            .collect();
+
+        let health_checks: Vec<HealthSpec> = raw
+            .health_checks
+            .into_iter()
+            .map(|h| HealthSpec {
+                name: h.name,
+                kind: h.kind.unwrap_or_default(),
+                command: h.command,
+                probe: h.probe,
+                unit: h.unit,
+                optional: h.optional,
+            })
+            .collect();
+
+        Self {
+            schema_version: raw.schema_version,
+            component,
+            source,
+            distribution_selectors,
+            build,
+            install,
+            env_requirements: raw.environment.into(),
+            dependencies,
+            features,
+            adapters,
+            health_checks,
+        }
+    }
+}
+
+fn source_from_raw(raw: SourceRaw) -> SourceSpec {
+    let kind = raw
+        .kind
+        .or(raw.upstream)
+        .unwrap_or_else(|| "workspace".to_string());
+    SourceSpec {
+        kind,
+        path: raw.path,
+        url: raw.url,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EnvRequirements
+// ---------------------------------------------------------------------------
+
+/// Host requirements normalized from capability and component TOML styles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "EnvRequirementsRaw")]
+pub struct EnvRequirements {
+    /// Accepted OS names.
+    pub os: Vec<String>,
+    /// Accepted CPU architectures.
+    pub arch: Vec<String>,
+    /// Accepted libc families.
+    pub libc: Vec<String>,
+    /// Minimum kernel version.
+    pub kernel_min: Option<String>,
+    /// Whether BTF debug data must be available.
+    pub btf: Option<bool>,
+    /// Whether the process/host must expose CAP_BPF.
+    pub cap_bpf: Option<bool>,
+    /// Accepted package bases.
+    pub pkg_base: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct EnvRequirementsRaw {
+    // Capability-style keys.
+    #[serde(default)]
+    os: Option<StringOrList>,
+    #[serde(default)]
+    arch: Option<StringOrList>,
+    #[serde(default)]
+    libc: Option<StringOrList>,
+    #[serde(default)]
+    kernel: Option<String>,
+    #[serde(default)]
+    pkg_base: Option<StringOrList>,
+
+    // Component-style keys.
+    #[serde(default)]
+    requires_os: Option<StringOrList>,
+    #[serde(default)]
+    requires_arch: Option<StringOrList>,
+    #[serde(default)]
+    requires_libc: Option<StringOrList>,
+    #[serde(default)]
+    requires_kernel: Option<String>,
+    #[serde(default)]
+    requires_pkg_base: Option<StringOrList>,
+
+    // Either prefix accepts the free-form map.
+    #[serde(default)]
+    requires_env: BTreeMap<String, toml::Value>,
+
+    #[serde(default)]
+    btf: Option<bool>,
+    #[serde(default)]
+    cap_bpf: Option<bool>,
+}
+
+impl From<EnvRequirementsRaw> for EnvRequirements {
+    fn from(r: EnvRequirementsRaw) -> Self {
+        let merge = |a: Option<StringOrList>, b: Option<StringOrList>| -> Vec<String> {
+            a.or(b).map(|v| v.into_vec()).unwrap_or_default()
+        };
+        let btf = r
+            .btf
+            .or_else(|| lookup_bool(&r.requires_env, "btf_available"))
+            .or_else(|| lookup_bool(&r.requires_env, "btf"));
+        let cap_bpf = r
+            .cap_bpf
+            .or_else(|| lookup_cap_bpf(r.requires_env.get("linux_capabilities")))
+            .or_else(|| lookup_cap_bpf(r.requires_env.get("capability")));
+        Self {
+            os: merge(r.os, r.requires_os),
+            arch: merge(r.arch, r.requires_arch),
+            libc: merge(r.libc, r.requires_libc),
+            kernel_min: r.kernel.or(r.requires_kernel),
+            btf,
+            cap_bpf,
+            pkg_base: merge(r.pkg_base, r.requires_pkg_base),
+        }
+    }
+}
+
+fn lookup_bool(map: &BTreeMap<String, toml::Value>, key: &str) -> Option<bool> {
+    match map.get(key)? {
+        toml::Value::Boolean(b) => Some(*b),
+        toml::Value::String(s) => match s.as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn lookup_cap_bpf(value: Option<&toml::Value>) -> Option<bool> {
+    let v = value?;
+    match v {
+        toml::Value::String(s) => Some(s.eq_ignore_ascii_case("CAP_BPF")),
+        toml::Value::Array(items) => Some(items.iter().any(|item| match item {
+            toml::Value::String(s) => s.eq_ignore_ascii_case("CAP_BPF"),
+            _ => false,
+        })),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum StringOrList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s],
+            Self::Many(v) => v,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match Helper::deserialize(deserializer)? {
+            Helper::One(s) => Self::One(s),
+            Helper::Many(v) => Self::Many(v),
+        })
+    }
+}
+
+fn current_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+fn default_capability_layer() -> String {
+    "tier1-capability".to_string()
+}
+fn default_runtime_layer() -> String {
+    "runtime".to_string()
+}
+fn default_stability() -> String {
+    "stable".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// File-loading entry points
+// ---------------------------------------------------------------------------
+
+impl CapabilityManifest {
+    /// Load a capability manifest from TOML on disk.
     pub fn from_file(path: &Path) -> Result<Self, ManifestError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ManifestError::Io(path.display().to_string(), e))?;
+        let content = read_to_string(path)?;
         toml::from_str(&content)
             .map_err(|e| ManifestError::Parse(path.display().to_string(), e.to_string()))
     }
 
-    /// Parse a manifest from a TOML string.
-    pub fn from_str(s: &str) -> Result<Self, ManifestError> {
+    /// Parse a capability manifest from TOML text.
+    pub fn from_toml_str(s: &str) -> Result<Self, ManifestError> {
         toml::from_str(s).map_err(|e| ManifestError::Parse("<string>".into(), e.to_string()))
     }
 }
 
+impl ComponentManifest {
+    /// Load a component manifest from TOML on disk.
+    pub fn from_file(path: &Path) -> Result<Self, ManifestError> {
+        let content = read_to_string(path)?;
+        toml::from_str(&content)
+            .map_err(|e| ManifestError::Parse(path.display().to_string(), e.to_string()))
+    }
+
+    /// Parse a component manifest from TOML text.
+    pub fn from_toml_str(s: &str) -> Result<Self, ManifestError> {
+        toml::from_str(s).map_err(|e| ManifestError::Parse("<string>".into(), e.to_string()))
+    }
+}
+
+fn read_to_string(path: &Path) -> Result<String, ManifestError> {
+    std::fs::read_to_string(path).map_err(|e| ManifestError::Io(path.display().to_string(), e))
+}
+
+/// Helper used by [`Catalog`] when scanning layer directories.
+pub(crate) fn manifest_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if !dir.exists() {
+        return files;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Errors raised while loading manifests.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    /// Manifest file could not be read.
     #[error("cannot read manifest '{0}': {1}")]
     Io(String, std::io::Error),
+    /// Manifest TOML could not be parsed.
     #[error("cannot parse manifest '{0}': {1}")]
     Parse(String, String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_manifest_parses_existing_fixture() {
+        let toml_text = r#"
+            [capability]
+            name = "agent-observability"
+            description = "Agent behavior tracing"
+
+            [implementation]
+            components = ["agentsight"]
+            features.agentsight = ["token_counting", "ebpf_tracing"]
+
+            [requires_env]
+            os = "linux"
+            arch = ["x86_64", "aarch64"]
+        "#;
+        let m = CapabilityManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(m.capability.name, "agent-observability");
+        assert_eq!(m.capability.layer, "tier1-capability");
+        assert_eq!(m.components, vec!["agentsight"]);
+        assert_eq!(m.env_requirements.os, vec!["linux"]);
+        assert_eq!(m.env_requirements.arch, vec!["x86_64", "aarch64"]);
+        assert!(m.default_features.contains(&"token_counting".to_string()));
+    }
+
+    #[test]
+    fn component_manifest_parses_existing_fixture() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+            layer = "runtime"
+            domain = "observability"
+
+            [build]
+            system = "cargo"
+            targets = ["agentsight"]
+
+            [install]
+            modes = ["system"]
+            services = ["agentsight.service"]
+
+            [[install.files]]
+            source = "target/release/agentsight"
+            dest = "{bindir}/agentsight"
+
+            [environment]
+            requires_os = "linux"
+            requires_arch = ["x86_64"]
+            requires_kernel = ">=5.8"
+
+            [environment.requires_env]
+            btf_available = "true"
+            capability = "CAP_BPF"
+
+            [dependencies]
+            build = ["rust>=1.91"]
+            runtime = ["kernel-headers"]
+
+            [[features]]
+            name = "token_counting"
+            label = "LLM Token metering"
+            default = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.component.name, "agentsight");
+        assert_eq!(m.component.domain.as_deref(), Some("observability"));
+        assert_eq!(m.build.backend, "cargo");
+        assert_eq!(m.install.modes, vec!["system"]);
+        assert_eq!(m.install.files.len(), 1);
+        assert_eq!(
+            m.install.files[0].source.as_deref(),
+            Some("target/release/agentsight")
+        );
+        assert_eq!(
+            m.install.files[0].dest.as_deref(),
+            Some("{bindir}/agentsight")
+        );
+        assert_eq!(m.env_requirements.kernel_min.as_deref(), Some(">=5.8"));
+        assert_eq!(m.env_requirements.btf, Some(true));
+        assert_eq!(m.env_requirements.cap_bpf, Some(true));
+        assert_eq!(m.features.len(), 1);
+        assert_eq!(m.features[0].description, "LLM Token metering");
+        assert_eq!(m.dependencies.build, vec!["rust>=1.91"]);
+        assert_eq!(m.dependencies.runtime, vec!["kernel-headers"]);
+        assert!(m.dependencies.components.is_empty());
+    }
+
+    #[test]
+    fn install_files_preserve_source_dest_and_fallbacks() {
+        let toml_text = r#"
+            [component]
+            name = "tool"
+            version = "1.0.0"
+
+            [install]
+            modes = ["user"]
+
+            [[install.files]]
+            source = "target/release/tool"
+            dest = "{bindir}/tool"
+
+            [[install.files]]
+            source = "{datadir}/source-only"
+
+            [[install.files]]
+            dest = "{etcdir}/dest-only"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+
+        assert_eq!(m.install.files.len(), 3);
+        assert_eq!(
+            m.install.files[0].source.as_deref(),
+            Some("target/release/tool")
+        );
+        assert_eq!(m.install.files[0].dest.as_deref(), Some("{bindir}/tool"));
+        assert_eq!(m.install.files[0].install_path(), Some("{bindir}/tool"));
+        assert_eq!(
+            m.install.files[1].source.as_deref(),
+            Some("{datadir}/source-only")
+        );
+        assert_eq!(m.install.files[1].dest, None);
+        assert_eq!(
+            m.install.files[1].install_path(),
+            Some("{datadir}/source-only")
+        );
+        assert_eq!(m.install.files[2].source, None);
+        assert_eq!(
+            m.install.files[2].dest.as_deref(),
+            Some("{etcdir}/dest-only")
+        );
+        assert_eq!(
+            m.install.files[2].install_path(),
+            Some("{etcdir}/dest-only")
+        );
+    }
+
+    #[test]
+    fn install_capabilities_preserve_path_and_caps() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [install]
+            modes = ["system"]
+
+            [[install.capabilities]]
+            path = "{bindir}/agentsight"
+            caps = ["cap_bpf", "cap_perfmon"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+
+        assert_eq!(m.install.capabilities.len(), 1);
+        assert_eq!(
+            m.install.capabilities[0].path.as_deref(),
+            Some("{bindir}/agentsight")
+        );
+        assert_eq!(
+            m.install.capabilities[0].caps,
+            vec!["cap_bpf", "cap_perfmon"]
+        );
+    }
+
+    #[test]
+    fn dependencies_preserve_build_runtime_components_kind() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [dependencies]
+            build = ["rust>=1.91", "clang>=14"]
+            runtime = ["kernel-headers"]
+            components = ["sec-core"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.dependencies.build, vec!["rust>=1.91", "clang>=14"]);
+        assert_eq!(m.dependencies.runtime, vec!["kernel-headers"]);
+        assert_eq!(m.dependencies.components, vec!["sec-core"]);
+    }
+
+    #[test]
+    fn adapters_preserve_framework_kind_plugin_source_dest_detect() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            kind = "third-party"
+            plugin_id = "agentsight-openclaw"
+            source = "adapters/agentsight/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.detect]
+            config_path = "~/.openclaw/config.toml"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters.len(), 1);
+        let a = &m.adapters[0];
+        assert_eq!(a.framework.as_deref(), Some("openclaw"));
+        assert_eq!(a.kind.as_deref(), Some("third-party"));
+        assert_eq!(a.plugin_id.as_deref(), Some("agentsight-openclaw"));
+        assert_eq!(a.source.as_deref(), Some("adapters/agentsight/openclaw"));
+        assert_eq!(
+            a.dest.as_deref(),
+            Some("{datadir}/adapters/{component}/openclaw/")
+        );
+        assert_eq!(
+            a.detect.get("config_path").and_then(|v| v.as_str()),
+            Some("~/.openclaw/config.toml")
+        );
+    }
+
+    #[test]
+    fn multiple_health_checks_are_preserved_in_order() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [[health_checks]]
+            name = "binary"
+            kind = "command"
+            command = "{bindir}/agentsight --help"
+
+            [[health_checks]]
+            name = "service"
+            kind = "systemd"
+            unit = "agentsight.service"
+            optional = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.health_checks.len(), 2);
+        assert_eq!(m.health_checks[0].name.as_deref(), Some("binary"));
+        assert_eq!(m.health_checks[0].kind, "command");
+        assert_eq!(
+            m.health_checks[0].command.as_deref(),
+            Some("{bindir}/agentsight --help")
+        );
+        assert_eq!(m.health_checks[1].name.as_deref(), Some("service"));
+        assert_eq!(m.health_checks[1].kind, "systemd");
+        assert_eq!(
+            m.health_checks[1].unit.as_deref(),
+            Some("agentsight.service")
+        );
+        assert_eq!(m.health_checks[1].optional, Some(true));
+    }
+
+    #[test]
+    fn component_domain_distinguishes_unset_from_explicit_empty() {
+        let unset = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "unset-domain"
+            version = "1.0.0"
+        "#,
+        )
+        .expect("parse unset");
+        assert_eq!(unset.component.domain, None);
+
+        let explicit_empty = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "empty-domain"
+            version = "1.0.0"
+            domain = ""
+        "#,
+        )
+        .expect("parse explicit empty");
+        assert_eq!(explicit_empty.component.domain.as_deref(), Some(""));
+    }
 }

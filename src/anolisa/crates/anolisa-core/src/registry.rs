@@ -1,63 +1,53 @@
-//! Component registry: discovers and loads manifests.
+//! Registry: thin wrapper over [`Catalog`].
+//!
+//! Registry is the historical entry point used by callers that just want
+//! lookup-by-name semantics over the bundled catalog. It now delegates fully
+//! to `Catalog` so layering and schema parsing live in one place.
 
-use crate::manifest::{Manifest, ManifestError};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use crate::catalog::{Catalog, CatalogError, CatalogLayers};
+use crate::manifest::{CapabilityManifest, ComponentManifest};
+use std::path::PathBuf;
 
-/// Registry of known components loaded from manifest files.
-#[derive(Debug, Default)]
+/// Lookup facade over a loaded [`Catalog`].
+#[derive(Debug, Clone)]
 pub struct Registry {
-    pub manifests: HashMap<String, Manifest>,
+    catalog: Catalog,
 }
 
 impl Registry {
-    /// Load all manifests from a directory (recursively).
-    pub fn load_from_dir(dir: &Path) -> Result<Self, ManifestError> {
-        let mut manifests = HashMap::new();
-
-        if !dir.exists() {
-            return Ok(Self { manifests });
-        }
-
-        for entry in walkdir(dir) {
-            if entry.extension().is_some_and(|e| e == "toml") {
-                match Manifest::from_file(&entry) {
-                    Ok(m) => {
-                        manifests.insert(m.component.name.clone(), m);
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: skipping {}: {e}", entry.display());
-                    }
-                }
-            }
-        }
-
-        Ok(Self { manifests })
+    /// Construct a registry backed by the supplied bundled-manifests root.
+    pub fn from_bundled(bundled: PathBuf) -> Result<Self, CatalogError> {
+        let catalog = Catalog::load(CatalogLayers::bundled_only(bundled))?;
+        Ok(Self { catalog })
     }
 
-    /// Get a manifest by component name.
-    pub fn get(&self, name: &str) -> Option<&Manifest> {
-        self.manifests.get(name)
+    /// Construct a registry from an already-built [`Catalog`].
+    pub fn from_catalog(catalog: Catalog) -> Self {
+        Self { catalog }
     }
 
-    /// List all registered component names.
-    pub fn names(&self) -> Vec<&str> {
-        self.manifests.keys().map(|s| s.as_str()).collect()
+    /// Borrow the underlying catalog for callers that need full layer data.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
-}
 
-/// Simple recursive file listing (avoids external walkdir dep for skeleton).
-fn walkdir(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(walkdir(&path));
-            } else {
-                files.push(path);
-            }
-        }
+    /// Lookup a capability by name.
+    pub fn capability(&self, name: &str) -> Option<&CapabilityManifest> {
+        self.catalog.capability(name)
     }
-    files
+
+    /// Lookup a component by name.
+    pub fn component(&self, name: &str) -> Option<&ComponentManifest> {
+        self.catalog.component(name)
+    }
+
+    /// List all capabilities in catalog order.
+    pub fn list_capabilities(&self) -> Vec<&CapabilityManifest> {
+        self.catalog.list_capabilities()
+    }
+
+    /// List all components in catalog order.
+    pub fn list_components(&self) -> Vec<&ComponentManifest> {
+        self.catalog.list_components()
+    }
 }

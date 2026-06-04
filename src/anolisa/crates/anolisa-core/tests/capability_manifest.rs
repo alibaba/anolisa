@@ -31,12 +31,14 @@ fn all_capability_manifests_parse() {
         count += 1;
     }
 
-    assert_eq!(count, 9, "expected 9 capability manifests, got {count}");
+    assert_eq!(count, 10, "expected 10 capability manifests, got {count}");
 
     // Spot-check a few canonical capabilities resolve.
     for name in [
         "token-optimization",
         "agent-memory",
+        "cosh",
+        "agent-gateway",
         "sandbox",
         "os-security",
     ] {
