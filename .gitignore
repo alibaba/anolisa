@@ -42,3 +42,4 @@ rpmbuild/
 
 .qoder/
 .claude/
+.agents/

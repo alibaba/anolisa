@@ -1,0 +1,136 @@
+# Template: runtime component manifest v2.
+# Copy to src/anolisa/manifests/runtime/<component>.toml.
+
+manifest_version = 2
+anolisa_min_version = "0.1.0"
+
+[component]
+name = "agentsight"
+version = "0.5.0"
+layer = "runtime"
+domain = "observability"
+description = "Agent observability"
+stability = "experimental"
+
+[source]
+path = "src/agentsight"
+upstream = "workspace"
+
+[distribution]
+default_channel = "stable"
+allowed_channels = ["stable", "beta", "nightly"]
+index_ref = "builtin"       # builtin | remote | local
+source_fallback = false     # source build only when user passes --from-source
+checksum = "sha256"
+signature = "cosign"
+
+[[distribution.selectors]]
+install_mode = "system"
+os = ["alinux", "anolis", "rhel", "centos"]
+pkg_base = "rpm"
+preferred_artifact_types = ["rpm", "tar_gz"]
+
+[[distribution.selectors]]
+install_mode = "system"
+os = ["ubuntu", "debian"]
+pkg_base = "deb"
+preferred_artifact_types = ["deb", "tar_gz"]
+
+[[distribution.selectors]]
+install_mode = "user"
+os = ["linux"]
+preferred_artifact_types = ["tar_gz"]
+
+[build]
+system = "make"              # cargo | make | npm | static | legacy-script
+targets = ["agentsight"]
+profile = "release"
+pre_build = []
+
+[build.toolchain]
+rust = ">=1.80.0"
+clang = ">=14"
+libbpf = ">=0.8"
+
+[[build.outputs]]
+name = "agentsight"
+path = "target/release/agentsight"
+kind = "binary"
+
+[install]
+modes = ["system"]
+services = ["agentsight.service"]
+
+[[install.files]]
+source = "target/release/agentsight"
+dest = "{bindir}/agentsight"
+mode = "0755"
+owner = "anolisa"
+
+[[install.capabilities]]
+path = "{bindir}/agentsight"
+caps = ["cap_bpf", "cap_perfmon"]
+optional = true
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+requires_kernel = ">=5.8"
+incompatible_env = []
+
+[environment.requires_env]
+btf_available = "true"
+linux_capabilities = ["CAP_BPF"]
+
+[dependencies]
+build = ["rust>=1.80", "clang>=14", "libbpf-dev"]
+runtime = ["kernel-headers"]
+components = []
+
+[[features]]
+name = "token_counting"
+label = "LLM Token metering"
+default = true
+
+[[features]]
+name = "server"
+label = "HTTP observability dashboard"
+default = true
+
+[features.requires_env]
+port_available = "9090"
+
+[[features]]
+name = "ebpf_tracing"
+label = "eBPF-based execution tracing"
+default = true
+
+[features.requires_env]
+linux_capabilities = ["CAP_BPF"]
+btf_available = "true"
+
+[[adapters]]
+framework = "openclaw"
+kind = "third-party" # first-party | third-party | protocol
+plugin_id = "agentsight-openclaw"
+source = "adapters/agentsight/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.detect]
+config_path = "~/.openclaw/config.toml"
+
+[[health_checks]]
+name = "binary"
+kind = "command"
+command = "{bindir}/agentsight --help"
+
+[[health_checks]]
+name = "service"
+kind = "systemd"
+unit = "agentsight.service"
+optional = true
+
+[[log_sources]]
+name = "agentsight"
+kind = "component-reported"
+default_level = "info"

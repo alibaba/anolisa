@@ -1,0 +1,60 @@
+# Template: installed state.
+# Runtime path:
+#   user-mode:   $XDG_STATE_HOME/anolisa/installed.toml
+#   system-mode: /var/lib/anolisa/installed.toml
+
+schema_version = 1
+updated_at = "2026-06-01T10:00:00Z"
+install_mode = "user" # user | system
+prefix = "~/.local"
+anolisa_version = "0.1.0"
+
+[[objects]]
+kind = "capability" # capability | component | adapter | osbase
+name = "agent-observability"
+version = "0.1.0"
+status = "installed" # installed | partial | disabled | failed | adopted
+manifest_digest = "sha256:replace-with-manifest-digest"
+distribution_source = "builtin"
+installed_at = "2026-06-01T10:00:00Z"
+last_operation_id = "op-20260601-001"
+managed = true
+adopted = false
+subscription_scope = "none" # none | registered | entitled | reporting
+
+[[objects.files]]
+path = "~/.local/bin/agentsight"
+owner = "anolisa" # anolisa | external
+sha256 = "replace-with-sha256"
+
+[[objects.external_modified_files]]
+path = "~/.openclaw/config.toml"
+owner = "external"
+backup_id = "backup-op-20260601-001-openclaw-config"
+sha256_before = "replace-with-sha256"
+sha256_after = "replace-with-sha256"
+
+[[objects.services]]
+name = "agentsight.service"
+manager = "systemd"
+restartable = true
+enabled = true
+
+[[objects.health]]
+name = "binary"
+status = "ok"
+checked_at = "2026-06-01T10:00:03Z"
+
+[[backups]]
+id = "backup-op-20260601-001-openclaw-config"
+operation_id = "op-20260601-001"
+original_path = "~/.openclaw/config.toml"
+backup_path = "~/.local/state/anolisa/backups/op-20260601-001/openclaw/config.toml"
+restore_strategy = "replace-file"
+
+[[operations]]
+id = "op-20260601-001"
+command = "enable agent-observability"
+status = "ok"
+started_at = "2026-06-01T10:00:00Z"
+finished_at = "2026-06-01T10:00:03Z"
