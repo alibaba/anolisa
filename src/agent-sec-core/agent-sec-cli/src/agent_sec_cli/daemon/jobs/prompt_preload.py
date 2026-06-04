@@ -3,12 +3,30 @@
 import asyncio
 import contextlib
 import os
+import sys
 from typing import Any
 
 from agent_sec_cli.daemon.jobs.base import BackgroundJob, JobStatus, utc_now
 
 PROMPT_PRELOAD_ENV = "AGENT_SEC_DAEMON_PROMPT_PRELOAD"
+PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_ENV = (
+    "AGENT_SEC_DAEMON_PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS"
+)
 PROMPT_PRELOAD_JOB_NAME = "prompt-model-preload"
+PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS = 600.0
+PROMPT_PRELOAD_CHILD_TERMINATE_TIMEOUT_SECONDS = 5.0
+_PROMPT_PRELOAD_CHILD_CODE = """
+import sys
+
+from agent_sec_cli.daemon.jobs.prompt_preload import _download_prompt_model_sync
+
+
+try:
+    _download_prompt_model_sync(sys.argv[1])
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+""".strip()
 
 
 class PromptModelPreloadJob(BackgroundJob):
@@ -74,6 +92,8 @@ class PromptModelPreloadJob(BackgroundJob):
         )
 
         try:
+            await _run_preload_child_process(self._mode)
+            _update_prompt_state(self._prompt_state, status="loading")
             await asyncio.to_thread(
                 _preload_prompt_model_sync,
                 self._prompt_state,
@@ -111,6 +131,89 @@ def prompt_preload_enabled() -> bool:
     """Return whether daemon startup should trigger prompt model preload."""
     raw_value = os.environ.get(PROMPT_PRELOAD_ENV, "1").strip().lower()
     return raw_value not in {"0", "false", "no", "off"}
+
+
+async def _run_preload_child_process(mode: str) -> None:
+    """Run preload once in a child process so startup downloads are killable."""
+    download_timeout_seconds = _prompt_preload_download_timeout_seconds()
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        _PROMPT_PRELOAD_CHILD_CODE,
+        mode,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        _stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=download_timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        await _terminate_child_process(process)
+        raise RuntimeError(
+            "prompt preload child timed out after " f"{download_timeout_seconds:g}s"
+        ) from exc
+    except asyncio.CancelledError:
+        await _terminate_child_process(process)
+        raise
+
+    if process.returncode == 0:
+        return
+
+    stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+    if not stderr_text:
+        stderr_text = (
+            f"prompt preload child process exited with code {process.returncode}"
+        )
+    raise RuntimeError(stderr_text)
+
+
+def _prompt_preload_download_timeout_seconds() -> float:
+    raw_value = os.environ.get(PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_ENV)
+    if raw_value is None:
+        return PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS
+
+    try:
+        timeout_seconds = float(raw_value)
+    except ValueError:
+        return PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS
+
+    if timeout_seconds <= 0:
+        return PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS
+    return timeout_seconds
+
+
+async def _terminate_child_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+
+    with contextlib.suppress(ProcessLookupError):
+        process.terminate()
+
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=PROMPT_PRELOAD_CHILD_TERMINATE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+
+
+def _download_prompt_model_sync(mode: str) -> None:
+    """Download prompt model files without loading them into daemon memory."""
+    from agent_sec_cli.prompt_scanner.config import (  # noqa: PLC0415 - lazy import: daemon preload only
+        ScanMode,
+    )
+    from agent_sec_cli.prompt_scanner.scanner import (  # noqa: PLC0415 - lazy import: daemon preload only
+        PromptScanner,
+    )
+
+    scanner = PromptScanner(mode=ScanMode(mode))
+    _warmup_silently(scanner)
 
 
 def _preload_prompt_model_sync(

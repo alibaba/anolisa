@@ -54,10 +54,8 @@ test-python: ## Run Python unit and integration tests
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
 .PHONY: test-prompt-scanner-e2e
-test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests (downloads ML model on first run)
-	@echo "🔥 Warming up prompt-scanner (downloading ML model if not cached)..."
-	uv run --project agent-sec-cli agent-sec-cli scan-prompt warmup
-	@echo "🧪 Running prompt-scanner e2e tests..."
+test-prompt-scanner-e2e: ## Run daemon-backed prompt-scanner e2e tests
+	@echo "🧪 Running daemon-backed prompt-scanner e2e tests..."
 	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner/e2e_test.py
 
 .PHONY: test-e2e-rpm

@@ -20,6 +20,8 @@ DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
 PROMPT_PRELOAD_ENV = "AGENT_SEC_DAEMON_PROMPT_PRELOAD"
 READY_TIMEOUT_ENV = "AGENT_SEC_PROMPT_E2E_READY_TIMEOUT_SECONDS"
 DEFAULT_READY_TIMEOUT_SECONDS = 600
+PROMPT_READY_POLL_INTERVAL_SECONDS = 5.0
+READY_PROGRESS_INTERVAL_SECONDS = 10.0
 
 
 @dataclass
@@ -135,6 +137,11 @@ def _start_daemon(
         stdout_file=stdout_file,
         stderr_file=stderr_file,
     )
+    _print_progress(
+        "started daemon "
+        f"pid={process.pid} socket={socket_path} "
+        f"stdout={stdout_path} stderr={stderr_path}"
+    )
     _wait_for_health(socket_path, daemon)
     return daemon
 
@@ -170,6 +177,7 @@ def _stop_daemon(
 def _wait_for_health(socket_path: Path, daemon: DaemonProcess) -> None:
     deadline = time.monotonic() + 10
     last_error: Exception | None = None
+    _print_progress("waiting for daemon.health")
 
     while time.monotonic() < deadline:
         _assert_process_running(daemon)
@@ -183,6 +191,7 @@ def _wait_for_health(socket_path: Path, daemon: DaemonProcess) -> None:
                 last_error = exc
             else:
                 if response.get("ok") is True:
+                    _print_progress("daemon.health is ready")
                     return
         time.sleep(0.05)
 
@@ -199,6 +208,13 @@ def _wait_for_prompt_scan_ready(
     deadline = time.monotonic() + timeout_seconds
     last_state: dict[str, Any] | None = None
     last_error: Exception | None = None
+    started_at = time.monotonic()
+    next_progress_at = 0.0
+    last_progress_key: tuple[Any, ...] | None = None
+
+    _print_progress(
+        "waiting for prompt scanner model ready " f"timeout_seconds={timeout_seconds}"
+    )
 
     while time.monotonic() < deadline:
         _assert_process_running(daemon)
@@ -212,27 +228,63 @@ def _wait_for_prompt_scan_ready(
             )
         except OSError as exc:
             last_error = exc
-            time.sleep(0.5)
+            now = time.monotonic()
+            if now >= next_progress_at:
+                elapsed = now - started_at
+                _print_progress(
+                    "waiting for prompt scanner ready "
+                    f"elapsed={elapsed:.1f}s last_error={exc!r}"
+                )
+                next_progress_at = now + READY_PROGRESS_INTERVAL_SECONDS
+            time.sleep(PROMPT_READY_POLL_INTERVAL_SECONDS)
             continue
 
         if response.get("ok") is not True:
             error = response.get("error") or {}
             if error.get("code") == "busy":
                 last_state = {"status": "busy"}
-                time.sleep(0.5)
+                now = time.monotonic()
+                if now >= next_progress_at:
+                    elapsed = now - started_at
+                    _print_progress(
+                        "waiting for prompt scanner ready "
+                        f"elapsed={elapsed:.1f}s status=busy"
+                    )
+                    next_progress_at = now + READY_PROGRESS_INTERVAL_SECONDS
+                time.sleep(PROMPT_READY_POLL_INTERVAL_SECONDS)
                 continue
             raise AssertionError(f"daemon health request failed: {response!r}")
 
         prompt_state = response["data"]["prompt_scan"]
         last_state = prompt_state
+        now = time.monotonic()
+        progress_key = (
+            prompt_state.get("status"),
+            prompt_state.get("loaded"),
+            prompt_state.get("model"),
+            prompt_state.get("last_error"),
+        )
+        if progress_key != last_progress_key or now >= next_progress_at:
+            elapsed = now - started_at
+            _print_progress(
+                "waiting for prompt scanner ready "
+                f"elapsed={elapsed:.1f}s status={prompt_state.get('status')} "
+                f"loaded={prompt_state.get('loaded')} "
+                f"model={prompt_state.get('model')} "
+                f"last_error={prompt_state.get('last_error')}"
+            )
+            last_progress_key = progress_key
+            next_progress_at = now + READY_PROGRESS_INTERVAL_SECONDS
 
         if prompt_state.get("status") == "ready" and prompt_state.get("loaded") is True:
+            elapsed = time.monotonic() - started_at
+            _print_progress(f"prompt scanner model is ready elapsed={elapsed:.1f}s")
             return
         if prompt_state.get("status") == "degraded":
             raise AssertionError(
                 "daemon prompt scanner preload failed; " f"state={prompt_state!r}"
             )
-        time.sleep(0.5)
+        time.sleep(PROMPT_READY_POLL_INTERVAL_SECONDS)
 
     raise AssertionError(
         "daemon prompt scanner did not become ready within "
@@ -258,6 +310,10 @@ def _read_log_file(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
+
+
+def _print_progress(message: str) -> None:
+    print(f"[prompt-scanner-e2e] {message}", flush=True)
 
 
 def _call_daemon(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 """Tests for daemon background job scheduling."""
 
 import asyncio
+import contextlib
 import sys
 
 import pytest
@@ -12,7 +13,9 @@ from agent_sec_cli.daemon.jobs import (
 from agent_sec_cli.daemon.jobs.base import next_cycle_start
 from agent_sec_cli.daemon.jobs.prompt_preload import (
     PromptModelPreloadJob,
+    _download_prompt_model_sync,
     _preload_prompt_model_sync,
+    _run_preload_child_process,
 )
 from agent_sec_cli.daemon.jobs.registry import register_default_jobs
 from agent_sec_cli.daemon.runtime import PromptRuntimeState
@@ -99,14 +102,23 @@ def test_register_default_jobs_respects_prompt_preload_env(monkeypatch):
 
 def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):
     prompt_state = PromptRuntimeState()
+    child_calls: list[str] = []
     calls: list[tuple[str, str]] = []
+
+    async def fake_child_preload(mode: str) -> None:
+        child_calls.append(mode)
+        assert prompt_state.status == "downloading"
 
     def fake_preload(state, mode: str, probe_text: str) -> None:
         calls.append((mode, probe_text))
-        assert state.status == "downloading"
+        assert state.status == "loading"
         state.model = "fake-model"
         state.status = "loading"
 
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
         fake_preload,
@@ -121,6 +133,7 @@ def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):
 
     status = asyncio.run(scenario())
 
+    assert child_calls == ["strict"]
     assert calls == [("strict", "probe")]
     assert status["state"] == "completed"
     assert status["last_error"] is None
@@ -135,9 +148,16 @@ def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):
 def test_prompt_model_preload_job_marks_prompt_degraded_on_failure(monkeypatch):
     prompt_state = PromptRuntimeState()
 
+    async def fake_child_preload(_mode: str) -> None:
+        pass
+
     def fake_preload(_state, _mode: str, _probe_text: str) -> None:
         raise RuntimeError("forced preload failure")
 
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
         fake_preload,
@@ -158,6 +178,211 @@ def test_prompt_model_preload_job_marks_prompt_degraded_on_failure(monkeypatch):
     assert prompt_state.loaded is False
     assert prompt_state.last_error == "forced preload failure"
     assert prompt_state.last_finished_at is not None
+
+
+def test_prompt_model_preload_job_marks_prompt_degraded_on_child_failure(monkeypatch):
+    prompt_state = PromptRuntimeState()
+
+    async def fake_child_preload(_mode: str) -> None:
+        raise RuntimeError("forced child failure")
+
+    def fake_preload(_state, _mode: str, _probe_text: str) -> None:
+        raise AssertionError("main preload should not run after child failure")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
+        fake_preload,
+    )
+
+    async def scenario():
+        job = PromptModelPreloadJob(prompt_state)
+        await job.start()
+        status = await _wait_for_job_state(job, {"completed", "error"})
+        await job.stop()
+        return status
+
+    status = asyncio.run(scenario())
+
+    assert status["state"] == "error"
+    assert status["last_error"] == "forced child failure"
+    assert prompt_state.status == "degraded"
+    assert prompt_state.loaded is False
+    assert prompt_state.last_error == "forced child failure"
+    assert prompt_state.last_finished_at is not None
+
+
+def test_prompt_model_preload_job_cancel_during_child_preload(monkeypatch):
+    prompt_state = PromptRuntimeState()
+    child_started = asyncio.Event()
+    child_cancelled = False
+
+    async def fake_child_preload(_mode: str) -> None:
+        nonlocal child_cancelled
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled = True
+            raise
+
+    def fake_preload(_state, _mode: str, _probe_text: str) -> None:
+        raise AssertionError("main preload should not run after cancellation")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
+        fake_preload,
+    )
+
+    async def scenario():
+        job = PromptModelPreloadJob(prompt_state)
+        await job.start()
+        await asyncio.wait_for(child_started.wait(), timeout=0.5)
+        await job.stop()
+        return job.status().to_dict()
+
+    status = asyncio.run(scenario())
+
+    assert child_cancelled is True
+    assert status["state"] == "stopped"
+    assert prompt_state.status == "downloading"
+    assert prompt_state.loaded is False
+
+
+def test_prompt_preload_child_process_is_terminated_on_cancel(monkeypatch):
+    process_started = asyncio.Event()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        async def communicate(self):
+            process_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    fake_process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return fake_process
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(_run_preload_child_process("strict"))
+        await asyncio.wait_for(process_started.wait(), timeout=0.5)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert fake_process.terminated is True
+    assert fake_process.killed is False
+
+
+def test_prompt_preload_child_process_is_terminated_on_timeout(monkeypatch):
+    process_started = asyncio.Event()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        async def communicate(self):
+            process_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    fake_process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return fake_process
+
+    monkeypatch.setenv(
+        "AGENT_SEC_DAEMON_PROMPT_PRELOAD_DOWNLOAD_TIMEOUT_SECONDS",
+        "0.01",
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="timed out after 0.01s"):
+            await _run_preload_child_process("strict")
+
+    asyncio.run(scenario())
+
+    assert process_started.is_set()
+    assert fake_process.terminated is True
+    assert fake_process.killed is False
+
+
+def test_prompt_model_download_sync_suppresses_warmup_output(monkeypatch, capsys):
+    calls = []
+
+    class FakePromptScanner:
+        def __init__(self, mode):
+            calls.append(("init", mode.value))
+
+        def warmup(self):
+            print("download progress on stdout")
+            print("download progress on stderr", file=sys.stderr)
+            calls.append(("warmup",))
+
+        def scan(self, text, source=None):
+            raise AssertionError("download-only child preload should not scan")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.prompt_scanner.scanner.PromptScanner",
+        FakePromptScanner,
+    )
+
+    _download_prompt_model_sync("strict")
+    captured = capsys.readouterr()
+
+    assert calls == [
+        ("init", "strict"),
+        ("warmup",),
+    ]
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_prompt_model_preload_sync_suppresses_warmup_output(monkeypatch, capsys):

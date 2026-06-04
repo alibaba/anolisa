@@ -243,8 +243,7 @@ def _daemon_disabled() -> bool:
 
 def _daemon_unavailable_message(detail: str) -> str:
     return (
-        "Error: agent-sec daemon is unavailable for scan-prompt. "
-        f"Detail: {detail}"
+        "Error: agent-sec daemon is unavailable for scan-prompt. " f"Detail: {detail}"
     )
 
 

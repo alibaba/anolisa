@@ -157,9 +157,7 @@ class TestCoshHookSubprocess:
         output = self._run_hook({"session_id": "abc"})
         assert output["decision"] == "allow"
 
-    def test_injects_trace_context_into_scan_prompt_command(
-        self, monkeypatch, capsys
-    ):
+    def test_injects_trace_context_into_scan_prompt_command(self, monkeypatch, capsys):
         captured = {}
 
         def fake_run(args, **kwargs):
