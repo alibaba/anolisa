@@ -23,10 +23,10 @@ pub enum RuntimeCommands {
         /// Component name or "all"
         component: String,
         /// Install from source (build locally)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from_rpm")]
         from_source: bool,
         /// Install from RPM/DEB repository
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from_source")]
         from_rpm: bool,
         /// Specific component version to install (e.g. 0.3.2).
         /// Renamed from --version to avoid colliding with the global -V/--version flag.
@@ -50,10 +50,10 @@ pub enum RuntimeCommands {
         /// Component name or "all"
         component: String,
         /// Build in release mode (default)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "debug")]
         release: bool,
         /// Build in debug mode
-        #[arg(long)]
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
         /// Build only, do not install
         #[arg(long)]
@@ -95,5 +95,38 @@ pub fn handle(args: RuntimeArgs, _ctx: &CliContext) -> Result<(), CliError> {
             };
             Err(CliError::not_implemented(cmd))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeArgs;
+    use clap::Parser;
+
+    #[test]
+    fn build_profile_flags_are_mutually_exclusive() {
+        let result =
+            RuntimeArgs::try_parse_from(["runtime", "build", "agentsight", "--release", "--debug"]);
+        let err = match result {
+            Ok(_) => panic!("release and debug cannot be used together"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn install_source_flags_are_mutually_exclusive() {
+        let result = RuntimeArgs::try_parse_from([
+            "runtime",
+            "install",
+            "agentsight",
+            "--from-source",
+            "--from-rpm",
+        ]);
+        let err = match result {
+            Ok(_) => panic!("source and rpm install modes cannot be used together"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

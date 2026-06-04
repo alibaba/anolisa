@@ -444,6 +444,7 @@ pub fn execute_enable(
             .map(|(idx, dest)| ResolvedInstallFile {
                 source: c.files.get(idx).and_then(|file| file.source.clone()),
                 dest: PathBuf::from(dest),
+                mode: c.files.get(idx).and_then(|file| file.mode.clone()),
             })
             .collect();
         let outcome =
@@ -1442,6 +1443,7 @@ mod tests {
             files: vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/agentsight".to_string()),
+                mode: None,
             }],
             resolved_files,
             capabilities: Vec::new(),

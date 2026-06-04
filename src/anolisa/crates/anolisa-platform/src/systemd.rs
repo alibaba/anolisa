@@ -14,14 +14,15 @@ pub enum SystemdError {
 }
 
 /// Query the status of a systemd unit.
-pub fn unit_status(_unit: &str) -> Result<UnitStatus, SystemdError> {
+pub fn unit_status(unit: &str) -> Result<UnitStatus, SystemdError> {
+    if unit.trim().is_empty() {
+        return Err(SystemdError::NotFound("<empty>".to_string()));
+    }
     // TODO(owner: platform-runtime, when: status/restart need live unit state):
     // invoke `systemctl show` and parse active/enabled/description fields.
-    Ok(UnitStatus {
-        active: false,
-        enabled: false,
-        description: String::new(),
-    })
+    Err(SystemdError::CommandFailed(
+        "systemd unit status query is not implemented".to_string(),
+    ))
 }
 
 /// Snapshot of systemd unit state used by status/restart flows.
@@ -36,11 +37,37 @@ pub struct UnitStatus {
 }
 
 /// Enable and start a systemd unit.
-pub fn enable_unit(_unit: &str) -> Result<(), SystemdError> {
-    todo!("owner: platform-runtime; when service execute path ships; systemctl enable --now")
+pub fn enable_unit(unit: &str) -> Result<(), SystemdError> {
+    if unit.trim().is_empty() {
+        return Err(SystemdError::NotFound("<empty>".to_string()));
+    }
+    // TODO(owner: platform-runtime, when: service execute path ships):
+    // invoke `systemctl enable --now <unit>` and surface command status.
+    Err(SystemdError::CommandFailed(
+        "systemd unit enable is not implemented".to_string(),
+    ))
 }
 
 /// Stop and disable a systemd unit.
-pub fn disable_unit(_unit: &str) -> Result<(), SystemdError> {
-    todo!("owner: platform-runtime; when service execute path ships; systemctl disable --now")
+pub fn disable_unit(unit: &str) -> Result<(), SystemdError> {
+    if unit.trim().is_empty() {
+        return Err(SystemdError::NotFound("<empty>".to_string()));
+    }
+    // TODO(owner: platform-runtime, when: service execute path ships):
+    // invoke `systemctl disable --now <unit>` and surface command status.
+    Err(SystemdError::CommandFailed(
+        "systemd unit disable is not implemented".to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unimplemented_unit_operations_return_errors_instead_of_panicking() {
+        assert!(unit_status("agentsight.service").is_err());
+        assert!(enable_unit("agentsight.service").is_err());
+        assert!(disable_unit("agentsight.service").is_err());
+    }
 }

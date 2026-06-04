@@ -80,7 +80,7 @@ incompatible_env = []
 
 [environment.requires_env]
 btf_available = "true"
-linux_capabilities = ["CAP_BPF"]
+capability = "CAP_BPF"
 
 [dependencies]
 build = ["rust>=1.80", "clang>=14", "libbpf-dev"]
@@ -98,7 +98,7 @@ label = "HTTP observability dashboard"
 default = true
 
 [features.requires_env]
-port_available = "9090"
+port = "9090"
 
 [[features]]
 name = "ebpf_tracing"
@@ -106,7 +106,7 @@ label = "eBPF-based execution tracing"
 default = true
 
 [features.requires_env]
-linux_capabilities = ["CAP_BPF"]
+capability = "CAP_BPF"
 btf_available = "true"
 
 [[adapters]]

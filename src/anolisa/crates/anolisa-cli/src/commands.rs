@@ -15,7 +15,7 @@ pub mod runtime;
 pub mod self_;
 pub mod subscription;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -109,6 +109,7 @@ pub enum Commands {
 /// surfaces. Handlers must not re-parse global flags from their own
 /// `args` struct.
 pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
+    validate_global_args(ctx)?;
     match cli.command {
         // Tier 1
         Commands::List(args) => tier1::list::handle(args, ctx),
@@ -128,5 +129,63 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
         Commands::SelfCmd(args) => self_::handle(args, ctx),
         Commands::Runtime(args) => runtime::handle(args, ctx),
         Commands::Osbase(args) => osbase::handle(args, ctx),
+    }
+}
+
+fn validate_global_args(ctx: &CliContext) -> Result<(), CliError> {
+    if let Some(prefix) = &ctx.prefix
+        && !is_safe_absolute_path(prefix)
+    {
+        return Err(CliError::InvalidArgument {
+            command: "global".to_string(),
+            reason: format!(
+                "--prefix must be an absolute path without '.' or '..' segments, got {}",
+                prefix.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn is_safe_absolute_path(path: &Path) -> bool {
+    path.is_absolute() && !path.as_os_str().is_empty() && !has_dot_segment(path)
+}
+
+fn has_dot_segment(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    raw.split(std::path::MAIN_SEPARATOR)
+        .any(|segment| segment == "." || segment == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx_with_prefix(prefix: PathBuf) -> CliContext {
+        CliContext {
+            install_mode: InstallMode::System,
+            prefix: Some(prefix),
+            json: false,
+            dry_run: false,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+        }
+    }
+
+    #[test]
+    fn global_prefix_must_be_absolute() {
+        let err = validate_global_args(&ctx_with_prefix(PathBuf::from("relative")))
+            .expect_err("relative prefix must be rejected");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn global_prefix_rejects_traversal_segments() {
+        let err = validate_global_args(&ctx_with_prefix(PathBuf::from("/opt/../etc")))
+            .expect_err("traversing prefix must be rejected");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
     }
 }

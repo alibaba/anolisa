@@ -15,7 +15,7 @@ pub enum SubscriptionCommands {
     Register {
         #[arg(long)]
         org: Option<String>,
-        #[arg(long)]
+        #[arg(long, env = "ANOLISA_SUBSCRIPTION_KEY", hide_env_values = true)]
         key: Option<String>,
         #[arg(long)]
         server: Option<String>,

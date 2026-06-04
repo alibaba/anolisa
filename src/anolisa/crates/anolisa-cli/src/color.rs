@@ -6,7 +6,7 @@
 
 use std::fmt::Display;
 
-use console::Style;
+use console::{Style, measure_text_width};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -105,13 +105,24 @@ impl Palette {
     }
 }
 
-/// Pad a string on the right to `width` Unicode scalar values.
+/// Pad a string on the right to `width` terminal display columns.
 pub fn pad_right(text: impl AsRef<str>, width: usize) -> String {
     let text = text.as_ref();
-    let len = text.chars().count();
+    let len = measure_text_width(text);
     if len >= width {
         text.to_string()
     } else {
         format!("{text}{}", " ".repeat(width - len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pad_right;
+
+    #[test]
+    fn pad_right_counts_cjk_display_width() {
+        let padded = pad_right("状态", 6);
+        assert_eq!(console::measure_text_width(&padded), 6);
     }
 }

@@ -764,6 +764,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("/etc/passwd".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -783,12 +784,14 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/../escape".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
         let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
         let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
         assert!(codes.contains(&"E_INSTALL_PATH_TRAVERSAL"));
+        assert!(has_errors(&findings));
     }
 
     #[test]
@@ -801,6 +804,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -819,6 +823,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -845,6 +850,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -871,6 +877,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -896,6 +903,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -938,6 +946,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -983,6 +992,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
+                mode: None,
             }],
         );
         let catalog = make_catalog(vec![cap], vec![comp]);

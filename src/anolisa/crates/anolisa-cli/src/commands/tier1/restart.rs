@@ -9,8 +9,8 @@
 //!      the union of restartable service units.
 //!   3. If the union is empty → `INVALID_ARGUMENT` (nothing to restart).
 //!   4. Picks a [`anolisa_core::ServiceManager`] via `service::for_install_mode`.
-//!      Unsupported backends (user mode, non-Linux, container) short-
-//!      circuit with a `not_supported` outcome — caller sees a clear
+//!      Unsupported backends (user mode, non-Linux, container) short-circuit
+//!      with a `not_supported` outcome — caller sees a clear
 //!      "skipped" instead of a misleading success.
 //!   5. Calls `restart_service(unit)` per unit. Per-unit failures are
 //!      collected as warnings on the outcome; a unit that systemctl

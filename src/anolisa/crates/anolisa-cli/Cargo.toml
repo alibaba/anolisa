@@ -20,7 +20,6 @@ toml.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-indicatif.workspace = true
 console.workspace = true
 
 [dev-dependencies]

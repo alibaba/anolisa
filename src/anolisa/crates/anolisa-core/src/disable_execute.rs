@@ -1,22 +1,20 @@
 //! End-to-end orchestrator for `anolisa disable <capability>` (P1-I).
 //!
-//! **Scope (logical / control-plane disable).** This first stage is a pure
-//! state-and-log change: ANOLISA flips the capability object — and every
-//! component listed in its `component_refs` — to `ObjectStatus::Disabled`
-//! and writes a matching pair of `started` / `succeeded` records to the
-//! central log. It does NOT:
+//! **Scope.** Disable flips the capability object — and every component
+//! listed in its `component_refs` — to `ObjectStatus::Disabled`, runs the
+//! disable lifecycle hooks that are strict or best-effort by phase, stops
+//! owned service units on a best-effort basis, and writes matching
+//! `started` / `succeeded` records to the central log. It does NOT:
 //!
 //!   * delete files (`OwnedFile` paths stay on disk);
-//!   * stop or `systemctl disable` any service unit;
-//!   * call adapter / runtime / osbase hooks;
+//!   * `systemctl disable` service units or remove unit files;
 //!   * touch the distribution-index, the download cache, or the install
 //!     runner;
 //!   * take a backup or build a transaction frame.
 //!
-//! Lifecycle disable (pre_disable / disable / post_disable /
-//! health_after_disable manifest hooks, service teardown, file removal,
-//! external-config rollback) is deferred to a later milestone — it
-//! requires manifest schema work that is not in P1.
+//! Full teardown (file removal, service disablement, external-config
+//! rollback, and transaction-framed purge) is handled by uninstall/purge
+//! paths rather than this logical disable surface.
 //!
 //! This module mirrors the lock / log / state sequencing of
 //! [`crate::enable_execute::execute_enable`] but is much smaller: there is
@@ -39,13 +37,18 @@
 //!      typo path so a concurrent uninstaller does not produce
 //!      ghost audit entries.
 //!   4. Append the `started` record to the central log.
-//!   5. Snapshot `installed.toml` bytes; mutate the in-memory state
+//!   5. Run strict `pre_disable` hooks before the state flip. A hard
+//!      failure records `failed` and leaves state unchanged.
+//!   6. Snapshot `installed.toml` bytes; mutate the in-memory state
 //!      (`status = Disabled`, `last_operation_id = <op>`) for the
 //!      capability + each referenced component; append an
 //!      `OperationRecord { status = "ok" }`; `state.save`. Any failure
 //!      after the snapshot restores the prior bytes (or removes the file
 //!      if there was no prior).
-//!   6. Append the `succeeded` record; release the lock.
+//!   7. Append the `succeeded` record; release the lock.
+//!   8. Stop owned service units best-effort, then run best-effort
+//!      `post_disable` hooks. Failures after the state flip surface as
+//!      warnings rather than reverting the disable.
 //!
 //! Idempotency: if the capability is already `Disabled` at step 3, we
 //! still go through lock + `started` + `succeeded` (so the audit trail

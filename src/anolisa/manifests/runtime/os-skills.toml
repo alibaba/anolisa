@@ -13,7 +13,7 @@ modes = ["user", "system"]
 
 [[install.files]]
 source = "skills/"
-dest = "{share_dir}/skills"
+dest = "{datadir}/skills"
 mode = "0644"
 
 [environment]

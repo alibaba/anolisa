@@ -78,7 +78,7 @@ impl EnvService {
         let kernel = detect_kernel();
         let pkg_base = detect_pkg_base();
         let btf = detect_btf(target_os);
-        let cap_bpf = detect_cap_bpf();
+        let cap_bpf = detect_cap_bpf(target_os);
         let container = detect_container();
         let (user, uid) = detect_user_uid();
         let home = detect_home();
@@ -102,6 +102,9 @@ fn detect_libc(target_os: &str) -> Option<String> {
     if target_os != "linux" {
         return None;
     }
+    // TODO(owner: env-detection, when: external command probes are centralized):
+    // Run `ldd --version` and `uname -r` through a Rust-side timeout so
+    // `EnvService::detect` cannot hang behind a stuck PATH entry or probe binary.
     if let Ok(out) = Command::new("ldd").arg("--version").output() {
         let combined = format!(
             "{}{}",
@@ -167,16 +170,22 @@ pub fn parse_os_release(content: &str) -> Option<String> {
         return None;
     }
 
-    let major = version_id
-        .as_deref()
-        .and_then(|v| v.split('.').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let major = version_id.as_deref().and_then(version_major);
 
     Some(match major {
         Some(m) => format!("anolis{m}"),
         None => "anolis".to_string(),
     })
+}
+
+fn version_major(version_id: &str) -> Option<String> {
+    let head = version_id.split('.').next()?.trim();
+    let digits: String = head.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
 }
 
 fn unquote(value: &str) -> String {
@@ -198,8 +207,8 @@ fn detect_btf(target_os: &str) -> Option<bool> {
     Some(std::path::Path::new("/sys/kernel/btf/vmlinux").exists())
 }
 
-fn detect_cap_bpf() -> Option<bool> {
-    if std::env::consts::OS != "linux" {
+fn detect_cap_bpf(target_os: &str) -> Option<bool> {
+    if target_os != "linux" {
         return None;
     }
     detect_cap_bpf_from_status_file(std::path::Path::new("/proc/self/status"))
@@ -326,6 +335,7 @@ mod tests {
         assert_eq!(facts.os, "macos");
         assert!(facts.libc.is_none(), "libc should be None off-Linux");
         assert!(facts.btf.is_none(), "btf should be None off-Linux");
+        assert!(facts.cap_bpf.is_none(), "cap_bpf should be None off-Linux");
     }
 
     #[test]
@@ -356,6 +366,12 @@ mod tests {
     fn parse_os_release_missing_version_falls_back_to_anolis() {
         let content = "ID=anolis\n";
         assert_eq!(parse_os_release(content).as_deref(), Some("anolis"));
+    }
+
+    #[test]
+    fn parse_os_release_uses_numeric_major_prefix() {
+        let content = "ID=anolis\nVERSION_ID=\"23alpha\"\n";
+        assert_eq!(parse_os_release(content).as_deref(), Some("anolis23"));
     }
 
     #[test]

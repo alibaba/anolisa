@@ -31,7 +31,6 @@ anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 
 # Terminal UI
-indicatif = "0.17"
 console = "0.15"
 
 # Data structures

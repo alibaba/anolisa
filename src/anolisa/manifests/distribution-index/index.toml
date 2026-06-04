@@ -1,0 +1,29 @@
+# DistributionIndex (schema v1).
+#
+# Flat `[[entries]]` form consumed by anolisa-core::distribution::DistributionIndex.
+# One row per (component, version, channel, target) artifact binding. Concrete
+# artifact URL / checksum / signature / backend live here, never in component
+# manifests.
+#
+# This index now carries real raw/tar_gz release entries for capabilities
+# graduated in `templates/execution-policy.toml`. Keep URLs real: a matching
+# row becomes a live HTTP(S) request as soon as a Linux host resolves it.
+
+schema_version = 1
+channel = "stable"
+publisher = "anolisa"
+
+[[entries]]
+component = "cosh"
+version = "2.4.1"
+channel = "stable"
+artifact_id = "copilot-shell-2.4.1-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "https://anolisa.oss-cn-hangzhou-internal.aliyuncs.com/releases/stable/copilot-shell/2.4.1/copilot-shell-2.4.1-linux-x86_64.tar.gz"
+os = "linux"
+arch = "x86_64"
+libc = "glibc"
+install_modes = ["system"]
+sha256 = "e1ac72ba1b6ef67f10f5dbd164f3077eee04cd6404f96acacf6bab7f5d392c1d"
+size = 5473797

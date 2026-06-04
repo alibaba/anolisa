@@ -227,6 +227,9 @@ pub struct InstallFileSpec {
     /// Destination path after layout placeholder expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest: Option<String>,
+    /// Unix file mode requested by the manifest, e.g. `"0755"` or `"0644"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl InstallFileSpec {
@@ -471,6 +474,8 @@ struct InstallFileRaw {
     dest: Option<String>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -576,6 +581,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                     .map(|f| InstallFileSpec {
                         source: f.source,
                         dest: f.dest,
+                        mode: f.mode,
                     })
                     .filter(|f| f.install_path().is_some())
                     .collect();

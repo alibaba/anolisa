@@ -1198,6 +1198,7 @@ mod tests {
                 files: vec![InstallFileSpec {
                     source: None,
                     dest: Some("{bindir}/agentsight".to_string()),
+                    mode: None,
                 }],
                 services: vec!["agentsight.service".to_string()],
                 capabilities: Vec::new(),
@@ -2085,6 +2086,7 @@ mod tests {
             vec![InstallFileSpec {
                 source: None,
                 dest: Some("{bindir}/agentsight".to_string()),
+                mode: None,
             }]
         );
         let resolved = &comp_plan.resolved_files[0];
@@ -2111,14 +2113,17 @@ mod tests {
             InstallFileSpec {
                 source: Some("target/release/agentsight".to_string()),
                 dest: Some("{bindir}/agentsight".to_string()),
+                mode: Some("0755".to_string()),
             },
             InstallFileSpec {
                 source: Some("{datadir}/source-only".to_string()),
                 dest: None,
+                mode: None,
             },
             InstallFileSpec {
                 source: None,
                 dest: Some("{etcdir}/dest-only".to_string()),
+                mode: Some("0644".to_string()),
             },
         ];
         let catalog = make_catalog(vec![cap], vec![comp]);
@@ -2246,6 +2251,7 @@ mod tests {
                 files: vec![InstallFileSpec {
                     source: None,
                     dest: Some("{bindir}/second".to_string()),
+                    mode: None,
                 }],
                 services: Vec::new(),
                 capabilities: Vec::new(),

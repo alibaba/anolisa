@@ -36,11 +36,11 @@ impl FeatureStore {
     /// Fails when the file cannot be read or parsed as the feature-store
     /// TOML schema.
     pub fn load(path: &Path) -> Result<Self, FeatureStoreError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| FeatureStoreError::Io(e.to_string()))?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(FeatureStoreError::Io(e.to_string())),
+        };
         toml::from_str(&content).map_err(|e| FeatureStoreError::Parse(e.to_string()))
     }
 
@@ -63,6 +63,7 @@ impl FeatureStore {
     pub fn is_enabled(&self, component: &str, feature: &str) -> bool {
         self.component
             .get(component)
+            .filter(|c| c.enabled)
             .and_then(|c| c.features.get(feature))
             .copied()
             .unwrap_or(false)
@@ -85,6 +86,30 @@ impl FeatureStore {
         if let Some(comp) = self.component.get_mut(component) {
             comp.features.insert(feature.to_string(), false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_component_disables_all_feature_overrides() {
+        let mut store = FeatureStore::default();
+        store.enable("agentsight", "ebpf_tracing");
+        assert!(store.is_enabled("agentsight", "ebpf_tracing"));
+
+        store.component.get_mut("agentsight").unwrap().enabled = false;
+
+        assert!(!store.is_enabled("agentsight", "ebpf_tracing"));
+    }
+
+    #[test]
+    fn missing_feature_store_file_loads_as_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FeatureStore::load(&tmp.path().join("missing.toml")).unwrap();
+
+        assert!(store.component.is_empty());
     }
 }
 

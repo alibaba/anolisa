@@ -52,13 +52,19 @@ pub struct ResolvedInstallFile {
     pub source: Option<String>,
     /// Absolute destination after layout-template substitution.
     pub dest: PathBuf,
+    /// Optional Unix file mode from the component manifest, e.g. `"0644"`.
+    pub mode: Option<String>,
 }
 
 impl ResolvedInstallFile {
     /// Build a destination-only mapping used by legacy callers that do
     /// not distinguish archive source paths.
     pub fn dest_only(dest: PathBuf) -> Self {
-        Self { source: None, dest }
+        Self {
+            source: None,
+            dest,
+            mode: None,
+        }
     }
 }
 
@@ -98,6 +104,15 @@ pub enum InstallError {
     TraversalSegment {
         /// Rejected destination path.
         path: PathBuf,
+    },
+
+    /// Manifest requested a file mode that is not valid octal notation.
+    #[error("destination '{path}' has invalid install mode '{mode}'")]
+    InvalidMode {
+        /// Destination whose mode could not be parsed.
+        path: PathBuf,
+        /// Raw manifest mode string.
+        mode: String,
     },
 
     /// Fresh-install milestone refuses to overwrite existing files.
@@ -242,7 +257,7 @@ impl<'a> InstallRunner<'a> {
         }
         let dest = &files[0].dest;
         let bytes = read_file_bytes(cached_artifact)?;
-        let installed = write_dest_atomic(dest, &bytes)?;
+        let installed = write_dest_atomic(dest, &bytes, files[0].mode.as_deref())?;
         Ok(InstallOutcome {
             files: vec![installed],
         })
@@ -276,7 +291,7 @@ impl<'a> InstallRunner<'a> {
                 .ok_or_else(|| InstallError::MissingArchiveEntry {
                     basename: key.clone(),
                 })?;
-            let installed = write_dest_atomic(&file.dest, bytes)?;
+            let installed = write_dest_atomic(&file.dest, bytes, file.mode.as_deref())?;
             out.push(installed);
         }
         Ok(InstallOutcome { files: out })
@@ -354,7 +369,11 @@ fn normalize_archive_key(path: &str) -> String {
     path.trim_start_matches("./").to_string()
 }
 
-fn write_dest_atomic(dest: &Path, bytes: &[u8]) -> Result<InstalledFile, InstallError> {
+fn write_dest_atomic(
+    dest: &Path,
+    bytes: &[u8],
+    mode: Option<&str>,
+) -> Result<InstalledFile, InstallError> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
@@ -371,8 +390,9 @@ fn write_dest_atomic(dest: &Path, bytes: &[u8]) -> Result<InstalledFile, Install
     };
     #[cfg(unix)]
     {
+        let mode = parse_unix_mode(mode, dest)?;
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
+        let perms = std::fs::Permissions::from_mode(mode);
         fs::set_permissions(&tmp, perms).map_err(|source| InstallError::Io {
             path: tmp.clone(),
             source,
@@ -389,6 +409,27 @@ fn write_dest_atomic(dest: &Path, bytes: &[u8]) -> Result<InstalledFile, Install
         path: dest.to_path_buf(),
         sha256: sha,
     })
+}
+
+#[cfg(unix)]
+fn parse_unix_mode(mode: Option<&str>, dest: &Path) -> Result<u32, InstallError> {
+    const DEFAULT_MODE: u32 = 0o755;
+    let Some(raw) = mode else {
+        return Ok(DEFAULT_MODE);
+    };
+    let trimmed = raw.trim();
+    let octal = trimmed.strip_prefix("0o").unwrap_or(trimmed);
+    let parsed = u32::from_str_radix(octal, 8).map_err(|_| InstallError::InvalidMode {
+        path: dest.to_path_buf(),
+        mode: raw.to_string(),
+    })?;
+    if parsed > 0o7777 {
+        return Err(InstallError::InvalidMode {
+            path: dest.to_path_buf(),
+            mode: raw.to_string(),
+        });
+    }
+    Ok(parsed)
 }
 
 fn stream_write_and_hash(tmp: &Path, bytes: &[u8]) -> Result<String, InstallError> {
@@ -632,6 +673,7 @@ mod tests {
                 &[ResolvedInstallFile {
                     source: Some("target/release/source-name".to_string()),
                     dest: dest.clone(),
+                    mode: None,
                 }],
             )
             .expect("install ok");
@@ -639,6 +681,38 @@ mod tests {
         assert_eq!(outcome.files.len(), 1);
         assert_eq!(outcome.files[0].path, dest);
         assert_eq!(fs::read(&outcome.files[0].path).unwrap(), payload);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_files_honors_manifest_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let payload: &[u8] = b"config-bytes";
+        let gz = build_tar_gz(&[("share/config.toml", payload)]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let dest = layout.datadir.join("config.toml");
+        runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("share/config.toml".to_string()),
+                    dest: dest.clone(),
+                    mode: Some("0644".to_string()),
+                }],
+            )
+            .expect("install ok");
+
+        let mode = fs::metadata(dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
     }
 
     #[test]

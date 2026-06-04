@@ -197,10 +197,10 @@ impl FsLayout {
         xdg_cache: Option<PathBuf>,
         xdg_runtime: Option<PathBuf>,
     ) -> Self {
-        let data = xdg_data.unwrap_or_else(|| home.join(xdg::DATA_HOME));
-        let config = xdg_config.unwrap_or_else(|| home.join(xdg::CONFIG_HOME));
-        let state = xdg_state.unwrap_or_else(|| home.join(xdg::STATE_HOME));
-        let cache = xdg_cache.unwrap_or_else(|| home.join(xdg::CACHE_HOME));
+        let data = sanitize_absolute_root(xdg_data, home.join(xdg::DATA_HOME));
+        let config = sanitize_absolute_root(xdg_config, home.join(xdg::CONFIG_HOME));
+        let state = sanitize_absolute_root(xdg_state, home.join(xdg::STATE_HOME));
+        let cache = sanitize_absolute_root(xdg_cache, home.join(xdg::CACHE_HOME));
 
         let datadir = data.join(NS);
         let etc_dir = config.join(NS);
@@ -226,6 +226,7 @@ impl FsLayout {
         // installs); fall back to a subdir under state_dir per design.md
         // L536 so socket/pid paths still resolve.
         let runtime_dir = xdg_runtime
+            .filter(|r| is_safe_absolute_root(r))
             .map(|r| r.join(NS))
             .unwrap_or_else(|| state_dir.join(xdg::RUNTIME_FALLBACK_SUB));
 
@@ -263,6 +264,23 @@ fn rebase_under(prefix: &Path, path: &str) -> PathBuf {
     }
     let stripped = path.strip_prefix('/').unwrap_or(path);
     prefix.join(stripped)
+}
+
+fn sanitize_absolute_root(candidate: Option<PathBuf>, fallback: PathBuf) -> PathBuf {
+    match candidate {
+        Some(path) if is_safe_absolute_root(&path) => path,
+        _ => fallback,
+    }
+}
+
+fn is_safe_absolute_root(path: &Path) -> bool {
+    path.is_absolute() && !path.as_os_str().is_empty() && !has_dot_segment(path)
+}
+
+fn has_dot_segment(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    raw.split(std::path::MAIN_SEPARATOR)
+        .any(|segment| segment == "." || segment == "..")
 }
 
 #[cfg(test)]
@@ -412,6 +430,30 @@ mod tests {
         assert_eq!(layout.systemd_unit_dir, PathBuf::from("/conf/systemd/user"));
         // bin is HOME-rooted regardless of XDG_DATA_HOME — see next test.
         assert_eq!(layout.bin_dir, PathBuf::from("/tmp/h/.local/bin"));
+    }
+
+    #[test]
+    fn user_layout_ignores_relative_or_traversing_xdg_dirs() {
+        let layout = FsLayout::user_with_xdg(
+            PathBuf::from("/tmp/h"),
+            Some(PathBuf::from("relative-data")),
+            Some(PathBuf::from("/conf/../escape")),
+            Some(PathBuf::from("/state/.")),
+            Some(PathBuf::from("/cache")),
+            Some(PathBuf::from("relative-runtime")),
+        );
+
+        assert_eq!(layout.datadir, PathBuf::from("/tmp/h/.local/share/anolisa"));
+        assert_eq!(layout.etc_dir, PathBuf::from("/tmp/h/.config/anolisa"));
+        assert_eq!(
+            layout.state_dir,
+            PathBuf::from("/tmp/h/.local/state/anolisa")
+        );
+        assert_eq!(layout.cache_dir, PathBuf::from("/cache/anolisa"));
+        assert_eq!(
+            layout.runtime_dir,
+            PathBuf::from("/tmp/h/.local/state/anolisa/runtime")
+        );
     }
 
     #[test]

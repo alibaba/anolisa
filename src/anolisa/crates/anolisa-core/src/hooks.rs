@@ -568,6 +568,7 @@ mod tests {
     use super::*;
     use anolisa_platform::fs_layout::FsLayout;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use tempfile::tempdir;
@@ -584,7 +585,10 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("mkdir parent");
         }
-        fs::write(path, body).expect("write script");
+        let mut file = fs::File::create(path).expect("create script");
+        file.write_all(body.as_bytes()).expect("write script");
+        file.sync_all().expect("sync script");
+        drop(file);
         let mut perm = fs::metadata(path).expect("stat").permissions();
         perm.set_mode(0o755);
         fs::set_permissions(path, perm).expect("chmod");
