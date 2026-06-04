@@ -13,10 +13,15 @@ anolisa-env.workspace = true
 anolisa-build.workspace = true
 anolisa-platform.workspace = true
 clap.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 indicatif.workspace = true
 console.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

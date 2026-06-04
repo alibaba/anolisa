@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+use crate::context::CliContext;
+use crate::response::CliError;
+
 #[derive(Parser)]
 pub struct OsbaseArgs {
     #[command(subcommand)]
@@ -88,63 +91,32 @@ pub enum SecurityCommands {
     Status { target: Option<String> },
 }
 
-pub fn handle(args: OsbaseArgs) -> anyhow::Result<()> {
-    match args.command {
+pub fn handle(args: OsbaseArgs, _ctx: &CliContext) -> Result<(), CliError> {
+    let command = match args.command {
         OsbaseCommands::Kernel(k) => match k.command {
-            KernelCommands::Install { dry_run } => {
-                println!("osbase kernel install (dry_run={dry_run}): not yet implemented");
-            }
-            KernelCommands::Remove => {
-                println!("osbase kernel remove: not yet implemented");
-            }
-            KernelCommands::Status => {
-                println!("osbase kernel status: not yet implemented");
-            }
+            KernelCommands::Install { .. } => "osbase kernel install".to_string(),
+            KernelCommands::Remove => "osbase kernel remove".to_string(),
+            KernelCommands::Status => "osbase kernel status".to_string(),
         },
         OsbaseCommands::Sandbox(s) => match s.command {
-            SandboxCommands::Install { target, dry_run } => {
-                println!(
-                    "osbase sandbox install {target} (dry_run={dry_run}): not yet implemented"
-                );
-            }
-            SandboxCommands::Remove { target } => {
-                println!("osbase sandbox remove {target}: not yet implemented");
-            }
-            SandboxCommands::List { available } => {
-                if available {
-                    println!("Available sandbox targets:");
-                } else {
-                    println!("Installed sandbox targets:");
-                }
-                println!("  container   runc/crun container runtime");
-                println!("  kata        Kata Containers (microVM)");
-                println!("  firecracker Firecracker microVM");
-                println!("  vm          KVM/QEMU full VM");
-                println!("  landlock    Landlock LSM policies");
-            }
-            SandboxCommands::Status { target } => {
-                println!(
-                    "osbase sandbox status {}: not yet implemented",
-                    target.as_deref().unwrap_or("(all)")
-                );
-            }
+            SandboxCommands::Install { target, .. } => format!("osbase sandbox install {target}"),
+            SandboxCommands::Remove { target } => format!("osbase sandbox remove {target}"),
+            SandboxCommands::List { .. } => "osbase sandbox list".to_string(),
+            SandboxCommands::Status { target } => match target {
+                Some(t) => format!("osbase sandbox status {t}"),
+                None => "osbase sandbox status".to_string(),
+            },
         },
         OsbaseCommands::Security(s) => match s.command {
-            SecurityCommands::Install { target, dry_run } => {
-                println!(
-                    "osbase security install {target} (dry_run={dry_run}): not yet implemented"
-                );
+            SecurityCommands::Install { target, .. } => {
+                format!("osbase security install {target}")
             }
-            SecurityCommands::Remove { target } => {
-                println!("osbase security remove {target}: not yet implemented");
-            }
-            SecurityCommands::Status { target } => {
-                println!(
-                    "osbase security status {}: not yet implemented",
-                    target.as_deref().unwrap_or("(all)")
-                );
-            }
+            SecurityCommands::Remove { target } => format!("osbase security remove {target}"),
+            SecurityCommands::Status { target } => match target {
+                Some(t) => format!("osbase security status {t}"),
+                None => "osbase security status".to_string(),
+            },
         },
-    }
-    Ok(())
+    };
+    Err(CliError::not_implemented(command))
 }

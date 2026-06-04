@@ -1,6 +1,13 @@
 //! Tier 2 surface — `anolisa self`: management of the anolisa CLI itself.
+//!
+//! `self update` is retained as a long-term compatibility alias for
+//! `anolisa update self` (launch spec §7.3). Handlers return a hint that
+//! redirects the user to the unified update surface.
 
 use clap::{Parser, Subcommand};
+
+use crate::context::CliContext;
+use crate::response::CliError;
 
 #[derive(Parser)]
 pub struct SelfArgs {
@@ -10,7 +17,7 @@ pub struct SelfArgs {
 
 #[derive(Subcommand)]
 pub enum SelfCommands {
-    /// Update the anolisa CLI binary
+    /// Update the anolisa CLI binary (alias of `anolisa update self`)
     Update,
     /// Scan and register pre-existing components (build-all.sh migration path)
     Adopt {
@@ -28,27 +35,15 @@ pub enum SelfCommands {
     },
 }
 
-pub fn handle(args: SelfArgs) -> anyhow::Result<()> {
+pub fn handle(args: SelfArgs, _ctx: &CliContext) -> Result<(), CliError> {
     match args.command {
-        SelfCommands::Update => {
-            println!("anolisa self update: not yet implemented");
-        }
-        SelfCommands::Adopt { scan, confirm } => {
-            if scan && !confirm {
-                println!("Scanning for existing ANOLISA components...");
-                println!("  → adopt scan not yet implemented");
-                println!();
-                println!("Re-run with --confirm to register the findings.");
-            } else if confirm {
-                println!("Adopting and registering existing components...");
-                println!("  → adopt confirm not yet implemented");
-            } else {
-                println!("Usage: anolisa self adopt --scan  |  --scan --confirm");
-            }
-        }
-        SelfCommands::Completions { shell } => {
-            println!("Shell completions for {shell}: not yet implemented");
-        }
+        SelfCommands::Update => Err(CliError::not_implemented_with_hint(
+            "self update",
+            "long-term alias of `anolisa update self`; use that instead",
+        )),
+        SelfCommands::Adopt { .. } => Err(CliError::not_implemented("self adopt")),
+        SelfCommands::Completions { shell } => Err(CliError::not_implemented(format!(
+            "self completions {shell}"
+        ))),
     }
-    Ok(())
 }

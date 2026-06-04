@@ -1,4 +1,14 @@
+//! Tier 2 surface — `anolisa runtime`: direct management of runtime-layer
+//! components.
+//!
+//! `runtime update` is retained as a long-term compatibility alias for
+//! `anolisa update runtime` (launch spec §7.3); handler hint redirects
+//! callers to the unified update surface.
+
 use clap::{Parser, Subcommand};
+
+use crate::context::CliContext;
+use crate::response::CliError;
 
 #[derive(Parser)]
 pub struct RuntimeArgs {
@@ -18,9 +28,10 @@ pub enum RuntimeCommands {
         /// Install from RPM/DEB repository
         #[arg(long)]
         from_rpm: bool,
-        /// Specific version to install
-        #[arg(long)]
-        version: Option<String>,
+        /// Specific component version to install (e.g. 0.3.2).
+        /// Renamed from --version to avoid colliding with the global -V/--version flag.
+        #[arg(long = "component-version", value_name = "VERSION")]
+        component_version: Option<String>,
     },
     /// Remove a runtime component
     Remove {
@@ -29,7 +40,7 @@ pub enum RuntimeCommands {
         #[arg(long)]
         purge: bool,
     },
-    /// Update a runtime component
+    /// Update a runtime component (alias of `anolisa update runtime <COMP>`)
     Update {
         /// Component name or "all"
         component: String,
@@ -61,66 +72,28 @@ pub enum RuntimeCommands {
     },
 }
 
-pub fn handle(args: RuntimeArgs) -> anyhow::Result<()> {
+pub fn handle(args: RuntimeArgs, _ctx: &CliContext) -> Result<(), CliError> {
     match args.command {
-        RuntimeCommands::Install {
-            component,
-            from_source,
-            from_rpm,
-            version,
-        } => {
-            let source = if from_rpm {
-                "rpm"
-            } else if from_source {
-                "source"
-            } else {
-                "auto"
-            };
-            println!(
-                "runtime install {component} (source={source}, version={})",
-                version.as_deref().unwrap_or("latest")
-            );
-            println!("  → not yet implemented");
-        }
-        RuntimeCommands::Remove { component, purge } => {
-            println!("runtime remove {component} (purge={purge}): not yet implemented");
-        }
-        RuntimeCommands::Update { component } => {
-            println!("runtime update {component}: not yet implemented");
-        }
-        RuntimeCommands::Build {
-            component,
-            debug,
-            no_install,
-            ..
-        } => {
-            let profile = if debug { "debug" } else { "release" };
-            println!(
-                "runtime build {component} (profile={profile}, install={})",
-                !no_install
-            );
-            println!("  → not yet implemented");
-        }
-        RuntimeCommands::List { available } => {
-            if available {
-                println!("Available ANOLISA runtime components:");
-            } else {
-                println!("Installed ANOLISA runtime components:");
-            }
-            println!("  COMPONENT         LAYER      DOMAIN         STATUS");
-            println!("  cosh              runtime    tools          -");
-            println!("  tokenless         runtime    cost           -");
-            println!("  ws-ckpt           runtime    state          -");
-            println!("  agentsight        runtime    observability  -");
-            println!("  agent-sec-core    runtime    security       -");
-            println!("  os-skills         runtime    tools          -");
-        }
+        RuntimeCommands::Install { component, .. } => Err(CliError::not_implemented(format!(
+            "runtime install {component}"
+        ))),
+        RuntimeCommands::Remove { component, .. } => Err(CliError::not_implemented(format!(
+            "runtime remove {component}"
+        ))),
+        RuntimeCommands::Update { component } => Err(CliError::not_implemented_with_hint(
+            format!("runtime update {component}"),
+            "long-term alias of `anolisa update runtime <COMPONENT>`; use that instead",
+        )),
+        RuntimeCommands::Build { component, .. } => Err(CliError::not_implemented(format!(
+            "runtime build {component}"
+        ))),
+        RuntimeCommands::List { .. } => Err(CliError::not_implemented("runtime list")),
         RuntimeCommands::Status { component } => {
-            println!(
-                "runtime status {}: not yet implemented",
-                component.as_deref().unwrap_or("(all)")
-            );
+            let cmd = match component {
+                Some(c) => format!("runtime status {c}"),
+                None => "runtime status".to_string(),
+            };
+            Err(CliError::not_implemented(cmd))
         }
     }
-    Ok(())
 }

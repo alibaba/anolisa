@@ -14,4 +14,5 @@ pub mod list;
 pub mod logs;
 pub mod restart;
 pub mod status;
+pub mod uninstall;
 pub mod update;

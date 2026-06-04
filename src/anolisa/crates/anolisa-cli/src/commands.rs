@@ -5,6 +5,7 @@
 //! - **Tier 2** — independent management surfaces (subscription / adapter / self
 //!   / runtime / osbase). Each surface uses its own appropriate vocabulary.
 
+pub mod common;
 pub mod tier1;
 
 // Tier 2 surfaces
@@ -14,7 +15,12 @@ pub mod runtime;
 pub mod self_;
 pub mod subscription;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
+
+use crate::context::{CliContext, InstallMode};
+use crate::response::CliError;
 
 #[derive(Parser)]
 #[command(
@@ -28,12 +34,12 @@ pub struct Cli {
     pub command: Commands,
 
     /// Install scope: user (~/.local) or system (/usr/local)
-    #[arg(long, global = true, default_value = "user")]
-    pub install_mode: String,
+    #[arg(long, global = true, value_enum, default_value_t = InstallMode::User)]
+    pub install_mode: InstallMode,
 
     /// Custom install prefix (system-mode only)
-    #[arg(long, global = true)]
-    pub prefix: Option<String>,
+    #[arg(long, global = true, value_name = "PATH")]
+    pub prefix: Option<PathBuf>,
 
     /// Output in JSON format
     #[arg(long, global = true)]
@@ -65,11 +71,13 @@ pub enum Commands {
     Enable(tier1::enable::EnableArgs),
     /// Disable a capability or one of its features
     Disable(tier1::disable::DisableArgs),
+    /// Uninstall a capability (removes ANOLISA-owned files); `--purge` also drops config
+    Uninstall(tier1::uninstall::UninstallArgs),
     /// Show capability health
     Status(tier1::status::StatusArgs),
     /// Diagnose capability issues
     Doctor(tier1::doctor::DoctorArgs),
-    /// Show service logs for a capability
+    /// Central log query (operation/audit + component-reported logs)
     Logs(tier1::logs::LogsArgs),
     /// Restart the capability's underlying service
     Restart(tier1::restart::RestartArgs),
@@ -77,7 +85,7 @@ pub enum Commands {
     Env(tier1::env::EnvArgs),
     /// One-shot summary: anolisa version + enabled capabilities + components
     Info(tier1::info::InfoArgs),
-    /// Update components behind a capability
+    /// Update self, runtime components, or everything ANOLISA-managed
     Update(tier1::update::UpdateArgs),
 
     // ── Tier 2 — Management surfaces ────────────────────────────────
@@ -95,24 +103,30 @@ pub enum Commands {
 }
 
 /// Dispatch parsed CLI arguments to their handlers.
-pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
+///
+/// Every handler receives the immutable [`CliContext`] so global flags
+/// such as `--json`, `--dry-run`, `--install-mode` stay consistent across
+/// surfaces. Handlers must not re-parse global flags from their own
+/// `args` struct.
+pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     match cli.command {
         // Tier 1
-        Commands::List(args) => tier1::list::handle(args),
-        Commands::Enable(args) => tier1::enable::handle(args),
-        Commands::Disable(args) => tier1::disable::handle(args),
-        Commands::Status(args) => tier1::status::handle(args),
-        Commands::Doctor(args) => tier1::doctor::handle(args),
-        Commands::Logs(args) => tier1::logs::handle(args),
-        Commands::Restart(args) => tier1::restart::handle(args),
-        Commands::Env(args) => tier1::env::handle(args),
-        Commands::Info(args) => tier1::info::handle(args),
-        Commands::Update(args) => tier1::update::handle(args),
+        Commands::List(args) => tier1::list::handle(args, ctx),
+        Commands::Enable(args) => tier1::enable::handle(args, ctx),
+        Commands::Disable(args) => tier1::disable::handle(args, ctx),
+        Commands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
+        Commands::Status(args) => tier1::status::handle(args, ctx),
+        Commands::Doctor(args) => tier1::doctor::handle(args, ctx),
+        Commands::Logs(args) => tier1::logs::handle(args, ctx),
+        Commands::Restart(args) => tier1::restart::handle(args, ctx),
+        Commands::Env(args) => tier1::env::handle(args, ctx),
+        Commands::Info(args) => tier1::info::handle(args, ctx),
+        Commands::Update(args) => tier1::update::handle(args, ctx),
         // Tier 2
-        Commands::Subscription(args) => subscription::handle(args),
-        Commands::Adapter(args) => adapter::handle(args),
-        Commands::SelfCmd(args) => self_::handle(args),
-        Commands::Runtime(args) => runtime::handle(args),
-        Commands::Osbase(args) => osbase::handle(args),
+        Commands::Subscription(args) => subscription::handle(args, ctx),
+        Commands::Adapter(args) => adapter::handle(args, ctx),
+        Commands::SelfCmd(args) => self_::handle(args, ctx),
+        Commands::Runtime(args) => runtime::handle(args, ctx),
+        Commands::Osbase(args) => osbase::handle(args, ctx),
     }
 }
