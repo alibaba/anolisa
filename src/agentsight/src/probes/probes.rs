@@ -35,7 +35,7 @@ const EVENT_SOURCE_PROCMON: u32 = 3;
 const EVENT_SOURCE_FILEWATCH: u32 = 4;
 const EVENT_SOURCE_FILEWRITE: u32 = 5;
 const EVENT_SOURCE_UDPDNS: u32 = 6;
-const EVENT_SOURCE_LSM: u32 = 7;
+const EVENT_SOURCE_LSM: u32 = 8;
 
 /// Unified probe manager that coordinates sslsniff and proctrace
 /// 
