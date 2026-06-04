@@ -558,3 +558,233 @@ def test_review_closes_reader_when_security_reader_init_raises(
         observability_cli.review()
 
     assert events == ["reader-init", "security-reader-init", "reader-close"]
+
+
+# ── report command tests ──────────────────────────────────────────────────────
+
+_report_runner = CliRunner()
+
+
+def _fake_session(sid="sess-1", first=1000.0, last=1060.0, turns=3, events=9):
+    from unittest.mock import MagicMock
+
+    s = MagicMock()
+    s.session_id = sid
+    s.first_seen_epoch = first
+    s.last_seen_epoch = last
+    s.turn_count = turns
+    s.event_count = events
+    return s
+
+
+def _fake_run(rid="run-1"):
+    from unittest.mock import MagicMock
+
+    r = MagicMock()
+    r.run_id = rid
+    r.started_at_epoch = 1000.0
+    r.ended_at_epoch = 1020.0
+    r.user_input_preview = "hello"
+    r.event_count = 3
+    return r
+
+
+def _fake_event(hook, metrics=None):
+    from unittest.mock import MagicMock
+
+    e = MagicMock()
+    e.hook = hook
+    e.metrics_json = json.dumps(metrics or {})
+    return e
+
+
+class _StubReader:
+    def __init__(self, sessions=None, runs=None, events=None):
+        self._sessions = sessions or []
+        self._runs = runs or []
+        self._events = events or []
+
+    def list_sessions(self):
+        return self._sessions
+
+    def list_runs(self, _sid):
+        return self._runs
+
+    def list_events(self, _sid, _rid):
+        return self._events
+
+    def close(self):
+        pass
+
+
+def test_report_requires_session_or_last() -> None:
+    result = _report_runner.invoke(app, ["observability", "report"])
+    assert result.exit_code == 1
+    assert "specify --session-id or --last" in result.output
+
+
+def test_report_invalid_format() -> None:
+    result = _report_runner.invoke(
+        app, ["observability", "report", "--session-id", "x", "--format", "xml"]
+    )
+    assert result.exit_code == 1
+    assert "text" in result.output and "json" in result.output
+
+
+def test_report_session_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        observability_sqlite_reader,
+        "ObservabilityReader",
+        lambda: _StubReader(),
+    )
+    monkeypatch.setattr(
+        security_sqlite_reader,
+        "SqliteEventReader",
+        lambda: None,
+    )
+    result = _report_runner.invoke(
+        app, ["observability", "report", "--session-id", "nonexistent"]
+    )
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_report_text_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubReader(
+        sessions=[_fake_session()],
+        runs=[_fake_run()],
+        events=[
+            _fake_event(
+                "after_llm_call",
+                {"request_payload_bytes": 500, "response_stream_bytes": 100},
+            ),
+            _fake_event("before_tool_call", {"tool_name": "bash"}),
+        ],
+    )
+    monkeypatch.setattr(
+        observability_sqlite_reader, "ObservabilityReader", lambda: stub
+    )
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", lambda: None)
+    result = _report_runner.invoke(
+        app, ["observability", "report", "--session-id", "sess-1"]
+    )
+    assert result.exit_code == 0
+    assert "sess-1" in result.output
+    assert "bash" in result.output
+    assert "500" in result.output
+    assert "100" in result.output
+    assert "3 turns" in result.output
+
+
+def test_report_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubReader(
+        sessions=[_fake_session()],
+        runs=[_fake_run()],
+        events=[
+            _fake_event(
+                "after_llm_call",
+                {"request_payload_bytes": 800, "response_stream_bytes": 200},
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        observability_sqlite_reader, "ObservabilityReader", lambda: stub
+    )
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", lambda: None)
+    result = _report_runner.invoke(
+        app,
+        ["observability", "report", "--session-id", "sess-1", "--format", "json"],
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["session_id"] == "sess-1"
+    assert parsed["turn_count"] == 3
+    assert parsed["llm_calls"] == 1
+    assert parsed["request_bytes"] == 800
+    assert parsed["duration_seconds"] == 60.0
+
+
+def test_report_last_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubReader(
+        sessions=[_fake_session(sid="latest-sess")],
+        runs=[_fake_run()],
+        events=[],
+    )
+    monkeypatch.setattr(
+        observability_sqlite_reader, "ObservabilityReader", lambda: stub
+    )
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", lambda: None)
+    result = _report_runner.invoke(app, ["observability", "report", "--last"])
+    assert result.exit_code == 0
+    assert "latest-sess" in result.output
+
+
+def test_report_last_no_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        observability_sqlite_reader,
+        "ObservabilityReader",
+        lambda: _StubReader(),
+    )
+    result = _report_runner.invoke(app, ["observability", "report", "--last"])
+    assert result.exit_code == 1
+    assert "No sessions" in result.output
+
+
+def test_report_with_security_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    stub = _StubReader(
+        sessions=[_fake_session()],
+        runs=[_fake_run()],
+        events=[],
+    )
+
+    def _fake_candidate(category, result="succeeded"):
+        c = MagicMock()
+        c.event = MagicMock()
+        c.event.category = category
+        c.event.result = result
+        return c
+
+    sec = MagicMock()
+    sec.query_correlation_candidates.return_value = [
+        _fake_candidate("code_scan", "succeeded"),
+        _fake_candidate("code_scan", "failed"),
+        _fake_candidate("prompt_scan", "succeeded"),
+    ]
+    sec.close = MagicMock()
+
+    monkeypatch.setattr(
+        observability_sqlite_reader, "ObservabilityReader", lambda: stub
+    )
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", lambda: sec)
+    result = _report_runner.invoke(
+        app,
+        ["observability", "report", "--session-id", "sess-1", "--format", "json"],
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["security_verdicts"]["code_scan"]["succeeded"] == 1
+    assert parsed["security_verdicts"]["code_scan"]["failed"] == 1
+    assert parsed["security_verdicts"]["prompt_scan"]["succeeded"] == 1
+
+
+def test_report_security_reader_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubReader(
+        sessions=[_fake_session()],
+        runs=[_fake_run()],
+        events=[],
+    )
+    monkeypatch.setattr(
+        observability_sqlite_reader, "ObservabilityReader", lambda: stub
+    )
+
+    def _raise():
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(security_sqlite_reader, "SqliteEventReader", _raise)
+    result = _report_runner.invoke(
+        app, ["observability", "report", "--session-id", "sess-1"]
+    )
+    assert result.exit_code == 0
+    assert "security" in result.output.lower()
