@@ -92,6 +92,8 @@ pub struct AgentSight {
     last_drain_check: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: HashMap<u32, String>,
+    /// Optimize wakeup latency by clearing timer_slack_ns on traced agent processes
+    optimize_timer_slack: bool,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
     /// Flag indicating SLS Logtail has been activated (irreversible)
@@ -242,7 +244,7 @@ impl AgentSight {
 
         // Attach SSL probes to already-running agents
         for agent in &existing_agents {
-            Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
+            Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name, config.optimize_timer_slack);
         }
 
         // Connection scan: find processes with established connections to https_rules IPs
@@ -261,7 +263,7 @@ impl AgentSight {
         }
         for result in &conn_results {
             let agent_name = format!("domain:{}", result.domain);
-            Self::attach_process_internal(&mut probes, result.pid, &agent_name);
+            Self::attach_process_internal(&mut probes, result.pid, &agent_name, config.optimize_timer_slack);
             pid_agent_name_cache.insert(result.pid, agent_name);
         }
         if !conn_results.is_empty() {
@@ -498,6 +500,7 @@ impl AgentSight {
             pending_genai: Vec::new(),
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
+            optimize_timer_slack: config.optimize_timer_slack,
             pid_agent_name_cache,
             http_domains,
             sls_activated,
@@ -539,11 +542,10 @@ impl AgentSight {
 
     /// Attach SSL probes to a specific agent process
     pub fn attach_process(&mut self, pid: u32, agent_name: &str) {
-        Self::attach_process_internal(&mut self.probes, pid, agent_name);
+        Self::attach_process_internal(&mut self.probes, pid, agent_name, self.optimize_timer_slack);
     }
 
-    /// Internal helper to attach SSL probes to a process
-    fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
+    fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str, optimize_timer_slack: bool) {
         log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
         if let Err(e) = probes.add_traced_pid(pid) {
             log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
@@ -552,6 +554,13 @@ impl AgentSight {
             log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
         } else {
             log::info!("Attached to agent: {} (pid={})", agent_name, pid);
+            if optimize_timer_slack {
+                let path = format!("/proc/{}/timerslack_ns", pid);
+                match std::fs::write(&path, "1") {
+                    Ok(()) => log::info!("Set timer_slack_ns=1 for pid {} (wakeup optimization)", pid),
+                    Err(e) => log::debug!("Failed to set timer_slack_ns for pid {}: {}", pid, e),
+                }
+            }
         }
     }
 
@@ -607,14 +616,8 @@ impl AgentSight {
 
             // HTTPS rules: attach SSL probes to the process
             if self.scanner.on_dns_event(dns_event.pid, &dns_event.domain) {
-                log::info!(
-                    "[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
-                    dns_event.pid,
-                    dns_event.domain
-                );
-                if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
-                    log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
-                }
+                let agent_name = format!("dns:{}", dns_event.domain);
+                self.attach_process(dns_event.pid, &agent_name);
             }
 
             // HTTP domains: resolve DNS domain → IP, add to tcpsniff BPF map

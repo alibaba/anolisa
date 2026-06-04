@@ -22,6 +22,10 @@ pub struct TraceCommand {
     #[structopt(long)]
     pub enable_filewatch: bool,
 
+    /// Optimize agent wakeup latency by setting timer_slack_ns=1 on traced processes
+    #[structopt(long)]
+    pub optimize_timer_slack: bool,
+
     /// Path to JSON configuration file
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
@@ -72,6 +76,7 @@ impl TraceCommand {
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch)
+            .set_optimize_timer_slack(self.optimize_timer_slack)
             .set_config_path(std::path::PathBuf::from(&self.config));
 
         // Create AgentSight (auto-attaches probes and starts polling)

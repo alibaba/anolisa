@@ -445,6 +445,10 @@ pub struct AgentsightConfig {
     /// Obtain via `stat -c %i /sys/fs/cgroup/<path>` (v2) or
     /// `stat -c %i /sys/fs/cgroup/memory/<path>` (v1).
     pub cgroup_ids: Vec<u64>,
+    /// Optimize agent wakeup latency by setting timer_slack_ns=1 on traced processes.
+    /// Reduces hrtimer coalescing from ~50us to ~1ns, cutting p90 wakeup tail by ~2x.
+    /// Opt-in: changes traced process behavior (not purely observational).
+    pub optimize_timer_slack: bool,
     /// TCP capture targets for plain HTTP capture (empty = disabled).
     /// Each entry specifies destination IP, port, or both.
     pub tcp_targets: Vec<TcpTarget>,
@@ -525,6 +529,7 @@ impl Default for AgentsightConfig {
             enable_filewatch: false,
             cgroup_filter_enabled: false,
             cgroup_ids: Vec::new(),
+            optimize_timer_slack: false,
             tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
@@ -627,6 +632,11 @@ impl AgentsightConfig {
     /// probes are created (the value is baked into the BPF rodata at load).
     pub fn set_cgroup_filter_enabled(mut self, enabled: bool) -> Self {
         self.cgroup_filter_enabled = enabled;
+        self
+    }
+
+    pub fn set_optimize_timer_slack(mut self, enable: bool) -> Self {
+        self.optimize_timer_slack = enable;
         self
     }
 
