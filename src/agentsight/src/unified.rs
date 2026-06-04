@@ -807,6 +807,14 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.detach_process(*pid, &agent_name);
                 }
+                // Clean activity monitor (root agents may not be in proctrace child_pids)
+                if let Some(ref mut activity) = self.activity_monitor {
+                    activity.remove_process(*pid);
+                }
+                // Clean lineage tree
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    tree.remove(*pid);
+                }
             }
         }
     }

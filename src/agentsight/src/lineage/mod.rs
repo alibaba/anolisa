@@ -90,13 +90,21 @@ impl LineageTree {
         self.nodes.insert(pid, node);
     }
 
-    /// Remove a node and clean up parent→child links.
+    /// Remove a node, reparent its children to grandparent, and clean up links.
     pub fn remove(&mut self, pid: u32) -> Option<LineageNode> {
         let node = self.nodes.remove(&pid)?;
 
-        // Remove from parent's children list
+        // Reparent children to the removed node's parent (mirrors kernel subreaper)
+        for &child_pid in &node.children {
+            if let Some(child) = self.nodes.get_mut(&child_pid) {
+                child.ppid = node.ppid;
+            }
+        }
+
+        // Update parent's children list: remove this node, add its children
         if let Some(parent) = self.nodes.get_mut(&node.ppid) {
             parent.children.retain(|&c| c != pid);
+            parent.children.extend(node.children.iter());
         }
 
         Some(node)
