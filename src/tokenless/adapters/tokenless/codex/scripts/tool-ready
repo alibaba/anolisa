@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Codex PreToolUse tool-ready environment pre-check with auto-fix.
+
+Reads a PreToolUse hook request from stdin, runs a two-phase
+check-then-fix pipeline via ``tokenless env-check``, and blocks the
+tool if required dependencies are still missing after auto-fix.
+
+Pipeline: Check → Fix → Re-check
+  1. CHECK:   ``tokenless env-check --json --tool <name>``
+  2. FIX:     ``tokenless env-check --fix --json --tool <name>``
+  3. RE-CHECK: parse result after fix attempt
+
+Protocol:
+    stdin  ← codex PreToolUse JSON (tool_name, ...)
+    stdout → {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                      "permissionDecision": "allow"|"deny",
+                                      "additionalContext": "..."}}
+
+Status mapping (from tokenless env-check --json):
+    READY       → passthrough (empty stdout)
+    PARTIAL     → allow + additionalContext warning
+    NOT_READY   → auto-fix → re-check → deny if still failing
+    UNKNOWN     → passthrough (fail-open)
+
+Fail-open: every error path silently passes through (exit 0 with empty
+stdout) so the agent session is never blocked by a hook failure.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from typing import Optional
+
+# Resolve shared hook utilities (common/hooks/ relative to adapters root).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_COMMON = os.path.join(_HERE, "..", "..", "common", "hooks")
+if _COMMON not in sys.path:
+    sys.path.insert(0, _COMMON)
+from hook_utils import skip_silent as _skip  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
+FIX_TIMEOUT = 60  # auto-fix may involve package installs (dnf/pip)
+
+# -- tokenless binary search paths (ANOLISA FHS spec) ------------------------
+
+_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
+_TOKENLESS_LOCAL_SHARE = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+)
+_TOKENLESS_LOCAL_LIB = os.path.join(
+    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+)
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _warn(msg: str) -> None:
+    print(f"[tokenless:ready] {msg}", file=sys.stderr)
+
+
+def _find_tokenless() -> Optional[str]:
+    explicit = os.environ.get("TOKENLESS_BIN", "")
+    if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+    path = shutil.which("tokenless")
+    if path:
+        return path
+    for fp in (_TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            return fp
+    return None
+
+
+def _run_env_check(
+    tokenless_bin: str, tool_name: str, fix: bool = False
+) -> Optional[dict]:
+    """Run tokenless env-check and return parsed JSON result, or None."""
+    cmd = [tokenless_bin, "env-check", "--json", "--tool", tool_name]
+    if fix:
+        cmd.append("--fix")
+    timeout = FIX_TIMEOUT if fix else 10
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        _warn(f"env-check{' --fix' if fix else ''} exit {proc.returncode}")
+        return None
+    try:
+        return json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def _build_response(
+    tool_name: str,
+    status: str,
+    missing: list[str],
+    permission: str,
+) -> str:
+    """Build a codex PreToolUse JSON response and return it as a string."""
+    missing_str = ", ".join(missing) if missing else "unknown"
+    if status == "PARTIAL":
+        ctx = (
+            f"[tokenless:ready] {tool_name}: PARTIAL — "
+            f"recommended deps not installed: {missing_str}. "
+            f"Core tool is functional, extended features may be unavailable."
+        )
+    else:
+        ctx = (
+            f"[tokenless:ready] {tool_name}: NOT_READY — "
+            f"auto-fix attempted but dependencies still missing: {missing_str}. "
+            f"Do NOT retry the same tool — fix the environment first."
+        )
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": permission,
+            "additionalContext": ctx,
+        }
+    }
+    return json.dumps(response, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    # 1. Locate tokenless binary
+    tokenless_bin = _find_tokenless()
+    if not tokenless_bin:
+        _skip()
+
+    # 2. Read stdin JSON
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    # 3. Extract tool_name
+    tool_name = input_data.get("tool_name", "")
+    if not tool_name:
+        _skip()
+
+    # === Phase 1: CHECK ===
+    result = _run_env_check(tokenless_bin, tool_name, fix=False)
+    if result is None:
+        _skip()
+
+    status = result.get("status", "UNKNOWN")
+    missing = result.get("missing", [])
+
+    if status == "READY":
+        _skip()
+
+    if status == "UNKNOWN":
+        _skip()
+
+    # === Phase 2: FIX (auto-install missing dependencies) ===
+    _warn(f"{tool_name}: {status}, attempting auto-fix"
+          + (f" (missing: {', '.join(missing)})" if missing else ""))
+
+    fix_result = _run_env_check(tokenless_bin, tool_name, fix=True)
+    if fix_result is None:
+        # Fix command itself failed — report what we know from check
+        if status == "PARTIAL":
+            print(_build_response(tool_name, status, missing, "allow"))
+            return
+        print(_build_response(tool_name, status, missing, "deny"))
+        return
+
+    fix_status = fix_result.get("status", "UNKNOWN")
+
+    # === Phase 3: RE-CHECK ===
+    if fix_status == "READY":
+        _warn(f"{tool_name}: auto-fix succeeded, tool is now READY")
+        _skip()
+
+    # Fix didn't fully resolve — report remaining issues
+    fix_missing = fix_result.get("missing", [])
+    if fix_status == "PARTIAL":
+        print(_build_response(tool_name, fix_status, fix_missing, "allow"))
+        return
+
+    # Still NOT_READY after fix
+    print(_build_response(tool_name, fix_status, fix_missing, "deny"))
+
+
+if __name__ == "__main__":
+    main()

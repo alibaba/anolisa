@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""Codex PostToolUse compression hook for the Tokenless plugin.
+
+Reads a PostToolUse hook request from stdin, compresses the tool response
+via ``tokenless compress-response`` and optional TOON encoding, then
+injects a compressed summary and environment error classification as
+``additionalContext``.
+
+Protocol:
+    stdin  ← codex PostToolUse JSON (tool_name, tool_response, ...)
+    stdout → {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                      "additionalContext": "..."}}
+
+Design notes for Codex:
+    - PostToolUse CANNOT suppress the original tool output (``suppressOutput``
+      is rejected by the codex hook engine for this event).
+    - ``additionalContext`` is additive — the model sees both the original
+      output AND the injected context.
+    - Therefore we inject a compressed *summary* rather than duplicating the
+      full content, plus environment error classification with fix hints.
+    - For very large JSON responses (> 4 KB), we include the full compressed
+      content so the model has a compact alternative to the raw output.
+
+Fail-open: every error path silently passes through (exit 0 with empty
+stdout) so the agent session is never blocked by a compression failure.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from typing import Optional
+
+# Resolve shared hook utilities (common/hooks/ relative to adapters root).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_COMMON = os.path.join(_HERE, "..", "..", "common", "hooks")
+if _COMMON not in sys.path:
+    sys.path.insert(0, _COMMON)
+from hook_utils import skip_silent as _skip, try_parse_json as _try_parse_json, warn as _warn  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
+MIN_RESPONSE_CHARS: int = 500
+LARGE_RESPONSE_CHARS: int = 4000
+
+# Tool names whose responses should NEVER be compressed (content-reading tools
+# where the model relies on exact output, and task-management tools).
+SKIP_TOOLS: set[str] = {
+    "Read", "read_file", "Glob", "list_directory",
+    "NotebookRead", "read", "glob", "notebookread",
+    "TodoWrite", "Task", "TaskStatus",
+}
+
+# -- tokenless binary search paths (ANOLISA FHS spec) ------------------------
+
+_TOKENLESS_FALLBACK = "/usr/bin/tokenless"
+_TOKENLESS_LOCAL_SHARE = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+)
+_TOKENLESS_LOCAL_LIB = os.path.join(
+    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+)
+
+# -- environment error patterns ----------------------------------------------
+# (pattern_list, category_tag, fix_hint_template)
+
+_ENV_PATTERNS: list[tuple[list[str], str, str]] = [
+    (
+        [
+            "command not found",
+            "not installed",
+            "which: no",
+            "No command ",
+            "cannot execute",
+            "is not recognized",
+            "Could not find",
+            "unable to locate",
+            "Package not found",
+            "/bin/sh:.*: not found",
+            "command not found:",
+        ],
+        "ENV_DEPENDENCY_MISSING",
+        "Missing dependency detected. Install it or ask the user for guidance.",
+    ),
+    (
+        [
+            "Permission denied",
+            "Operation not permitted",
+            "EACCES",
+            "Access denied",
+            "cannot open .* for writing",
+        ],
+        "ENV_PERMISSION",
+        "Permission denied. Check file/directory permissions or run with appropriate access.",
+    ),
+    (
+        [
+            "No such file or directory",
+            "ENOENT",
+            "cannot find",
+            "File not found",
+            "does not exist",
+        ],
+        "ENV_FILE_MISSING",
+        "Required file or directory not found. Verify the path or create it.",
+    ),
+    (
+        [
+            "Connection refused",
+            "Could not resolve host",
+            "Network is unreachable",
+            r"curl: \(7\)",
+            r"curl: \(6\)",
+            "Failed to connect",
+            "Name or service not known",
+            "Couldn't resolve host",
+            "Temporary failure in name resolution",
+            "ECONNREFUSED",
+            "ETIMEDOUT",
+        ],
+        "ENV_NETWORK",
+        "Network connectivity issue. Check DNS, proxy, and firewall settings.",
+    ),
+    (
+        [
+            "ModuleNotFoundError",
+            "ImportError",
+            "No module named",
+            "cannot import name",
+            "npm ERR! 404",
+        ],
+        "ENV_PACKAGE_MISSING",
+        "Required package or module is missing. Install the needed dependency.",
+    ),
+]
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_tokenless() -> Optional[str]:
+    """Locate the tokenless CLI binary."""
+    explicit = os.environ.get("TOKENLESS_BIN", "")
+    if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+
+    path = shutil.which("tokenless")
+    if path:
+        return path
+
+    for fp in (_TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            return fp
+    return None
+
+
+def _is_json_serializable(obj) -> bool:
+    """Check if a value is a JSON object or array (compressible)."""
+    return isinstance(obj, (dict, list))
+
+
+def _classify_env_error(tool_response) -> tuple[Optional[str], Optional[str]]:
+    """Detect environment errors in tool output.
+
+    Returns (category_tag, fix_hint) or (None, None).
+    """
+    text = ""
+    if isinstance(tool_response, dict):
+        # Check stderr and error fields first
+        text = str(tool_response.get("stderr", "")) + str(tool_response.get("error", ""))
+        # Also check exit code
+        exit_code = tool_response.get("exit_code") or tool_response.get("exitCode")
+        if exit_code is not None and exit_code == 0 and not text:
+            return None, None
+    elif isinstance(tool_response, str):
+        text = tool_response
+
+    if not text:
+        return None, None
+
+    for patterns, category, hint in _ENV_PATTERNS:
+        for pat in patterns:
+            if re.search(pat, text, re.IGNORECASE):
+                return category, hint
+
+    return None, None
+
+
+def _extract_text_for_compression(tool_response) -> Optional[str]:
+    """Extract a JSON string from tool_response for compression."""
+    if isinstance(tool_response, str):
+        return tool_response
+    if isinstance(tool_response, (dict, list)):
+        return json.dumps(tool_response, separators=(",", ":"), ensure_ascii=False)
+    return None
+
+
+def _run_tokenless(tokenless_bin: str, subcommand: str, input_data: str,
+                   session_id: str = "", tool_use_id: str = "",
+                   timeout: int = 10) -> Optional[str]:
+    """Run a tokenless subcommand with input, return stdout or None on failure."""
+    cmd = [tokenless_bin, subcommand, "--agent-id", AGENT_ID]
+    if session_id:
+        cmd.extend(["--session-id", session_id])
+    if tool_use_id:
+        cmd.extend(["--tool-use-id", tool_use_id])
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_data,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        if proc.returncode != 0 and proc.stderr:
+            _warn(f"{subcommand}: {proc.stderr.strip()[:200]}")
+    except subprocess.TimeoutExpired:
+        _warn(f"{subcommand} timed out after {timeout}s")
+    except OSError as e:
+        _warn(f"{subcommand} OS error: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    # 1. Locate tokenless binary (fail-open: skip if not installed)
+    tokenless_bin = _find_tokenless()
+    if not tokenless_bin:
+        _skip()
+
+    # 2. Read and parse stdin JSON from codex
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    # 3. Extract fields
+    tool_name = input_data.get("tool_name", "")
+    tool_response = input_data.get("tool_response")
+    session_id = input_data.get("session_id", "")
+    tool_use_id = input_data.get("tool_use_id", "")
+
+    # 4. Skip content-reading and task-management tools
+    if tool_name in SKIP_TOOLS:
+        _skip()
+
+    # 5. Skip empty or trivial responses
+    if tool_response is None:
+        _skip()
+
+    raw_text = _extract_text_for_compression(tool_response)
+    if not raw_text or raw_text in ("{}", "[]", '""'):
+        _skip()
+
+    # 6. Detect environment errors (always, regardless of size)
+    env_category, env_hint = _classify_env_error(tool_response)
+
+    # 7. Skip compression for small responses, but still report env errors
+    if len(raw_text) < MIN_RESPONSE_CHARS:
+        if env_category:
+            response = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": (
+                        f"[tokenless:env:{env_category}] {env_hint} "
+                        f"Do NOT retry the same command — fix the environment first."
+                    ),
+                }
+            }
+            print(json.dumps(response, ensure_ascii=False))
+        _skip()
+
+    # 8. Determine whether to do full compression
+    parsed = _try_parse_json(raw_text)
+    is_json = parsed is not None and _is_json_serializable(parsed)
+    is_large = len(raw_text) >= LARGE_RESPONSE_CHARS
+
+    compressed_text: Optional[str] = None
+    toon_text: Optional[str] = None
+
+    # -- Build compression input --
+    # If the response is plain text (not JSON), wrap it as a structured
+    # dict so the compression pipeline can still run and record stats.
+    # Otherwise bare strings like git log output would be silently skipped
+    # and never appear in tokenless stats, unlike openclaw/hermes where the
+    # agent framework natively wraps Bash output in {"stdout":...,...}.
+    if is_json:
+        compression_input = raw_text
+    else:
+        compression_input = json.dumps(
+            {"stdout": raw_text}, separators=(",", ":"), ensure_ascii=False
+        )
+
+    # -- Response compression --
+    compressed_text = _run_tokenless(
+        tokenless_bin, "compress-response",
+        compression_input, session_id, tool_use_id, timeout=10,
+    )
+    if compressed_text and len(compressed_text) >= len(compression_input):
+        compressed_text = None  # no savings → skip
+
+    # -- TOON encoding (if still valid JSON after compression) --
+    if compressed_text:
+        toon_input = compressed_text
+    else:
+        toon_input = compression_input
+
+    toon_parsed = _try_parse_json(toon_input)
+    if toon_parsed is not None:
+        toon_text = _run_tokenless(
+            tokenless_bin, "compress-toon",
+            toon_input, session_id, tool_use_id, timeout=10,
+        )
+        if toon_text and len(toon_text) >= len(toon_input):
+            toon_text = None  # no savings → skip
+
+    # 9. Build additionalContext
+    parts: list[str] = []
+
+    original_chars = len(raw_text)
+    final_text = toon_text or compressed_text
+    if final_text:
+        final_chars = len(final_text)
+        savings_pct = round((1 - final_chars / max(original_chars, 1)) * 100)
+        parts.append(
+            f"[tokenless:compressed] {tool_name}: "
+            f"{original_chars:,} → {final_chars:,} chars ({savings_pct}% reduction)"
+        )
+    elif not final_text:
+        # No compression savings (JSON or plain text)
+        if is_large:
+            parts.append(
+                f"[tokenless] {tool_name}: {original_chars:,} chars, "
+                f"no compression savings achieved"
+            )
+
+    # Environment error hints
+    if env_category:
+        parts.append(
+            f"[tokenless:env:{env_category}] {env_hint} "
+            f"Do NOT retry the same command — fix the environment first."
+        )
+
+    # For large responses, include the compressed content
+    if final_text and is_large:
+        parts.append("--- compressed content ---")
+        # Truncate the compressed content if it's still very large
+        if len(final_text) > 8000:
+            parts.append(final_text[:8000])
+            parts.append("... (compressed content truncated at 8000 chars)")
+        else:
+            parts.append(final_text)
+        parts.append("--- end compressed content ---")
+
+    if not parts:
+        _skip()
+
+    additional_context = "\n".join(parts)
+
+    # 10. Output codex hook response
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": additional_context,
+        }
+    }
+    print(json.dumps(response, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

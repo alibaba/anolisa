@@ -26,7 +26,8 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json \
     $(ADAPTER_SRC_DIR)/hermes/plugin.yaml \
     $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json \
-    $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json
+    $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
+    $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json
 TOON_VER := 0.4.6
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -40,6 +41,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         hermes-install hermes-uninstall \
         qoder-install qoder-uninstall \
         claude-code-install claude-code-uninstall \
+        codex-install codex-uninstall \
         setup help \
         test-hooks
 
@@ -85,6 +87,10 @@ $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json: $(ADAPTER_SRC_DIR)/qoder/.qo
 $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json: \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json.in Cargo.toml
 	@echo "==> Generating claude-code/.claude-plugin/plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json: $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json.in Cargo.toml
+	@echo "==> Generating codex/.codex-plugin/plugin.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
@@ -191,9 +197,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -270,6 +276,18 @@ claude-code-uninstall:
 	@echo "==> Uninstalling Claude Code plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- Codex ---
+CODEX_ADAPTER_DIR = $(SHARE_DIR)/codex
+
+codex-install:
+	@echo "==> Installing Codex plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/install.sh
+
+codex-uninstall:
+	@echo "==> Uninstalling Codex plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/uninstall.sh
+
 # One-step setup: build + install + all adapters
 setup: install adapter-install
 	@echo ""
@@ -285,7 +303,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -309,7 +327,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -321,6 +339,8 @@ help:
 	@echo "  qoder-uninstall   Unregister Qoder CLI plugin"
 	@echo "  claude-code-install   Register Claude Code plugin via claude CLI"
 	@echo "  claude-code-uninstall Unregister Claude Code plugin"
+	@echo "  codex-install     Register Codex plugin via codex CLI"
+	@echo "  codex-uninstall   Unregister Codex plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  help              Show this help"
 	@echo ""

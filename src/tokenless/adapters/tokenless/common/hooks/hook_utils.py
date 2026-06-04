@@ -45,6 +45,11 @@ def skip() -> None:
     sys.exit(0)
 
 
+def skip_silent() -> None:
+    """Exit silently with empty stdout (codex protocol: empty stdout = passthrough)."""
+    sys.exit(0)
+
+
 def warn(msg: str) -> None:
     print(f"[tokenless] WARNING: {msg}", file=sys.stderr)
 

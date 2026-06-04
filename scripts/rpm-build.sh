@@ -450,12 +450,15 @@ build_tokenless() {
         --exclude='target' \
         --exclude='.git' \
         --exclude='node_modules' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
         --exclude='adapters/tokenless/hermes/plugin.yaml' \
         --exclude='adapters/tokenless/qoder/.qoder-plugin/plugin.json' \
         --exclude='adapters/tokenless/claude-code/.claude-plugin/plugin.json' \
+        --exclude='adapters/tokenless/codex/.codex-plugin/plugin.json' \
         . | tar -xf - -C "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}"

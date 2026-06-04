@@ -78,6 +78,22 @@
         "install":   "claude-code/scripts/install.sh",
         "uninstall": "claude-code/scripts/uninstall.sh"
       }
+    },
+    "codex": {
+      "compatibleVersions": "*",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response",
+          "compress-toon"
+        ]
+      },
+      "actions": {
+        "detect":    "codex/scripts/detect.sh",
+        "install":   "codex/scripts/install.sh",
+        "uninstall": "codex/scripts/uninstall.sh"
+      }
     }
   }
 }

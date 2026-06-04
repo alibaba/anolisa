@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Codex PreToolUse RTK command rewriting hook.
+
+Reads a PreToolUse hook request from stdin, extracts the shell command,
+invokes ``rtk rewrite`` for token optimization, and returns the rewritten
+command via ``updatedInput``.
+
+Protocol:
+    stdin  ← codex PreToolUse JSON (tool_name, tool_input.command, ...)
+    stdout → {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                      "permissionDecision": "allow",
+                                      "updatedInput": {...}}}
+
+rtk exit code protocol:
+    0 = rewrite available → apply
+    1 = no RTK equivalent → skip (passthrough)
+    2 = deny rule matched → skip
+    3 = Ask/Default → apply (non-interactive context)
+
+Fail-open: all error paths exit 0 with empty stdout (passthrough).
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from typing import Optional
+
+# Resolve shared hook utilities (common/hooks/ relative to adapters root).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_COMMON = os.path.join(_HERE, "..", "..", "common", "hooks")
+if _COMMON not in sys.path:
+    sys.path.insert(0, _COMMON)
+from hook_utils import parse_version as _parse_version, skip_silent as _skip, write_context as _write_context  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
+_MIN_RTK_VERSION = (0, 35, 0)
+
+# RTK binary search paths
+_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
+_RTK_FALLBACK_DEBIAN = "/usr/lib/anolisa/tokenless/rtk"
+_RTK_LOCAL_SHARE = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+)
+_RTK_LOCAL_LIB = os.path.join(
+    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk"
+)
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_rtk() -> Optional[str]:
+    """Locate the rtk binary."""
+    path = shutil.which("rtk")
+    if path:
+        return path
+    for fp in (_RTK_FALLBACK, _RTK_FALLBACK_DEBIAN, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB):
+        if os.path.isfile(fp) and os.access(fp, os.X_OK):
+            return fp
+    return None
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    # 1. Resolve rtk binary
+    rtk_bin = _find_rtk()
+    if not rtk_bin:
+        _skip()
+
+    # 2. Version guard
+    try:
+        result = subprocess.run(
+            [rtk_bin, "--version"],
+            capture_output=True, text=True, timeout=3,
+        )
+        ver = _parse_version(result.stdout)
+        if ver and ver < _MIN_RTK_VERSION:
+            _skip()
+    except Exception:
+        _skip()
+
+    # 3. Read stdin JSON
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _skip()
+        input_data = json.loads(raw)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        _skip()
+
+    # 4. Extract command from tool_input
+    tool_name = input_data.get("tool_name", "")
+    tool_input = input_data.get("tool_input", {})
+    if isinstance(tool_input, str):
+        try:
+            tool_input = json.loads(tool_input)
+        except (json.JSONDecodeError, ValueError):
+            _skip()
+    cmd = tool_input.get("command", "")
+    if not cmd:
+        _skip()
+
+    # 5. Set up RTK env context for stats
+    session_id = input_data.get("session_id", "")
+    tool_use_id = input_data.get("tool_use_id", "")
+
+    env = os.environ.copy()
+    env["TOKENLESS_AGENT_ID"] = AGENT_ID
+    if session_id:
+        env["TOKENLESS_SESSION_ID"] = session_id
+    if tool_use_id:
+        env["TOKENLESS_TOOL_USE_ID"] = tool_use_id
+
+    _write_context(AGENT_ID, session_id, tool_use_id)
+
+    # 6. Rewrite via rtk
+    try:
+        proc = subprocess.run(
+            [rtk_bin, "rewrite", cmd],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except Exception:
+        _skip()
+
+    # 7. Interpret rtk exit code
+    if proc.returncode in (1, 2):
+        _skip()
+
+    rewritten = proc.stdout.strip()
+    if not rewritten or rewritten == cmd:
+        _skip()
+
+    # 8. Build codex PreToolUse response with updatedInput
+    updated_input = dict(tool_input)
+    updated_input["command"] = rewritten
+
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+    }
+    print(json.dumps(response, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
