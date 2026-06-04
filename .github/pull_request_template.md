@@ -39,6 +39,7 @@ closes #
 - [ ] `skill` (os-skills)
 - [ ] `sight` (agentsight)
 - [ ] `tokenless` (tokenless)
+- [ ] `ckpt` (ws-ckpt)
 - [ ] `memory` (agent-memory)
 - [ ] Multiple / Project-wide
 
