@@ -134,4 +134,68 @@ def review() -> None:
         reader.close()
 
 
+@app.command()
+def report(
+    session_id: str = typer.Option(
+        None, "--session-id", help="Session ID to report on."
+    ),
+    last: bool = typer.Option(
+        False, "--last", help="Report on the most recent session."
+    ),
+    format_: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Print a per-session debrief (LLM calls, tools, security, compression)."""
+    if format_ not in ("text", "json"):
+        typer.echo(
+            f"Error: --format must be 'text' or 'json', got '{format_}'.", err=True
+        )
+        raise typer.Exit(code=1)
+    if not session_id and not last:
+        typer.echo("Error: specify --session-id or --last.", err=True)
+        raise typer.Exit(code=1)
+
+    from agent_sec_cli.observability.session_report import (  # noqa: PLC0415
+        build_session_report,
+        format_text,
+    )
+    from agent_sec_cli.observability.sqlite_reader import (  # noqa: PLC0415
+        ObservabilityReader,
+    )
+    from agent_sec_cli.security_events.sqlite_reader import (  # noqa: PLC0415
+        SqliteEventReader,
+    )
+
+    reader = ObservabilityReader()
+    security_reader = None
+    try:
+        if last:
+            sessions = reader.list_sessions()
+            if not sessions:
+                typer.echo("No sessions recorded.", err=True)
+                raise typer.Exit(code=1)
+            session_id = sessions[0].session_id
+
+        try:
+            security_reader = SqliteEventReader()
+        except Exception:
+            pass
+
+        rpt = build_session_report(session_id, reader, security_reader)
+
+        if rpt is None:
+            typer.echo(f"Error: session '{session_id}' not found.", err=True)
+            raise typer.Exit(code=1)
+
+        if format_ == "json":
+            typer.echo(json.dumps(rpt.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            typer.echo(format_text(rpt))
+    finally:
+        if security_reader is not None:
+            security_reader.close()
+        reader.close()
+
+
 __all__ = ["app"]
