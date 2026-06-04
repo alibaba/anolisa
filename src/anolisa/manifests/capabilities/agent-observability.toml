@@ -8,5 +8,5 @@ features.agentsight = ["token_counting", "ebpf_tracing"]
 
 [requires_env]
 os = "linux"
-arch = ["x86_64", "aarch64"]
+arch = ["x86_64"]
 # ebpf_tracing feature additionally requires CAP_BPF; gated at the feature level.

@@ -22,12 +22,14 @@ pub fn cache_path(system_mode: bool) -> PathBuf {
 
 /// Load cached facts if they exist and are not stale.
 pub fn load_cached(_path: &PathBuf) -> Option<EnvFacts> {
-    // TODO: implement cache loading with TTL check
+    // TODO(owner: env-detection, when: repeated probes become measurable):
+    // load JSON only when the recorded TTL is still valid.
     None
 }
 
 /// Write facts to cache.
 pub fn save_cache(_path: &PathBuf, _facts: &EnvFacts) -> std::io::Result<()> {
-    // TODO: implement cache persistence
+    // TODO(owner: env-detection, when: `load_cached` is wired): persist
+    // facts atomically so partial writes cannot poison future detection.
     Ok(())
 }

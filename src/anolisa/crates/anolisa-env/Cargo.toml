@@ -9,3 +9,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 semver.workspace = true
+nix.workspace = true
+dirs.workspace = true

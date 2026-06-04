@@ -1,193 +1,441 @@
+//! ANOLISA environment facts detection.
+//!
+//! [`EnvService::detect`] returns an [`EnvFacts`] snapshot describing the
+//! host OS, arch, libc, kernel, distro family, BTF / `cap_bpf` availability,
+//! container runtime, and current user identity. Every probe degrades
+//! gracefully: detection never panics and unknown values fall back to
+//! `None` or safe defaults.
+//!
+//! The legacy probe / cache / gate scaffolding that lived in this crate
+//! during the skeleton phase is preserved on disk (see `cache.rs`,
+//! `gate.rs`, `probes/`) but is no longer wired into the crate while we
+//! consolidate around this simpler `EnvFacts` contract — later milestones
+//! will re-integrate it on top of the new shape.
+
+use std::path::PathBuf;
+use std::process::Command;
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
-pub mod cache;
-pub mod gate;
-pub mod probes;
-
-/// Top-level environment facts collected by all probes.
+/// Snapshot of detected environment facts.
+///
+/// Optional fields are `None` when detection is unavailable on the
+/// current platform (for example `libc` / `btf` on non-Linux hosts) or
+/// when a probe failed without a usable fallback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvFacts {
-    pub platform: Platform,
-    pub nesting: Option<NestingInfo>,
-    pub gpu: Option<GpuInfo>,
-    pub tee: Option<TeeInfo>,
-    pub kernel: KernelInfo,
-    pub distro: DistroInfo,
-    pub arch: Arch,
-    pub capabilities: HashSet<Capability>,
-    pub filesystem: FsInfo,
-    /// Detected agent frameworks on this machine (empty = none detected).
-    /// Drives `anolisa adapter scan` output and `--with-adapter=auto`.
-    pub frameworks: Vec<DetectedFramework>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Operating system identifier (e.g. `"linux"`, `"darwin"`).
+    pub os: String,
+    /// CPU architecture (e.g. `"x86_64"`, `"aarch64"`).
+    pub arch: String,
+    /// libc flavor on Linux (`"glibc"` / `"musl"`); `None` elsewhere.
+    pub libc: Option<String>,
+    /// Kernel release as reported by `uname -r`.
+    pub kernel: Option<String>,
+    /// Package base family derived from `/etc/os-release`
+    /// (e.g. `"anolis23"`, `"anolis8"`).
+    pub pkg_base: Option<String>,
+    /// Whether `/sys/kernel/btf/vmlinux` exists.
+    pub btf: Option<bool>,
+    /// Best-effort `CAP_BPF` availability from Linux effective capabilities.
+    /// `None` when the capability set cannot be read or parsed.
+    pub cap_bpf: Option<bool>,
+    /// Container runtime hint. Set from marker files first
+    /// (`/.dockerenv` -> `"docker"`, `/run/.containerenv` -> `"podman"`)
+    /// and then by scanning `/proc/1/cgroup` and `/proc/self/cgroup` for
+    /// known cgroup paths. Possible values today include `"docker"`,
+    /// `"podman"`, `"libpod"`, `"containerd"`, `"kubepods"`, and the
+    /// generic `"container"` fallback when the cgroup line looks
+    /// containerized but the flavor is unknown. `None` when no probe
+    /// found a match.
+    pub container: Option<String>,
+    /// User-facing login name (from `$USER` / `$LOGNAME`, or passwd).
+    pub user: String,
+    /// Effective uid of the running process.
+    pub uid: u32,
+    /// Home directory as resolved by [`dirs::home_dir`].
+    pub home: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Platform {
-    Physical,
-    Vm(Hypervisor),
-    Container(ContainerRuntime),
-}
+/// Stateless façade exposing environment detection entry points.
+pub struct EnvService;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Hypervisor {
-    Kvm,
-    Xen,
-    HyperV,
-    VMware,
-    Other(String),
-}
+impl EnvService {
+    /// Detect facts for the current host. Never fails.
+    pub fn detect() -> EnvFacts {
+        Self::detect_for(std::env::consts::OS)
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ContainerRuntime {
-    Runc,
-    Gvisor,
-    Kata,
-    Firecracker,
-    Other(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NestingInfo {
-    pub outer: Platform,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuInfo {
-    pub vendor: String,
-    pub model: String,
-    pub driver_version: Option<String>,
-    pub compute_capable: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TeeType {
-    Tdx,
-    Sev,
-    Sgx,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TeeInfo {
-    pub tee_type: TeeType,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KernelInfo {
-    pub version: String,
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub btf_available: bool,
-    pub cgroups_v2: bool,
-    pub namespaces: bool,
-    pub landlock_abi: Option<u32>,
-    pub kvm_available: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DistroInfo {
-    pub id: String,
-    pub version: String,
-    pub name: String,
-    pub pkg_base: PkgBase,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PkgBase {
-    Rpm,
-    Deb,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Arch {
-    X86_64,
-    Aarch64,
-    Riscv64,
-    Other,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum Capability {
-    CapBpf,
-    CapSysAdmin,
-    CapNetAdmin,
-    CapSysPtrace,
-    Other(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FsInfo {
-    pub btrfs_available: bool,
-    pub overlayfs_available: bool,
-}
-
-/// One agent framework detected on the host. The probe library defines the
-/// detection rules; this struct just records the outcome.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DetectedFramework {
-    /// Framework identifier: `cosh`, `openclaw`, `hermes`, `mcp`, ...
-    pub name: String,
-    /// Adapter classification — informs default install behavior.
-    pub kind: FrameworkKind,
-    /// Optional version string if the probe was able to determine one.
-    pub version: Option<String>,
-    /// Optional install path if the probe found a binary or config.
-    pub location: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum FrameworkKind {
-    /// Bundled with ANOLISA (always present on a machine that has anolisa).
-    FirstParty,
-    /// External agent framework installed independently.
-    ThirdParty,
-    /// Open protocol the system speaks (e.g. MCP).
-    Protocol,
-}
-
-impl EnvFacts {
-    /// Create a minimal placeholder for testing / offline use.
-    pub fn placeholder() -> Self {
-        Self {
-            platform: Platform::Physical,
-            nesting: None,
-            gpu: None,
-            tee: None,
-            kernel: KernelInfo {
-                version: "unknown".into(),
-                major: 0,
-                minor: 0,
-                patch: 0,
-                btf_available: false,
-                cgroups_v2: false,
-                namespaces: false,
-                landlock_abi: None,
-                kvm_available: false,
-            },
-            distro: DistroInfo {
-                id: "unknown".into(),
-                version: "0".into(),
-                name: "Unknown".into(),
-                pkg_base: PkgBase::Unknown,
-            },
-            arch: Arch::X86_64,
-            capabilities: HashSet::new(),
-            filesystem: FsInfo {
-                btrfs_available: false,
-                overlayfs_available: false,
-            },
-            frameworks: vec![DetectedFramework {
-                name: "cosh".into(),
-                kind: FrameworkKind::FirstParty,
-                version: None,
-                location: None,
-            }],
-            timestamp: chrono::Utc::now(),
+    /// Detection variant that pretends the target OS is `target_os`.
+    ///
+    /// Useful for tests that want to assert non-Linux fallback behavior
+    /// without running on a non-Linux host. Probes that consult the live
+    /// filesystem (`/proc`, `/sys`, `/etc/os-release`, etc.) still read
+    /// from the real machine.
+    pub fn detect_for(target_os: &str) -> EnvFacts {
+        let arch = std::env::consts::ARCH.to_string();
+        let libc = detect_libc(target_os);
+        let kernel = detect_kernel();
+        let pkg_base = detect_pkg_base();
+        let btf = detect_btf(target_os);
+        let cap_bpf = detect_cap_bpf();
+        let container = detect_container();
+        let (user, uid) = detect_user_uid();
+        let home = detect_home();
+        EnvFacts {
+            os: target_os.to_string(),
+            arch,
+            libc,
+            kernel,
+            pkg_base,
+            btf,
+            cap_bpf,
+            container,
+            user,
+            uid,
+            home,
         }
+    }
+}
+
+fn detect_libc(target_os: &str) -> Option<String> {
+    if target_os != "linux" {
+        return None;
+    }
+    if let Ok(out) = Command::new("ldd").arg("--version").output() {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        )
+        .to_lowercase();
+        if combined.contains("musl") {
+            return Some("musl".to_string());
+        }
+        if combined.contains("glibc") || combined.contains("gnu libc") {
+            return Some("glibc".to_string());
+        }
+    }
+    // Default assumption on Linux when probes are inconclusive.
+    Some("glibc".to_string())
+}
+
+fn detect_kernel() -> Option<String> {
+    let out = Command::new("uname").arg("-r").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Parse an `os-release(5)` document and return a normalized
+/// `pkg_base` identifier such as `"anolis23"` when the distro is
+/// (or claims compatibility with) Anolis OS.
+///
+/// Returns `None` for distros outside the Anolis family — callers
+/// can fall back to a different probe / default.
+pub fn parse_os_release(content: &str) -> Option<String> {
+    let mut id: Option<String> = None;
+    let mut id_like: Option<String> = None;
+    let mut version_id: Option<String> = None;
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = Some(unquote(v));
+        } else if let Some(v) = line.strip_prefix("ID_LIKE=") {
+            id_like = Some(unquote(v));
+        } else if let Some(v) = line.strip_prefix("VERSION_ID=") {
+            version_id = Some(unquote(v));
+        }
+    }
+
+    let is_anolis = id
+        .as_deref()
+        .map(|s| matches!(s, "anolis" | "openanolis"))
+        .unwrap_or(false)
+        || id_like
+            .as_deref()
+            .map(|s| {
+                s.split_whitespace()
+                    .any(|w| matches!(w, "anolis" | "openanolis"))
+            })
+            .unwrap_or(false);
+
+    if !is_anolis {
+        return None;
+    }
+
+    let major = version_id
+        .as_deref()
+        .and_then(|v| v.split('.').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    Some(match major {
+        Some(m) => format!("anolis{m}"),
+        None => "anolis".to_string(),
+    })
+}
+
+fn unquote(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string()
+}
+
+fn detect_pkg_base() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/os-release").ok()?;
+    parse_os_release(&content)
+}
+
+fn detect_btf(target_os: &str) -> Option<bool> {
+    if target_os != "linux" {
+        return None;
+    }
+    Some(std::path::Path::new("/sys/kernel/btf/vmlinux").exists())
+}
+
+fn detect_cap_bpf() -> Option<bool> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    detect_cap_bpf_from_status_file(std::path::Path::new("/proc/self/status"))
+}
+
+fn detect_cap_bpf_from_status_file(path: &std::path::Path) -> Option<bool> {
+    let content = std::fs::read_to_string(path).ok()?;
+    parse_cap_bpf_from_proc_status(&content)
+}
+
+fn parse_cap_bpf_from_proc_status(content: &str) -> Option<bool> {
+    const CAP_BPF_BIT: u32 = 39;
+
+    let cap_eff = content.lines().find_map(|raw| {
+        let line = raw.trim();
+        line.strip_prefix("CapEff:")
+            .map(|value| value.trim().trim_start_matches("0x"))
+    })?;
+
+    let bits = u64::from_str_radix(cap_eff, 16).ok()?;
+    Some((bits & (1u64 << CAP_BPF_BIT)) != 0)
+}
+
+fn detect_container() -> Option<String> {
+    if std::path::Path::new("/.dockerenv").exists() {
+        return Some("docker".to_string());
+    }
+    if std::path::Path::new("/run/.containerenv").exists() {
+        return Some("podman".to_string());
+    }
+    if std::env::consts::OS == "linux" {
+        // Try pid 1's cgroup first (most accurate for "are we in a
+        // container?"), then fall back to the current process. Probe
+        // failure must never become a hard error.
+        for candidate in ["/proc/1/cgroup", "/proc/self/cgroup"] {
+            if let Ok(content) = std::fs::read_to_string(candidate)
+                && let Some(flavor) = parse_cgroup(&content)
+            {
+                return Some(flavor);
+            }
+        }
+    }
+    None
+}
+
+/// Inspect a `/proc/<pid>/cgroup` payload and return a container
+/// flavor hint when a known marker is present. Both cgroup v1 (multiple
+/// lines, one per controller) and cgroup v2 (single `0::` line) are
+/// covered.
+///
+/// Matching deliberately looks for *container instance* paths rather
+/// than substring-anywhere — a host that merely runs the containerd
+/// daemon will have lines like `0::/system.slice/containerd.service`
+/// in its own cgroup, and treating that as "we are containerised"
+/// produces false positives.
+fn parse_cgroup(content: &str) -> Option<String> {
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Be strict about order: more specific markers first
+        // (libpod before podman, kubepods before bare containerd) so
+        // the most informative label wins on overlapping paths.
+        if line.contains("libpod-") || line.contains("/libpod/") {
+            return Some("libpod".to_string());
+        }
+        if line.contains("/docker/") || line.contains("docker-") {
+            return Some("docker".to_string());
+        }
+        if line.contains("kubepods") {
+            return Some("kubepods".to_string());
+        }
+        if line.contains("podman-") || line.contains("/podman/") {
+            return Some("podman".to_string());
+        }
+        // Only match container-instance containerd paths
+        // (`cri-containerd-<id>.scope`, `/containerd/<id>/`). Bare
+        // `containerd.service` on the host is the daemon itself, not
+        // a container, so it must NOT match.
+        if line.contains("cri-containerd-") || line.contains("/containerd/") {
+            return Some("containerd".to_string());
+        }
+        if line.contains("/lxc/") || line.contains(":lxc:") {
+            return Some("lxc".to_string());
+        }
+    }
+    None
+}
+
+fn detect_user_uid() -> (String, u32) {
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()
+        .or_else(|| {
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .ok()
+                .flatten()
+                .map(|u| u.name)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    (user, uid)
+}
+
+fn detect_home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_returns_non_empty_os_and_arch() {
+        let facts = EnvService::detect();
+        assert!(!facts.os.is_empty(), "os should not be empty");
+        assert!(!facts.arch.is_empty(), "arch should not be empty");
+    }
+
+    #[test]
+    fn detect_for_non_linux_skips_libc_and_btf() {
+        let facts = EnvService::detect_for("macos");
+        assert_eq!(facts.os, "macos");
+        assert!(facts.libc.is_none(), "libc should be None off-Linux");
+        assert!(facts.btf.is_none(), "btf should be None off-Linux");
+    }
+
+    #[test]
+    fn parse_os_release_anolis_23() {
+        let content = "NAME=\"Anolis OS\"\n\
+                       VERSION=\"23.0\"\n\
+                       ID=\"anolis\"\n\
+                       VERSION_ID=\"23\"\n";
+        assert_eq!(parse_os_release(content).as_deref(), Some("anolis23"));
+    }
+
+    #[test]
+    fn parse_os_release_id_like_matches() {
+        let content = "NAME=\"Custom Distro\"\n\
+                       ID=customdistro\n\
+                       ID_LIKE=\"anolis rhel\"\n\
+                       VERSION_ID=\"8.6\"\n";
+        assert_eq!(parse_os_release(content).as_deref(), Some("anolis8"));
+    }
+
+    #[test]
+    fn parse_os_release_unknown_distro_returns_none() {
+        let content = "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"22.04\"\n";
+        assert!(parse_os_release(content).is_none());
+    }
+
+    #[test]
+    fn parse_os_release_missing_version_falls_back_to_anolis() {
+        let content = "ID=anolis\n";
+        assert_eq!(parse_os_release(content).as_deref(), Some("anolis"));
+    }
+
+    #[test]
+    fn parse_cap_bpf_from_proc_status_detects_cap_bpf_set() {
+        let content = "Name:\tanolisa\nCapEff:\t0000008000000000\n";
+        assert_eq!(parse_cap_bpf_from_proc_status(content), Some(true));
+    }
+
+    #[test]
+    fn parse_cap_bpf_from_proc_status_detects_cap_bpf_unset() {
+        let content = "Name:\tanolisa\nCapEff:\t00000000a80425fb\n";
+        assert_eq!(parse_cap_bpf_from_proc_status(content), Some(false));
+    }
+
+    #[test]
+    fn parse_cap_bpf_from_proc_status_rejects_invalid_value() {
+        let content = "Name:\tanolisa\nCapEff:\tnot-hex\n";
+        assert_eq!(parse_cap_bpf_from_proc_status(content), None);
+    }
+
+    #[test]
+    fn detect_cap_bpf_from_status_file_missing_falls_back_to_none() {
+        let path = std::path::Path::new("/definitely/missing/anolisa-proc-status");
+        assert_eq!(detect_cap_bpf_from_status_file(path), None);
+    }
+
+    #[test]
+    fn parse_cgroup_recognizes_docker_v1_lines() {
+        let content = "\
+12:hugetlb:/docker/3f4b1c2a5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a\n\
+11:memory:/docker/3f4b1c2a5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a\n";
+        assert_eq!(parse_cgroup(content).as_deref(), Some("docker"));
+    }
+
+    #[test]
+    fn parse_cgroup_recognizes_libpod_before_podman() {
+        let content = "0::/machine.slice/libpod-abc.scope\n";
+        assert_eq!(parse_cgroup(content).as_deref(), Some("libpod"));
+    }
+
+    #[test]
+    fn parse_cgroup_recognizes_podman_userns_path() {
+        let content =
+            "0::/user.slice/user-1000.slice/user@1000.service/podman-rootless.scope/abc\n";
+        assert_eq!(parse_cgroup(content).as_deref(), Some("podman"));
+    }
+
+    #[test]
+    fn parse_cgroup_recognizes_kubepods_before_containerd() {
+        // kubepods always wins because it's the more useful label
+        // even when the underlying runtime is containerd.
+        let content = "0::/kubepods.slice/kubepods-besteffort.slice/cri-containerd-abc.scope\n";
+        assert_eq!(parse_cgroup(content).as_deref(), Some("kubepods"));
+    }
+
+    #[test]
+    fn parse_cgroup_recognizes_containerd_instance_path() {
+        // `/containerd/<id>/` is the in-container cgroup path; this
+        // must match.
+        let content = "0::/containerd/abc123def456\n";
+        assert_eq!(parse_cgroup(content).as_deref(), Some("containerd"));
+    }
+
+    #[test]
+    fn parse_cgroup_ignores_host_containerd_service() {
+        // Bare `containerd.service` is the host daemon, NOT a sign
+        // we're inside a container. Must not match.
+        let content = "0::/system.slice/containerd.service\n";
+        assert!(parse_cgroup(content).is_none());
+    }
+
+    #[test]
+    fn parse_cgroup_unknown_paths_return_none() {
+        let content = "0::/user.slice/user-1000.slice/session-2.scope\n";
+        assert!(parse_cgroup(content).is_none());
+    }
+
+    #[test]
+    fn parse_cgroup_empty_input_returns_none() {
+        assert!(parse_cgroup("").is_none());
+        assert!(parse_cgroup("\n\n").is_none());
     }
 }

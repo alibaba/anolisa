@@ -35,7 +35,8 @@ impl EnvDetector for FrameworksProbe {
             location: None,
         });
 
-        // TODO: real detection rules — left as scaffolding hooks.
+        // TODO(owner: env-detection, when: adapter auto-selection ships):
+        // replace scaffolding with real signal-based detection rules.
         // openclaw: PATH lookup `openclaw` or `~/.openclaw/`
         // hermes:   PATH lookup `hermes`  or `/opt/hermes/`
         // mcp:      detect claude-desktop / cursor / claude-code config files

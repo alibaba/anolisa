@@ -30,11 +30,12 @@ pub enum SubscriptionCommands {
 
 pub fn handle(args: SubscriptionArgs) -> anyhow::Result<()> {
     match args.command {
-        SubscriptionCommands::Register { org, key, .. } => {
+        SubscriptionCommands::Register { org, key, server } => {
             println!(
-                "Registering with org={}, key={}",
+                "Registering with org={}, key={}, server={}",
                 org.as_deref().unwrap_or("<interactive>"),
-                key.as_deref().unwrap_or("<interactive>")
+                key.as_deref().unwrap_or("<interactive>"),
+                server.as_deref().unwrap_or("<interactive>")
             );
             println!("  → subscription register: not yet implemented");
         }

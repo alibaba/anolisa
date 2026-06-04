@@ -19,6 +19,7 @@ pub fn evaluate(
     _requirements: &std::collections::HashMap<String, String>,
     _facts: &EnvFacts,
 ) -> GateResult {
-    // TODO: implement requirement expression evaluation
+    // TODO(owner: env-detection, when: manifest requirement syntax stabilizes):
+    // evaluate requirement expressions instead of accepting every manifest.
     GateResult::Compatible
 }

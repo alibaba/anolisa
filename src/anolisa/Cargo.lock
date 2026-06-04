@@ -63,6 +63,8 @@ name = "anolisa-env"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs",
+ "nix",
  "semver",
  "serde",
  "serde_json",
