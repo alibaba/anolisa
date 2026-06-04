@@ -99,6 +99,27 @@ def _allow() -> str:
     return json.dumps({"decision": "allow"})
 
 
+def _build_detail_reason(scan_result: dict) -> str:
+    """Build a detailed reason string from scan result for security operations."""
+    threat_type = scan_result.get("threat_type", "")
+    risk_level = scan_result.get("risk_level", "unknown")
+    confidence = scan_result.get("confidence")
+
+    lines = [
+        f"[prompt-scanner] 检测到安全风险",
+        f"  攻击类型 : {threat_type or 'unknown'}",
+        f"  风险等级 : {risk_level}",
+        f"  拦截环节 : 用户输入扫描 (UserPromptSubmit)",
+    ]
+    if confidence is not None:
+        try:
+            lines.append(f"  模型置信度: {float(confidence) * 100:.1f}%")
+        except (TypeError, ValueError):
+            pass
+
+    return "\n".join(lines)
+
+
 def _format_cosh(scan_result: dict) -> str:
     """Convert a ScanResult dict into a cosh HookOutput JSON string.
 
@@ -113,21 +134,18 @@ def _format_cosh(scan_result: dict) -> str:
     if verdict == "pass":
         return json.dumps({"decision": "allow"})
 
-    # Build reason from summary; it already contains threat type, confidence & evidence.
-    summary = scan_result.get("summary", "")
-    threat_type = scan_result.get("threat_type", "")
-    msg = f"[prompt-scanner] {summary or threat_type or 'Prompt rejected by security policy'}"
+    reason = _build_detail_reason(scan_result)
 
     if verdict == "warn":
         return json.dumps(
-            {"decision": "ask", "reason": msg},
+            {"decision": "ask", "reason": reason},
             ensure_ascii=False,
         )
     # Use "ask" to avoid blocking users outright.
     # TODO: switch to "block" once the policy is mature enough.
     if verdict == "deny":
         return json.dumps(
-            {"decision": "ask", "reason": msg},
+            {"decision": "ask", "reason": reason},
             ensure_ascii=False,
         )
     # other error or unknown verdict -> fail-open

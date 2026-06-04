@@ -60,23 +60,27 @@ class TestFormatCoshWarn:
 
     def test_warn_returns_ask(self):
         result = json.loads(
-            _format_cosh({"verdict": "warn", "summary": "suspicious prompt"})
+            _format_cosh(
+                {"verdict": "warn", "threat_type": "jailbreak", "risk_level": "medium"}
+            )
         )
         assert result["decision"] == "ask"
-        assert "suspicious prompt" in result["reason"]
         assert "[prompt-scanner]" in result["reason"]
+        assert "攻击类型" in result["reason"]
+        assert "jailbreak" in result["reason"]
 
-    def test_warn_uses_threat_type_when_no_summary(self):
+    def test_warn_uses_threat_type_when_provided(self):
         result = json.loads(
             _format_cosh({"verdict": "warn", "threat_type": "direct_injection"})
         )
         assert result["decision"] == "ask"
         assert "direct_injection" in result["reason"]
 
-    def test_warn_uses_default_when_no_summary_no_threat_type(self):
-        result = json.loads(_format_cosh({"verdict": "warn"}))
+    def test_warn_includes_structured_fields(self):
+        result = json.loads(_format_cosh({"verdict": "warn", "confidence": 0.85}))
         assert result["decision"] == "ask"
-        assert "Prompt rejected by security policy" in result["reason"]
+        assert "模型置信度" in result["reason"]
+        assert "85.0%" in result["reason"]
 
 
 class TestFormatCoshDeny:
@@ -84,10 +88,13 @@ class TestFormatCoshDeny:
 
     def test_deny_returns_ask(self):
         result = json.loads(
-            _format_cosh({"verdict": "deny", "summary": "jailbreak detected"})
+            _format_cosh(
+                {"verdict": "deny", "threat_type": "jailbreak", "risk_level": "high"}
+            )
         )
         assert result["decision"] == "ask"
-        assert "jailbreak detected" in result["reason"]
+        assert "jailbreak" in result["reason"]
+        assert "拦截环节" in result["reason"]
 
 
 class TestFormatCoshError:

@@ -278,10 +278,24 @@ class PromptScanCapability(AgentSecCoreCapability):
 
     def _format_prompt_warning(self, verdict: str, scan: dict[str, Any]) -> str:
         """Build a warning string from a scan-prompt result."""
-        summary = self._safe_string(scan.get("summary"))
         threat_type = self._safe_string(scan.get("threat_type"))
-        detail = summary or threat_type or "Prompt rejected by security policy"
-        return f"\U0001f6e1\ufe0f [prompt-scan] {detail}\n\n本轮请求将继续处理。"
+        risk_level = self._safe_string(scan.get("risk_level")) or "unknown"
+        confidence = scan.get("confidence")
+
+        lines = [
+            f"\U0001f6e1\ufe0f [prompt-scan] 检测到安全风险",
+            f"  攻击类型 : {threat_type or 'unknown'}",
+            f"  风险等级 : {risk_level}",
+            f"  拦截环节 : 用户输入扫描 (pre_llm_call)",
+        ]
+        if confidence is not None:
+            try:
+                lines.append(f"  模型置信度: {float(confidence) * 100:.1f}%")
+            except (TypeError, ValueError):
+                pass
+        lines.append("")
+        lines.append("本轮请求将继续处理。")
+        return "\n".join(lines)
 
     def _message_value(self, message: Any, key: str) -> Any:
         """Read a key from dict-like or object-like messages."""
