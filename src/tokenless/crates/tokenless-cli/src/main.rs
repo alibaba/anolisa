@@ -155,6 +155,10 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
             Ok(content)
         }
         None => {
+            use std::io::IsTerminal as _;
+            if io::stdin().is_terminal() {
+                return Err("No input provided. Use --file <path> or pipe via stdin: echo '{...}' | tokenless <command>".to_string());
+            }
             let mut buf = String::new();
             io::stdin()
                 .lock()
@@ -163,6 +167,9 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
                 .map_err(|e| format!("Failed to read stdin: {}", e))?;
             if buf.len() > MAX_INPUT_BYTES {
                 return Err(too_large());
+            }
+            if buf.trim().is_empty() {
+                return Err("No input received on stdin".to_string());
             }
             Ok(buf)
         }
