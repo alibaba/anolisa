@@ -30,6 +30,7 @@ fn current_uid() -> u32 {
 /// KEEP IN SYNC with the shell equivalent in
 /// `adapters/tokenless/common/hooks/tool_ready_hook.sh` (`is_trusted_file`).
 /// Changes to trust criteria must be applied to both implementations.
+#[allow(clippy::collapsible_if)]
 fn is_trusted_path(path: &std::path::Path) -> bool {
     // System paths are always trusted
     if path.starts_with("/usr/share")
@@ -62,15 +63,15 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
     // Check the parent directory first — a world-writable directory allows an
     // attacker to unlink and replace the file (TOCTOU), even if the file itself
     // has correct ownership and permissions.
-    if let Some(parent) = check_path.parent()
-        && let Ok(parent_meta) = fs::symlink_metadata(parent)
-    {
-        let parent_uid = parent_meta.uid();
-        if parent_uid != current_uid() && parent_uid != 0 {
-            return false;
-        }
-        if parent_meta.mode() & 0o002 != 0 {
-            return false;
+    if let Some(parent) = check_path.parent() {
+        if let Ok(parent_meta) = fs::symlink_metadata(parent) {
+            let parent_uid = parent_meta.uid();
+            if parent_uid != current_uid() && parent_uid != 0 {
+                return false;
+            }
+            if parent_meta.mode() & 0o002 != 0 {
+                return false;
+            }
         }
     }
     match fs::symlink_metadata(&check_path) {

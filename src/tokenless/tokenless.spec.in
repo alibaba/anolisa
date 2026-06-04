@@ -1,4 +1,4 @@
-%define anolis_release 1
+%define anolis_release 2
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -86,6 +86,9 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
@@ -128,6 +131,15 @@ install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 
+# Install Qoder CLI plugin (manifest + hooks.json + install scripts).
+# Hook scripts themselves are shared from common/hooks/ — no duplication here.
+install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/
+install -m 0644 adapters/tokenless/qoder/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/
+install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
+install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+
 # Install cosh extension for auto-discovery at /usr/share/anolisa/extensions/tokenless/
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
@@ -161,6 +173,10 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/manifest.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tool-ready-spec.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/cosh-extension.json
@@ -179,6 +195,13 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
+# Qoder CLI plugin — hook scripts reused from common/hooks/ (no duplication).
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.toml
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
 # Cosh extension — auto-discovered from /usr/share/anolisa/extensions/
 %dir %{_datadir}/anolisa/extensions
 %dir %{_datadir}/anolisa/extensions/tokenless
@@ -210,8 +233,27 @@ rm -rf "$HOME/.local/share/anolisa/adapters/tokenless/hermes-plugin" 2>/dev/null
 hash -r 2>/dev/null || true
 
 %preun
-# On uninstall ($1=0): clean openclaw plugin and stale config entries
+# On uninstall ($1=0): clean qodercli plugin, openclaw plugin, and stale config entries
 if [ $1 -eq 0 ]; then
+    # --- Qoder CLI plugin cleanup ---
+    # Unregister plugin via qodercli and remove hooks from settings.json.
+    QODER_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh"
+    if [ -x "$QODER_SCRIPT" ]; then
+        bash "$QODER_SCRIPT" || true
+    fi
+    # Clean up plugin cache (qodercli's uninstall may leave orphaned cache).
+    # qodercli's cache key has been observed in two forms — the plugin's
+    # package name ("tokenless") and a target-suffixed variant
+    # ("tokenless-qoder"). Cover both so leftover caches don't shadow a
+    # fresh install on the next rpm upgrade.
+    for cache_dir in "$HOME/.qoder/plugins/cache/local/tokenless" \
+                     "$HOME/.qoder/plugins/cache/local/tokenless-qoder"; do
+        if [ -d "$cache_dir" ]; then
+            rm -rf "$cache_dir" || true
+        fi
+    done
+
+    # --- OpenClaw plugin cleanup ---
     PLUGIN_DIR="$HOME/.openclaw/extensions/tokenless"
     if [ -d "$PLUGIN_DIR" ]; then
         if command -v openclaw &>/dev/null; then
@@ -238,6 +280,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Jun 03 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.1-2
+- feat(tokenless): add qodercli plugin support
+
 * Wed May 27 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.1-1
 - fix(tokenless): derive Makefile version from Cargo.toml, fix spec changelog weekday
 - fix(tokenless): normalize adapter version numbers to 0.4.0

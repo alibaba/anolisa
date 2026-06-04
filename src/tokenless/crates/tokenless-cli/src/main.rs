@@ -185,13 +185,12 @@ pub fn get_home_dir() -> String {
 /// location (e.g. `/etc/evil.db`).
 fn get_db_path() -> String {
     let home = get_home_dir();
-    if let Ok(env_path) = std::env::var("TOKENLESS_STATS_DB")
-        && !env_path.is_empty()
-    {
-        match validate_db_path(&env_path, &home) {
+    match std::env::var("TOKENLESS_STATS_DB") {
+        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, &home) {
             Ok(path) => return path,
             Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
-        }
+        },
+        _ => {}
     }
     format!("{}/.tokenless/stats.db", home)
 }

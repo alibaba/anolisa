@@ -44,6 +44,21 @@
         "install":   "hermes/scripts/install.sh",
         "uninstall": "hermes/scripts/uninstall.sh"
       }
+    },
+    "qoder": {
+      "compatibleVersions": ">=0.2.0",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response"
+        ]
+      },
+      "actions": {
+        "detect":    "qoder/scripts/detect.sh",
+        "install":   "qoder/scripts/install.sh",
+        "uninstall": "qoder/scripts/uninstall.sh"
+      }
     }
   }
 }

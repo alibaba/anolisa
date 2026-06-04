@@ -24,7 +24,8 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/manifest.json \
     $(ADAPTER_SRC_DIR)/openclaw/package.json \
     $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json \
-    $(ADAPTER_SRC_DIR)/hermes/plugin.yaml
+    $(ADAPTER_SRC_DIR)/hermes/plugin.yaml \
+    $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json
 TOON_VER := 0.4.6
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -36,6 +37,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         cosh-extension-install cosh-extension-uninstall \
         openclaw-install openclaw-uninstall \
         hermes-install hermes-uninstall \
+        qoder-install qoder-uninstall \
         setup help \
         test-hooks
 
@@ -72,6 +74,10 @@ $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json: $(ADAPTER_SRC_DIR)/openclaw/op
 
 $(ADAPTER_SRC_DIR)/hermes/plugin.yaml: $(ADAPTER_SRC_DIR)/hermes/plugin.yaml.in Cargo.toml
 	@echo "==> Generating hermes/plugin.yaml (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json: $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json.in Cargo.toml
+	@echo "==> Generating qoder/.qoder-plugin/plugin.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
@@ -178,9 +184,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -228,6 +234,18 @@ hermes-uninstall:
 	@echo "==> Uninstalling Hermes Agent plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=hermes bash $(HERMES_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- Qoder CLI ---
+QODER_ADAPTER_DIR = $(SHARE_DIR)/qoder
+
+qoder-install:
+	@echo "==> Installing tokenless Qoder CLI plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/install.sh
+
+qoder-uninstall:
+	@echo "==> Uninstalling tokenless Qoder CLI plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/uninstall.sh
+
 # One-step setup: build + install + all adapters
 setup: install adapter-install
 	@echo ""
@@ -243,7 +261,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes"
+	@echo "    cosh, openclaw, hermes, qoder"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -267,7 +285,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -275,6 +293,8 @@ help:
 	@echo "  openclaw-uninstall Unregister OpenClaw plugin"
 	@echo "  hermes-install    Install Hermes Agent plugin"
 	@echo "  hermes-uninstall  Uninstall Hermes Agent plugin"
+	@echo "  qoder-install     Register Qoder CLI plugin"
+	@echo "  qoder-uninstall   Unregister Qoder CLI plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  help              Show this help"
 	@echo ""

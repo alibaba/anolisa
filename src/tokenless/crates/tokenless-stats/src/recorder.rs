@@ -83,10 +83,11 @@ impl StatsRecorder {
         // hardcoded literals in the for loop — never from user input.
         for col in &["before_output", "after_output"] {
             let check = conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), []);
-            if let Err(e) = check
-                && !e.to_string().contains("duplicate column name")
-            {
-                return Err(StatsError::Database(e));
+            match check {
+                Err(e) if !e.to_string().contains("duplicate column name") => {
+                    return Err(StatsError::Database(e));
+                }
+                _ => {}
             }
         }
 

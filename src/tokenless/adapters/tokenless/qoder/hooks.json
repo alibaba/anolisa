@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-tool-ready",
+            "description": "Pre-checks tool environment readiness, auto-fixes, and provides skip-retry guidance",
+            "command": "bash ${QODER_TOKENLESS_HOOKS}/tool_ready_hook.sh",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qoder-cli" }
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|Shell|run_shell_command|terminal|execute_command)$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-rewrite",
+            "description": "Rewrites shell commands via rtk for token savings",
+            "command": "python3 ${QODER_TOKENLESS_HOOKS}/rewrite_hook.py",
+            "timeout": 5000,
+            "env": { "TOKENLESS_AGENT_ID": "qoder-cli" }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-response",
+            "description": "Compresses tool responses and encodes to TOON format",
+            "command": "python3 ${QODER_TOKENLESS_HOOKS}/compress_response_hook.py",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "qoder-cli" }
+          }
+        ]
+      }
+    ]
+  }
+}
