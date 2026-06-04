@@ -956,6 +956,7 @@ impl GenAIBuilder {
         path.contains("/v1/chat/completions") ||
         path.contains("/v1/completions") ||
         path.contains("/v1/messages") ||
+        path.contains("/v1/responses") ||
         path.contains("/chat/completions") ||
         path.contains("/completions") ||
         path.contains("/api/v1/copilot/generate_copilot")
@@ -973,7 +974,10 @@ impl GenAIBuilder {
     fn extract_provider_from_path(&self, path: &str) -> Option<String> {
         if path.contains("anthropic") || path.contains("/v1/messages") {
             Some("anthropic".to_string())
-        } else if path.contains("/v1/chat/completions") || path.contains("/v1/completions") {
+        } else if path.contains("/v1/chat/completions")
+            || path.contains("/v1/completions")
+            || path.contains("/v1/responses")
+        {
             Some("openai".to_string())
         } else if path.contains("/api/v1/copilot/generate_copilot") {
             Some("sysom".to_string())
