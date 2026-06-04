@@ -33,7 +33,20 @@ Use `--region singapore` only for pay-as-you-go Singapore. For deeper billing de
 
 ## Execute
 
-Run exactly this script from the installed skill directory:
+If the user asks to install OpenClaw but has not provided an API key, run the
+basic dependency precheck first:
+
+```bash
+python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_openclaw.py \
+  --billing payg \
+  --precheck-only
+```
+
+After precheck passes, tell the user the matching API key source URL printed by
+the script. If the user already provided an API key, run the full install
+directly; the script performs the same dependency precheck before installing.
+
+Run exactly this script from the installed skill directory for full install:
 
 ```bash
 python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_openclaw.py \
@@ -49,7 +62,7 @@ python3 <install-openclaw-skill-dir>/scripts/install_openclaw.py ...
 
 The authoritative implementation is `scripts/install_openclaw.py`.
 The normal parameters are `--billing`, `--api-key`, `--api-key-env`, `--region`,
-`--model-id`, `--npm-registry`, and DingTalk-specific flags.
+`--model-id`, `--npm-registry`, `--precheck-only`, and DingTalk-specific flags.
 
 ## Examples
 
@@ -99,6 +112,7 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 ## What The Script Does
 
 - Checks Node.js/npm and installs them with `dnf`/`yum` when needed.
+- Runs dependency precheck before installing or writing config.
 - Installs OpenClaw with npm unless `--skip-install-openclaw` is passed.
 - Uses npm registry `https://registry.npmmirror.com` by default; override with `--npm-registry`.
 - Writes only OpenClaw schema-supported config fields.

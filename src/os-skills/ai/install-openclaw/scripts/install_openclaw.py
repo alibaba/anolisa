@@ -491,6 +491,96 @@ def sudo_command(cmd):
     return ["sudo", *cmd]
 
 
+def has_package_manager():
+    return command_exists("dnf") or command_exists("yum")
+
+
+def dependency_precheck(args):
+    print("\n--- Dependency precheck ---\n")
+
+    issues = []
+    actions = []
+
+    node_ok = command_exists("node") and node_major() >= 22
+    npm_ok = command_exists("npm")
+    openclaw_ok = command_exists("openclaw") and not args.force_install_openclaw
+    can_sudo = os.geteuid() == 0 or command_exists("sudo")
+
+    node_status = (
+        f"{command_output(['node', '--version'])} major={node_major()}"
+        if command_exists("node")
+        else "missing"
+    )
+    npm_status = command_output(["npm", "--version"]) if command_exists("npm") else "missing"
+    openclaw_status = (
+        command_output(["openclaw", "--version"]) if command_exists("openclaw") else "missing"
+    )
+    package_manager = "dnf" if command_exists("dnf") else "yum" if command_exists("yum") else "missing"
+
+    print(f"  python={sys.version.split()[0]}")
+    print(f"  node={node_status}")
+    print(f"  npm={npm_status}")
+    print(f"  openclaw={openclaw_status}")
+    print(f"  package_manager={package_manager}")
+    print(f"  sudo={'available' if can_sudo else 'missing'}")
+    print(f"  npm_registry={args.npm_registry or 'default'}")
+
+    if args.skip_install_openclaw:
+        print("  install_openclaw=skipped")
+    else:
+        if node_ok and npm_ok:
+            print("  node_npm=ok")
+        elif args.no_install_node:
+            issues.append("Node.js v22+ and npm are required, but --no-install-node was passed.")
+        elif not has_package_manager():
+            issues.append("Node.js/npm are missing or too old, and no dnf/yum package manager was found.")
+        elif not can_sudo:
+            issues.append("Node.js/npm installation needs root or sudo.")
+        else:
+            actions.append("Install Node.js/npm with dnf/yum.")
+
+        npm_available_after_actions = npm_ok or any("Node.js/npm" in action for action in actions)
+        if openclaw_ok:
+            print("  openclaw_cli=ok")
+        elif not npm_available_after_actions:
+            issues.append("OpenClaw is missing and npm is not available to install it.")
+        elif not can_sudo:
+            issues.append("OpenClaw global npm installation needs root or sudo.")
+        else:
+            actions.append(f"Install {args.openclaw_package} with npm.")
+
+    if not args.skip_gateway:
+        if command_exists("ps"):
+            print("  ps=ok")
+        else:
+            issues.append("ps is required for gateway port ownership checks.")
+        if command_exists("fuser") or command_exists("lsof"):
+            print("  port_tools=ok")
+        else:
+            print("  port_tools=missing; stale gateway port inspection will be limited")
+
+    if actions:
+        print("\n  Planned automatic fixes:")
+        for action in actions:
+            print(f"  - {action}")
+
+    if issues:
+        print("\n  Missing dependencies that cannot be fixed automatically:")
+        for issue in issues:
+            print(f"  - {issue}")
+        raise SystemExit("Dependency precheck failed. Fix the items above and rerun.")
+
+    print("\nDependency precheck passed.")
+
+
+def print_api_key_guidance(args):
+    billing = normalize_billing(args.billing)
+    plan = BILLING_PLANS[billing]
+    print("\nNext step:")
+    print(f"  Get the {plan['name']} API key from: {plan['api_key_url']}")
+    print("  Then rerun with --api-key or --api-key-env.")
+
+
 def install_node_with_system_package_manager(args):
     if command_exists("dnf"):
         run_command(
@@ -895,6 +985,11 @@ def parse_args():
     )
     parser.add_argument("--doctor-fix", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--precheck-only",
+        action="store_true",
+        help="Only check basic environment dependencies; do not require API keys or install anything.",
+    )
 
     parser.add_argument("--dingtalk-client-id", default="")
     parser.add_argument("--dingtalk-client-secret", default="")
@@ -908,6 +1003,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    dependency_precheck(args)
+    if args.precheck_only:
+        print_api_key_guidance(args)
+        return
 
     if not args.skip_install_openclaw:
         install_openclaw(args)
