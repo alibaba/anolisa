@@ -151,7 +151,6 @@ impl MessageParser {
         // Convert SSE events to JSON array
         let chunks: Vec<serde_json::Value> = sse_events
             .iter()
-            .filter(|e| !e.is_done())
             .filter_map(|e| {
                 let data = String::from_utf8_lossy(e.data());
                 serde_json::from_str(&data).ok()

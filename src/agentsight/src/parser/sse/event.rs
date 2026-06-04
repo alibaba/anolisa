@@ -114,9 +114,11 @@ impl ParsedSseEvent {
             return true;
         }
         // Anthropic style: data contains {"type":"message_stop"}
+        // Responses API style: data contains {"type":"response.completed",...}
         if trimmed.starts_with('{') {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
+                let t = v.get("type").and_then(|t| t.as_str());
+                if t == Some("message_stop") || t == Some("response.completed") {
                     return true;
                 }
             }
@@ -506,6 +508,22 @@ mod tests {
             data.len(),
             ev,
         );
+        assert!(!parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_responses_api_completed() {
+        let data = b"{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_x\"}}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_responses_api_delta_not_done() {
+        let data = b"{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
         assert!(!parsed.is_done());
     }
 

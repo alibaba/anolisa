@@ -325,9 +325,6 @@ impl GenAIBuilder {
 
         // Forward scan for model, trace_id, and content deltas
         for event in sse_events {
-            if event.is_done() {
-                continue;
-            }
             if let Some(json) = event.json_body() {
                 // Extract model from first chunk that has it
                 if model.is_none() {

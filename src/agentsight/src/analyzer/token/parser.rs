@@ -38,11 +38,6 @@ impl TokenParser {
     /// Returns `Some(TokenUsage)` if the event contains usage information,
     /// `None` otherwise.
     pub fn parse_event(&self, event: &ParsedSseEvent) -> Option<TokenUsage> {
-        // Skip done markers
-        if event.is_done() {
-            return None;
-        }
-
         // Get event data as string
         let data = event.data();
         let data_str = std::str::from_utf8(data).ok()?;
@@ -87,9 +82,18 @@ impl TokenParser {
 
         // 3. Check for usage object directly (OpenAI and compatible APIs)
         if let Some(usage) = json.get("usage") {
-            // Try to detect provider from content structure
             let provider = detect_provider_from_usage(usage);
             return extract_usage_object(usage, provider, json);
+        }
+
+        // 4. Responses API: usage nested in response.completed event
+        if json.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+            if let Some(resp) = json.get("response") {
+                if let Some(usage) = resp.get("usage") {
+                    let provider = detect_provider_from_usage(usage);
+                    return extract_usage_object(usage, provider, json);
+                }
+            }
         }
 
         None
