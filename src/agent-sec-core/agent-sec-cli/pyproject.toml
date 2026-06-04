@@ -158,7 +158,7 @@ extend-exclude = "/backend-skill/templates/"
 
 [tool.isort]
 profile = "black"
-line_length = 100
+line_length = 80
 known_first_party = ["agent_sec_cli"]
 extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
 
