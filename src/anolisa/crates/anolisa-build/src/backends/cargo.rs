@@ -20,7 +20,8 @@ impl BuildBackend for CargoBuilder {
             BuildProfile::Debug => "debug",
         };
 
-        // TODO: actually invoke cargo build
+        // TODO(owner: build-backend, when: source builds graduate): invoke
+        // cargo and surface command status instead of predicting paths only.
         let _cmd = format!(
             "cargo build {profile_flag} --manifest-path {}/Cargo.toml",
             spec.source_dir.display()
