@@ -105,6 +105,10 @@ impl ParsedHttp2Frame {
         self.frame_type == Http2FrameType::Settings
     }
 
+    pub fn is_continuation(&self) -> bool {
+        self.frame_type == Http2FrameType::Continuation
+    }
+
     /// Check END_STREAM flag (0x01) on DATA/HEADERS frames
     pub fn has_end_stream(&self) -> bool {
         matches!(self.frame_type, Http2FrameType::Data | Http2FrameType::Headers)

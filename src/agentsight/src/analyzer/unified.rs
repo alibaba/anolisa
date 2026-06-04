@@ -528,10 +528,19 @@ impl Analyzer {
                 let req_body = request.json_body();
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let path = stream.path();
+                if path.is_empty() {
+                    return None;
+                }
+                let req_body = stream.request_json_body();
+                let resp_body = stream.response_sse_json_array()
+                    .or_else(|| stream.response_json_body());
+                self.analyze_message(&path, req_body.as_ref(), resp_body.as_ref())
+            }
             AggregatedResult::ResponseOnly { .. }
             | AggregatedResult::ProcessComplete(_)
-            | AggregatedResult::Http2Frames { .. }
-            | AggregatedResult::Http2StreamComplete(_) => None,
+            | AggregatedResult::Http2Frames { .. } => None,
         }
     }
 
