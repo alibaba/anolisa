@@ -1139,10 +1139,9 @@ SHELL_SELF_PROTECT_OPENCLAW_CASES = [
         "shell-self-protect-openclaw",
         1,
     ),
-    # === True Positives: plugins disable/uninstall/remove ===
+    # === True Positives: plugins disable/uninstall ===
     ("openclaw plugins disable agent-sec", "bash", "shell-self-protect-openclaw", 1),
     ("openclaw plugins uninstall agent-sec", "bash", "shell-self-protect-openclaw", 1),
-    ("openclaw plugins remove agent-sec", "bash", "shell-self-protect-openclaw", 1),
     (
         "openclaw plugins uninstall agent-sec --force",
         "bash",
@@ -1163,6 +1162,31 @@ SHELL_SELF_PROTECT_OPENCLAW_CASES = [
     ),
     (
         "openclaw plugins disable agent-sec 2>&1",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    # --- True Positives: shell separators directly after plugin name ---
+    (
+        "openclaw plugins disable agent-sec;echo hacked",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw plugins uninstall agent-sec&&echo done",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw plugins uninstall agent-sec|cat",
+        "bash",
+        "shell-self-protect-openclaw",
+        1,
+    ),
+    (
+        "openclaw plugins disable agent-sec>log.txt",
         "bash",
         "shell-self-protect-openclaw",
         1,
@@ -1214,6 +1238,9 @@ SHELL_SELF_PROTECT_OPENCLAW_CASES = [
         "shell-self-protect-openclaw",
         0,
     ),
+    # --- TN: subcommands not supported by OpenClaw ---
+    ("openclaw plugins remove agent-sec", "bash", "shell-self-protect-openclaw", 0),
+    ("openclaw plugins rm agent-sec", "bash", "shell-self-protect-openclaw", 0),
 ]
 
 SHELL_SELF_PROTECT_HERMES_CASES = [
@@ -1238,6 +1265,43 @@ SHELL_SELF_PROTECT_HERMES_CASES = [
     ),
     (
         "HERMES_HOME=/tmp hermes plugins remove agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins uninstall agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins rm agent-sec-core-hermes-plugin",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    # --- True Positives: shell separators directly after plugin name ---
+    (
+        "hermes plugins disable agent-sec-core-hermes-plugin;echo hacked",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins remove agent-sec-core-hermes-plugin&&echo done",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins disable agent-sec-core-hermes-plugin|cat",
+        "bash",
+        "shell-self-protect-hermes",
+        1,
+    ),
+    (
+        "hermes plugins remove agent-sec-core-hermes-plugin>log.txt",
         "bash",
         "shell-self-protect-hermes",
         1,
