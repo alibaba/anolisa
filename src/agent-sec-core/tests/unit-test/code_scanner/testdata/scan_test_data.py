@@ -1195,6 +1195,25 @@ SHELL_SELF_PROTECT_OPENCLAW_CASES = [
     ("openclaw plugins disable tokenless", "bash", "shell-self-protect-openclaw", 0),
     ("openclaw plugins install agent-sec", "bash", "shell-self-protect-openclaw", 0),
     ("openclaw gateway restart", "bash", "shell-self-protect-openclaw", 0),
+    # --- False positive regression: plugin names prefixed with agent-sec ---
+    (
+        "openclaw plugins disable agent-sec-memory",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    (
+        "openclaw plugins uninstall agent-sec-memory --force",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
+    (
+        "openclaw plugins remove agent-sec-core-openclaw-plugin",
+        "bash",
+        "shell-self-protect-openclaw",
+        0,
+    ),
 ]
 
 SHELL_SELF_PROTECT_HERMES_CASES = [
@@ -1233,6 +1252,19 @@ SHELL_SELF_PROTECT_HERMES_CASES = [
     ("hermes plugins disable other-plugin", "bash", "shell-self-protect-hermes", 0),
     ("hermes plugins remove tokenless", "bash", "shell-self-protect-hermes", 0),
     ("hermes plugins list", "bash", "shell-self-protect-hermes", 0),
+    # --- False positive regression: plugin names prefixed with agent-sec-core-hermes-plugin ---
+    (
+        "hermes plugins disable agent-sec-core-hermes-plugin-2",
+        "bash",
+        "shell-self-protect-hermes",
+        0,
+    ),
+    (
+        "hermes plugins remove agent-sec-core-hermes-plugin-extended",
+        "bash",
+        "shell-self-protect-hermes",
+        0,
+    ),
 ]
 
 # =====================================================================
