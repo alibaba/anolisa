@@ -101,8 +101,8 @@ pub struct AgentSight {
     pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
     /// Blood lineage tree tracking process parent-child relationships and type classification
     lineage_tree: Arc<std::sync::RwLock<crate::lineage::LineageTree>>,
-    /// Idle-burst-idle scheduler for Agent family cgroup CPU weight management
-    scheduler: Option<crate::scheduler::Scheduler>,
+    /// Agent activity monitor — tracks idle/active transitions (observability only)
+    activity_monitor: Option<crate::scheduler::ActivityMonitor>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -443,14 +443,12 @@ impl AgentSight {
                 .ok();
         }
 
-        let scheduler = if config.enable_scheduler {
+        let activity_monitor = if config.enable_scheduler {
             log::info!(
-                "Scheduler enabled: active_weight={}, idle_threshold={}ms, cgroup_root={:?}",
-                config.scheduler_config.active_weight,
-                config.scheduler_config.idle_threshold_ms,
-                config.scheduler_config.cgroup_root,
+                "Activity monitor enabled: idle_threshold={}ms",
+                config.activity_config.idle_threshold_ms,
             );
-            Some(crate::scheduler::Scheduler::new(config.scheduler_config.clone()))
+            Some(crate::scheduler::ActivityMonitor::new(config.activity_config.clone()))
         } else {
             None
         };
@@ -480,7 +478,7 @@ impl AgentSight {
             sls_activated,
             pending_logtail,
             lineage_tree: Arc::new(std::sync::RwLock::new(crate::lineage::LineageTree::new())),
-            scheduler,
+            activity_monitor,
         })
     }
 
@@ -559,10 +557,10 @@ impl AgentSight {
             return None;
         }
 
-        // Handle scheduler state events (idle-burst-idle)
+        // Handle activity monitor events (idle/active detection)
         if let Event::Sched(ref sched_event) = event {
-            if let Some(ref mut scheduler) = self.scheduler {
-                scheduler.on_sched_event(sched_event.tgid, sched_event.tid, sched_event.event_type);
+            if let Some(ref mut activity) = self.activity_monitor {
+                activity.on_sched_event(sched_event.tgid, sched_event.tid, sched_event.event_type);
             }
             return None;
         }
@@ -845,12 +843,12 @@ impl AgentSight {
             }
             tree.classify(pid, has_agent_mode, matches_agent);
 
-            // Register a classified process with the scheduler's Agent family.
-            if let Some(ref mut scheduler) = self.scheduler {
+            // Register a classified process with the activity monitor.
+            if let Some(ref mut activity) = self.activity_monitor {
                 let ptype = tree.get(pid).map(|n| n.process_type);
                 if ptype.is_some_and(|t| t != crate::lineage::ProcessType::Unknown) {
                     if let Some(root_pid) = tree.find_root(pid) {
-                        scheduler.add_process(pid, root_pid);
+                        activity.add_process(pid, root_pid);
                     }
                 }
             }
@@ -908,19 +906,19 @@ impl AgentSight {
                         ptype,
                     );
 
-                    // Register a classified process with the scheduler's Agent family.
-                    if let Some(ref mut scheduler) = self.scheduler {
+                    // Register a classified process with the activity monitor.
+                    if let Some(ref mut activity) = self.activity_monitor {
                         if ptype.is_some_and(|t| t != crate::lineage::ProcessType::Unknown) {
                             if let Some(root_pid) = tree.find_root(header.pid) {
-                                scheduler.add_process(header.pid, root_pid);
+                                activity.add_process(header.pid, root_pid);
                             }
                         }
                     }
                 }
             }
             VariableEvent::Exit { header, .. } => {
-                if let Some(ref mut scheduler) = self.scheduler {
-                    scheduler.remove_process(header.pid);
+                if let Some(ref mut activity) = self.activity_monitor {
+                    activity.remove_process(header.pid);
                 }
                 if let Ok(mut tree) = self.lineage_tree.write() {
                     if let Some(removed) = tree.remove(header.pid) {
@@ -952,12 +950,12 @@ impl AgentSight {
         self.filewatch_callback = Some(Box::new(callback));
     }
 
-    /// Idle-loop hook: finalize debounced scheduler transitions. Must be called
+    /// Idle-loop hook: finalize debounced activity transitions. Must be called
     /// from every driver loop's idle branch (run() and the FFI loop) so the
-    /// scheduler is not stuck never transitioning families to idle.
+    /// monitor is not stuck never transitioning families to idle.
     pub fn on_idle_tick(&mut self) {
-        if let Some(ref mut scheduler) = self.scheduler {
-            scheduler.tick();
+        if let Some(ref mut activity) = self.activity_monitor {
+            activity.tick();
         }
     }
 
