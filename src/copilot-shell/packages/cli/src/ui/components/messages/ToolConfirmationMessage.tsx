@@ -115,7 +115,7 @@ export const ToolConfirmationMessage: React.FC<
       },
       {
         key: 'cancel',
-        label: t('No'),
+        label: t('No (esc)'),
         value: ToolConfirmationOutcome.Cancel,
       },
     ];

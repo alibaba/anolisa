@@ -872,6 +872,7 @@ export default {
   'Allow always': '总是允许',
   No: '否',
   'No (esc)': '否 (esc)',
+  'Press Esc to interrupt': '按 Esc 中断',
   'Yes, allow always for this session': '是，本次会话总是允许',
   'Modify in progress:': '正在修改：',
   'Save and close external editor to continue': '保存并关闭外部编辑器以继续',

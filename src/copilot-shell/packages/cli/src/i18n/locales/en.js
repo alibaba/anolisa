@@ -917,6 +917,7 @@ export default {
   'Allow always': 'Allow always',
   No: 'No',
   'No (esc)': 'No (esc)',
+  'Press Esc to interrupt': 'Press Esc to interrupt',
   'Yes, allow always for this session': 'Yes, allow always for this session',
   'Modify in progress:': 'Modify in progress:',
   'Save and close external editor to continue':

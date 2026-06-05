@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-08T01:37:41.605Z",
+  "generatedAt": "2026-06-05T06:52:21.204Z",
   "keys": [
     "(Use Enter to Set Auth)",
     "A checkpoint with the tag {{tag}} already exists. Do you want to overwrite it?",
@@ -72,11 +72,10 @@
     "Please enter your OpenAI configuration. You can get an API key from",
     "Please open the following URL in your browser to view the documentation:\n{{url}}",
     "Please view MCP documentation in your browser:",
+    "Please visit this URL to authorize:",
     "Press ? again to close",
     "Press Ctrl+R to rename · Ctrl+V to preview",
     "Pro quota limit reached for {{model}}.",
-    "Qwen OAuth authentication cancelled.",
-    "Qwen OAuth authentication timed out. Please try again.",
     "Resume a conversation from a checkpoint. Usage: /chat resume <tag>",
     "Reverse search history",
     "Save the current conversation as a checkpoint. Usage: /chat save <tag>",
@@ -84,7 +83,9 @@
     "Session renamed.",
     "Settings service is not available; unable to persist the approval mode.",
     "Share the current conversation to a markdown or json file. Usage: /chat share <file>",
+    "Terms of Services and Privacy Notice for Copilot Shell",
     "This extension will exclude the following core tools: {{tools}}",
+    "Time remaining:",
     "Toggle compact mode",
     "Toggle shell mode",
     "Toggle this help display",
@@ -97,5 +98,5 @@
     "open full Copilot Shell documentation in your browser",
     "or use the cli /docs command"
   ],
-  "count": 95
+  "count": 96
 }

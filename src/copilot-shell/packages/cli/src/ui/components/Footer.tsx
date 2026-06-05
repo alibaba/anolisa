@@ -20,6 +20,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { ApprovalMode } from '@copilot-shell/core';
+import { StreamingState } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
@@ -73,7 +74,11 @@ export const Footer: React.FC = () => {
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
-    <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
+    <Text color={theme.text.secondary}>
+      {t('? for shortcuts')}
+      {uiState.streamingState === StreamingState.WaitingForConfirmation &&
+        ` · ${t('Press Esc to interrupt')}`}
+    </Text>
   );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];

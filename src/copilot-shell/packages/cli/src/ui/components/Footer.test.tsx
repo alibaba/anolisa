@@ -320,6 +320,26 @@ describe('<Footer />', () => {
     expect(lastFrame()).toMatch(/0\.1%/);
   });
 
+  it('shows esc interrupt hint during tool confirmation', () => {
+    useStatusLineMock.mockReturnValue({ lines: null });
+    const uiState = createMockUIState({
+      streamingState: 'waiting_for_confirmation',
+    });
+    const { lastFrame } = renderWithWidth(120, uiState);
+    expect(lastFrame()).toContain('? for shortcuts');
+    expect(lastFrame()).toContain('Press Esc to interrupt');
+  });
+
+  it('does not show esc interrupt hint when idle', () => {
+    useStatusLineMock.mockReturnValue({ lines: null });
+    const uiState = createMockUIState({
+      streamingState: 'idle',
+    });
+    const { lastFrame } = renderWithWidth(120, uiState);
+    expect(lastFrame()).toContain('? for shortcuts');
+    expect(lastFrame()).not.toContain('Press Esc to interrupt');
+  });
+
   describe('footer rendering (golden snapshots)', () => {
     it('renders complete footer on wide terminal', () => {
       const uiState = createMockUIState({

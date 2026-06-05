@@ -272,6 +272,30 @@ describe('ToolConfirmationMessage', () => {
     });
   });
 
+  describe('compact mode', () => {
+    it('should show "(esc)" hint on cancel option', () => {
+      const details: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'echo "hello"',
+        rootCommand: 'echo',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={details}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode
+        />,
+      );
+
+      expect(lastFrame()).toContain('No (esc)');
+    });
+  });
+
   describe('external editor option', () => {
     const editConfirmationDetails: ToolCallConfirmationDetails = {
       type: 'edit',
