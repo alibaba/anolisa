@@ -49,12 +49,34 @@ pub(super) fn render_command_hook_findings<W: Write>(
         let Some(markdown) = hint.finding_markdown.as_deref() else {
             continue;
         };
-        renderer.write_notice(
-            output,
-            "Command hook",
-            renderer.markdown_text_lines(markdown),
-            None,
-        )?;
+
+        match state.analysis_mode {
+            AnalysisMode::Smart => {
+                let card_id = format!("consultation-{}", hint.id);
+                let model = cosh_shell::agent_render::ConsultationCardModel {
+                    hook_id: card_id.clone(),
+                    severity: "warning".into(),
+                    title: hint.prompt_hint.clone(),
+                    suggestion: markdown.lines().next().unwrap_or("").to_string(),
+                };
+                renderer.write_consultation_card(output, &model)?;
+                state.pending_consultation = Some(PendingConsultation {
+                    card_id,
+                    block_id: hint.command_block_id.clone(),
+                    prompt_hint: hint.prompt_hint.clone(),
+                });
+                break;
+            }
+            AnalysisMode::Auto => {
+                renderer.write_notice(
+                    output,
+                    "Command hook",
+                    renderer.markdown_text_lines(markdown),
+                    None,
+                )?;
+            }
+            AnalysisMode::Manual => {}
+        }
     }
 
     Ok(())
@@ -153,4 +175,44 @@ fn looks_like_test_or_build(command: &str) -> bool {
         || trimmed.starts_with("pnpm test")
         || trimmed.starts_with("yarn test")
         || trimmed.starts_with("make test")
+}
+
+pub(super) fn handle_consultation_events<W: Write>(
+    events: &[ShellEvent],
+    blocks: &[CommandBlock],
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let consultation = match state.pending_consultation.take() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    for event in events {
+        if event.kind != ShellEventKind::UserInputIntercepted {
+            continue;
+        }
+        if event.component.as_deref() != Some("card") {
+            continue;
+        }
+        let event_id = event.input.as_deref().unwrap_or("");
+        if !event_id.contains(&consultation.card_id) {
+            continue;
+        }
+        let action = event.message.as_deref().unwrap_or("");
+        if action == "approve" {
+            let block = blocks.iter().find(|b| b.id == consultation.block_id);
+            if let Some(block) = block {
+                let findings = findings_from_blocks(blocks);
+                start_agent_for_block(block, blocks, &findings, adapter, state, output, None)?;
+            }
+            return Ok(());
+        } else if action == "cancel" || action == "deny" {
+            return Ok(());
+        }
+    }
+
+    state.pending_consultation = Some(consultation);
+    Ok(())
 }

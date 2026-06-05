@@ -35,10 +35,13 @@ where
 {
     let mut buffer = [0_u8; 8192];
     let mut display_start = parser.display.len();
+    let mut native_cursor_saved = false;
+    let mut native_prompt_col: u16 = 0;
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
-        drain_raw_input_events(input_events, parser, output, prompt)?;
+        drain_raw_input_events(input_events, parser, output, prompt, &mut native_cursor_saved, &mut native_prompt_col)?;
         let mut observer_action = event_observer(&parser.events, output)?;
+        observer_action = resolve_pty_emit(master, output, observer_action)?;
         update_input_mode(input_mode, &observer_action);
         let mut hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display.len() > display_start {
@@ -59,6 +62,7 @@ where
                             display_start = cut;
                         }
                         observer_action = event_observer(&parser.events, output)?;
+                        observer_action = resolve_pty_emit(master, output, observer_action)?;
                         update_input_mode(input_mode, &observer_action);
                         hold_shell_output = observer_action.hold_shell_output();
                         if !hold_shell_output && parser.display.len() > display_start {
@@ -73,6 +77,7 @@ where
                         display_start = parser.display.len();
                     }
                     observer_action = event_observer(&parser.events, output)?;
+                    observer_action = resolve_pty_emit(master, output, observer_action)?;
                     update_input_mode(input_mode, &observer_action);
                     hold_shell_output = observer_action.hold_shell_output();
                     if !hold_shell_output && parser.display.len() > display_start {
@@ -108,8 +113,9 @@ where
             return Ok(());
         }
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
-        drain_raw_input_events(input_events, parser, output, prompt)?;
+        drain_raw_input_events(input_events, parser, output, prompt, &mut native_cursor_saved, &mut native_prompt_col)?;
         observer_action = event_observer(&parser.events, output)?;
+        observer_action = resolve_pty_emit(master, output, observer_action)?;
         update_input_mode(input_mode, &observer_action);
         hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display.len() > display_start {
@@ -162,13 +168,26 @@ fn drain_raw_input_events<W: Write>(
     parser: &mut OscParser,
     output: &mut W,
     prompt: &str,
+    native_cursor_saved: &mut bool,
+    native_prompt_col: &mut u16,
 ) -> io::Result<()> {
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::CandidateRedraw { input, hint } => {
-                if !native_mode {
+                if native_mode {
+                    if !*native_cursor_saved {
+                        let last_line = parser.display_last_line_bytes();
+                        *native_prompt_col = last_line as u16;
+                        *native_cursor_saved = true;
+                    }
+                    if *native_prompt_col > 0 {
+                        write!(output, "\r\x1b[{}C\x1b[K", *native_prompt_col)?;
+                    } else {
+                        write!(output, "\r\x1b[K")?;
+                    }
+                } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
                 }
                 output.write_all(&input)?;
@@ -178,15 +197,34 @@ fn drain_raw_input_events<W: Write>(
                 output.flush()?;
             }
             RawInputEvent::CandidateCommit(input) => {
-                if !native_mode {
-                    write!(output, "\r\x1b[2K{prompt}")?;
-                    output.write_all(&input)?;
+                if native_mode && *native_cursor_saved {
+                    if *native_prompt_col > 0 {
+                        write!(output, "\r\x1b[{}C\x1b[K", *native_prompt_col)?;
+                    } else {
+                        write!(output, "\r\x1b[K")?;
+                    }
+                    *native_cursor_saved = false;
+                } else {
+                    write!(output, "\r\x1b[2K")?;
+                    if !native_mode {
+                        write!(output, "{prompt}")?;
+                    }
                 }
+                output.write_all(&input)?;
                 writeln!(output)?;
                 output.flush()?;
             }
             RawInputEvent::CandidateClearLine => {
-                write!(output, "\r\x1b[2K")?;
+                if native_mode && *native_cursor_saved {
+                    if *native_prompt_col > 0 {
+                        write!(output, "\r\x1b[{}C\x1b[K", *native_prompt_col)?;
+                    } else {
+                        write!(output, "\r\x1b[K")?;
+                    }
+                    *native_cursor_saved = false;
+                } else {
+                    write!(output, "\r\x1b[2K")?;
+                }
                 output.flush()?;
             }
             RawInputEvent::UserIntercept(input, reason) => {
@@ -235,6 +273,22 @@ fn sync_outer_terminal_winsize(
     signal_process_group(child_pid, libc::SIGWINCH)?;
     *last_winsize = current;
     Ok(())
+}
+
+fn resolve_pty_emit<W: Write>(
+    master: &mut File,
+    output: &mut W,
+    action: RawObserverAction,
+) -> io::Result<RawObserverAction> {
+    match action {
+        RawObserverAction::EmitToPty(bytes) => {
+            output.flush()?;
+            master.write_all(&bytes)?;
+            master.flush()?;
+            Ok(RawObserverAction::Continue)
+        }
+        other => Ok(other),
+    }
 }
 
 fn same_winsize(left: &Winsize, right: &Winsize) -> bool {

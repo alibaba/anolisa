@@ -120,6 +120,24 @@ pub(super) fn start_agent_for_block<W: Write>(
         return Ok(());
     }
 
+    if state.analysis_throttle.should_throttle(&block.command) {
+        state.analyzed_blocks.insert(block.id.clone());
+        let throttle_key = format!("throttle:{}", cosh_shell::first_program_token(&block.command));
+        if state.queued_analysis_notices.insert(throttle_key) {
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Analysis skipped",
+                vec![format!(
+                    "skipped repeated failure analysis for `{}`",
+                    block.command
+                )],
+                Some("Too many consecutive failures for this command. Wait before retrying."),
+            )?;
+            output.flush()?;
+        }
+        return Ok(());
+    }
+
     if !state.analyzed_blocks.insert(block.id.clone()) {
         return Ok(());
     }

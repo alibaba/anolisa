@@ -31,17 +31,19 @@ fn raw_cli_startup_banner_renders_when_enabled() {
     );
 
     assert!(output.contains("cosh-shell"), "{output}");
-    assert!(output.contains("┌─┐┌─┐┌─┐┬ ┬"), "logo missing: {output}");
-    assert!(output.contains("shell"), "{output}");
     assert!(output.contains("Adapter: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
     assert!(output.contains("Mode: ask"), "{output}");
     assert!(output.contains("/help"), "{output}");
-    assert!(output.contains("/details"), "{output}");
-    assert!(output.contains("/skill"), "{output}");
+    assert!(output.contains("/explain"), "{output}");
+    assert!(!output.contains("┌─┐┌─┐┌─┐┬ ┬"), "logo should be removed: {output}");
     assert!(
-        output.contains("Startup hooks: none configured"),
-        "{output}"
+        !output.contains("Agent actions still require approval"),
+        "footer should be removed: {output}"
+    );
+    assert!(
+        !output.contains("Startup hooks: none configured"),
+        "no hooks line when hooks are disabled: {output}"
     );
     assert!(!output.contains("no command ran"), "{output}");
     assert!(!output.contains("cosh-osc$ ╭ cosh-shell"), "{output}");
@@ -75,7 +77,10 @@ fn raw_cli_startup_hooks_render_markdown_findings_without_running_commands() {
         output.contains("cosh-shell only inspected lightweight startup context"),
         "{output}"
     );
-    assert!(output.contains("Read-only startup checks."), "{output}");
+    assert!(
+        !output.contains("Read-only startup checks."),
+        "hook findings should be inline, not a separate panel: {output}"
+    );
     assert!(!output.contains("No command ran."), "{output}");
     assert!(!output.contains("Thinking..."), "{output}");
     assert!(!output.contains("bash:"), "{output}");

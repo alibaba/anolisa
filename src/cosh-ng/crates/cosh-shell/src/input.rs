@@ -1,6 +1,14 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputClassifier {
     slash_commands: Vec<String>,
+    conservative: bool,
+}
+
+impl InputClassifier {
+    pub fn with_conservative(mut self, conservative: bool) -> Self {
+        self.conservative = conservative;
+        self
+    }
 }
 
 impl Default for InputClassifier {
@@ -25,11 +33,23 @@ impl Default for InputClassifier {
             .iter()
             .map(|command| command.to_string())
             .collect(),
+            conservative: false,
         }
     }
 }
 
 impl InputClassifier {
+    pub fn conservative() -> Self {
+        Self {
+            conservative: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_conservative(&self) -> bool {
+        self.conservative
+    }
+
     pub fn classify(&self, input: &str) -> InputDecision {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -49,6 +69,16 @@ impl InputClassifier {
                 input: input.to_string(),
                 reason: InterceptReason::Slash,
             };
+        }
+
+        if self.conservative {
+            if looks_like_pure_natural_language(trimmed) {
+                return InputDecision::Intercept {
+                    input: input.to_string(),
+                    reason: InterceptReason::NaturalLanguage,
+                };
+            }
+            return InputDecision::SendToShell(input.to_string());
         }
 
         if starts_with_shell_command(trimmed) {
@@ -214,9 +244,42 @@ fn looks_like_natural_language(input: &str) -> bool {
         && lower.split_whitespace().count() > 1
 }
 
+const SHELL_META_CHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '(', ')', '{', '}'];
+
+fn has_command_like_tokens(input: &str) -> bool {
+    for token in input.split_whitespace() {
+        if token.starts_with('-') {
+            return true;
+        }
+        if token.contains('/') || token.contains('~') {
+            return true;
+        }
+        if token.chars().any(|ch| SHELL_META_CHARS.contains(&ch)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_pure_natural_language(input: &str) -> bool {
+    if has_command_like_tokens(input) {
+        return false;
+    }
+
+    let first_token = input.split_whitespace().next().unwrap_or_default();
+    if first_token.chars().any(|ch| !ch.is_ascii() && ch.is_alphabetic()) {
+        return true;
+    }
+
+    let lower = input.to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or_default();
+    matches!(first, "why" | "how" | "what" | "explain" | "fix" | "please")
+        && lower.split_whitespace().count() > 1
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InputClassifier, InputDecision, InterceptReason};
+    use super::{has_command_like_tokens, InputClassifier, InputDecision, InterceptReason};
 
     #[test]
     fn classifies_known_slash_commands_without_capturing_paths() {
@@ -348,6 +411,192 @@ mod tests {
         assert_eq!(
             classifier.classify(&format!("LC_ALL=C cat {chinese_doc}")),
             InputDecision::SendToShell(format!("LC_ALL=C cat {chinese_doc}"))
+        );
+    }
+
+    #[test]
+    fn conservative_intercepts_agent_marker() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("?? what happened"),
+            InputDecision::Intercept {
+                input: "?? what happened".to_string(),
+                reason: InterceptReason::AgentMarker,
+            }
+        );
+    }
+
+    #[test]
+    fn conservative_intercepts_slash_commands() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("/explain last error"),
+            InputDecision::Intercept {
+                input: "/explain last error".to_string(),
+                reason: InterceptReason::Slash,
+            }
+        );
+        assert_eq!(
+            c.classify("/help"),
+            InputDecision::Intercept {
+                input: "/help".to_string(),
+                reason: InterceptReason::Slash,
+            }
+        );
+    }
+
+    #[test]
+    fn conservative_intercepts_pure_natural_language() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
+            InputDecision::Intercept {
+                input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
+        );
+        assert_eq!(
+            c.classify("why is the build failing"),
+            InputDecision::Intercept {
+                input: "why is the build failing".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
+        );
+        assert_eq!(
+            c.classify("how do I reset my password"),
+            InputDecision::Intercept {
+                input: "how do I reset my password".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
+        );
+        assert_eq!(
+            c.classify("what is a mutex"),
+            InputDecision::Intercept {
+                input: "what is a mutex".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
+        );
+        assert_eq!(
+            c.classify("explain the error"),
+            InputDecision::Intercept {
+                input: "explain the error".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
+        );
+    }
+
+    #[test]
+    fn conservative_sends_unknown_commands_to_shell() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("git status"),
+            InputDecision::SendToShell("git status".to_string())
+        );
+        assert_eq!(
+            c.classify("ls -la"),
+            InputDecision::SendToShell("ls -la".to_string())
+        );
+        assert_eq!(
+            c.classify("cargo build"),
+            InputDecision::SendToShell("cargo build".to_string())
+        );
+        assert_eq!(
+            c.classify("mycustomtool run"),
+            InputDecision::SendToShell("mycustomtool run".to_string())
+        );
+    }
+
+    #[test]
+    fn conservative_rejects_nl_with_flags() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("why -v"),
+            InputDecision::SendToShell("why -v".to_string())
+        );
+        assert_eq!(
+            c.classify("fix --dry-run"),
+            InputDecision::SendToShell("fix --dry-run".to_string())
+        );
+    }
+
+    #[test]
+    fn conservative_rejects_nl_with_paths() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("explain /etc/passwd"),
+            InputDecision::SendToShell("explain /etc/passwd".to_string())
+        );
+        assert_eq!(
+            c.classify("fix src/main.rs"),
+            InputDecision::SendToShell("fix src/main.rs".to_string())
+        );
+        assert_eq!(
+            c.classify("what ~/docs"),
+            InputDecision::SendToShell("what ~/docs".to_string())
+        );
+    }
+
+    #[test]
+    fn conservative_rejects_nl_with_shell_metacharacters() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("why echo | grep foo"),
+            InputDecision::SendToShell("why echo | grep foo".to_string())
+        );
+        assert_eq!(
+            c.classify("how to cat > file"),
+            InputDecision::SendToShell("how to cat > file".to_string())
+        );
+        assert_eq!(
+            c.classify("fix $HOME"),
+            InputDecision::SendToShell("fix $HOME".to_string())
+        );
+    }
+
+    #[test]
+    fn conservative_rejects_non_ascii_with_command_tokens() {
+        let c = InputClassifier::conservative();
+        assert_eq!(
+            c.classify("cat \u{8bbe}\u{8ba1}\u{6587}\u{6863}.md"),
+            InputDecision::SendToShell("cat \u{8bbe}\u{8ba1}\u{6587}\u{6863}.md".to_string())
+        );
+        assert_eq!(
+            c.classify("\u{67e5}\u{770b} --help"),
+            InputDecision::SendToShell("\u{67e5}\u{770b} --help".to_string())
+        );
+    }
+
+    #[test]
+    fn conservative_default_is_false() {
+        let d = InputClassifier::default();
+        assert!(!d.conservative);
+    }
+
+    #[test]
+    fn has_command_like_tokens_detects_flags_paths_metas() {
+        assert!(has_command_like_tokens("-v"));
+        assert!(has_command_like_tokens("foo --bar"));
+        assert!(has_command_like_tokens("foo /etc/passwd"));
+        assert!(has_command_like_tokens("foo ~/dir"));
+        assert!(has_command_like_tokens("a | b"));
+        assert!(has_command_like_tokens("echo $VAR"));
+        assert!(!has_command_like_tokens("why is the sky blue"));
+        assert!(!has_command_like_tokens("explain the error"));
+    }
+
+    #[test]
+    fn default_mode_unchanged_for_known_shell_commands() {
+        let d = InputClassifier::default();
+        assert_eq!(
+            d.classify("git status"),
+            InputDecision::SendToShell("git status".to_string())
+        );
+        assert_eq!(
+            d.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
+            InputDecision::Intercept {
+                input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
+                reason: InterceptReason::NaturalLanguage,
+            }
         );
     }
 }

@@ -26,6 +26,9 @@ enum CardInputKind {
         id: String,
         option_count: usize,
     },
+    Consultation {
+        id: String,
+    },
 }
 
 impl CardInputState {
@@ -42,11 +45,13 @@ impl CardInputState {
                 allow_free_text: *allow_free_text,
                 multiple: *multiple,
             },
-            RawInputCapture::Approval { id } => CardInputKind::Approval { id: id.clone() },
+            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+                CardInputKind::Approval { id: id.clone() }
+            }
             RawInputCapture::Mode { id, option_count } => CardInputKind::Mode {
                 id: id.clone(),
                 option_count: *option_count,
-            },
+            }
         };
         if self.active_kind.as_ref() != Some(&kind) {
             self.active_kind = Some(kind);
@@ -83,7 +88,7 @@ impl CardInputState {
             match input[idx] {
                 CTRL_C => {
                     match capture {
-                        RawInputCapture::Approval { id } => {
+                        RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -130,7 +135,7 @@ impl CardInputState {
                 }
                 0x1b if input.get(idx + 1) == Some(&0x1b) => {
                     match capture {
-                        RawInputCapture::Approval { id } => {
+                        RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -146,7 +151,7 @@ impl CardInputState {
                 }
                 0x1b => {
                     match capture {
-                        RawInputCapture::Approval { id } => {
+                        RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -157,7 +162,7 @@ impl CardInputState {
                     idx += 1;
                 }
                 byte if !byte.is_ascii_control() => match capture {
-                    RawInputCapture::Approval { id } => {
+                    RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                         if byte == b'd' || byte == b'D' {
                             self.selected = 2;
                             events.push(RawInputEvent::CardDetails(id.clone()));
@@ -249,7 +254,7 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } => {
+            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                 let previous = self.selected;
                 match code {
                     b'D' => self.selected = self.selected.saturating_sub(1),
@@ -297,7 +302,7 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } => {
+            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                 self.selected = (self.selected + 1).min(approval_action_max_index());
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }
@@ -322,7 +327,7 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } => {
+            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                 self.selected = self.selected.saturating_sub(1);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }
@@ -371,7 +376,7 @@ impl CardInputState {
                 }
                 None
             }
-            RawInputCapture::Approval { id } => {
+            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                 if !self.free_text.trim().is_empty() {
                     return None;
                 }
@@ -429,7 +434,7 @@ fn question_choice_count(capture: &RawInputCapture) -> usize {
             allow_free_text,
             multiple: _,
         } => shared_question_choice_count(*option_count, *allow_free_text),
-        RawInputCapture::Approval { .. } => 0,
+        RawInputCapture::Approval { .. } | RawInputCapture::Consultation { .. } => 0,
         RawInputCapture::Mode { .. } => 0,
     }
 }

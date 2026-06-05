@@ -146,7 +146,11 @@ fn compact_approval_receipt_lines(
 }
 
 fn compact_approval_receipt_text(model: &ApprovalReceiptPanelModel<'_>) -> String {
-    format!("{} {}", model.title, model.id)
+    if !model.subject.is_empty() {
+        format!("{} {} \u{2014} {}", model.title, model.id, model.subject)
+    } else {
+        format!("{} {}", model.title, model.id)
+    }
 }
 
 fn receipt_status_style(model: &ApprovalReceiptPanelModel<'_>) -> Style {

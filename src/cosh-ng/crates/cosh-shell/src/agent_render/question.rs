@@ -9,6 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border::ROUNDED,
     text::{Line, Span, Text},
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
@@ -189,6 +190,7 @@ fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut
             " Agent question ",
             Style::default().add_modifier(Modifier::BOLD),
         )))
+        .border_set(ROUNDED)
         .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(area);
     block.render(area, buffer);

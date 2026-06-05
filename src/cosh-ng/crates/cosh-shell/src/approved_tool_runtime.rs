@@ -38,7 +38,8 @@ struct ApprovedToolRun {
 }
 
 fn approved_bash_tool_run(request: &RuntimeApprovalRequest) -> ApprovedToolRun {
-    let result = cosh_shell::run_approved_bash_tool(&request.preview);
+    let command = raw_bash_command(&request.preview);
+    let result = cosh_shell::run_approved_bash_tool(command);
     let continuation = tool_result_agent_request(request, &result);
     ApprovedToolRun {
         result,
@@ -197,6 +198,10 @@ fn tool_execution_output_detail(
     detail.push('\n');
     detail.push_str(text);
     detail
+}
+
+fn raw_bash_command(preview: &str) -> &str {
+    preview.strip_prefix("$ ").unwrap_or(preview)
 }
 
 fn tool_result_agent_request(

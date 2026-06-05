@@ -4,6 +4,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border::ROUNDED,
     text::{Line, Span, Text},
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
@@ -185,6 +186,7 @@ fn render_activity_panel(model: ActivityPanelModel<'_>, area: Rect, buffer: &mut
             " Activity ",
             Style::default().add_modifier(Modifier::BOLD),
         )))
+        .border_set(ROUNDED)
         .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     block.render(area, buffer);
@@ -308,6 +310,7 @@ fn render_activity_details_panel(
             ),
             Span::raw(format!("{} ", model.id)),
         ]))
+        .border_set(ROUNDED)
         .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     block.render(area, buffer);

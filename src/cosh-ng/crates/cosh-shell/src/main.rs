@@ -35,8 +35,8 @@ use approved_tool_runtime::{
     render_approved_tool_result, request_is_executable_bash_tool, request_is_readonly_builtin_tool,
 };
 use command_hook_runtime::{
-    command_hook_hints_for_block, command_hook_hints_for_blocks, record_command_result_hooks,
-    render_command_hook_findings,
+    command_hook_hints_for_block, command_hook_hints_for_blocks, handle_consultation_events,
+    record_command_result_hooks, render_command_hook_findings,
 };
 use details_runtime::render_runtime_details;
 use failed_command_runtime::{
@@ -55,7 +55,8 @@ use recommendation_runtime::{
 };
 use runtime_state::{
     AnalysisMode, ApprovalMode, ApprovalRequestKind, ApprovalRequestStatus, InlineState,
-    RuntimeApprovalJournalEntry, RuntimeApprovalRequest, RuntimeCommandHookHint,
+    PendingConsultation, RuntimeApprovalJournalEntry, RuntimeApprovalRequest,
+    RuntimeCommandHookHint,
 };
 use slash_runtime::render_slash_actions;
 use startup_runtime::render_startup_banner;
@@ -284,17 +285,37 @@ fn run_raw(adapter_name: &str, run_model: bool, shell_kind: RawShellKind) -> i32
     if isolated {
         config.native_mode = false;
     }
+    if config.native_mode {
+        config.input_classifier = config.input_classifier.with_conservative(true);
+    }
 
     let login = args
         .first()
         .map_or(false, |a| a.starts_with('-'))
         || args.iter().any(|a| a == "--login" || a == "-l");
     config.login_shell = login;
+
+    let cosh_config = cosh_shell::load_config();
+    if cosh_config.analysis_mode == "auto" {
+        // will be applied below
+    }
+
     let adapter = build_adapter(kind, run_model);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    match cosh_config.analysis_mode.as_str() {
+        "auto" => inline_state.analysis_mode = AnalysisMode::Auto,
+        "manual" => inline_state.analysis_mode = AnalysisMode::Manual,
+        _ => {}
+    }
+    if cosh_config.approval_mode == "auto" {
+        inline_state.approval_mode = ApprovalMode::Auto;
+    }
     let mut hook_engine = cosh_shell::HookEngine::new();
     for hook in cosh_shell::default_builtin_hooks() {
         hook_engine.register(hook);
+    }
+    if let Some(hooks_dir) = dirs_for_hook_loading() {
+        hook_engine.load_hooks_from_dir(&hooks_dir);
     }
     inline_state.hook_engine = hook_engine;
     let raw_result = match shell_kind {
@@ -342,6 +363,10 @@ fn render_raw_inline_events<W: Write>(
         inline_state,
         &mut terminal_output,
     )?;
+    if inline_state.trigger_pty_prompt {
+        inline_state.trigger_pty_prompt = false;
+        return Ok(RawObserverAction::EmitToPty(b"\n".to_vec()));
+    }
     if let Some(capture) = pending_card_capture(inline_state) {
         Ok(RawObserverAction::CaptureInput(capture))
     } else if inline_state.active_run.is_some() {
@@ -358,6 +383,12 @@ fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
         return Some(RawInputCapture::Mode {
             id: mode_panel.id.clone(),
             option_count: 2,
+        });
+    }
+
+    if let Some(consultation) = state.pending_consultation.as_ref() {
+        return Some(RawInputCapture::Consultation {
+            id: consultation.card_id.clone(),
         });
     }
 
@@ -507,6 +538,7 @@ fn render_inline_guidance<W: Write>(
     }
     record_command_result_hooks(&ledger.blocks, state);
     render_command_hook_findings(&ledger.blocks, state, output)?;
+    handle_consultation_events(events, &ledger.blocks, adapter, state, output)?;
     render_intercept_agent_guidance(events, &ledger.blocks, adapter, state, output)?;
 
     let analysis_mode = state.analysis_mode;
@@ -556,6 +588,8 @@ fn render_owned_shell_prompt<W: Write>(
 
     if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
         write!(output, "cosh-osc$ ")?;
+    } else {
+        state.trigger_pty_prompt = true;
     }
     output.flush()?;
     state.needs_prompt_after_agent_run = false;
@@ -802,6 +836,16 @@ fn print_usage_help() {
            --version               Print version\n\
            --help                  Print help"
     );
+}
+
+fn dirs_for_hook_loading() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = std::path::PathBuf::from(home).join(".config/cosh/hooks");
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

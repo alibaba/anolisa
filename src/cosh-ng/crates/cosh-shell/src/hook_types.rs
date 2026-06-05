@@ -12,7 +12,9 @@ pub struct HookMatcher {
     pub id: String,
     pub commands: Vec<String>,
     pub command_patterns: Vec<String>,
+    pub command_regex: Option<String>,
     pub exit_codes: Option<Vec<i32>>,
+    pub min_output_bytes: Option<u64>,
     pub trigger: HookTrigger,
 }
 
@@ -44,4 +46,6 @@ pub struct HookFinding {
     pub suggestion: String,
     pub skill: Option<String>,
     pub cli_hint: Option<String>,
+    #[serde(default)]
+    pub context_refs: Vec<String>,
 }

@@ -28,7 +28,11 @@ pub(super) fn render_slash_actions<W: Write>(
                 render_help(state, output)?;
                 true
             }
-            SlashCommand::Mode(arg) => render_mode_command(arg, state, output)?,
+            SlashCommand::Hooks(sub, arg) => {
+                render_hooks_command(sub, arg, state, output)?;
+                true
+            }
+            SlashCommand::Mode(arg, sub) => render_mode_command(arg, sub, state, output)?,
             SlashCommand::Info(command) => {
                 render_info(command, output)?;
                 true
@@ -73,7 +77,8 @@ fn clear_shell_prompt_line<W: Write>(output: &mut W) -> std::io::Result<()> {
 enum SlashCommand<'a> {
     Noop,
     Help,
-    Mode(Option<&'a str>),
+    Hooks(Option<&'a str>, Option<&'a str>),
+    Mode(Option<&'a str>, Option<&'a str>),
     Info(SlashInfoCommand),
     Hint(&'a str),
     Unknown(&'a str),
@@ -85,7 +90,16 @@ impl<'a> SlashCommand<'a> {
         let token = parts.next()?;
         match token {
             "/help" => Some(Self::Help),
-            "/mode" | "/approval-mode" => Some(Self::Mode(parts.next())),
+            "/hooks" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                Some(Self::Hooks(sub, arg))
+            }
+            "/mode" | "/approval-mode" => {
+                let first = parts.next();
+                let second = parts.next();
+                Some(Self::Mode(first, second))
+            }
             "/audit" => Some(Self::Info(SlashInfoCommand::Audit)),
             "/config" => Some(Self::Info(SlashInfoCommand::Config)),
             "/skill" => Some(Self::Info(SlashInfoCommand::Skill)),
@@ -122,10 +136,74 @@ fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result
         "Slash commands",
         body,
         Some(&format!(
-            "Mode: {}. Default ask confirms every Agent action; auto only skips approval for low-risk read-only Bash tools.",
-            state.approval_mode.label()
+            "Approval: {}. Analysis: {}.",
+            state.approval_mode.label(),
+            state.analysis_mode.label()
         )),
     )
+}
+
+fn render_hooks_command<W: Write>(
+    sub: Option<&str>,
+    arg: Option<&str>,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let renderer = RatatuiInlineRenderer::for_terminal();
+    match (sub, arg) {
+        (None, _) => {
+            let hooks = state.hook_engine.registered_hooks();
+            let disabled = &state.disabled_hooks;
+            let body: Vec<String> = if hooks.is_empty() {
+                vec!["No hooks registered.".to_string()]
+            } else {
+                hooks
+                    .iter()
+                    .map(|id| {
+                        if disabled.contains(*id) {
+                            format!("{id} (disabled)")
+                        } else {
+                            id.to_string()
+                        }
+                    })
+                    .collect()
+            };
+            renderer.write_notice(
+                output,
+                "Registered hooks",
+                body,
+                Some(&format!("{} hook(s) registered.", hooks.len())),
+            )
+        }
+        (Some("enable"), Some(id)) => {
+            state.disabled_hooks.remove(id);
+            renderer.write_notice(
+                output,
+                "Hook enabled",
+                vec![format!("Hook '{id}' enabled.")],
+                None,
+            )
+        }
+        (Some("disable"), Some(id)) => {
+            state.disabled_hooks.insert(id.to_string());
+            renderer.write_notice(
+                output,
+                "Hook disabled",
+                vec![format!("Hook '{id}' disabled.")],
+                None,
+            )
+        }
+        _ => renderer.write_notice(
+            output,
+            "Usage",
+            vec![
+                "/hooks                - list all hooks".into(),
+                "/hooks enable <id>    - enable a hook".into(),
+                "/hooks disable <id>   - disable a hook".into(),
+            ],
+            None,
+        ),
+    }
 }
 
 fn render_hint<W: Write>(prefix: &str, state: &InlineState, output: &mut W) -> std::io::Result<()> {
@@ -231,9 +309,19 @@ fn all_slash_command_hints() -> &'static [SlashCommandHint] {
             summary: "show command reference",
         },
         SlashCommandHint {
+            name: "/hooks",
+            usage: "/hooks",
+            summary: "list registered hooks",
+        },
+        SlashCommandHint {
             name: "/mode",
             usage: "/mode [ask|auto]",
             summary: "show or change approval mode",
+        },
+        SlashCommandHint {
+            name: "/mode",
+            usage: "/mode analysis [smart|auto|manual]",
+            summary: "show or change analysis mode",
         },
         SlashCommandHint {
             name: "/skill",

@@ -16,6 +16,7 @@ mod approval_details;
 mod approval_journal;
 mod approval_receipt;
 mod card;
+mod consultation;
 mod markdown;
 mod question;
 mod recommendation;
@@ -29,6 +30,7 @@ pub use crate::approval_actions::{
 };
 pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};
 pub use approval::ApprovalPanelModel;
+pub use consultation::ConsultationCardModel;
 pub use approval_details::ApprovalDetailsPanelModel;
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
 pub use approval_receipt::ApprovalReceiptPanelModel;
@@ -406,7 +408,10 @@ fn styled_buffer_row(buffer: &Buffer, area: Rect, y: u16) -> String {
 fn last_non_blank_cell(buffer: &Buffer, area: Rect, y: u16) -> Option<u16> {
     (0..area.width)
         .rev()
-        .find(|x| buffer[(*x, y)].symbol() != " ")
+        .find(|x| {
+            let s = buffer[(*x, y)].symbol();
+            !s.is_empty() && s != " "
+        })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -468,6 +473,9 @@ fn ansi_color_code(color: Color, background: bool) -> Option<String> {
 }
 
 fn symbol_display_width(symbol: &str) -> usize {
+    if symbol.is_empty() {
+        return 0;
+    }
     symbol.chars().map(render_char_width).sum::<usize>().max(1)
 }
 
@@ -481,6 +489,40 @@ fn render_char_width(ch: char) -> usize {
         ch if is_wide_symbol(ch) => 2,
         _ => 1,
     }
+}
+
+fn sanitize_ambiguous_chars(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{2014}' => '-',
+            '\u{2013}' => '-',
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201c}' | '\u{201d}' => '"',
+            '\u{2026}' => '.',
+            '\u{00b7}' => '*',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn sanitize_styled_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| {
+                        Span::styled(sanitize_ambiguous_chars(&span.content), span.style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+fn is_east_asian_ambiguous(ch: char) -> bool {
+    matches!(ch, '\u{2014}' | '\u{2015}' | '\u{2025}' | '\u{2026}')
 }
 
 fn is_box_drawing(ch: char) -> bool {

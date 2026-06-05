@@ -269,8 +269,9 @@ fn render_auto_approved_tool<W: Write>(
             continue;
         }
 
+        let raw_cmd = request.preview.strip_prefix("$ ").unwrap_or(&request.preview);
         if !request_is_executable_bash_tool(&request)
-            || can_run_approved_bash_tool(&request.preview).is_err()
+            || can_run_approved_bash_tool(raw_cmd).is_err()
         {
             continue;
         }

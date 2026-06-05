@@ -33,9 +33,7 @@ impl AgentStatusAnimation {
         }
 
         const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-        if self.visible {
-            write!(output, "\r\x1b[2K")?;
-        }
+        write!(output, "\r\x1b[2K")?;
         write!(output, "{} {}", FRAMES[self.frame % FRAMES.len()], label)?;
         output.flush()?;
 

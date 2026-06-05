@@ -32,7 +32,7 @@ pub use adapter::{
     AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ClaudeCodeAdapter, FakeAgentAdapter,
     PreparedInvocation, QwenCliAdapter,
 };
-pub use agent_render::RatatuiInlineRenderer;
+pub use agent_render::{ConsultationCardModel, RatatuiInlineRenderer};
 pub use governance::{govern_agent_events, GovernanceOutput};
 pub use input::{InputClassifier, InputDecision, InterceptReason};
 pub use interactive::{run_line_interactive_bash, LineInteractiveOutput};

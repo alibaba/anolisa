@@ -79,6 +79,7 @@ pub enum RawObserverAction {
     HoldShellOutput,
     DelayShellOutput,
     CaptureInput(RawInputCapture),
+    EmitToPty(Vec<u8>),
 }
 
 impl RawObserverAction {
@@ -114,6 +115,9 @@ pub enum RawInputCapture {
         id: String,
         option_count: usize,
     },
+    Consultation {
+        id: String,
+    },
 }
 
 pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &RawObserverAction) {
@@ -125,7 +129,7 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
         RawObserverAction::HoldShellOutput => RawInputMode::Hold,
         RawObserverAction::DelayShellOutput => RawInputMode::Delay,
         RawObserverAction::RawPassthrough => RawInputMode::RawPassthrough,
-        RawObserverAction::Continue => RawInputMode::Passthrough,
+        RawObserverAction::Continue | RawObserverAction::EmitToPty(_) => RawInputMode::Passthrough,
     };
 }
 
@@ -308,6 +312,9 @@ fn relay_passthrough_input(
     input_mode: &Arc<Mutex<RawInputMode>>,
     line_buffer: &mut CandidateLineBuffer,
 ) -> io::Result<bool> {
+    if input_classifier.is_conservative() {
+        return relay_native_passthrough(bytes, master, input_classifier, input_events, input_mode, line_buffer);
+    }
     if line_buffer.is_active() || starts_intercept_candidate(bytes) {
         line_buffer.push(bytes);
         redraw_candidate_line(input_events, line_buffer);
@@ -320,6 +327,33 @@ fn relay_passthrough_input(
         );
     }
 
+    send_raw_input_events(bytes, input_events);
+    master.write_all(bytes)?;
+    master.flush()?;
+    Ok(false)
+}
+
+fn relay_native_passthrough(
+    bytes: &[u8],
+    master: &mut File,
+    input_classifier: &InputClassifier,
+    input_events: &Sender<RawInputEvent>,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    line_buffer: &mut CandidateLineBuffer,
+) -> io::Result<bool> {
+    let starts_slash = bytes.first() == Some(&b'/') || bytes.starts_with(b"??");
+    if line_buffer.is_active() || starts_slash {
+        line_buffer.push(bytes);
+        return relay_candidate_line(
+            master,
+            input_classifier,
+            input_events,
+            input_mode,
+            line_buffer,
+        );
+    }
+    // Non-slash input: send directly to PTY. Shell marker's preexec/
+    // command_not_found hooks handle NL/CJK intercept on the shell side.
     send_raw_input_events(bytes, input_events);
     master.write_all(bytes)?;
     master.flush()?;

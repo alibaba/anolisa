@@ -18,10 +18,6 @@ pub(super) fn render_intercept_agent_guidance<W: Write>(
         }
 
         if let Some(answer_run) = agent_request_from_pending_question_answer(event, idx, state) {
-            if let Some(raw) = event.input.as_deref() {
-                write!(output, "\u{2192} AI: {}\n", raw.trim())?;
-                output.flush()?;
-            }
             render_question_answer_notice(state, &answer_run, output)?;
             stop_active_agent_run_without_rendering(state, output)?;
             state.needs_prompt_after_agent_run = true;
@@ -31,10 +27,6 @@ pub(super) fn render_intercept_agent_guidance<W: Write>(
         }
 
         if let Some(mut request) = agent_request_from_intercepted_input(event, idx, true) {
-            if let Some(raw) = event.input.as_deref() {
-                write!(output, "\u{2192} AI: {}\n", raw.trim())?;
-                output.flush()?;
-            }
             let before_ms = event.started_at_ms.unwrap_or(u64::MAX);
             let ctx_config = cosh_shell::ContextWindowConfig::default();
             let ctx_entries = cosh_shell::build_context_window(blocks, before_ms, &ctx_config);

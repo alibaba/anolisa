@@ -4,6 +4,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border::ROUNDED,
     text::{Line, Span, Text},
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
@@ -176,6 +177,7 @@ fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut
             Span::styled(" Approval ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(format!("{} ", model.id)),
         ]))
+        .border_set(ROUNDED)
         .border_style(Style::default().fg(border));
     let inner = block.inner(area);
     block.render(area, buffer);
@@ -274,6 +276,7 @@ fn render_command_tool_approval_panel(
             Span::styled(" Approval ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(format!("{} ", model.id)),
         ]))
+        .border_set(ROUNDED)
         .border_style(Style::default().fg(border));
     let inner = block.inner(area);
     block.render(area, buffer);

@@ -54,7 +54,12 @@ _cosh_now_ms() {
 }
 
 _cosh_history_entry() {
-  builtin history 1 2>/dev/null
+  local saved_fmt="$HISTTIMEFORMAT"
+  HISTTIMEFORMAT=
+  local entry
+  entry="$(builtin history 1 2>/dev/null)"
+  HISTTIMEFORMAT="$saved_fmt"
+  printf '%s' "$entry"
 }
 
 _cosh_history_no() {
@@ -62,7 +67,12 @@ _cosh_history_no() {
 }
 
 _cosh_history_command_from_entry() {
-  printf '%s' "$1" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//'
+  local saved_fmt="$HISTTIMEFORMAT"
+  HISTTIMEFORMAT=
+  local entry
+  entry="$(builtin history 1 2>/dev/null)"
+  HISTTIMEFORMAT="$saved_fmt"
+  printf '%s' "$entry" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//'
 }
 
 _cosh_emit_marker() {
@@ -199,6 +209,9 @@ command_not_found_handle() {
 
 _cosh_preexec_marker() {
   trap - DEBUG
+  if [[ -n "${_COSH_OLD_DEBUG_TRAP:-}" ]]; then
+    eval "$_COSH_OLD_DEBUG_TRAP" 2>/dev/null || true
+  fi
   if [[ "${_COSH_AT_PROMPT:-0}" == 1 ]]; then
     local history_entry
     local history_no
@@ -237,6 +250,7 @@ _cosh_precmd_marker() {
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
+_COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 trap '_cosh_preexec_marker' DEBUG
 # Append precmd to existing PROMPT_COMMAND
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
@@ -265,12 +279,14 @@ export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
 # ── Source user startup files (native mode) ──
 if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
   if [[ -n "${COSH_ZDOTDIR_ORIG:-}" ]]; then
+    [[ -f "${COSH_ZDOTDIR_ORIG}/.zshenv" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshenv"
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
       [[ -f "${COSH_ZDOTDIR_ORIG}/.zprofile" ]] && source "${COSH_ZDOTDIR_ORIG}/.zprofile"
       [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
     fi
     [[ -f "${COSH_ZDOTDIR_ORIG}/.zshrc" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshrc"
   else
+    [[ -f ~/.zshenv ]] && source ~/.zshenv
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
       [[ -f ~/.zprofile ]] && source ~/.zprofile
       [[ -f ~/.zlogin ]] && source ~/.zlogin
@@ -442,6 +458,17 @@ command_not_found_handler() {
 
 _cosh_preexec_marker() {
   local command="$1"
+  local first_word="$command"
+  local argc=1
+  if [[ "$command" == *[[:space:]]* ]]; then
+    first_word="${command%%[[:space:]]*}"
+    argc=2
+  fi
+  local reason
+  if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+    _cosh_emit_intercept_marker "$command" "$reason"
+    return 1
+  fi
   _cosh_emit_marker "preexec" "$command" 0
 }
 

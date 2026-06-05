@@ -7,6 +7,7 @@ pub struct ContextWindowConfig {
     pub preview_lines_failed: usize,
     pub preview_lines_success: usize,
     pub preview_enabled: bool,
+    pub token_budget: usize,
 }
 
 impl Default for ContextWindowConfig {
@@ -17,6 +18,7 @@ impl Default for ContextWindowConfig {
             preview_lines_failed: 20,
             preview_lines_success: 5,
             preview_enabled: true,
+            token_budget: 2000,
         }
     }
 }
@@ -55,7 +57,29 @@ pub fn build_context_window(
         })
         .collect();
     entries.reverse();
+    trim_to_token_budget(&mut entries, config.token_budget);
     entries
+}
+
+fn trim_to_token_budget(entries: &mut Vec<ContextEntry>, budget: usize) {
+    let chars_budget = budget * 4;
+    let mut total_chars = 0;
+    let mut keep = entries.len();
+    for (i, entry) in entries.iter().enumerate().rev() {
+        let entry_chars = entry.block.command.len()
+            + entry.block.cwd.len()
+            + entry.preview.as_ref().map_or(0, |p| p.len())
+            + 60;
+        total_chars += entry_chars;
+        if total_chars > chars_budget {
+            keep = entries.len() - i;
+            break;
+        }
+    }
+    if keep < entries.len() {
+        let start = entries.len() - keep;
+        entries.drain(..start);
+    }
 }
 
 fn output_preview(

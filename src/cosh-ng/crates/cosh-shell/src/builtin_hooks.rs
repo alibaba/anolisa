@@ -13,6 +13,7 @@ impl FailedCommandHook {
                 id: "failed-command".into(),
                 commands: vec![],
                 command_patterns: vec![],
+                command_regex: None, min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnFail,
             },
@@ -45,7 +46,7 @@ impl BuiltinHook for FailedCommandHook {
                 description: format!("Command failed in {}", input.cwd),
                 suggestion: "Use /explain to analyze the failure".into(),
                 skill: None,
-                cli_hint: None,
+                cli_hint: None, context_refs: Vec::new(),
             }),
         }
     }
@@ -74,6 +75,8 @@ impl TestFailureHook {
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
+                command_regex: None,
+                min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnFail,
             },
@@ -110,7 +113,7 @@ impl BuiltinHook for TestFailureHook {
             description: format!("Test failure in {}", input.cwd),
             suggestion: format!("Use /{skill} to diagnose test failures"),
             skill: Some(skill.to_string()),
-            cli_hint: None,
+            cli_hint: None, context_refs: Vec::new(),
         })
     }
 }

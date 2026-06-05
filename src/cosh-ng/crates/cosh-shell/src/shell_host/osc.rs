@@ -302,6 +302,14 @@ impl OscParser {
         }).count()
     }
 
+    pub(super) fn display_last_line_bytes(&self) -> usize {
+        if let Some(last_newline) = self.display.iter().rposition(|&b| b == b'\n') {
+            self.display.len() - last_newline - 1
+        } else {
+            self.display.len()
+        }
+    }
+
     pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.intervention_display_cuts)
     }

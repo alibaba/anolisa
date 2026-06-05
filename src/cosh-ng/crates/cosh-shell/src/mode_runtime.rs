@@ -1,20 +1,28 @@
-use super::runtime_state::RuntimeModePanel;
 use super::slash_runtime::write_shell_prompt;
 use super::*;
 
 pub(super) fn render_mode_command<W: Write>(
     arg: Option<&str>,
+    sub: Option<&str>,
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<bool> {
+    if arg == Some("analysis") {
+        return render_analysis_mode_command(sub, state, output);
+    }
     match arg {
         None => {
-            state.pending_mode_panel = Some(RuntimeModePanel {
-                id: "mode".to_string(),
-                selected_option: mode_index(state.approval_mode),
-            });
-            render_current_mode_panel(state, output)?;
-            Ok(false)
+            let body = vec![
+                format!("Approval mode: {}", state.approval_mode.label()),
+                format!("Analysis mode: {}", state.analysis_mode.label()),
+            ];
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Current modes",
+                body,
+                Some("Use /mode ask|auto or /mode analysis smart|auto|manual."),
+            )?;
+            Ok(true)
         }
         Some("ask") => {
             state.approval_mode = ApprovalMode::Ask;
@@ -41,9 +49,65 @@ pub(super) fn render_mode_command<W: Write>(
         Some(other) => RatatuiInlineRenderer::for_terminal()
             .write_notice(
                 output,
-                "Approval mode",
+                "Mode",
                 vec![format!("Unknown mode: {other}")],
-                Some("Use /mode ask or /mode auto."),
+                Some("Use /mode ask|auto or /mode analysis smart|auto|manual."),
+            )
+            .map(|_| true),
+    }
+}
+
+fn render_analysis_mode_command<W: Write>(
+    arg: Option<&str>,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    match arg {
+        None => {
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Analysis mode",
+                vec![format!("Current: {}", state.analysis_mode.label())],
+                Some("Use /mode analysis smart|auto|manual."),
+            )?;
+            Ok(true)
+        }
+        Some("smart") => {
+            state.analysis_mode = AnalysisMode::Smart;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Analysis mode",
+                vec!["Mode set to smart.".to_string()],
+                Some("Hooks evaluate on failure; findings shown for review."),
+            )?;
+            Ok(true)
+        }
+        Some("auto") => {
+            state.analysis_mode = AnalysisMode::Auto;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Analysis mode",
+                vec!["Mode set to auto.".to_string()],
+                Some("Hooks evaluate on failure; Agent auto-triggered for failed commands."),
+            )?;
+            Ok(true)
+        }
+        Some("manual") => {
+            state.analysis_mode = AnalysisMode::Manual;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Analysis mode",
+                vec!["Mode set to manual.".to_string()],
+                Some("Hooks and automatic analysis disabled; use slash commands to trigger."),
+            )?;
+            Ok(true)
+        }
+        Some(other) => RatatuiInlineRenderer::for_terminal()
+            .write_notice(
+                output,
+                "Analysis mode",
+                vec![format!("Unknown analysis mode: {other}")],
+                Some("Use /mode analysis smart|auto|manual."),
             )
             .map(|_| true),
     }
@@ -236,13 +300,6 @@ fn mode_card_action_from_event(event: &ShellEvent) -> Option<ModeCardAction> {
 fn split_mode_value(value: &str) -> Option<(String, usize)> {
     let (id, selected) = value.split_once(':')?;
     Some((id.to_string(), selected.parse().ok()?))
-}
-
-fn mode_index(mode: ApprovalMode) -> usize {
-    match mode {
-        ApprovalMode::Ask => 0,
-        ApprovalMode::Auto => 1,
-    }
 }
 
 fn mode_from_index(index: usize) -> ApprovalMode {

@@ -266,7 +266,7 @@ mod tests {
                 description: "cargo test exited with code 101".to_string(),
                 suggestion: "Use /rust-project".to_string(),
                 skill: Some("rust-project".to_string()),
-                cli_hint: None,
+                cli_hint: None, context_refs: Vec::new(),
             }),
             recommended_skill: None,
         };
