@@ -1048,19 +1048,17 @@ fn describe_resolve_error(
             "no prebuilt artifact for component '{}' on {}/{} (install_mode={})",
             component, env.os, env.arch, install_mode,
         ),
-        ResolveError::UnsupportedMode => format!(
-            "component '{}' has no artifact for install_mode '{}'",
-            component, install_mode,
-        ),
+        ResolveError::UnsupportedMode => {
+            format!("component '{component}' has no artifact for install_mode '{install_mode}'")
+        }
         ResolveError::Ambiguous(list) => format!(
             "multiple artifacts match component '{}' ({} candidates); declare preferred_artifact_types to disambiguate",
             component,
             list.len(),
         ),
-        ResolveError::ChecksumMissing => format!(
-            "matching artifact for component '{}' has no sha256",
-            component,
-        ),
+        ResolveError::ChecksumMissing => {
+            format!("matching artifact for component '{component}' has no sha256")
+        }
     }
 }
 
@@ -1447,8 +1445,7 @@ mod tests {
         assert_eq!(
             plan.status,
             PlanStatus::Blocked,
-            "resolved rpm must block the plan despite a tar_gz sibling, got: {:?}",
-            plan,
+            "resolved rpm must block the plan despite a tar_gz sibling, got: {plan:?}",
         );
         let comp_plan = &plan.components[0];
         assert_eq!(comp_plan.status, PlanStatus::Blocked);

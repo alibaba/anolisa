@@ -222,7 +222,7 @@ pub fn render_error(ctx: &CliContext, err: &CliError) -> ExitCode {
 
 fn write_json<T: Serialize>(response: &CliResponse<T>) -> Result<(), serde_json::Error> {
     let s = serde_json::to_string_pretty(response)?;
-    println!("{}", s);
+    println!("{s}");
     Ok(())
 }
 

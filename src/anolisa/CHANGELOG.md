@@ -42,8 +42,7 @@ Initial alpha release of the ANOLISA CLI.
 | Capability | Status |
 |-----------|--------|
 | agent-observability | `enable` fully wired (dry-run + real-execute) |
-| token-optimization | `enable` gated by execution-policy |
-| Others (8 total) | Manifest-only; `enable` returns NOT_IMPLEMENTED |
+| Others (9 total) | Manifest-only; `enable` returns NOT_IMPLEMENTED |
 
 ### Known limitations
 
@@ -94,8 +93,7 @@ ANOLISA CLI 首个 alpha 版本。
 | 能力 | 状态 |
 |-----|------|
 | agent-observability | `enable` 完整链路（dry-run + 真实执行） |
-| token-optimization | `enable` 受执行策略门控 |
-| 其余 8 个 | 仅清单；`enable` 返回 NOT_IMPLEMENTED |
+| 其余 9 个 | 仅清单；`enable` 返回 NOT_IMPLEMENTED |
 
 ### 已知限制
 

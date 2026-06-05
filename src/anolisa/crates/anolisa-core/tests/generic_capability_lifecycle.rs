@@ -301,8 +301,7 @@ fn assert_full_lifecycle(fx: &Fixture, component_name: &str, actor: &str) {
     assert_eq!(
         integrity,
         IntegrityStatus::Ok,
-        "fresh install must hash-clean; got {:?}",
-        integrity,
+        "fresh install must hash-clean; got {integrity:?}",
     );
 
     // --- disable ---

@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Rust >= 1.85 (project uses edition 2024)
+- Rust >= 1.88 (project uses edition 2024)
 - Working directory: `src/anolisa/` (Cargo workspace root)
 
 ```bash

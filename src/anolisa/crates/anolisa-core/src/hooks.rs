@@ -611,7 +611,7 @@ mod tests {
 
         let spec = HookSpec::new("foo", HookPhase::PostEnable, script.clone());
         let outcome = run_hook(&spec, &layout, None, "op-test-1", "tester", "system");
-        assert!(outcome.success, "hook should succeed: {:?}", outcome);
+        assert!(outcome.success, "hook should succeed: {outcome:?}");
         assert_eq!(outcome.exit_code, Some(0));
         assert!(outcome.skip.is_none());
     }

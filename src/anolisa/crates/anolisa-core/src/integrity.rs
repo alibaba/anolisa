@@ -209,8 +209,7 @@ fn hash_file_sha256(path: &std::path::Path) -> std::io::Result<String> {
         total += n as u64;
         if total > MAX_PROBE_BYTES {
             return Err(std::io::Error::other(format!(
-                "file grew past integrity probe ceiling {} during read",
-                MAX_PROBE_BYTES
+                "file grew past integrity probe ceiling {MAX_PROBE_BYTES} during read"
             )));
         }
         hasher.update(&buf[..n]);

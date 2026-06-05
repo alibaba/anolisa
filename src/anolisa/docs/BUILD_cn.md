@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- Rust >= 1.85（项目使用 edition 2024）
+- Rust >= 1.88（项目使用 edition 2024）
 - 工作目录：`src/anolisa/`（即 Cargo workspace 根）
 
 ```bash
