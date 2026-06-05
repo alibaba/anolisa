@@ -1,0 +1,498 @@
+use std::sync::{Arc, Mutex};
+
+use crate::types::{AgentEvent, QuestionSelectionMode};
+
+use super::claude_stream::ClaudeStreamParser;
+
+#[test]
+fn claude_stream_parser_extracts_partial_text_and_completion() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let first = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好"}}}"#,
+    );
+    let second = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"，shell"}}}"#,
+    );
+    let done = parser.parse_line(r#"{"type":"result","subtype":"success","result":"你好，shell"}"#);
+
+    assert!(matches!(
+        &first[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "你好"
+    ));
+    assert!(matches!(
+        &second[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "，shell"
+    ));
+    assert!(done
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+}
+
+#[test]
+fn claude_stream_parser_maps_thinking_delta_to_transient_status() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hidden reasoning chunk"}}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::StatusChanged { phase, message, .. }]
+            if phase == "thinking" && message == "claude-code thinking"
+    ));
+    assert!(!matches!(
+        &events[..],
+        [AgentEvent::TextDelta { text, .. }] if text.contains("hidden reasoning chunk")
+    ));
+}
+
+#[test]
+fn claude_stream_parser_extracts_cumulative_assistant_snapshots() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let first = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#,
+    );
+    let second = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#,
+    );
+
+    assert!(matches!(
+        &first[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "hello"
+    ));
+    assert!(matches!(
+        &second[..],
+        [AgentEvent::TextDelta { text, .. }] if text == " world"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_ignores_non_json_stdout_noise() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line("Press ENTER or type command to continue");
+
+    assert!(events.is_empty());
+}
+
+#[test]
+fn claude_stream_parser_extracts_system_status() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(r#"{"type":"system","subtype":"status","status":"requesting"}"#);
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::StatusChanged { phase, message, .. }]
+            if phase == "requesting" && message.contains("claude-code status")
+    ));
+}
+
+#[test]
+fn claude_stream_parser_extracts_startup_progress_without_hook_noise() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let first = parser.parse_line(
+        r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#,
+    );
+    let second = parser.parse_line(
+        r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#,
+    );
+    let init = parser.parse_line(r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#);
+
+    assert!(matches!(
+        &first[..],
+        [AgentEvent::StatusChanged { phase, message, .. }]
+            if phase == "initializing" && message.contains("preparing")
+    ));
+    assert!(second.is_empty());
+    assert!(matches!(
+        &init[..],
+        [AgentEvent::StatusChanged { phase, message, .. }]
+            if phase == "initialized" && message.contains("claude-opus-4-6")
+    ));
+}
+
+#[test]
+fn claude_stream_parser_extracts_result_errors_array() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.05)"]}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::AgentFailed { error, .. }] if error.contains("Reached maximum budget")
+    ));
+}
+
+#[test]
+fn claude_stream_parser_extracts_tool_use_and_session_id() {
+    let session = Arc::new(Mutex::new(None));
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), Some(Arc::clone(&session)));
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","session_id":"session-123","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pwd","description":"Print working directory"}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::ToolCall { name, input, .. }] if name == "Bash" && input == "pwd"
+    ));
+    assert_eq!(
+        session.lock().expect("session lock").as_deref(),
+        Some("session-123")
+    );
+}
+
+#[test]
+fn claude_stream_parser_maps_ask_user_question_to_question_event() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{"question":"Pick a color","options":[{"label":"Green"},{"label":"Blue"}],"allow_free_text":false}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "Pick a color"
+            && options == &vec!["Green".to_string(), "Blue".to_string()]
+            && !allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_nested_ask_user_question_options() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{"questions":[{"question":"你喜欢什么颜色？","header":"颜色偏好","options":[{"label":"白色","description":"White"},{"label":"黑色","description":"Black"},{"label":"蓝色","description":"Blue"},{"label":"红色","description":"Red"}],"multiSelect":false}]}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么颜色？"
+            && options == &vec![
+                "白色".to_string(),
+                "黑色".to_string(),
+                "蓝色".to_string(),
+                "红色".to_string()
+            ]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_waits_for_streamed_question_input_json() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let start_events = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
+    );
+    assert!(start_events.is_empty());
+
+    let delta_events = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"你喜欢什么颜色？\",\"header\":\"颜色\",\"options\":[{\"label\":\"白色\"},{\"label\":\"黑色\"}],\"multiSelect\":false}]}"}}}"#,
+    );
+    assert!(delta_events.is_empty());
+
+    let stop_events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#);
+
+    assert!(matches!(
+        &stop_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么颜色？"
+            && options == &vec!["白色".to_string(), "黑色".to_string()]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_accumulates_fragmented_question_input_json() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
+        )
+        .is_empty());
+
+    for partial_json in [
+        r#"{"questions":[{"#,
+        r#""question":"你喜欢什么颜色？","#,
+        r#""header":"颜色","#,
+        r#""options":[{"label":"白色","description":"白色"},"#,
+        r#"{"label":"黑色","description":"黑色"},"#,
+        r#"{"label":"蓝色","description":"蓝色"},"#,
+        r#"{"label":"红色","description":"红色"}],"#,
+        r#""multiSelect":false}]}"#,
+    ] {
+        let line = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": partial_json
+                }
+            }
+        })
+        .to_string();
+        assert!(parser.parse_line(&line).is_empty());
+    }
+
+    let stop_events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#);
+
+    assert!(matches!(
+        &stop_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么颜色？"
+            && options == &vec![
+                "白色".to_string(),
+                "黑色".to_string(),
+                "蓝色".to_string(),
+                "红色".to_string()
+            ]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_deduplicates_streamed_and_snapshot_tool_use() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
+        )
+        .is_empty());
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"Pick\",\"header\":\"Pick\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\"}],\"multiSelect\":false}]}"}}}"#,
+        )
+        .is_empty());
+
+    let snapshot_events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{"questions":[{"question":"Pick","header":"Pick","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}]}}"#,
+    );
+    let stop_events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#);
+
+    assert!(snapshot_events.is_empty());
+    assert!(matches!(
+        &stop_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "Pick"
+            && options == &vec!["A".to_string(), "B".to_string()]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_ignores_incomplete_snapshot_for_streaming_question() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
+        )
+        .is_empty());
+
+    let snapshot_events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Agent needs your input"},{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}]}}"#,
+    );
+    assert!(snapshot_events.is_empty());
+
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"你喜欢什么颜色？\",\"header\":\"颜色\",\"options\":[{\"label\":\"白色\"},{\"label\":\"黑色\"},{\"label\":\"蓝色\"}],\"multiSelect\":false}]}"}}}"#,
+        )
+        .is_empty());
+
+    let stop_events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#);
+
+    assert!(matches!(
+        &stop_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么颜色？"
+            && options == &vec![
+                "白色".to_string(),
+                "黑色".to_string(),
+                "蓝色".to_string()
+            ]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_waits_for_permission_request_after_empty_question_snapshot() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let snapshot_events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}]}}"#,
+    );
+    assert!(snapshot_events.is_empty());
+
+    let permission_events = parser.parse_line(
+        r#"{"event":"permission_request","toolName":"AskUserQuestion","input":{"questions":[{"question":"你喜欢什么颜色？","header":"颜色","options":[{"label":"白色","description":"White"},{"label":"黑色","description":"Black"},{"label":"蓝色","description":"Blue"}],"multiSelect":false}]},"permissionLevel":null}"#,
+    );
+
+    assert!(matches!(
+        &permission_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么颜色？"
+            && options == &vec![
+                "白色".to_string(),
+                "黑色".to_string(),
+                "蓝色".to_string()
+            ]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_deduplicates_tool_input_and_permission_request_question() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+    let tool_input = r#"{"event":"tool_input","toolName":"AskUserQuestion","input":{"questions":[{"question":"选择检查项","header":"检查","options":[{"label":"Lint"},{"label":"Unit tests"}],"multiSelect":true}]},"toolUseId":"toolu_ask"}"#;
+    let permission_request = r#"{"event":"permission_request","toolName":"AskUserQuestion","input":{"questions":[{"question":"选择检查项","header":"检查","options":[{"label":"Lint"},{"label":"Unit tests"}],"multiSelect":true}]},"permissionLevel":null}"#;
+
+    let tool_events = parser.parse_line(tool_input);
+    let permission_events = parser.parse_line(permission_request);
+
+    assert!(matches!(
+        &tool_events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            selection_mode,
+            ..
+        }] if question == "选择检查项"
+            && options == &vec!["Lint".to_string(), "Unit tests".to_string()]
+            && *selection_mode == QuestionSelectionMode::Multiple
+    ));
+    assert!(permission_events.is_empty());
+}
+
+#[test]
+fn claude_stream_parser_maps_question_options_with_title_and_value() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{"question":"Pick one","suggestions":[{"title":"Fast path"},{"value":"Manual path"}],"allowFreeText":false}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            ..
+        }] if question == "Pick one"
+            && options == &vec!["Fast path".to_string(), "Manual path".to_string()]
+            && !allow_free_text
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_question_text_context_when_tool_input_is_empty() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"你喜欢什么动物？\n猫 狗 兔 鸟"},{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "你喜欢什么动物？"
+            && options == &vec![
+                "猫".to_string(),
+                "狗".to_string(),
+                "兔".to_string(),
+                "鸟".to_string()
+            ]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Single
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_multi_select_question_mode() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{"question":"Pick checks","options":["Lint","Test"],"multi_select":true,"allow_free_text":true}}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::UserQuestion {
+            question,
+            options,
+            allow_free_text,
+            selection_mode,
+            ..
+        }] if question == "Pick checks"
+            && options == &vec!["Lint".to_string(), "Test".to_string()]
+            && *allow_free_text
+            && *selection_mode == QuestionSelectionMode::Multiple
+    ));
+}

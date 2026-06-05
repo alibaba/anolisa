@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/cosh-types", "crates/cosh-platform", "crates/cosh-cli", "crates/cosh-tui"]
+members = [
+    "crates/cosh-types",
+    "crates/cosh-platform",
+    "crates/cosh-cli",
+    "crates/cosh-tui",
+    "crates/cosh-shell",
+]
 resolver = "2"
 
 [workspace.package]

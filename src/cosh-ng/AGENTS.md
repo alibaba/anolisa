@@ -18,6 +18,27 @@ cargo test --package cosh-platform   # Platform crate unit tests only
 cargo test --package cosh-types      # Types crate unit tests only
 ```
 
+### cosh-shell Testing Strategy
+
+cosh-shell 的 PTY 集成测试较慢（每个 spawn 子进程）。开发时使用分层策略，避免跑全量：
+
+```bash
+# 开发时：只跑单元测试（0.1s）
+cargo test --package cosh-shell --lib
+
+# 验证逻辑：跑 mvp_loop（0.4s）
+cargo test --package cosh-shell --test mvp_loop
+
+# 验证单个集成测试（0.5-2s）
+cargo test --package cosh-shell --test raw_cli <test_name> -- --exact
+
+# 验证 shell host 改动（用并行加速）
+cargo test --package cosh-shell --test shell_host -- --test-threads=4
+
+# 阶段验收才跑全量（并行）
+cargo test --package cosh-shell -- --test-threads=4
+```
+
 Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc commands need root/sudo. Checkpoint commands need a running ws-ckpt daemon.
 
 ## Architecture

@@ -327,6 +327,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosh-shell"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cosh-tui"
 version = "0.2.0"
 dependencies = [

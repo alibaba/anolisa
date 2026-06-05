@@ -1,0 +1,283 @@
+use super::*;
+
+#[test]
+fn raw_cli_agent_question_accepts_card_answer_choice() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Agent question q-1"), "{output}");
+    assert!(
+        output.contains("Choose a color for the next step"),
+        "{output}"
+    );
+    assert!(output.contains("Select one:"), "{output}");
+    assert!(output.contains("[1] Green"), "{output}");
+    assert!(output.contains("[2] Blue"), "{output}");
+    assert!(output.contains("[4] Other..."), "{output}");
+    assert!(output.contains("> [1] Green"), "{output}");
+    assert!(output.contains("> [2] Blue"), "{output}");
+    assert!(output.contains("Left/Right move"), "{output}");
+    assert!(output.contains("Enter send"), "{output}");
+    assert!(!output.contains("│Choose"), "{output}");
+    assert!(!output.contains("│Options"), "{output}");
+    assert!(!output.contains("Agent is asking for input"), "{output}");
+    assert!(!output.contains("Effect: answer is sent back"), "{output}");
+    assert!(output.contains("Answer: Blue"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(output.contains("Answer: Blue"), "{output}");
+    assert!(!output.contains("Question: Choose a color"), "{output}");
+    assert!(!output.contains("│Question"), "{output}");
+    assert!(!output.contains("│Answer"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(output.contains("Got your answer: Blue"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
+            (
+                b"echo after-zsh-question\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(
+        output.contains("Choose a color for the next step"),
+        "{output}"
+    );
+    assert!(output.contains("Answer: Blue"), "{output}");
+    assert!(output.contains("Got your answer: Blue"), "{output}");
+    assert!(output.contains("after-zsh-question"), "{output}");
+    assert!(!output.contains("zsh: command not found"), "{output}");
+    assert!(
+        !output.contains("zsh: no such file or directory"),
+        "{output}"
+    );
+    assert!(!output.contains("^[[C"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("\x1b]1337;COSH;"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_answer_drops_stale_held_text() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? stream stale question\n".to_vec(), Duration::ZERO),
+            (b"\x1b[B\n".to_vec(), Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Agent question q-1"), "{output}");
+    assert!(output.contains("Answer: Blue"), "{output}");
+    assert!(output.contains("Got your answer: Blue"), "{output}");
+    assert!(
+        !output.contains("STALE QUESTION TEXT SHOULD NOT RENDER"),
+        "{output}"
+    );
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_accepts_multiple_card_answers() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask multi question\n".to_vec(), Duration::ZERO),
+            (b" \t \n".to_vec(), Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(output.contains("Choose checks to run"), "{output}");
+    assert!(output.contains("Select one or more:"), "{output}");
+    assert!(output.contains("[x] [1] Lint"), "{output}");
+    assert!(output.contains("[x] [2] Unit tests"), "{output}");
+    assert!(output.contains("[ ] [3] Raw shell smoke"), "{output}");
+    assert!(output.contains("Space toggle"), "{output}");
+    assert!(output.contains("Answer: Lint, Unit tests"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(output.contains("Answer: Lint, Unit tests"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(!output.contains("Question: Choose checks"), "{output}");
+    assert!(
+        output.contains("Got your answer: Lint, Unit tests"),
+        "{output}"
+    );
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_accepts_multiple_answers_with_custom_card_answer() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask multi question\n".to_vec(), Duration::ZERO),
+            (b" \t\t\tDocs\n".to_vec(), Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Choose checks to run"), "{output}");
+    assert!(output.contains("[x] [1] Lint"), "{output}");
+    assert!(output.contains("> [4] Other: Docs"), "{output}");
+    assert!(output.contains("Answer: Lint, Docs"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(output.contains("Answer: Lint, Docs"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(output.contains("Got your answer: Lint, Docs"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_accepts_natural_language_answer() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (
+                "\u{7eff}\u{8272}\n".as_bytes().to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(output.contains("Answer: \u{7eff}\u{8272}"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(!output.contains("Question: Choose a color"), "{output}");
+    assert!(
+        output.contains("Got your answer: \u{7eff}\u{8272}"),
+        "{output}"
+    );
+    assert!(output.contains("Other: \u{7eff}\u{8272}"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_accepts_custom_card_answer() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (
+                "\t\t\t\u{7ea2}\u{8272}\n".as_bytes().to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Agent question q-1"), "{output}");
+    assert!(output.contains("> [4] Other: \u{7ea2}\u{8272}"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(output.contains("Answer: \u{7ea2}\u{8272}"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Got your answer: \u{7ea2}\u{8272}"),
+        "{output}"
+    );
+    assert!(!output.contains("Question: Choose a color"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_accepts_free_text_only_answer() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask free question\n".to_vec(), Duration::ZERO),
+            (
+                "\u{7279}\u{6027}\u{5206}\u{652f}\n".as_bytes().to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Agent question q-1"), "{output}");
+    assert!(
+        output.contains("Tell me the branch name to inspect"),
+        "{output}"
+    );
+    assert!(output.contains("Type answer"), "{output}");
+    assert!(output.contains("Enter send"), "{output}");
+    assert!(!output.contains("Type an answer"), "{output}");
+    assert!(!output.contains("[1]"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(
+        output.contains("Answer: \u{7279}\u{6027}\u{5206}\u{652f}"),
+        "{output}"
+    );
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("no command ran"), "{output}");
+    assert!(
+        !output.contains("Continuing the same Agent session"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Got your answer: \u{7279}\u{6027}\u{5206}\u{652f}"),
+        "{output}"
+    );
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
