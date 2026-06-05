@@ -10,7 +10,6 @@ use ratatui::{
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer,
-    ACTIVITY_MAX_WIDTH, MIN_WIDTH,
 };
 
 #[derive(Debug, Clone)]
@@ -56,7 +55,7 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = activity_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -69,7 +68,7 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = activity_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -82,7 +81,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn plain_activity_panel_lines(&self, model: ActivityPanelModel<'_>) -> Vec<String> {
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let content_width = activity_panel_content_width(width);
         let mut lines = vec!["Activity:".to_string()];
         lines.extend(
@@ -114,7 +113,7 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_details_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = activity_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -130,7 +129,7 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_details_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = activity_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -146,7 +145,7 @@ impl RatatuiInlineRenderer {
         &self,
         model: ActivityDetailsPanelModel<'_>,
     ) -> Vec<String> {
-        let width = self.width.clamp(MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let content_width = panel_content_width(width);
         let mut lines = vec![format!("Activity details {}", model.id)];
         lines.extend(wrap_plain_line(

@@ -45,10 +45,6 @@ use wrap::{
 const DEFAULT_WIDTH: u16 = 100;
 const MIN_WIDTH: u16 = 40;
 const MAX_WIDTH: u16 = 160;
-const APPROVAL_MAX_WIDTH: u16 = 118;
-const ACTIVITY_MAX_WIDTH: u16 = 100;
-const QUESTION_MAX_WIDTH: u16 = 95;
-const RECOMMENDATION_MAX_WIDTH: u16 = 100;
 
 #[derive(Debug, Clone)]
 pub struct RatatuiInlineRenderer {
@@ -257,16 +253,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn rich_block_lines(&self, title: &str, body: Vec<String>) -> Vec<String> {
-        let terminal_width = self.width.clamp(MIN_WIDTH, MAX_WIDTH);
-        let content_width = body
-            .iter()
-            .map(|line| display_width(line))
-            .max()
-            .unwrap_or(0);
-        let title_width = display_width(title);
-        let width = (content_width.max(title_width) as u16)
-            .saturating_add(4)
-            .clamp(MIN_WIDTH, terminal_width);
+        let width = self.panel_standard_width();
         let inner_width = width.saturating_sub(4).max(1) as usize;
         let content_height = body
             .iter()
@@ -303,18 +290,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn rich_styled_block_lines(&self, title: &str, body: Vec<Line<'static>>) -> Vec<String> {
-        let terminal_width = self.width.clamp(MIN_WIDTH, MAX_WIDTH);
-        let title_width = display_width(title);
-        let content_width = body
-            .iter()
-            .map(line_to_string)
-            .map(|line| display_width(&line))
-            .max()
-            .unwrap_or(0)
-            .max(title_width);
-        let width = (content_width as u16)
-            .saturating_add(4)
-            .clamp(MIN_WIDTH, terminal_width);
+        let width = self.panel_standard_width();
         let inner_width = width.saturating_sub(4).max(1) as usize;
         let content_height = body
             .iter()
@@ -345,6 +321,10 @@ impl RatatuiInlineRenderer {
             .render(inner, &mut buffer);
 
         buffer_to_styled_lines(&buffer, area)
+    }
+
+    fn panel_standard_width(&self) -> u16 {
+        self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
     fn content_width(&self) -> usize {

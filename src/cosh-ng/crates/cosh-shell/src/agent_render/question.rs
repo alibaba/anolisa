@@ -15,7 +15,6 @@ use ratatui::{
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, display_width, wrap_plain_line, RatatuiInlineRenderer,
-    MIN_WIDTH, QUESTION_MAX_WIDTH,
 };
 
 #[derive(Debug, Clone)]
@@ -56,7 +55,7 @@ impl RatatuiInlineRenderer {
             return self.plain_question_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, QUESTION_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = question_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -69,7 +68,7 @@ impl RatatuiInlineRenderer {
             return self.plain_question_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, QUESTION_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = question_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -82,7 +81,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn plain_question_panel_lines(&self, model: QuestionPanelModel<'_>) -> Vec<String> {
-        let width = self.width.clamp(MIN_WIDTH, QUESTION_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let content_width = question_content_width(width);
         let mut lines = vec!["Agent question".to_string()];
         lines.extend(wrap_plain_line(model.question, content_width));
@@ -132,7 +131,7 @@ impl RatatuiInlineRenderer {
     }
 
     pub fn question_answer_panel_lines(&self, model: QuestionAnswerPanelModel<'_>) -> Vec<String> {
-        let width = self.width.clamp(MIN_WIDTH, QUESTION_MAX_WIDTH);
+        let width = self.panel_standard_width();
         self.question_answer_lines(model, width, false)
     }
 
@@ -140,7 +139,7 @@ impl RatatuiInlineRenderer {
         &self,
         model: QuestionAnswerPanelModel<'_>,
     ) -> Vec<String> {
-        let width = self.width.clamp(MIN_WIDTH, QUESTION_MAX_WIDTH);
+        let width = self.panel_standard_width();
         self.question_answer_lines(model, width, self.styled)
     }
 

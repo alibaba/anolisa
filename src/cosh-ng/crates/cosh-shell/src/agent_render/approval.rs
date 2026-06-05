@@ -12,7 +12,6 @@ use crate::approval_actions::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
-    APPROVAL_MAX_WIDTH, MIN_WIDTH,
 };
 
 #[derive(Debug, Clone)]
@@ -48,7 +47,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -61,7 +60,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);

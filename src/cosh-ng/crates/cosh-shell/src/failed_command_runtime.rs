@@ -57,39 +57,28 @@ pub(super) fn latest_pending_failed_block_before_event<'a>(
     event: &ShellEvent,
 ) -> Option<&'a CommandBlock> {
     blocks.iter().rev().find(|block| {
-        should_analyze_failed_block(block)
+        should_analyze_failed_block(block, state.analysis_mode)
             && !state.analyzed_blocks.contains(&block.id)
             && !state.canceled_blocks.contains(&block.id)
             && event_happened_after_block_end(event, block)
     })
 }
 
-pub(super) fn should_analyze_failed_block(block: &CommandBlock) -> bool {
-    block.exit_code != 0
-        && !block.command.trim().is_empty()
-        && !is_user_interrupted_follow_command(block)
-}
-
-fn is_user_interrupted_follow_command(block: &CommandBlock) -> bool {
-    block.exit_code == 130 && is_tail_follow_command(&block.command)
-}
-
-fn is_tail_follow_command(command: &str) -> bool {
-    let mut tokens = command.split_whitespace();
-    let Some(program) = tokens.next() else {
-        return false;
-    };
-    if program != "tail" {
+pub(super) fn should_analyze_failed_block(block: &CommandBlock, mode: AnalysisMode) -> bool {
+    if block.exit_code == 0 || block.command.trim().is_empty() {
         return false;
     }
-
-    tokens.any(|token| {
-        token == "--follow"
-            || token.starts_with("--follow=")
-            || (token.starts_with('-')
-                && !token.starts_with("--")
-                && token.chars().skip(1).any(|flag| flag == 'f' || flag == 'F'))
-    })
+    if mode == AnalysisMode::Manual {
+        return false;
+    }
+    let category = cosh_shell::classify_exit(block.exit_code, &block.command);
+    match category {
+        cosh_shell::ExitCodeCategory::Success
+        | cosh_shell::ExitCodeCategory::UserInterrupt
+        | cosh_shell::ExitCodeCategory::PipelineNormal => false,
+        cosh_shell::ExitCodeCategory::CommandSpecificNormal => mode == AnalysisMode::Auto,
+        _ => true,
+    }
 }
 
 fn event_happened_after_block_end(event: &ShellEvent, block: &CommandBlock) -> bool {
@@ -122,7 +111,7 @@ pub(super) fn start_agent_for_block<W: Write>(
     output: &mut W,
     selectable_after_event_index: Option<usize>,
 ) -> std::io::Result<()> {
-    if !should_analyze_failed_block(block) {
+    if !should_analyze_failed_block(block, state.analysis_mode) {
         return Ok(());
     }
 

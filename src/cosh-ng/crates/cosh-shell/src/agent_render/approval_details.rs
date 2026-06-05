@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::{
     approval::{approval_content_width, wrapped_preview_rows},
-    buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer, APPROVAL_MAX_WIDTH, MIN_WIDTH,
+    buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer,
 };
 
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_details_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -63,7 +63,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_details_panel_lines(model);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);

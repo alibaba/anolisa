@@ -9,8 +9,7 @@ use ratatui::{
 };
 
 use super::{
-    buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer,
-    APPROVAL_MAX_WIDTH, MIN_WIDTH,
+    buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer, MAX_WIDTH,
 };
 
 #[derive(Debug, Clone)]
@@ -48,7 +47,7 @@ impl RatatuiInlineRenderer {
             return compact_approval_receipt_lines(&model, self.styled);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_receipt_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -67,7 +66,7 @@ impl RatatuiInlineRenderer {
             return compact_approval_receipt_lines(&model, self.styled);
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let height = approval_receipt_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -87,7 +86,7 @@ impl RatatuiInlineRenderer {
             return vec![format!("{} {}", model.title, model.id)];
         }
 
-        let width = self.width.clamp(MIN_WIDTH, APPROVAL_MAX_WIDTH);
+        let width = self.panel_standard_width();
         let content_width = approval_receipt_content_width(width);
         let mut lines = vec![format!("{} {}", model.title, model.id)];
         if !model.preview.is_empty() {
@@ -136,7 +135,7 @@ fn compact_approval_receipt_lines(
         return vec![compact_approval_receipt_text(model)];
     }
 
-    let area = Rect::new(0, 0, APPROVAL_MAX_WIDTH, 1);
+    let area = Rect::new(0, 0, MAX_WIDTH, 1);
     let mut buffer = Buffer::empty(area);
     Paragraph::new(Line::from(Span::styled(
         compact_approval_receipt_text(model),

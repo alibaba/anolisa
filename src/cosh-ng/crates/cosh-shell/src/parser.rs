@@ -1,3 +1,4 @@
+use crate::exit_classify::first_program_token;
 use crate::types::{
     AgentMode, AgentRequest, CommandBlock, CommandStatus, Finding, FindingKind, Intervention,
     InterventionDecision, OutputRefs, ShellEvent, ShellEventKind,
@@ -39,7 +40,8 @@ pub fn findings_from_blocks(blocks: &[CommandBlock]) -> Vec<Finding> {
                 });
             }
 
-            if block.command.contains("systemctl") {
+            let program = first_program_token(&block.command);
+            if program == "systemctl" {
                 findings.push(Finding {
                     id: format!("finding-{}-service", block.id),
                     command_block_id: block.id.clone(),

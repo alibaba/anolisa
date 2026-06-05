@@ -130,7 +130,7 @@ fn markdown_agent_table_does_not_overexpand_outer_card_width() {
 
     let text = String::from_utf8(output).expect("utf8 output");
     assert!(text.contains("│ ┌ table"), "{text}");
-    assert_rendered_width(&text, 100);
+    assert_rendered_width(&text, 160);
 }
 
 #[test]

@@ -48,6 +48,7 @@ pub(super) struct InlineState {
     pub(super) queued_agent_requests: VecDeque<PendingAgentRequest>,
     pub(super) shell_exited: bool,
     pub(super) approval_mode: ApprovalMode,
+    pub(super) analysis_mode: AnalysisMode,
     pub(super) needs_prompt_after_agent_run: bool,
 }
 
@@ -58,6 +59,14 @@ impl InlineState {
             ..Self::default()
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum AnalysisMode {
+    #[default]
+    Smart,
+    Auto,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

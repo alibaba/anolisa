@@ -415,13 +415,9 @@ fn recommendation_panel_renders_display_only_commands() {
     assert!(text.contains("2. echo $PATH"), "{text}");
     assert!(text.contains("│  1. pwd"), "{text}");
     assert!(text.contains("│  2. echo $PATH"), "{text}");
-    assert!(text.contains("│  Display-only:"), "{text}");
-    assert!(!text.contains("│Display-only:"), "{text}");
-    assert!(text.contains("Display-only"), "{text}");
-    assert!(text.contains("/select N"), "{text}");
+    assert!(text.contains("/select N copy"), "{text}");
+    assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
-    assert!(text.contains("Display-only"), "{text}");
-    assert!(text.contains("never executes recommendations"), "{text}");
     assert_rendered_width(&text, 100);
 }
 
@@ -440,8 +436,8 @@ fn recommendation_panel_wraps_long_commands_without_dropping_tail() {
     assert!(text.contains("cargo test --package cosh-shell"), "{text}");
     assert!(text.contains("raw_cli_streaming_tool_approval"), "{text}");
     assert!(text.contains("--test-threads=1"), "{text}");
-    assert!(text.contains("Display-only"), "{text}");
-    assert!(text.contains("never executes recommendations"), "{text}");
+    assert!(text.contains("/select N copy"), "{text}");
+    assert!(text.contains("display-only"), "{text}");
     assert_rendered_width(&text, 56);
 }
 
@@ -490,7 +486,7 @@ fn recommendation_panel_write_preserves_ratatui_styles_for_terminal_output() {
     assert!(clean.contains("Recommendations"), "{clean}");
     assert!(clean.contains("1. pwd"), "{clean}");
     assert!(clean.contains("│  1. pwd"), "{clean}");
-    assert!(clean.contains("│  Display-only:"), "{clean}");
+    assert!(clean.contains("/select N copy"), "{clean}");
 }
 
 #[test]
@@ -506,7 +502,8 @@ fn plain_recommendation_panel_keeps_display_only_commands() {
     assert!(text.contains("Recommendations:"), "{text}");
     assert!(text.contains("  1. pwd"), "{text}");
     assert!(text.contains("  2. echo $PATH"), "{text}");
-    assert!(text.contains("  Display-only"), "{text}");
+    assert!(text.contains("/select N copy"), "{text}");
+    assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
     assert!(!text.contains('╭'), "{text}");
     assert_rendered_width(&text, 80);
@@ -532,8 +529,8 @@ fn plain_recommendation_panel_wraps_long_commands_without_dropping_tail() {
     assert!(text.contains("     raw_cli"), "{text}");
     assert!(text.contains("raw_cli_streaming_tool_approval"), "{text}");
     assert!(text.contains("--test-threads=1"), "{text}");
-    assert!(text.contains("  Display-only"), "{text}");
-    assert!(text.contains("cosh never executes"), "{text}");
+    assert!(text.contains("/select N copy"), "{text}");
+    assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
     assert!(!text.contains('╭'), "{text}");
     assert_rendered_width(&text, 50);

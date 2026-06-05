@@ -54,7 +54,7 @@ use recommendation_runtime::{
     record_selectable_recommendations, render_selectable_recommendations, render_selection_actions,
 };
 use runtime_state::{
-    ApprovalMode, ApprovalRequestKind, ApprovalRequestStatus, InlineState,
+    AnalysisMode, ApprovalMode, ApprovalRequestKind, ApprovalRequestStatus, InlineState,
     RuntimeApprovalJournalEntry, RuntimeApprovalRequest, RuntimeCommandHookHint,
 };
 use slash_runtime::render_slash_actions;
@@ -300,7 +300,7 @@ fn run_raw(adapter_name: &str, run_model: bool, shell_kind: RawShellKind) -> i32
     };
 
     match raw_result {
-        Ok(_) => 0,
+        Ok(output) => output.exit_status.unwrap_or(0),
         Err(err) => {
             eprintln!("raw shell failed: {err}");
             1
@@ -472,10 +472,11 @@ fn render_inline_guidance<W: Write>(
     render_command_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(events, &ledger.blocks, adapter, state, output)?;
 
+    let analysis_mode = state.analysis_mode;
     for block in ledger
         .blocks
         .iter()
-        .filter(|block| should_analyze_failed_block(block))
+        .filter(|block| should_analyze_failed_block(block, analysis_mode))
     {
         start_agent_for_block(
             block,
@@ -515,6 +516,11 @@ fn render_owned_shell_prompt<W: Write>(
         return Ok(());
     }
 
+    // TODO(native-mode): In wrapped-shell mode the child shell also emits its
+    // own PS1 prompt, so this "cosh-osc$ " line produces a visible double-prompt.
+    // Once native-mode lands (cosh *is* the shell) this owned prompt becomes the
+    // only one and the duplication disappears.  Until then, suppress or reconcile
+    // with the child shell's prompt output.
     write!(output, "cosh-osc$ ")?;
     output.flush()?;
     state.needs_prompt_after_agent_run = false;

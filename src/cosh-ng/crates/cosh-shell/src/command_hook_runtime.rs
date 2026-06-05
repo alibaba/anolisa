@@ -100,7 +100,7 @@ pub(super) fn command_hook_hints_for_block(
 }
 
 fn prompt_hint_for_block(block: &CommandBlock) -> Option<String> {
-    if !should_analyze_failed_block(block) {
+    if !should_analyze_failed_block(block, AnalysisMode::Smart) {
         return None;
     }
 
@@ -123,7 +123,7 @@ fn prompt_hint_for_block(block: &CommandBlock) -> Option<String> {
 }
 
 fn finding_markdown_for_block(block: &CommandBlock) -> Option<String> {
-    if !should_analyze_failed_block(block) {
+    if !should_analyze_failed_block(block, AnalysisMode::Smart) {
         return None;
     }
 

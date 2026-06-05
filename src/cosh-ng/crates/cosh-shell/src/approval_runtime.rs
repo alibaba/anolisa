@@ -1,5 +1,6 @@
 use super::*;
 use cosh_shell::agent_render::approval_action_at;
+use cosh_shell::tool_display::display_for_tool;
 
 pub(super) fn record_approval_requests(
     state: &mut InlineState,
@@ -57,18 +58,25 @@ fn approval_request_from_event(
             run_id,
             name,
             input,
-        } => Some(RuntimeApprovalRequest {
-            id: next_approval_id(state),
-            run_id: run_id.clone(),
-            session_id: session_id.to_string(),
-            cwd: cwd.to_string(),
-            source: "agent",
-            kind: ApprovalRequestKind::Tool,
-            subject: format!("tool {name}"),
-            preview: input.clone(),
-            risk: "medium",
-            status: ApprovalRequestStatus::Pending,
-        }),
+        } => {
+            let info = display_for_tool(name, input);
+            let risk = match info.color {
+                cosh_shell::tool_display::ToolColor::Dangerous => "high",
+                _ => "medium",
+            };
+            Some(RuntimeApprovalRequest {
+                id: next_approval_id(state),
+                run_id: run_id.clone(),
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+                source: "agent",
+                kind: ApprovalRequestKind::Tool,
+                subject: info.label,
+                preview: info.preview,
+                risk,
+                status: ApprovalRequestStatus::Pending,
+            })
+        }
         AgentEvent::Action { run_id, command } => Some(RuntimeApprovalRequest {
             id: next_approval_id(state),
             run_id: run_id.clone(),

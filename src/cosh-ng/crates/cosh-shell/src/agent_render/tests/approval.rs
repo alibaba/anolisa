@@ -36,7 +36,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
     assert!(!text.contains("/approve"), "{text}");
     assert!(!text.contains("Subject: tool Bash"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
-    assert_rendered_width(&text, 118);
+    assert_rendered_width(&text, 140);
 }
 
 #[test]
