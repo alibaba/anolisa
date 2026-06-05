@@ -24,6 +24,14 @@ pub(super) fn render_startup_banner<W: Write>(
     state.rendered_startup_banner = true;
     let cwd = event.cwd.as_deref().unwrap_or("<unknown>");
     let startup_hook = evaluate_startup_hooks(cwd);
+    let ai_disabled = std::env::var("COSH_SHELL_AI")
+        .ok()
+        .is_some_and(|v| v.eq_ignore_ascii_case("off"));
+    let ai_line = if ai_disabled {
+        "AI: disabled".to_string()
+    } else {
+        format!("AI context may be sent to the {} backend.", adapter.name())
+    };
     write!(output, "\r\x1b[2K")?;
     let renderer = RatatuiInlineRenderer::for_terminal();
     renderer.write_banner(
@@ -40,6 +48,7 @@ pub(super) fn render_startup_banner<W: Write>(
                 adapter.name(),
                 state.approval_mode.label()
             ),
+            ai_line,
             format!("cwd: {cwd}"),
             String::new(),
             "/help \u{00b7} /mode \u{00b7} /details \u{00b7} /skill".to_string(),

@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod agent_render;
 mod approval_actions;
 pub mod builtin_hooks;
+pub mod config;
 pub mod exit_classify;
 pub mod governance;
 pub mod hook_engine;
@@ -20,6 +21,7 @@ pub mod tool_display;
 pub mod types;
 
 pub use builtin_hooks::*;
+pub use config::*;
 pub use exit_classify::*;
 pub use hook_engine::*;
 pub use hook_types::*;

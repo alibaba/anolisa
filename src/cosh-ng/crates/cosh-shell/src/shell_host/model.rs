@@ -15,6 +15,8 @@ pub struct ShellHostConfig {
     pub prompt: String,
     pub winsize: Winsize,
     pub input_classifier: InputClassifier,
+    pub native_mode: bool,
+    pub login_shell: bool,
 }
 
 impl ShellHostConfig {
@@ -28,6 +30,8 @@ impl ShellHostConfig {
             prompt: "cosh-osc$ ".to_string(),
             winsize,
             input_classifier: InputClassifier::default(),
+            native_mode: true,
+            login_shell: false,
         }
     }
 }

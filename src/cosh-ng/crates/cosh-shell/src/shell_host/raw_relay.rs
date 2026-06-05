@@ -163,22 +163,32 @@ fn drain_raw_input_events<W: Write>(
     output: &mut W,
     prompt: &str,
 ) -> io::Result<()> {
+    let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::CandidateRedraw { input, hint } => {
-                write!(output, "\r\x1b[2K{prompt}")?;
-                output.write_all(&input)?;
-                if let Some(hint) = hint {
-                    write!(output, "\x1b[s\x1b[2m  {hint}\x1b[0m\x1b[u")?;
+                if native_mode {
+                    // native mode: don't redraw prompt (we don't know the user's PS1)
+                } else {
+                    write!(output, "\r\x1b[2K{prompt}")?;
+                    output.write_all(&input)?;
+                    if let Some(hint) = hint {
+                        write!(output, "\x1b[s\x1b[2m  {hint}\x1b[0m\x1b[u")?;
+                    }
+                    output.flush()?;
                 }
-                output.flush()?;
             }
             RawInputEvent::CandidateCommit(input) => {
-                write!(output, "\r\x1b[2K{prompt}")?;
-                output.write_all(&input)?;
-                writeln!(output)?;
-                output.flush()?;
+                if native_mode {
+                    writeln!(output)?;
+                    output.flush()?;
+                } else {
+                    write!(output, "\r\x1b[2K{prompt}")?;
+                    output.write_all(&input)?;
+                    writeln!(output)?;
+                    output.flush()?;
+                }
             }
             RawInputEvent::CandidateClearLine => {
                 write!(output, "\r\x1b[2K")?;

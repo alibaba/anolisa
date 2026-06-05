@@ -294,6 +294,14 @@ impl OscParser {
             .count()
     }
 
+    pub(super) fn precmd_count(&self) -> usize {
+        self.events.iter().filter(|e| {
+            matches!(e.kind, ShellEventKind::CommandCompleted
+                | ShellEventKind::CommandFailed
+                | ShellEventKind::ShellReady)
+        }).count()
+    }
+
     pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.intervention_display_cuts)
     }
@@ -475,6 +483,49 @@ mod tests {
         parser.feed(b"04hcmd\x1b[?2004l").expect("feed remainder");
 
         assert_eq!(String::from_utf8_lossy(&parser.clean), "cmd");
+    }
+
+    #[test]
+    fn precmd_count_tracks_shell_ready_and_command_events() {
+        let mut parser = parser_for_test("precmd-count");
+        assert_eq!(parser.precmd_count(), 0);
+
+        // ShellReady via precmd without a current command
+        let mut precmd_no_cmd: Vec<u8> = Vec::new();
+        precmd_no_cmd.extend_from_slice(b"\x1b]1337;COSH;");
+        precmd_no_cmd.extend_from_slice(br#"{"event":"precmd","cwd":"/tmp"}"#);
+        precmd_no_cmd.push(BEL);
+        parser.feed(&precmd_no_cmd).expect("feed precmd");
+        assert_eq!(parser.precmd_count(), 1);
+
+        // CommandCompleted via preexec + precmd with status 0
+        let mut preexec: Vec<u8> = Vec::new();
+        preexec.extend_from_slice(b"\x1b]1337;COSH;");
+        preexec.extend_from_slice(br#"{"event":"preexec","command":"echo hi","cwd":"/tmp"}"#);
+        preexec.push(BEL);
+        parser.feed(&preexec).expect("feed preexec");
+        assert_eq!(parser.precmd_count(), 1);
+
+        let mut precmd_ok: Vec<u8> = Vec::new();
+        precmd_ok.extend_from_slice(b"\x1b]1337;COSH;");
+        precmd_ok.extend_from_slice(br#"{"event":"precmd","status":0,"cwd":"/tmp"}"#);
+        precmd_ok.push(BEL);
+        parser.feed(&precmd_ok).expect("feed precmd ok");
+        assert_eq!(parser.precmd_count(), 2);
+
+        // CommandFailed via preexec + precmd with status 1
+        let mut preexec2: Vec<u8> = Vec::new();
+        preexec2.extend_from_slice(b"\x1b]1337;COSH;");
+        preexec2.extend_from_slice(br#"{"event":"preexec","command":"false","cwd":"/tmp"}"#);
+        preexec2.push(BEL);
+        parser.feed(&preexec2).expect("feed preexec2");
+
+        let mut precmd_fail: Vec<u8> = Vec::new();
+        precmd_fail.extend_from_slice(b"\x1b]1337;COSH;");
+        precmd_fail.extend_from_slice(br#"{"event":"precmd","status":1,"cwd":"/tmp"}"#);
+        precmd_fail.push(BEL);
+        parser.feed(&precmd_fail).expect("feed precmd fail");
+        assert_eq!(parser.precmd_count(), 3);
     }
 
     fn parser_for_test(name: &str) -> OscParser {

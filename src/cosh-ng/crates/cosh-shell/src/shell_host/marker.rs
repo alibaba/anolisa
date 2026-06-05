@@ -11,11 +11,30 @@ fi
 
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
-export PS1="$COSH_POC_PS1"
-set -o history
-export HISTFILE="${COSH_HISTFILE:-/dev/null}"
-export HISTCONTROL=
-export HISTTIMEFORMAT=
+
+# ── Source user startup files (native mode) ──
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+    [[ -f /etc/profile ]] && source /etc/profile
+    if [[ -f ~/.bash_profile ]]; then source ~/.bash_profile
+    elif [[ -f ~/.bash_login ]]; then source ~/.bash_login
+    elif [[ -f ~/.profile ]]; then source ~/.profile
+    fi
+  else
+    [[ -f ~/.bashrc ]] && source ~/.bashrc
+  fi
+fi
+
+# ── Mode-dependent shell settings ──
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  : # native mode: keep user PS1, HISTFILE, etc.
+else
+  export PS1="$COSH_POC_PS1"
+  set -o history
+  export HISTFILE="${COSH_HISTFILE:-/dev/null}"
+  export HISTCONTROL=
+  export HISTTIMEFORMAT=
+fi
 
 _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
@@ -31,10 +50,7 @@ _cosh_json_escape() {
 }
 
 _cosh_now_ms() {
-  python3 - <<'PY' 2>/dev/null || date +%s000
-import time
-print(int(time.time() * 1000))
-PY
+  date +%s000
 }
 
 _cosh_history_entry() {
@@ -219,10 +235,18 @@ _cosh_precmd_marker() {
   _COSH_AT_PROMPT=1
 }
 
+# ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
 trap '_cosh_preexec_marker' DEBUG
-PROMPT_COMMAND="_cosh_precmd_marker"
-builtin history -c 2>/dev/null || true
+# Append precmd to existing PROMPT_COMMAND
+if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+  PROMPT_COMMAND+=(_cosh_precmd_marker)
+else
+  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
+fi
+if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+  builtin history -c 2>/dev/null || true
+fi
 "#
 }
 
@@ -237,11 +261,34 @@ COSH_OSC_MARKER_LOADED=1
 
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
-export PS1="$COSH_POC_PS1"
-export PROMPT="$COSH_POC_PS1"
-export HISTFILE="${COSH_HISTFILE:-/dev/null}"
-HISTSIZE="${COSH_HISTSIZE:-1000}"
-SAVEHIST=0
+
+# ── Source user startup files (native mode) ──
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  if [[ -n "${COSH_ZDOTDIR_ORIG:-}" ]]; then
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f "${COSH_ZDOTDIR_ORIG}/.zprofile" ]] && source "${COSH_ZDOTDIR_ORIG}/.zprofile"
+      [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
+    fi
+    [[ -f "${COSH_ZDOTDIR_ORIG}/.zshrc" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshrc"
+  else
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f ~/.zprofile ]] && source ~/.zprofile
+      [[ -f ~/.zlogin ]] && source ~/.zlogin
+    fi
+    [[ -f ~/.zshrc ]] && source ~/.zshrc
+  fi
+fi
+
+# ── Mode-dependent shell settings ──
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  : # native mode: keep user PS1/PROMPT, HISTFILE, etc.
+else
+  export PS1="$COSH_POC_PS1"
+  export PROMPT="$COSH_POC_PS1"
+  export HISTFILE="${COSH_HISTFILE:-/dev/null}"
+  HISTSIZE="${COSH_HISTSIZE:-1000}"
+  SAVEHIST=0
+fi
 setopt NO_BEEP 2>/dev/null || true
 setopt NO_PROMPT_CR 2>/dev/null || true
 setopt NO_PROMPT_SP 2>/dev/null || true
@@ -258,10 +305,7 @@ _cosh_json_escape() {
 }
 
 _cosh_now_ms() {
-  python3 - <<'PY' 2>/dev/null || date +%s000
-import time
-print(int(time.time() * 1000))
-PY
+  date +%s000
 }
 
 _cosh_emit_marker() {
@@ -406,6 +450,7 @@ _cosh_precmd_marker() {
   _cosh_emit_marker "precmd" "" "$exit_status"
 }
 
+# ── Hook setup (re-set after user rcfile may have overridden) ──
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _cosh_preexec_marker
 add-zsh-hook precmd _cosh_precmd_marker
