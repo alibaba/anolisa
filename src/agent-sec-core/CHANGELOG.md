@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0
+
+**Self-Protection — Tamper-resistance for agent-sec-core itself**
+
+- Added self-protect code-scan rules that block disabling/uninstalling agent-sec plugins on OpenClaw and Hermes. (#692)
+- Optimized self-protect rules in code-scan to eliminate false positives on prefix-matched plugin names and cover Hermes uninstall/rm patterns. (#710)
+
+**Prompt Scanner**
+
+- Unified prompt-scan warning format across cosh-extension, hermes-plugin, and openclaw-plugin with structured fields (threat type, risk level, interception stage, model confidence). (#709)
+
+**Agent-Sec-CLI**
+
+- Added daemon process for agent-sec-cli to amortize startup latency across hook invocations. (#677)
+
+**Adapter & Manifest**
+
+- Added standalone ANOLISA adapter entry `anolisa-for-openclaw` to package sec-core OpenClaw adapter scripts and drive install/detect/uninstall via the adapter manifest. (#549)
+- Added Hermes adapter runner: refactored the OpenClaw entry into a target-agnostic `anolisa-adapter-runner` and added `anolisa-for-hermes` wrapper, with per-agent adapter directory layout under sec-core. (#617)
+- Centralized sec-core adapter manifest parsing across adapter scripts and moved the manifest under the cli package. (#617)
+
+**OpenClaw Integration**
+
+- Normalized OpenClaw state directory handling: use `OPENCLAW_STATE_DIR` for adapter filesystem state, unset `OPENCLAW_HOME` when invoking the OpenClaw CLI, and aligned plugin install/list/uninstall handling. (#641)
+
 ## 0.5.0
 
 **PII Scanner — Personal information leak detection**

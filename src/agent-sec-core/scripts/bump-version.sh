@@ -18,7 +18,8 @@
 #   6. openclaw-plugin/openclaw.plugin.json  ("version" field)
 #   7. cosh-extension/cosh-extension.json    ("version" field)
 #   8. hermes-plugin/src/plugin.yaml        (version field)
-#   9. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#   9. adapters/adapter-manifest.json        ("version" field)
+#  10. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)
@@ -181,7 +182,15 @@ bump_file "$PROJECT_ROOT/hermes-plugin/src/plugin.yaml" \
     "hermes-plugin/src/plugin.yaml"
 
 # -----------------------------------------------------------------------------
-# 9. Regenerate lock files
+# 9. adapters/adapter-manifest.json
+# -----------------------------------------------------------------------------
+bump_file "$PROJECT_ROOT/adapters/adapter-manifest.json" \
+    "\"version\": \"$OLD_VERSION\"" \
+    "\"version\": \"$NEW_VERSION\"" \
+    "adapters/adapter-manifest.json"
+
+# -----------------------------------------------------------------------------
+# 10. Regenerate lock files
 # -----------------------------------------------------------------------------
 log "Regenerating lock files..."
 

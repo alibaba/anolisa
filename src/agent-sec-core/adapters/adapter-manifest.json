@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1",
   "component": "sec-core",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "description": "Security protection, code scanning, prompt scanning, and secure skills for agent runtimes.",
   "targets": {
     "openclaw": {
