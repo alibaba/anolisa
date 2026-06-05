@@ -20,14 +20,43 @@ use crate::interruption::types::InterruptionEvent;
 /// 环境变量名称
 pub const LOGTAIL_ENV_VAR: &str = "SLS_LOGTAIL_FILE";
 
-/// 检查 Logtail 导出是否启用（环境变量 SLS_LOGTAIL_FILE 是否设置）
-pub fn logtail_enabled() -> bool {
-    std::env::var(LOGTAIL_ENV_VAR).is_ok()
+/// 动态 Logtail 路径（由 config watcher 运行时设置）
+static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// 设置动态 Logtail 输出路径（线程安全）。
+///
+/// 由 config watcher 在检测到 `runtime.sls_logtail_path` 变更时调用。
+/// 设置后，`logtail_path()` 将在 env 未设置时返回此路径。
+pub fn set_dynamic_logtail_path(path: &str) {
+    if let Ok(mut guard) = DYNAMIC_LOGTAIL_PATH.write() {
+        *guard = Some(path.to_string());
+        log::info!("Dynamic logtail path set: {}", path);
+    }
 }
 
-/// 获取 Logtail 输出路径（从环境变量读取）
+/// 检查 Logtail 导出是否启用（环境变量 SLS_LOGTAIL_FILE 是否设置，或动态路径已配置）
+pub fn logtail_enabled() -> bool {
+    std::env::var(LOGTAIL_ENV_VAR).is_ok() || {
+        DYNAMIC_LOGTAIL_PATH
+            .read()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+}
+
+/// 获取 Logtail 输出路径
+///
+/// 优先级：环境变量 `SLS_LOGTAIL_FILE` > 动态配置路径
 pub fn logtail_path() -> Option<String> {
-    std::env::var(LOGTAIL_ENV_VAR).ok()
+    // 环境变量优先
+    if let Ok(p) = std::env::var(LOGTAIL_ENV_VAR) {
+        return Some(p);
+    }
+    // 回退到动态配置路径
+    DYNAMIC_LOGTAIL_PATH
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
 }
 
 /// iLogtail 文件导出器
@@ -71,6 +100,24 @@ impl LogtailExporter {
             log::info!("Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
         }
         Some(LogtailExporter { path, encryptor, trace_enabled })
+    }
+
+    /// 从显式路径创建 Logtail 导出器（用于运行时动态激活）
+    ///
+    /// 与 `new()` 不同，不依赖环境变量，直接使用传入的路径。
+    pub fn new_with_path(path_str: &str, encryption_pem: Option<&str>, trace_enabled: bool) -> Self {
+        let path = PathBuf::from(path_str);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
+        if encryptor.is_none() {
+            log::info!("Logtail exporter (dynamic): encryption disabled (no public key configured)");
+        }
+        if !trace_enabled {
+            log::info!("Logtail exporter (dynamic): traceEnabled=false, conversation content fields will NOT be uploaded");
+        }
+        LogtailExporter { path, encryptor, trace_enabled }
     }
 
     /// 返回导出文件路径

@@ -233,6 +233,16 @@ struct JsonFullConfig {
     http: Option<Vec<JsonHttpGroup>>,
     #[serde(default)]
     encryption: Option<JsonEncryption>,
+    #[serde(default)]
+    runtime: Option<JsonRuntime>,
+}
+
+/// Runtime 动态配置区段（支持热加载，无需重启）
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct JsonRuntime {
+    /// SLS Logtail 输出文件路径。非空时激活 SLS 上传。
+    #[serde(default)]
+    pub sls_logtail_path: Option<String>,
 }
 
 /// 加密配置：可选公钥（PEM 字符串）或公钥文件路径
@@ -454,6 +464,11 @@ pub struct AgentsightConfig {
     /// RSA 公钥（PEM 字符串）。从 agentsight.json `encryption.public_key`
     /// 或 `encryption.public_key_path` 加载。若为 None，则不加密敏感消息字段。
     pub encryption_public_key: Option<String>,
+
+    // --- Runtime Dynamic Configuration ---
+    /// SLS Logtail 输出文件路径（来自 `runtime.sls_logtail_path`）。
+    /// 非空时激活 SLS 上传。支持运行期热加载。
+    pub sls_logtail_path: Option<String>,
 }
 
 impl Default for AgentsightConfig {
@@ -505,6 +520,9 @@ impl Default for AgentsightConfig {
 
             // Encryption defaults (loaded from config file)
             encryption_public_key: None,
+
+            // Runtime dynamic configuration defaults
+            sls_logtail_path: None,
         }
     }
 }
@@ -615,6 +633,16 @@ impl AgentsightConfig {
             }
         }
 
+        // 解析 runtime 动态配置
+        if let Some(ref rt) = parsed.runtime {
+            if let Some(ref path) = rt.sls_logtail_path {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    self.sls_logtail_path = Some(trimmed.to_string());
+                }
+            }
+        }
+
         let (cmdline_rules, https_rules, http_targets) = extract_rules(&parsed);
         self.cmdline_rules.extend(cmdline_rules);
         self.https_rules.extend(https_rules);
@@ -676,6 +704,28 @@ impl AgentsightConfig {
     pub fn resolve_config_path(&self) -> PathBuf {
         assert!(self.config_path.is_some(), "config_path must be set via --config");
         self.config_path.clone().unwrap()
+    }
+}
+
+/// Parse `runtime.sls_logtail_path` from a JSON config string.
+///
+/// Returns `Some(path)` if the runtime section has a non-empty `sls_logtail_path`;
+/// returns `None` otherwise or on parse failure. Used by the config watcher to
+/// detect runtime changes without a full config reload.
+pub fn parse_runtime_sls_path(json: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Partial {
+        #[serde(default)]
+        runtime: Option<JsonRuntime>,
+    }
+    let parsed: Partial = serde_json::from_str(json).ok()?;
+    let rt = parsed.runtime?;
+    let path = rt.sls_logtail_path?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1031,5 +1081,53 @@ mod tests {
         let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
         assert_eq!(cmdline_rules.len(), 1);
         assert_eq!(cmdline_rules[0].agent_name, Some("Kept".to_string()));
+    }
+
+    #[test]
+    fn test_parse_runtime_sls_path_present() {
+        let json = r#"{"runtime": {"sls_logtail_path": "/var/log/sls/agentsight.log"}}"#;
+        assert_eq!(
+            parse_runtime_sls_path(json),
+            Some("/var/log/sls/agentsight.log".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_runtime_sls_path_empty() {
+        let json = r#"{"runtime": {"sls_logtail_path": ""}}"#;
+        assert_eq!(parse_runtime_sls_path(json), None);
+    }
+
+    #[test]
+    fn test_parse_runtime_sls_path_whitespace_only() {
+        let json = r#"{"runtime": {"sls_logtail_path": "   "}}"#;
+        assert_eq!(parse_runtime_sls_path(json), None);
+    }
+
+    #[test]
+    fn test_parse_runtime_sls_path_missing_section() {
+        let json = r#"{"cmdline": {"allow": []}}"#;
+        assert_eq!(parse_runtime_sls_path(json), None);
+    }
+
+    #[test]
+    fn test_parse_runtime_sls_path_invalid_json() {
+        assert_eq!(parse_runtime_sls_path("not json"), None);
+    }
+
+    #[test]
+    fn test_load_from_json_runtime_sls_path() {
+        let json = r#"{"runtime": {"sls_logtail_path": "/tmp/sls.log"}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert_eq!(config.sls_logtail_path, Some("/tmp/sls.log".to_string()));
+    }
+
+    #[test]
+    fn test_load_from_json_runtime_sls_path_empty_is_none() {
+        let json = r#"{"runtime": {"sls_logtail_path": ""}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert_eq!(config.sls_logtail_path, None);
     }
 }

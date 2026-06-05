@@ -20,9 +20,10 @@
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use crate::aggregator::Aggregator;
 use crate::analyzer::Analyzer;
@@ -93,6 +94,11 @@ pub struct AgentSight {
     pid_agent_name_cache: HashMap<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
+    /// Flag indicating SLS Logtail has been activated (irreversible)
+    #[allow(dead_code)]
+    sls_activated: Arc<AtomicBool>,
+    /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
+    pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -253,44 +259,91 @@ impl AgentSight {
         // Build GenAI exporters
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
+        let sls_activated = Arc::new(AtomicBool::new(false));
 
-        // When SLS_LOGTAIL_FILE is set, use Logtail file exporter only (skip local storage)
-        // — the Logtail file will be collected by iLogtail and uploaded to SLS.
-        // `config.trace_enabled` (from `traceEnabled` in agentsight.json) controls whether
-        // conversation content fields (gen_ai.input.messages / gen_ai.output.messages) are
-        // included in the uploaded records. When false, only token metadata is uploaded.
-        if let Some(exporter) = LogtailExporter::new(
-            config.encryption_public_key.as_deref(),
-            config.trace_enabled,
-        ) {
-            // SLS 模式必须能获取到 uid (owner-account-id)，否则拒绝启动
-            let uid = crate::genai::instance_id::get_owner_account_id();
-            if uid.is_empty() {
-                anyhow::bail!(
-                    "SLS Logtail exporter is enabled (SLS_LOGTAIL_FILE set) but failed to \
-                     fetch owner-account-id from ECS metadata service. \
-                     Cannot upload logs without uid. Aborting."
-                );
-            }
-            log::info!(
-                "Logtail file exporter enabled ({}), uid={}",
-                exporter.path().display(),
-                uid
-            );
-            genai_exporters.push(Box::new(exporter));
-        } else {
-            // No Logtail: use local JSONL + SQLite
-            genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
+        // If config has runtime.sls_logtail_path set, seed the dynamic path
+        if let Some(ref sls_path) = config.sls_logtail_path {
+            crate::genai::logtail::set_dynamic_logtail_path(sls_path);
+        }
 
+        let is_agentic_os = crate::genai::anolisa_release::is_anolisa();
+
+        // Determine if Logtail is currently enabled (env var OR dynamic config)
+        let logtail_currently_enabled = crate::genai::logtail::logtail_enabled();
+
+        if is_agentic_os {
+            // ── Anolisa OS: always register SQLite ──
             match GenAISqliteStore::new() {
                 Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled");
+                    log::info!("SQLite GenAI exporter enabled (agentic os)");
                     let store = Arc::new(store);
                     genai_sqlite_store = Some(Arc::clone(&store));
                     genai_exporters.push(Box::new(store));
                 }
                 Err(e) => {
                     log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                }
+            }
+            // If Logtail is enabled at startup, also register it (dual-write)
+            if logtail_currently_enabled {
+                if let Some(exporter) = LogtailExporter::new(
+                    config.encryption_public_key.as_deref(),
+                    config.trace_enabled,
+                ) {
+                    let uid = crate::genai::instance_id::get_owner_account_id();
+                    if uid.is_empty() {
+                        anyhow::bail!(
+                            "SLS Logtail exporter is enabled but failed to \
+                             fetch owner-account-id from ECS metadata service. \
+                             Cannot upload logs without uid. Aborting."
+                        );
+                    }
+                    log::info!(
+                        "Logtail file exporter enabled (agentic os, {}), uid={}",
+                        exporter.path().display(),
+                        uid
+                    );
+                    genai_exporters.push(Box::new(exporter));
+                    sls_activated.store(true, Ordering::SeqCst);
+                }
+            }
+        } else {
+            // ── Non-Anolisa OS: keep original mutual exclusion behavior ──
+            if logtail_currently_enabled {
+                if let Some(exporter) = LogtailExporter::new(
+                    config.encryption_public_key.as_deref(),
+                    config.trace_enabled,
+                ) {
+                    let uid = crate::genai::instance_id::get_owner_account_id();
+                    if uid.is_empty() {
+                        anyhow::bail!(
+                            "SLS Logtail exporter is enabled (SLS_LOGTAIL_FILE set) but failed to \
+                             fetch owner-account-id from ECS metadata service. \
+                             Cannot upload logs without uid. Aborting."
+                        );
+                    }
+                    log::info!(
+                        "Logtail file exporter enabled ({}), uid={}",
+                        exporter.path().display(),
+                        uid
+                    );
+                    genai_exporters.push(Box::new(exporter));
+                    sls_activated.store(true, Ordering::SeqCst);
+                }
+            } else {
+                // No Logtail: use local JSONL + SQLite
+                genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
+
+                match GenAISqliteStore::new() {
+                    Ok(store) => {
+                        log::info!("SQLite GenAI exporter enabled");
+                        let store = Arc::new(store);
+                        genai_sqlite_store = Some(Arc::clone(&store));
+                        genai_exporters.push(Box::new(store));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                    }
                 }
             }
         }
@@ -353,6 +406,21 @@ impl AgentSight {
             genai_exporters.len(),
         );
 
+        // Shared mailbox for dynamic LogtailExporter activation
+        let pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>> =
+            Arc::new(Mutex::new(None));
+
+        // Spawn config file watcher for runtime hot-reload
+        if let Some(ref cfg_path) = config.config_path {
+            Self::start_config_watcher(
+                cfg_path.clone(),
+                Arc::clone(&sls_activated),
+                Arc::clone(&pending_logtail),
+                config.encryption_public_key.clone(),
+                config.trace_enabled,
+            );
+        }
+
         // Spawn background thread that marks stale PENDING calls as 'interrupted'.
         // Fires every 60 seconds; any pending call older than 5 minutes is assumed lost.
         if let Some(ref sqlite_store) = genai_sqlite_store {
@@ -393,6 +461,8 @@ impl AgentSight {
             last_drain_check: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
+            sls_activated,
+            pending_logtail,
         })
     }
 
@@ -718,6 +788,8 @@ impl AgentSight {
                 self.flush_expired_pending_genai();
                 // Drain orphaned connections from dead PIDs and persist as pending
                 self.drain_and_persist_dead_connections();
+                // Check if config watcher deposited a new LogtailExporter
+                self.check_pending_logtail();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -734,6 +806,146 @@ impl AgentSight {
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
         // poller will be dropped automatically when AgentSight is dropped
+    }
+
+    /// Check and drain the pending_logtail mailbox.
+    /// If the config watcher deposited a new LogtailExporter, register it.
+    fn check_pending_logtail(&mut self) {
+        if let Ok(mut guard) = self.pending_logtail.try_lock() {
+            if let Some(exporter) = guard.take() {
+                log::info!("Registering dynamically-activated LogtailExporter: '{}'", exporter.name());
+                self.genai_exporters.push(exporter);
+            }
+        }
+    }
+
+    /// Start a background thread that watches the config file for changes.
+    ///
+    /// When `runtime.sls_logtail_path` becomes non-empty and SLS has not yet been
+    /// activated, this thread validates uid, sets the dynamic logtail path, creates
+    /// a LogtailExporter, and deposits it into `pending_logtail` for the main loop
+    /// to pick up.
+    fn start_config_watcher(
+        config_path: PathBuf,
+        sls_activated: Arc<AtomicBool>,
+        pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
+        encryption_pem: Option<String>,
+        trace_enabled: bool,
+    ) {
+        use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event as NotifyEvent, EventKind};
+
+        let watch_path = config_path.clone();
+        std::thread::Builder::new()
+            .name("config-watcher".to_string())
+            .spawn(move || {
+                log::info!("Config watcher started for {:?}", watch_path);
+
+                let (tx, rx) = std::sync::mpsc::channel::<notify::Result<NotifyEvent>>();
+
+                let mut watcher: RecommendedWatcher = match notify::recommended_watcher(tx) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        log::warn!("Failed to create config file watcher: {}", e);
+                        return;
+                    }
+                };
+
+                // Watch the parent directory (inotify requires watching dirs)
+                let watch_dir = watch_path.parent().unwrap_or(Path::new("/"));
+                if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
+                    log::warn!("Failed to watch config directory {:?}: {}", watch_dir, e);
+                    return;
+                }
+
+                let target_filename = watch_path.file_name().map(|f| f.to_os_string());
+
+                for event in rx {
+                    let event = match event {
+                        Ok(e) => e,
+                        Err(e) => {
+                            log::warn!("Config watcher error: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Only process CloseWrite events (file fully written)
+                    match event.kind {
+                        EventKind::Access(notify::event::AccessKind::Close(
+                            notify::event::AccessMode::Write,
+                        )) => {}
+                        _ => continue,
+                    }
+
+                    // Filter by filename
+                    let is_target = event.paths.iter().any(|p| {
+                        p.file_name().map(|f| f.to_os_string()) == target_filename
+                    });
+                    if !is_target {
+                        continue;
+                    }
+
+                    // Already activated? Skip.
+                    if sls_activated.load(Ordering::SeqCst) {
+                        continue;
+                    }
+
+                    // Re-read config file
+                    let content = match std::fs::read_to_string(&watch_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::warn!("Config watcher: failed to read {:?}: {}", watch_path, e);
+                            continue;
+                        }
+                    };
+
+                    // Parse runtime.sls_logtail_path
+                    let new_path = match crate::config::parse_runtime_sls_path(&content) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    log::info!(
+                        "Config watcher: detected runtime.sls_logtail_path = {:?}",
+                        new_path
+                    );
+
+                    // Validate uid (strong check: abort process on failure)
+                    let uid = crate::genai::instance_id::get_owner_account_id();
+                    if uid.is_empty() {
+                        log::error!(
+                            "Config watcher: SLS activation requested but uid fetch failed. \
+                             Terminating process."
+                        );
+                        std::process::exit(1);
+                    }
+
+                    // Set dynamic path so logtail_path() returns it
+                    crate::genai::logtail::set_dynamic_logtail_path(&new_path);
+
+                    // Create exporter and deposit into mailbox
+                    let exporter = LogtailExporter::new_with_path(
+                        &new_path,
+                        encryption_pem.as_deref(),
+                        trace_enabled,
+                    );
+                    log::info!(
+                        "Config watcher: LogtailExporter created (path={}, uid={})",
+                        new_path,
+                        uid
+                    );
+
+                    if let Ok(mut guard) = pending_logtail.lock() {
+                        *guard = Some(Box::new(exporter));
+                    }
+
+                    // Mark activated (irreversible)
+                    sls_activated.store(true, Ordering::SeqCst);
+                    log::info!("Config watcher: SLS Logtail activated dynamically");
+                }
+
+                log::info!("Config watcher exiting");
+            })
+            .ok();
     }
 
     /// Install an FFI event sender for C API mode.

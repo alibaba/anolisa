@@ -78,6 +78,7 @@ actix-cors = { version = "0.7", optional = true }
 include_dir = { version = "0.7", optional = true }
 # hf-hub for downloading tokenizer files (patched to use GitHub version below)
 hf-hub = "0.5"
+notify = "6"
 
 # [profile.release]
 # debug = true

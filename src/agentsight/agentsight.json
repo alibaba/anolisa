@@ -1,4 +1,7 @@
 {
+  "runtime": {
+    "sls_logtail_path": ""
+  },
   "https": [],
   "http": [],
   "encryption": {
