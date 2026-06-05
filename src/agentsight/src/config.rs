@@ -1036,7 +1036,8 @@ mod tests {
     fn test_default_agents_json_valid() {
         let (cmdline_rules, https_rules, http_targets) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
-        assert!(https_rules.is_empty());
+        // https rules: dashscope.aliyuncs.com configured by default
+        assert_eq!(https_rules.len(), 1);
         assert!(http_targets.is_empty());
     }
 
