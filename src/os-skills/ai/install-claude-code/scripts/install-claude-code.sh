@@ -4,11 +4,12 @@
 # Automated Claude Code installer for Alibaba Cloud Linux 4 (Alinux 4)
 #
 # Usage:
-#   bash install-claude-code.sh [--config]
+#   bash install-claude-code.sh [--config] [--skip-tokenless]
 #
 # Options:
 #   --config    Also write DashScope/Qwen configuration to ~/.claude/settings.json
 #               (will prompt for API key interactively, or use CLAUDE_API_KEY env var)
+#   --skip-tokenless  Skip tokenless plugin auto-installation
 #
 # Installation priority:
 #   1. Native installer (curl from claude.ai)
@@ -34,9 +35,11 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # --- Flags ---
 WRITE_CONFIG=false
+SKIP_TOKENLESS=false
 for arg in "$@"; do
   case "$arg" in
     --config) WRITE_CONFIG=true ;;
+    --skip-tokenless) SKIP_TOKENLESS=true ;;
     *) warn "Unknown argument: $arg" ;;
   esac
 done
@@ -270,6 +273,61 @@ JSONEOF
 }
 
 # =============================================================================
+# Tokenless Plugin Installation
+# =============================================================================
+find_tokenless_adapter_dir() {
+  local candidates=(
+    "${ANOLISA_TOKENLESS_ADAPTER_DIR:-}"
+    "/usr/share/anolisa/adapters/tokenless"
+    "$HOME/.local/share/anolisa/adapters/tokenless"
+  )
+  # Source tree layout relative to this script
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  candidates+=("$script_dir/../../../../tokenless/adapters/tokenless")
+
+  for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
+    [ -d "$candidate" ] && [ -f "$candidate/manifest.json" ] && echo "$candidate" && return 0
+  done
+  return 1
+}
+
+install_tokenless_plugin() {
+  if [[ "$SKIP_TOKENLESS" == true ]]; then
+    info "Skipping tokenless plugin (--skip-tokenless)"
+    return 0
+  fi
+
+  info "Installing tokenless Claude Code plugin..."
+
+  local adapter_dir
+  adapter_dir="$(find_tokenless_adapter_dir)" || {
+    warn "tokenless adapter not found — skipping tokenless plugin installation."
+    info "Install tokenless first, then run: make -C src/tokenless claude-code-install"
+    return 0
+  }
+
+  local install_script="$adapter_dir/claude-code/scripts/install.sh"
+  if [[ ! -f "$install_script" ]]; then
+    warn "tokenless install script not found: $install_script"
+    return 0
+  fi
+
+  info "tokenless adapter: $adapter_dir"
+  if ANOLISA_ADAPTER_DIR="$adapter_dir" \
+     ANOLISA_COMPONENT="tokenless" \
+     ANOLISA_TARGET="claude-code" \
+     bash "$install_script"; then
+    ok "tokenless Claude Code plugin installed"
+  else
+    warn "tokenless plugin installation failed (non-fatal)"
+    info "You can install it later with:"
+    info "  ANOLISA_ADAPTER_DIR=$adapter_dir bash $install_script"
+  fi
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 main() {
@@ -316,6 +374,9 @@ main() {
     info "Writing API configuration..."
     write_config
   fi
+
+  # Step 6: Install tokenless plugin
+  install_tokenless_plugin
 
   echo ""
   ok "Done! Run 'claude' to get started."

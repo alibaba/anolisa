@@ -43,6 +43,7 @@ hermes doctor      # 验证
 > - 脚本默认**跳过**交互式配置向导，安装完后运行 `hermes setup` 再配置
 > - 如需安装时直接配置，加 `--with-setup` 参数
 > - CI/自动化场景直接运行即可，不会出现任何交互阻塞
+> - **安装完成后会自动安装 tokenless 插件**（token 用量追踪和响应压缩），无需额外操作
 
 **安装参数说明**：
 
@@ -51,6 +52,7 @@ hermes doctor      # 验证
 | （无参数） | 最小安装，仅核心包，速度最快（**推荐新手**） |
 | `--full` | 安装所有 extras（daytona、playwright、WhatsApp 等） |
 | `--with-setup` | 安装完后启动配置向导 |
+| `--skip-tokenless` | 跳过 tokenless 插件自动安装 |
 
 ### 首次配置
 

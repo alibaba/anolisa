@@ -27,6 +27,7 @@ Task Progress:
 - [ ] Step 3: Verify installation
 - [ ] Step 4: Configure API provider
 - [ ] Step 5: Test run
+- [ ] Step 6: Tokenless plugin auto-installed
 ```
 
 ### Step 1: Check System & Install Prerequisites
@@ -112,6 +113,8 @@ Or use the automated script (auto-fallback all 3 methods):
 ```bash
 bash scripts/install-claude-code.sh
 ```
+
+Pass `--skip-tokenless` to skip the tokenless Claude Code plugin auto-installation.
 
 ### Step 3: Verify Installation
 

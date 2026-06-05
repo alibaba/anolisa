@@ -860,6 +860,64 @@ def install_openclaw(args):
     ensure_openclaw(args)
 
 
+def find_tokenless_adapter_dir():
+    """Locate the tokenless adapter directory containing agent plugin install scripts."""
+    candidates = [
+        os.environ.get("ANOLISA_TOKENLESS_ADAPTER_DIR", ""),
+        "/usr/share/anolisa/adapters/tokenless",
+        os.path.expanduser("~/.local/share/anolisa/adapters/tokenless"),
+    ]
+    # Also try relative to the script's own location (source tree layout)
+    script_dir = Path(__file__).resolve().parent
+    source_candidate = script_dir / ".." / ".." / ".." / ".." / "tokenless" / "adapters" / "tokenless"
+    candidates.append(str(source_candidate))
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        p = Path(candidate)
+        if p.is_dir() and (p / "manifest.json").is_file():
+            return p
+    return None
+
+
+def install_tokenless_plugin(args):
+    """Install the tokenless OpenClaw plugin via the tokenless adapter install script."""
+    if args.skip_tokenless:
+        print("\n--- Skipping tokenless plugin (--skip-tokenless) ---\n")
+        return
+
+    print("\n--- Installing tokenless OpenClaw plugin ---\n")
+
+    adapter_dir = find_tokenless_adapter_dir()
+    if adapter_dir is None:
+        print("  tokenless adapter not found — skipping tokenless plugin installation.")
+        print("  Install tokenless first, then run:")
+        print("    make -C src/tokenless openclaw-install")
+        return
+
+    install_script = adapter_dir / "openclaw" / "scripts" / "install.sh"
+    if not install_script.is_file():
+        print(f"  tokenless install script not found: {install_script}")
+        return
+
+    print(f"  tokenless adapter: {adapter_dir}")
+    env = os.environ.copy()
+    env["ANOLISA_ADAPTER_DIR"] = str(adapter_dir)
+    env["ANOLISA_COMPONENT"] = "tokenless"
+    env["ANOLISA_TARGET"] = "openclaw"
+    try:
+        run_command(
+            ["bash", str(install_script)],
+            env=env,
+            dry_run=args.dry_run,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"  tokenless plugin installation failed: {exc}")
+        print("  You can install it later with:")
+        print(f"    ANOLISA_ADAPTER_DIR={adapter_dir} bash {install_script}")
+
+
 def install_dingtalk_plugin(args):
     env = os.environ.copy()
     if args.npm_registry:
@@ -990,6 +1048,11 @@ def parse_args():
         action="store_true",
         help="Only check basic environment dependencies; do not require API keys or install anything.",
     )
+    parser.add_argument(
+        "--skip-tokenless",
+        action="store_true",
+        help="Do not install the tokenless OpenClaw plugin after OpenClaw installation.",
+    )
 
     parser.add_argument("--dingtalk-client-id", default="")
     parser.add_argument("--dingtalk-client-secret", default="")
@@ -1011,6 +1074,7 @@ def main():
 
     if not args.skip_install_openclaw:
         install_openclaw(args)
+        install_tokenless_plugin(args)
 
     config, metadata = build_config(args)
     apply_config(config, Path(args.config).expanduser())

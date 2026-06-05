@@ -62,7 +62,7 @@ python3 <install-openclaw-skill-dir>/scripts/install_openclaw.py ...
 
 The authoritative implementation is `scripts/install_openclaw.py`.
 The normal parameters are `--billing`, `--api-key`, `--api-key-env`, `--region`,
-`--model-id`, `--npm-registry`, `--precheck-only`, and DingTalk-specific flags.
+`--model-id`, `--npm-registry`, `--precheck-only`, `--skip-tokenless`, and DingTalk-specific flags.
 
 ## Examples
 
@@ -120,6 +120,7 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 - Sets `gateway.mode = local`, `gateway.bind = loopback`, and `gateway.auth.mode = none` for local single-machine setup.
 - Starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart` unless `--skip-gateway` is passed.
 - If the gateway port is occupied by OpenClaw, it clears that stale listener. If the port is occupied by another process, it stops and prints the process details for the user to decide.
+- **Auto-installs the tokenless OpenClaw plugin** after OpenClaw is installed, for token usage tracking and response compression. Pass `--skip-tokenless` to opt out.
 
 ## Verify
 

@@ -27,6 +27,7 @@ USE_VENV=true
 RUN_SETUP=false
 BRANCH="main"
 INSTALL_MINIMAL=true   # Default: minimal install (no heavy extras like daytona/playwright/whatsapp)
+SKIP_TOKENLESS=false
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -68,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             INSTALL_MINIMAL=false
             shift
             ;;
+        --skip-tokenless)
+            SKIP_TOKENLESS=true
+            shift
+            ;;
         -h|--help)
             echo "Hermes Agent Installer"
             echo ""
@@ -79,6 +84,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-setup   Skip interactive setup wizard (default)"
             echo "  --full         Install all extras (daytona, playwright, whatsapp, etc.)"
             echo "                 Default: minimal install for faster setup"
+            echo "  --skip-tokenless  Skip tokenless plugin auto-installation"
             echo "  --branch NAME  Git branch to install (default: main)"
             echo "  --dir PATH     Installation directory (default: ~/.hermes/hermes-agent)"
             echo "  --hermes-home PATH  Data directory (default: ~/.hermes, or \$HERMES_HOME)"
@@ -1442,6 +1448,59 @@ maybe_start_gateway() {
     fi
 }
 
+find_tokenless_adapter_dir() {
+    local candidates=(
+        "${ANOLISA_TOKENLESS_ADAPTER_DIR:-}"
+        "/usr/share/anolisa/adapters/tokenless"
+        "$HOME/.local/share/anolisa/adapters/tokenless"
+    )
+    # Source tree layout relative to this script
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    candidates+=("$script_dir/../../../../tokenless/adapters/tokenless")
+
+    for candidate in "${candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        [ -d "$candidate" ] && [ -f "$candidate/manifest.json" ] && echo "$candidate" && return 0
+    done
+    return 1
+}
+
+install_tokenless_plugin() {
+    if [ "$SKIP_TOKENLESS" = true ]; then
+        log_info "Skipping tokenless plugin (--skip-tokenless)"
+        return 0
+    fi
+
+    log_info "Installing tokenless Hermes plugin..."
+
+    local adapter_dir
+    adapter_dir="$(find_tokenless_adapter_dir)" || {
+        log_warn "tokenless adapter not found — skipping tokenless plugin installation."
+        log_info "Install tokenless first, then run: make -C src/tokenless hermes-install"
+        return 0
+    }
+
+    local install_script="$adapter_dir/hermes/scripts/install.sh"
+    if [ ! -f "$install_script" ]; then
+        log_warn "tokenless install script not found: $install_script"
+        return 0
+    fi
+
+    log_info "tokenless adapter: $adapter_dir"
+    if ANOLISA_ADAPTER_DIR="$adapter_dir" \
+       ANOLISA_COMPONENT="tokenless" \
+       ANOLISA_TARGET="hermes" \
+       HERMES_HOME="$HERMES_HOME" \
+       bash "$install_script"; then
+        log_success "tokenless Hermes plugin installed"
+    else
+        log_warn "tokenless plugin installation failed (non-fatal)"
+        log_info "You can install it later with:"
+        log_info "  ANOLISA_ADAPTER_DIR=$adapter_dir bash $install_script"
+    fi
+}
+
 print_success() {
     echo ""
     echo -e "${GREEN}${BOLD}"
@@ -1542,6 +1601,7 @@ main() {
     copy_config_templates
     run_setup_wizard
     maybe_start_gateway
+    install_tokenless_plugin
 
     print_success
 }
