@@ -10,6 +10,7 @@ use super::super::buffer_to_lines;
 use super::super::wrap::{char_width, display_width};
 
 pub(super) fn render_ratatui_code_block(
+    i18n: &crate::I18n,
     language: &str,
     lines: &[String],
     width: usize,
@@ -20,7 +21,7 @@ pub(super) fn render_ratatui_code_block(
     let height = code_lines.len().max(1) as u16 + 2;
     let area = Rect::new(0, 0, width, height);
     let mut buffer = Buffer::empty(area);
-    let title = code_block_title(language);
+    let title = code_block_title(i18n, language);
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(Span::styled(
@@ -49,15 +50,12 @@ pub(super) fn render_ratatui_code_block(
 }
 
 pub(super) fn render_plain_code_block(
+    i18n: &crate::I18n,
     language: &str,
     lines: &[String],
     width: usize,
 ) -> Vec<String> {
-    let label = if language.is_empty() {
-        "code".to_string()
-    } else {
-        format!("code: {language}")
-    };
+    let label = code_block_title(i18n, language);
     let mut rendered = vec![format!("+-- {label}")];
     let content_width = width.saturating_sub(2).max(10);
     let code_lines = wrapped_code_lines(lines, content_width);
@@ -79,11 +77,14 @@ fn wrapped_code_lines(lines: &[String], width: usize) -> Vec<String> {
         .collect()
 }
 
-fn code_block_title(language: &str) -> String {
+fn code_block_title(i18n: &crate::I18n, language: &str) -> String {
     if language.is_empty() {
-        "code".to_string()
+        i18n.t(crate::MessageId::MarkdownCodeLabel).to_string()
     } else {
-        format!("code: {language}")
+        i18n.format(
+            crate::MessageId::MarkdownCodeWithLanguageLabel,
+            &[("language", language)],
+        )
     }
 }
 

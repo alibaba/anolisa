@@ -8,19 +8,29 @@ use super::claude_stream::ClaudeStreamParser;
 use super::AdapterError;
 
 pub(super) struct QwenStreamParser {
+    run_id: String,
     inner: ClaudeStreamParser,
+    pending_text_prefix: String,
+    pending_synthetic_question: Option<String>,
 }
 
 impl QwenStreamParser {
     pub(super) fn new(run_id: String, session_state: Option<Arc<Mutex<Option<String>>>>) -> Self {
         Self {
+            run_id: run_id.clone(),
             inner: ClaudeStreamParser::new(run_id, session_state),
+            pending_text_prefix: String::new(),
+            pending_synthetic_question: None,
         }
     }
 
     pub(super) fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
         let events = self.inner.parse_line(line);
-        events.into_iter().map(|e| self.localize_event(e)).collect()
+        let mut localized = Vec::new();
+        for event in events {
+            localized.extend(self.localize_event(event));
+        }
+        localized
     }
 
     pub(super) fn finish(
@@ -33,37 +43,101 @@ impl QwenStreamParser {
             Ok(())
         })?;
         for event in collected {
-            sink(self.localize_event(event))?;
+            for event in self.localize_event(event) {
+                sink(event)?;
+            }
+        }
+        if let Some(text) = self.pending_synthetic_question.take() {
+            sink(AgentEvent::TextDelta {
+                run_id: self.run_id.clone(),
+                text: format!("{text}\n\n[debug: failed to parse COSH_QUESTION JSON]"),
+            })?;
         }
         Ok(())
     }
 
-    fn localize_event(&self, event: AgentEvent) -> AgentEvent {
+    fn localize_event(&mut self, event: AgentEvent) -> Vec<AgentEvent> {
         match event {
             AgentEvent::StatusChanged {
                 run_id,
                 phase,
                 message,
-            } => AgentEvent::StatusChanged {
+            } => vec![AgentEvent::StatusChanged {
                 run_id,
                 phase,
                 message: self.localize_status_message(&message),
-            },
-            AgentEvent::AgentCompleted { run_id, .. } => AgentEvent::AgentCompleted {
+            }],
+            AgentEvent::AgentCompleted { run_id, .. } => vec![AgentEvent::AgentCompleted {
                 run_id,
                 summary: "co analysis completed".to_string(),
-            },
-            AgentEvent::AgentFailed { run_id, error } => AgentEvent::AgentFailed {
+            }],
+            AgentEvent::AgentFailed { run_id, error } => vec![AgentEvent::AgentFailed {
                 run_id,
                 error: error
                     .replace("Claude Code", "co")
                     .replace("Claude", "co")
                     .replace("claude-code", "co")
                     .replace("claude code", "co"),
-            },
-            AgentEvent::TextDelta { run_id, text } => synthetic_question_from_text(&run_id, &text)
-                .unwrap_or(AgentEvent::TextDelta { run_id, text }),
-            other => other,
+            }],
+            AgentEvent::TextDelta { run_id, text } => self.localize_text_delta(run_id, text),
+            other => vec![other],
+        }
+    }
+
+    fn localize_text_delta(&mut self, run_id: String, text: String) -> Vec<AgentEvent> {
+        let marker = "COSH_QUESTION:";
+        let Some(pending) = self.pending_synthetic_question.as_mut() else {
+            let text = if self.pending_text_prefix.is_empty() {
+                text
+            } else {
+                let mut combined = std::mem::take(&mut self.pending_text_prefix);
+                combined.push_str(&text);
+                combined
+            };
+            let Some((prefix, suffix)) = text.split_once(marker) else {
+                let (emit, held) = split_possible_marker_prefix(&text, marker);
+                self.pending_text_prefix = held.to_string();
+                return if emit.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![AgentEvent::TextDelta {
+                        run_id,
+                        text: emit.to_string(),
+                    }]
+                };
+            };
+            let mut events = Vec::new();
+            if !prefix.is_empty() {
+                events.push(AgentEvent::TextDelta {
+                    run_id: run_id.clone(),
+                    text: prefix.to_string(),
+                });
+            }
+            self.pending_synthetic_question = Some(format!("{marker}{suffix}"));
+            return self.parse_pending_synthetic_question(run_id, events);
+        };
+
+        pending.push_str(&text);
+        self.parse_pending_synthetic_question(run_id, Vec::new())
+    }
+
+    fn parse_pending_synthetic_question(
+        &mut self,
+        run_id: String,
+        mut events: Vec<AgentEvent>,
+    ) -> Vec<AgentEvent> {
+        let Some(buffer) = self.pending_synthetic_question.as_ref() else {
+            return events;
+        };
+        match complete_json_after_marker(buffer) {
+            SyntheticQuestionJson::Incomplete => events,
+            SyntheticQuestionJson::Complete(_) => {
+                if let Some(event) = synthetic_question_from_text(&run_id, buffer) {
+                    events.push(event);
+                    self.pending_synthetic_question = None;
+                }
+                events
+            }
         }
     }
 
@@ -76,10 +150,27 @@ impl QwenStreamParser {
     }
 }
 
+fn split_possible_marker_prefix<'a>(text: &'a str, marker: &str) -> (&'a str, &'a str) {
+    let held_len = (1..marker.len())
+        .rev()
+        .find(|len| text.ends_with(&marker[..*len]))
+        .unwrap_or(0);
+    if held_len == 0 {
+        return (text, "");
+    }
+    text.split_at(text.len() - held_len)
+}
+
 fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> {
-    let marker = "COSH_QUESTION:";
-    let json_text = text.split_once(marker)?.1.trim().lines().next()?.trim();
+    let json_text = match complete_json_after_marker(text) {
+        SyntheticQuestionJson::Complete(json_text) => json_text,
+        SyntheticQuestionJson::Incomplete => return None,
+    };
     let value: Value = serde_json::from_str(json_text).ok()?;
+    synthetic_question_from_value(run_id, &value)
+}
+
+fn synthetic_question_from_value(run_id: &str, value: &Value) -> Option<AgentEvent> {
     let question = value.get("question")?.as_str()?.to_string();
     let options = value
         .get("options")
@@ -95,11 +186,11 @@ fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> 
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let allow_free_text = bool_field(&value, "allow_free_text")
-        .or_else(|| bool_field(&value, "allowFreeText"))
+    let allow_free_text = bool_field(value, "allow_free_text")
+        .or_else(|| bool_field(value, "allowFreeText"))
         .unwrap_or(options.is_empty());
-    let selection_mode = if bool_field(&value, "multi_select")
-        .or_else(|| bool_field(&value, "multiSelect"))
+    let selection_mode = if bool_field(value, "multi_select")
+        .or_else(|| bool_field(value, "multiSelect"))
         .unwrap_or(false)
     {
         QuestionSelectionMode::Multiple
@@ -113,8 +204,53 @@ fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> 
         options,
         allow_free_text,
         selection_mode,
-        request_id: None,
     })
+}
+
+enum SyntheticQuestionJson<'a> {
+    Complete(&'a str),
+    Incomplete,
+}
+
+fn complete_json_after_marker(text: &str) -> SyntheticQuestionJson<'_> {
+    let Some((_, after_marker)) = text.split_once("COSH_QUESTION:") else {
+        return SyntheticQuestionJson::Incomplete;
+    };
+    let Some(start_rel) = after_marker.find('{') else {
+        return SyntheticQuestionJson::Incomplete;
+    };
+    let json_start = text.len() - after_marker.len() + start_rel;
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, ch) in text[json_start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = json_start + offset + ch.len_utf8();
+                    return SyntheticQuestionJson::Complete(text[json_start..end].trim());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    SyntheticQuestionJson::Incomplete
 }
 
 fn option_label(value: &Value) -> Option<String> {
@@ -189,14 +325,16 @@ mod tests {
 
     #[test]
     fn localizes_capitalized_claude_wording() {
-        let p = parser();
-        let event = p.localize_event(AgentEvent::StatusChanged {
+        let mut p = parser();
+        let events = p.localize_event(AgentEvent::StatusChanged {
             run_id: "r".to_string(),
             phase: "starting".to_string(),
             message: "Starting Claude Code backend".to_string(),
         });
-        assert!(matches!(event, AgentEvent::StatusChanged { message, .. }
-            if message == "Starting co backend"));
+        assert!(
+            matches!(&events[..], [AgentEvent::StatusChanged { message, .. }]
+            if message == "Starting co backend")
+        );
     }
 
     #[test]
@@ -230,6 +368,106 @@ mod tests {
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolCall { name, input, .. }
             if name == "run_shell_command" && input == "ls -la")));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCall {
+                tool_id: Some(tool_id),
+                ..
+            } if tool_id == "call_abc"
+        )));
+    }
+
+    #[test]
+    fn tool_result_from_user_snapshot() {
+        let mut p = parser();
+        let events = p.parse_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_abc","is_error":false,"content":"cosh-control-protocol"}]}}"#);
+        assert!(matches!(
+            &events[..],
+            [
+                AgentEvent::ToolOutputDelta {
+                    tool_id,
+                    stream,
+                    text,
+                    ..
+                },
+                AgentEvent::ToolCompleted {
+                    tool_id: completed_id,
+                    status,
+                    ..
+                }
+            ] if tool_id == "call_abc"
+                && completed_id == "call_abc"
+                && stream == "stdout"
+                && text == "cosh-control-protocol"
+                && status == "success"
+        ));
+    }
+
+    #[test]
+    fn function_call_from_qwen_message_parts() {
+        let mut p = parser();
+        let events = p.parse_line(r#"{"type":"assistant","message":{"role":"model","parts":[{"functionCall":{"id":"call_qwen","name":"run_shell_command","args":{"command":"memory_pressure","description":"Check memory","is_background":false}}}]}}"#);
+        assert!(matches!(
+            &events[..],
+            [AgentEvent::ToolCall {
+                tool_id: Some(tool_id),
+                name,
+                input,
+                ..
+            }] if tool_id == "call_qwen" && name == "run_shell_command" && input == "memory_pressure"
+        ));
+    }
+
+    #[test]
+    fn function_response_from_qwen_message_parts_uses_result_display() {
+        let mut p = parser();
+        let events = p.parse_line(r#"{"type":"tool_result","message":{"role":"user","parts":[{"functionResponse":{"id":"call_qwen","name":"run_shell_command","response":{"output":"Command: memory_pressure\nOutput: wrapped output"}}}]},"toolCallResult":{"callId":"call_qwen","status":"success","resultDisplay":"System-wide memory free percentage: 87%"}}"#);
+        assert!(matches!(
+            &events[..],
+            [
+                AgentEvent::ToolOutputDelta {
+                    tool_id,
+                    stream,
+                    text,
+                    ..
+                },
+                AgentEvent::ToolCompleted {
+                    tool_id: completed_id,
+                    status,
+                    ..
+                }
+            ] if tool_id == "call_qwen"
+                && completed_id == "call_qwen"
+                && stream == "stdout"
+                && text == "System-wide memory free percentage: 87%"
+                && status == "success"
+        ));
+    }
+
+    #[test]
+    fn error_tool_result_from_user_snapshot() {
+        let mut p = parser();
+        let events = p.parse_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_err","is_error":true,"content":"permission denied"}]}}"#);
+        assert!(matches!(
+            &events[..],
+            [
+                AgentEvent::ToolOutputDelta {
+                    tool_id,
+                    stream,
+                    text,
+                    ..
+                },
+                AgentEvent::ToolCompleted {
+                    tool_id: completed_id,
+                    status,
+                    ..
+                }
+            ] if tool_id == "call_err"
+                && completed_id == "call_err"
+                && stream == "stderr"
+                && text == "permission denied"
+                && status == "error"
+        ));
     }
 
     #[test]
@@ -303,6 +541,62 @@ mod tests {
             )),
             "expected synthetic UserQuestion, got: {events:?}"
         );
+    }
+
+    #[test]
+    fn synthetic_question_from_multiline_text_fallback() {
+        let mut p = parser();
+        let events = p.parse_line(r#"{"type":"assistant","session_id":"s","message":{"id":"m1","type":"message","role":"assistant","model":"qwen","content":[{"type":"text","text":"COSH_QUESTION: {\n  \"question\":\"检索什么？\",\n  \"options\":[\"文件\",\"进程\"],\n  \"allow_free_text\":true,\n  \"multi_select\":false\n}"}]}}"#);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::UserQuestion {
+                question,
+                options,
+                allow_free_text,
+                ..
+            } if question == "检索什么？"
+                && options == &vec!["文件".to_string(), "进程".to_string()]
+                && *allow_free_text
+        )));
+    }
+
+    #[test]
+    fn synthetic_question_from_split_text_delta() {
+        let mut p = parser();
+        let first = p.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"COSH_QUESTION: {\"question\":\"检索什么？\""}}}"#);
+        assert!(first.is_empty(), "marker should be buffered: {first:?}");
+        let second = p.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":",\"options\":[\"文件\"],\"allow_free_text\":true,\"multi_select\":false}"}}}"#);
+        assert!(second.iter().any(|e| matches!(
+            e,
+            AgentEvent::UserQuestion {
+                question,
+                options,
+                allow_free_text,
+                ..
+            } if question == "检索什么？"
+                && options == &vec!["文件".to_string()]
+                && *allow_free_text
+        )));
+    }
+
+    #[test]
+    fn synthetic_question_marker_can_span_text_delta_boundary() {
+        let mut p = parser();
+        let first = p.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"COSH_QUES"}}}"#);
+        assert!(
+            first.is_empty(),
+            "partial marker should be buffered: {first:?}"
+        );
+        let second = p.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"TION: {\"question\":\"Project nickname?\",\"options\":[],\"allow_free_text\":true,\"multi_select\":false}"}}}"#);
+        assert!(second.iter().any(|e| matches!(
+            e,
+            AgentEvent::UserQuestion {
+                question,
+                options,
+                allow_free_text,
+                ..
+            } if question == "Project nickname?" && options.is_empty() && *allow_free_text
+        )));
     }
 
     #[test]

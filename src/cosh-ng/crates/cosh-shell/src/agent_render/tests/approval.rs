@@ -40,6 +40,42 @@ fn approval_panel_renders_active_request_with_queue_summary() {
 }
 
 #[test]
+fn approval_panel_uses_zh_labels_without_translating_command() {
+    let renderer = RatatuiInlineRenderer::with_width(140).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-1",
+            kind: "tool request",
+            risk: "medium",
+            subject: "tool Bash",
+            preview_label: "Tool 输入",
+            preview: "top -l 1 -o mem -n 20 | head -30",
+            queue_position: 1,
+            queue_total: 2,
+            next_label: Some("req-2 tool Bash"),
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: true,
+        })
+        .join("\n");
+
+    assert!(text.contains("审批 req-1"), "{text}");
+    assert!(text.contains("运行 Bash 命令？"), "{text}");
+    assert!(
+        text.contains("$ top -l 1 -o mem -n 20 | head -30"),
+        "{text}"
+    );
+    assert!(text.contains("队列: 1/2 待处理"), "{text}");
+    assert!(text.contains("下一个 req-2 tool Bash"), "{text}");
+    assert!(text.contains("允许一次"), "{text}");
+    assert!(text.contains("始终信任"), "{text}");
+    assert!(text.contains("拒绝"), "{text}");
+    assert!(text.contains("详情"), "{text}");
+    assert!(text.contains("按键:"), "{text}");
+    assert!(text.contains("默认: 拒绝"), "{text}");
+    assert_rendered_width(&text, 140);
+}
+
+#[test]
 fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
     let renderer = RatatuiInlineRenderer::with_width(82);
     let text = renderer
@@ -67,7 +103,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
 
 #[test]
 fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
-    let renderer = RatatuiInlineRenderer::with_width(54);
+    let renderer = RatatuiInlineRenderer::with_width(70);
     let text = renderer
         .approval_panel_lines(ApprovalPanelModel {
             id: "req-宽",
@@ -88,8 +124,8 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
     assert!(text.contains("$ cat /tmp/cosh-shell-中文"), "{text}");
     assert!(text.contains("> [ Details ]"), "{text}");
     assert!(text.contains("Queue: 1/3 pending"), "{text}");
-    assert_rendered_width(&text, 54);
-    assert_box_lines_aligned(&text, 54);
+    assert_rendered_width(&text, 70);
+    assert_box_lines_aligned(&text, 70);
 }
 
 #[test]
@@ -131,6 +167,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
         width: 90,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let mut output = Vec::new();
 
@@ -167,6 +204,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
         width: 90,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     }
     .write_approval_panel(
         &mut deny_output,
@@ -192,6 +230,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
         width: 90,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     }
     .write_approval_panel(
         &mut details_output,
@@ -243,10 +282,13 @@ fn plain_approval_panel_keeps_queue_before_actions() {
     assert!(text.contains("Run Bash command?"), "{text}");
     assert!(text.contains("$ git status"), "{text}");
     assert!(text.contains("next req-2 shell command"), "{text}");
-    assert!(text.contains("[Allow once]  Deny  Details"), "{text}");
+    assert!(
+        text.contains("[Allow once]  Always trust  Deny  Details"),
+        "{text}"
+    );
     assert!(
         line_index(&lines, "Queue: 1/2 pending; next req-2 shell command")
-            < line_index(&lines, "[Allow once]  Deny  Details"),
+            < line_index(&lines, "[Allow once]  Always trust  Deny  Details"),
         "{text}"
     );
     assert!(!text.contains("medium risk"), "{text}");
@@ -260,6 +302,7 @@ fn approval_receipt_panel_renders_auditable_decision() {
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Denied",
+            negative: true,
             id: "req-1",
             kind: "Bash tool",
             decision: "denied by user",
@@ -278,11 +321,82 @@ fn approval_receipt_panel_renders_auditable_decision() {
 }
 
 #[test]
+fn approval_receipt_panel_uses_zh_fallback_labels() {
+    let renderer = RatatuiInlineRenderer::with_width(100).with_language(crate::Language::ZhCn);
+    let shell_text = renderer
+        .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
+            title: "已拒绝",
+            negative: true,
+            id: "req-1",
+            kind: "shell 命令请求",
+            decision: "已拒绝",
+            subject: "shell command",
+            preview: "git status",
+            message: "命令未运行。",
+        })
+        .join("\n");
+    let preview_text = renderer
+        .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
+            title: "已拒绝",
+            negative: true,
+            id: "req-2",
+            kind: "tool 请求",
+            decision: "已拒绝",
+            subject: "tool Read",
+            preview: r#"{"file_path":"Cargo.toml"}"#,
+            message: "Tool 未运行。",
+        })
+        .join("\n");
+
+    assert!(shell_text.contains("命令: git status"), "{shell_text}");
+    assert!(
+        preview_text.contains(r#"预览: {"file_path":"Cargo.toml"}"#),
+        "{preview_text}"
+    );
+    assert!(!shell_text.contains("Command:"), "{shell_text}");
+    assert!(!preview_text.contains("Preview:"), "{preview_text}");
+}
+
+#[test]
+fn approval_receipt_panel_uses_negative_state_not_localized_title_for_style() {
+    let renderer = RatatuiInlineRenderer {
+        width: 100,
+        plain: false,
+        styled: true,
+        language: crate::Language::ZhCn,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_approval_receipt_panel(
+            &mut output,
+            ApprovalReceiptPanelModel {
+                title: "已拒绝",
+                negative: true,
+                id: "req-1",
+                kind: "shell 命令请求",
+                decision: "已拒绝",
+                subject: "shell command",
+                preview: "git status",
+                message: "命令未运行。",
+            },
+        )
+        .expect("render styled zh approval receipt");
+
+    let text = String::from_utf8(output).expect("utf8 receipt");
+    let clean = strip_ansi_escape(&text);
+    assert!(text.contains("\x1b[0;31m"), "{text:?}");
+    assert!(clean.contains("已拒绝 req-1"), "{clean}");
+    assert!(clean.contains("命令: git status"), "{clean}");
+}
+
+#[test]
 fn approval_receipt_panel_can_render_compact_bash_approval() {
     let renderer = RatatuiInlineRenderer::with_width(100);
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Approved",
+            negative: false,
             id: "req-1",
             kind: "",
             decision: "",
@@ -308,6 +422,7 @@ fn approval_receipt_panel_wraps_long_command_and_message() {
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Denied",
+            negative: true,
             id: "req-9",
             kind: "shell command request",
             decision: "denied",
@@ -337,6 +452,7 @@ fn approval_receipt_panel_keeps_cjk_and_emoji_borders_aligned() {
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Denied",
+            negative: true,
             id: "req-宽",
             kind: "shell command request",
             decision: "denied",
@@ -360,6 +476,7 @@ fn plain_approval_receipt_panel_keeps_cancel_text() {
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Cancelled",
+            negative: true,
             id: "req-2",
             kind: "shell command request",
             decision: "cancelled by user",
@@ -385,6 +502,7 @@ fn plain_approval_receipt_panel_wraps_long_command() {
     let text = renderer
         .approval_receipt_panel_lines(ApprovalReceiptPanelModel {
             title: "Denied",
+            negative: true,
             id: "req-10",
             kind: "shell command request",
             decision: "denied",
@@ -427,6 +545,11 @@ fn approval_details_panel_renders_structured_request_context() {
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "echo system && ps aux -m | head -11 && echo done",
+            request_id: None,
+            tool_use_id: None,
+            execution_path: Some("foreground_shell_pty"),
+            command_block_id: Some("cmd-7"),
+            redaction_status: Some("ref_only"),
         })
         .join("\n");
 
@@ -434,6 +557,9 @@ fn approval_details_panel_renders_structured_request_context() {
     assert!(text.contains("tool request  pending  high risk"), "{text}");
     assert!(text.contains("Source: agent"), "{text}");
     assert!(text.contains("Run: run-12"), "{text}");
+    assert!(text.contains("Execution: foreground_shell_pty"), "{text}");
+    assert!(text.contains("Command block: cmd-7"), "{text}");
+    assert!(text.contains("Redaction: ref_only"), "{text}");
     assert!(text.contains("Default: deny"), "{text}");
     assert!(text.contains("Request: Bash command"), "{text}");
     assert!(text.contains("Command:"), "{text}");
@@ -443,6 +569,46 @@ fn approval_details_panel_renders_structured_request_context() {
     assert!(!text.contains("Tool input"), "{text}");
     assert!(!text.contains("Approval details\nid:"), "{text}");
     assert_rendered_width(&text, 70);
+}
+
+#[test]
+fn approval_details_panel_uses_zh_catalog_labels() {
+    let renderer = RatatuiInlineRenderer::with_width(70).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .approval_details_panel_lines(ApprovalDetailsPanelModel {
+            id: "req-7",
+            run_id: "run-12",
+            source: "agent",
+            kind: "tool request",
+            status: "pending",
+            risk: "high",
+            subject: "tool Bash",
+            preview_label: "Tool 输入",
+            preview: "echo system && ps aux -m | head -11 && echo done",
+            request_id: None,
+            tool_use_id: None,
+            execution_path: Some("foreground_shell_pty"),
+            command_block_id: Some("cmd-7"),
+            redaction_status: Some("ref_only"),
+        })
+        .join("\n");
+
+    assert!(text.contains("审批详情 req-7"), "{text}");
+    assert!(text.contains("风险 high"), "{text}");
+    assert!(text.contains("来源: agent"), "{text}");
+    assert!(text.contains("运行: run-12"), "{text}");
+    assert!(text.contains("执行: foreground_shell_pty"), "{text}");
+    assert!(text.contains("命令块: cmd-7"), "{text}");
+    assert!(text.contains("脱敏: ref_only"), "{text}");
+    assert!(text.contains("默认: 拒绝"), "{text}");
+    assert!(text.contains("请求: Bash 命令"), "{text}");
+    assert!(text.contains("命令:"), "{text}");
+    assert!(
+        text.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
+        "{text}"
+    );
+    assert!(!text.contains("Approval details"), "{text}");
+    assert!(!text.contains("Tool input"), "{text}");
 }
 
 #[test]
@@ -459,6 +625,11 @@ fn approval_details_panel_keeps_cjk_and_emoji_borders_aligned() {
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "cat /tmp/cosh-shell-中文-smoke.txt && echo 🧪 approval details",
+            request_id: None,
+            tool_use_id: None,
+            execution_path: None,
+            command_block_id: None,
+            redaction_status: None,
         })
         .join("\n");
 
@@ -482,6 +653,13 @@ fn approval_journal_panel_renders_decision_history() {
             risk: "medium",
             subject: "tool shell",
             preview: "git status",
+            preview_hash: "fnv1a64:test0001",
+            request_id: Some("ctrl-1"),
+            tool_use_id: Some("toolu-1"),
+            actor: "agent-auto",
+            execution_path: Some("foreground_shell_pty"),
+            command_block_id: Some("cmd-1"),
+            redaction_status: Some("ref_only"),
         },
         ApprovalJournalEntryModel {
             id: "req-2",
@@ -492,6 +670,13 @@ fn approval_journal_panel_renders_decision_history() {
             risk: "high",
             subject: "shell command",
             preview: "touch /tmp/cosh-shell-fake-action-should-not-run",
+            preview_hash: "fnv1a64:test0002",
+            request_id: None,
+            tool_use_id: None,
+            actor: "user",
+            execution_path: Some("not_executed_denied"),
+            command_block_id: None,
+            redaction_status: None,
         },
     ];
     let text = renderer
@@ -501,6 +686,10 @@ fn approval_journal_panel_renders_decision_history() {
     assert!(text.contains("Approval journal 2 decisions"), "{text}");
     assert!(text.contains("req-1  approved  tool request"), "{text}");
     assert!(text.contains("Source: agent  Run: run-1"), "{text}");
+    assert!(text.contains("Execution: foreground_shell_pty"), "{text}");
+    assert!(text.contains("Command block: cmd-1"), "{text}");
+    assert!(text.contains("Redaction: ref_only"), "{text}");
+    assert!(text.contains("Actor: agent-auto"), "{text}");
     assert!(text.contains("Command: git status"), "{text}");
     assert!(
         text.contains("req-2  denied  shell command request"),
@@ -515,6 +704,47 @@ fn approval_journal_panel_renders_decision_history() {
 }
 
 #[test]
+fn approval_journal_panel_uses_zh_catalog_labels() {
+    let renderer = RatatuiInlineRenderer::with_width(88).with_language(crate::Language::ZhCn);
+    let entries = vec![ApprovalJournalEntryModel {
+        id: "req-1",
+        run_id: "run-1",
+        source: "agent",
+        decision: "approved",
+        kind: "tool request",
+        risk: "medium",
+        subject: "tool shell",
+        preview: "git status",
+        preview_hash: "fnv1a64:test0001",
+        request_id: Some("ctrl-1"),
+        tool_use_id: Some("toolu-1"),
+        actor: "agent-auto",
+        execution_path: Some("foreground_shell_pty"),
+        command_block_id: Some("cmd-1"),
+        redaction_status: Some("ref_only"),
+    }];
+    let text = renderer
+        .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
+        .join("\n");
+
+    assert!(text.contains("审批记录 1 条决策"), "{text}");
+    assert!(text.contains("风险 medium"), "{text}");
+    assert!(text.contains("来源: agent"), "{text}");
+    assert!(text.contains("运行: run-1"), "{text}");
+    assert!(text.contains("执行: foreground_shell_pty"), "{text}");
+    assert!(text.contains("命令块: cmd-1"), "{text}");
+    assert!(text.contains("脱敏: ref_only"), "{text}");
+    assert!(text.contains("Provider 请求: ctrl-1"), "{text}");
+    assert!(text.contains("Tool 使用: toolu-1"), "{text}");
+    assert!(text.contains("执行者: agent-auto"), "{text}");
+    assert!(text.contains("预览哈希: fnv1a64:test0001"), "{text}");
+    assert!(text.contains("对象: tool shell"), "{text}");
+    assert!(text.contains("命令: git status"), "{text}");
+    assert!(!text.contains("Approval journal"), "{text}");
+    assert!(!text.contains("Command block:"), "{text}");
+}
+
+#[test]
 fn approval_journal_panel_keeps_cjk_and_emoji_borders_aligned() {
     let renderer = RatatuiInlineRenderer::with_width(54);
     let entries = vec![ApprovalJournalEntryModel {
@@ -526,6 +756,13 @@ fn approval_journal_panel_keeps_cjk_and_emoji_borders_aligned() {
         risk: "high",
         subject: "shell command",
         preview: "cat /tmp/cosh-shell-中文-smoke.txt && echo 🧪 should-not-run",
+        preview_hash: "fnv1a64:test0003",
+        request_id: None,
+        tool_use_id: None,
+        actor: "user",
+        execution_path: Some("not_executed_denied"),
+        command_block_id: None,
+        redaction_status: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -551,6 +788,13 @@ fn plain_approval_journal_panel_keeps_decision_history() {
         risk: "medium",
         subject: "tool shell",
         preview: "git status",
+        preview_hash: "fnv1a64:test0004",
+        request_id: None,
+        tool_use_id: None,
+        actor: "user",
+        execution_path: Some("not_executed_cancelled"),
+        command_block_id: None,
+        redaction_status: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -558,6 +802,7 @@ fn plain_approval_journal_panel_keeps_decision_history() {
 
     assert!(text.contains("Approval journal - 1 decisions"), "{text}");
     assert!(text.contains("req-1 cancelled - tool request"), "{text}");
+    assert!(text.contains("Execution: not_executed_cancelled"), "{text}");
     assert!(text.contains("Command: git status"), "{text}");
     assert!(!text.contains('┌'), "{text}");
 }

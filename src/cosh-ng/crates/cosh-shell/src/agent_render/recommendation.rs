@@ -13,7 +13,6 @@ use super::{
     buffer_to_lines, buffer_to_styled_lines, display_width, wrap_plain_line, RatatuiInlineRenderer,
 };
 
-const RECOMMENDATION_FOOTER: &str = "/select N copy - display-only";
 const RECOMMENDATION_FOOTER_PREFIX: &str = "  ";
 
 #[derive(Debug, Clone)]
@@ -48,10 +47,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = recommendation_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = recommendation_panel_height(&model, i18n, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_recommendation_panel(model, area, &mut buffer);
+        render_recommendation_panel(model, i18n, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -61,10 +61,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = recommendation_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = recommendation_panel_height(&model, i18n, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_recommendation_panel(model, area, &mut buffer);
+        render_recommendation_panel(model, i18n, area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -75,9 +76,16 @@ impl RatatuiInlineRenderer {
     fn plain_recommendation_panel_lines(&self, model: RecommendationPanelModel<'_>) -> Vec<String> {
         let width = self.panel_standard_width();
         let content_width = panel_content_width(width);
-        let mut lines = vec!["Recommendations:".to_string()];
+        let i18n = self.i18n();
+        let mut lines = vec![format!(
+            "{}:",
+            i18n.t(crate::MessageId::RecommendationTitle)
+        )];
         if model.commands.is_empty() {
-            lines.push("  No command recommendations".to_string());
+            lines.push(format!(
+                "  {}",
+                i18n.t(crate::MessageId::RecommendationEmptyBody)
+            ));
         } else {
             lines.extend(
                 model
@@ -95,7 +103,7 @@ impl RatatuiInlineRenderer {
         }
         lines.extend(wrap_prefixed_recommendation_line(
             RECOMMENDATION_FOOTER_PREFIX,
-            RECOMMENDATION_FOOTER,
+            i18n.t(crate::MessageId::RecommendationFooter),
             content_width,
         ));
         lines
@@ -169,21 +177,26 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn recommendation_panel_height(model: &RecommendationPanelModel<'_>, width: u16) -> u16 {
+fn recommendation_panel_height(
+    model: &RecommendationPanelModel<'_>,
+    i18n: crate::I18n,
+    width: u16,
+) -> u16 {
     let content_width = panel_content_width(width);
     recommendation_command_rows(model, content_width)
-        + recommendation_footer_rows(content_width)
+        + recommendation_footer_rows(i18n, content_width)
         + 2
 }
 
 fn render_recommendation_panel(
     model: RecommendationPanelModel<'_>,
+    i18n: crate::I18n,
     area: Rect,
     buffer: &mut Buffer,
 ) {
     let block = Block::bordered()
         .title(Line::from(Span::styled(
-            "─ Recommendations ",
+            format!("─ {} ", i18n.t(crate::MessageId::RecommendationTitle)),
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .border_set(ROUNDED)
@@ -193,7 +206,7 @@ fn render_recommendation_panel(
 
     let content_width = inner.width as usize;
     let command_rows = recommendation_command_rows(&model, content_width);
-    let footer_rows = recommendation_footer_rows(content_width);
+    let footer_rows = recommendation_footer_rows(i18n, content_width);
     let chunks = Layout::vertical(vec![
         Constraint::Length(command_rows),
         Constraint::Length(footer_rows),
@@ -201,7 +214,10 @@ fn render_recommendation_panel(
     .split(inner);
 
     let command_lines = if model.commands.is_empty() {
-        vec![Line::from("  No command recommendations")]
+        vec![Line::from(format!(
+            "  {}",
+            i18n.t(crate::MessageId::RecommendationEmptyBody)
+        ))]
     } else {
         model
             .commands
@@ -226,7 +242,7 @@ fn render_recommendation_panel(
 
     Paragraph::new(Text::from(Line::from(vec![
         Span::raw(RECOMMENDATION_FOOTER_PREFIX),
-        Span::raw(RECOMMENDATION_FOOTER),
+        Span::raw(i18n.t(crate::MessageId::RecommendationFooter)),
     ])))
     .wrap(Wrap { trim: false })
     .render(chunks[1], buffer);
@@ -303,9 +319,13 @@ fn recommendation_command_rows(model: &RecommendationPanelModel<'_>, width: usiz
         .sum()
 }
 
-fn recommendation_footer_rows(width: usize) -> u16 {
+fn recommendation_footer_rows(i18n: crate::I18n, width: usize) -> u16 {
     wrapped_row_count(
-        &format!("{RECOMMENDATION_FOOTER_PREFIX}{RECOMMENDATION_FOOTER}"),
+        &format!(
+            "{}{}",
+            RECOMMENDATION_FOOTER_PREFIX,
+            i18n.t(crate::MessageId::RecommendationFooter)
+        ),
         width,
     )
 }

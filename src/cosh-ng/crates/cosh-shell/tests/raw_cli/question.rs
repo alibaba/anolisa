@@ -6,7 +6,7 @@ fn raw_cli_agent_question_accepts_card_answer_choice() {
         "fake",
         vec![
             (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
@@ -47,6 +47,86 @@ fn raw_cli_agent_question_accepts_card_answer_choice() {
 }
 
 #[test]
+fn raw_cli_agent_question_uses_zh_language_env() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "zh-CN")],
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent 问题"), "{output}");
+    assert!(!output.contains("Agent 问题 q-1"), "{output}");
+    assert!(
+        output.contains("Choose a color for the next step"),
+        "{output}"
+    );
+    assert!(output.contains("选择一项:"), "{output}");
+    assert!(output.contains("[1] Green"), "{output}");
+    assert!(output.contains("[2] Blue"), "{output}");
+    assert!(output.contains("[4] 其他..."), "{output}");
+    assert!(output.contains("> [2] Blue"), "{output}");
+    assert!(output.contains("左/右移动"), "{output}");
+    assert!(output.contains("Enter 发送"), "{output}");
+    assert!(output.contains("回答: Blue"), "{output}");
+    assert!(output.contains("Got your answer: Blue"), "{output}");
+    assert!(!output.contains("Agent question"), "{output}");
+    assert!(!output.contains("Select one:"), "{output}");
+    assert!(!output.contains("Left/Right move"), "{output}");
+    assert!(!output.contains("Answer: Blue"), "{output}");
+    assert!(!output.contains("Answer sent"), "{output}");
+    assert!(!output.contains("Sent to Agent"), "{output}");
+    assert!(!output.contains("/answer"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+    assert_no_migrated_english_ui_labels(&output, QUESTION_ZH_FORBIDDEN_UI);
+}
+
+#[test]
+fn raw_cli_agent_question_answer_slash_is_ignored() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (b"/answer Blue\n".to_vec(), Duration::from_millis(1_200)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(
+        !output.contains("Got your answer: /answer Blue"),
+        "{output}"
+    );
+    assert!(output.contains("Got your answer: Blue"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_question_ctrl_c_cancels_card_without_answer_turn() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask question\n".to_vec(), Duration::ZERO),
+            (vec![0x03], Duration::from_millis(1_500)),
+            (
+                b"echo after-question-cancel\nexit\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(output.contains("after-question-cancel"), "{output}");
+    assert!(!output.contains("Got your answer:"), "{output}");
+    assert!(!output.contains("Answer:"), "{output}");
+    assert!(!output.contains("bash:"), "{output}");
+}
+
+#[test]
 fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
@@ -58,7 +138,7 @@ fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
         &[("COSH_SHELL_ISOLATED", "1"), ("TERM", "xterm-256color")],
         vec![
             (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
             (
                 b"echo after-zsh-question\n".to_vec(),
                 Duration::from_millis(300),
@@ -91,7 +171,7 @@ fn raw_cli_agent_question_answer_drops_stale_held_text() {
         "fake",
         vec![
             (b"?? stream stale question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[B\n".to_vec(), Duration::from_millis(300)),
+            (b"\x1b[B\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
@@ -115,7 +195,7 @@ fn raw_cli_agent_question_accepts_multiple_card_answers() {
         "fake",
         vec![
             (b"?? ask multi question\n".to_vec(), Duration::ZERO),
-            (b" \t \n".to_vec(), Duration::from_millis(300)),
+            (b" \t \n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
@@ -151,7 +231,7 @@ fn raw_cli_agent_question_accepts_multiple_answers_with_custom_card_answer() {
         "fake",
         vec![
             (b"?? ask multi question\n".to_vec(), Duration::ZERO),
-            (b" \t\t\tDocs\n".to_vec(), Duration::from_millis(300)),
+            (b" \t\t\tDocs\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
@@ -181,7 +261,7 @@ fn raw_cli_agent_question_accepts_natural_language_answer() {
             (b"?? ask question\n".to_vec(), Duration::ZERO),
             (
                 "\u{7eff}\u{8272}\n".as_bytes().to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(1_200),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
@@ -214,7 +294,7 @@ fn raw_cli_agent_question_accepts_custom_card_answer() {
             (b"?? ask question\n".to_vec(), Duration::ZERO),
             (
                 "\t\t\t\u{7ea2}\u{8272}\n".as_bytes().to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
@@ -248,9 +328,9 @@ fn raw_cli_agent_question_accepts_free_text_only_answer() {
             (b"?? ask free question\n".to_vec(), Duration::ZERO),
             (
                 "\u{7279}\u{6027}\u{5206}\u{652f}\n".as_bytes().to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(1_400),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
         ],
     );
 

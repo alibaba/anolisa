@@ -54,11 +54,12 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_panel_lines(model);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = activity_panel_height(&model, width);
+        let height = activity_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_activity_panel(model, area, &mut buffer);
+        render_activity_panel(&i18n, model, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -67,11 +68,12 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_panel_lines(model);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = activity_panel_height(&model, width);
+        let height = activity_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_activity_panel(model, area, &mut buffer);
+        render_activity_panel(&i18n, model, area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -80,14 +82,15 @@ impl RatatuiInlineRenderer {
     }
 
     fn plain_activity_panel_lines(&self, model: ActivityPanelModel<'_>) -> Vec<String> {
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
         let content_width = activity_panel_content_width(width);
-        let mut lines = vec!["Activity:".to_string()];
+        let mut lines = vec![format!("{}:", i18n.t(crate::MessageId::ActivityTitle))];
         lines.extend(
             model
                 .rows
                 .into_iter()
-                .flat_map(|row| wrap_plain_line(&activity_row_text(&row), content_width)),
+                .flat_map(|row| wrap_plain_line(&activity_row_text(&i18n, &row), content_width)),
         );
         lines
     }
@@ -112,11 +115,12 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_details_panel_lines(model);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = activity_details_panel_height(&model, width);
+        let height = activity_details_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_activity_details_panel(model, area, &mut buffer);
+        render_activity_details_panel(&i18n, model, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -128,11 +132,12 @@ impl RatatuiInlineRenderer {
             return self.plain_activity_details_panel_lines(model);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = activity_details_panel_height(&model, width);
+        let height = activity_details_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_activity_details_panel(model, area, &mut buffer);
+        render_activity_details_panel(&i18n, model, area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -144,23 +149,35 @@ impl RatatuiInlineRenderer {
         &self,
         model: ActivityDetailsPanelModel<'_>,
     ) -> Vec<String> {
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
         let content_width = panel_content_width(width);
-        let mut lines = vec![format!("Activity details {}", model.id)];
+        let mut lines = vec![format!(
+            "{} {}",
+            i18n.t(crate::MessageId::ActivityDetailsTitle),
+            model.id
+        )];
         lines.extend(wrap_plain_line(
             &format!(
                 "{} - {} - {}",
-                model.kind,
-                activity_summary(model.status, model.summary),
+                activity_kind_label(&i18n, model.kind),
+                activity_summary(&i18n, model.status, model.summary),
                 model.subject
             ),
             content_width,
         ));
         lines.extend(wrap_plain_line(
-            &format!("Run: {}", model.run_id),
+            &format!(
+                "{}: {}",
+                i18n.t(crate::MessageId::ActivityRunLabel),
+                model.run_id
+            ),
             content_width,
         ));
-        lines.push("Detail:".to_string());
+        lines.push(format!(
+            "{}:",
+            i18n.t(crate::MessageId::ActivityDetailLabel)
+        ));
         for detail_line in model.detail.lines() {
             lines.extend(wrap_plain_line(detail_line, content_width));
         }
@@ -168,20 +185,25 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn activity_panel_height(model: &ActivityPanelModel<'_>, width: u16) -> u16 {
+fn activity_panel_height(i18n: &crate::I18n, model: &ActivityPanelModel<'_>, width: u16) -> u16 {
     let content_width = activity_panel_content_width(width);
-    activity_row_heights(model, content_width)
+    activity_row_heights(i18n, model, content_width)
         .into_iter()
         .sum::<u16>()
         .max(1)
         + 2
 }
 
-fn render_activity_panel(model: ActivityPanelModel<'_>, area: Rect, buffer: &mut Buffer) {
+fn render_activity_panel(
+    i18n: &crate::I18n,
+    model: ActivityPanelModel<'_>,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(Span::styled(
-            " Activity ",
+            format!(" {} ", i18n.t(crate::MessageId::ActivityTitle)),
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .border_set(ROUNDED)
@@ -189,7 +211,7 @@ fn render_activity_panel(model: ActivityPanelModel<'_>, area: Rect, buffer: &mut
     let inner = block.inner(area);
     block.render(area, buffer);
 
-    let row_constraints = activity_row_heights(&model, inner.width as usize)
+    let row_constraints = activity_row_heights(i18n, &model, inner.width as usize)
         .into_iter()
         .map(Constraint::Length)
         .collect::<Vec<_>>();
@@ -199,57 +221,101 @@ fn render_activity_panel(model: ActivityPanelModel<'_>, area: Rect, buffer: &mut
         let Some(area) = chunks.get(idx).copied() else {
             break;
         };
-        Paragraph::new(Text::from(styled_activity_row_line(&row)))
+        Paragraph::new(Text::from(styled_activity_row_line(i18n, &row)))
             .wrap(Wrap { trim: true })
             .render(area, buffer);
     }
 }
 
-fn activity_summary(status: &str, summary: &str) -> String {
+fn activity_summary(i18n: &crate::I18n, status: &str, summary: &str) -> String {
     if status.is_empty() || status == "captured" || summary.contains(status) {
         summary.to_string()
     } else {
-        format!("{status} · {summary}")
+        format!("{} · {summary}", activity_status_label(i18n, status))
     }
 }
 
-fn activity_row_text(row: &ActivityRowModel<'_>) -> String {
-    let summary = activity_summary(row.status, row.summary);
+fn activity_row_text(i18n: &crate::I18n, row: &ActivityRowModel<'_>) -> String {
+    let summary = activity_summary(i18n, row.status, row.summary);
     match row.kind {
         "skill" => {
             let status = if row.status.is_empty() {
-                "updated"
+                i18n.t(crate::MessageId::ActivitySkillUpdatedStatus)
             } else {
-                row.status
+                activity_status_label(i18n, row.status)
             };
             if row.subject.is_empty() {
-                format!("Skill {status}")
+                format!("{} {status}", i18n.t(crate::MessageId::ActivitySkillLabel))
             } else {
-                format!("Skill {status}: {}", row.subject)
+                format!(
+                    "{} {status}: {}",
+                    i18n.t(crate::MessageId::ActivitySkillLabel),
+                    row.subject
+                )
             }
         }
-        "output" => format!("Tool output: {summary}"),
+        "output" => format!(
+            "{}: {summary}",
+            i18n.t(crate::MessageId::ActivityToolOutputLabel)
+        ),
         "tool" => {
             if summary.is_empty() || summary == row.status {
-                format!("Tool {}", row.status)
+                format!(
+                    "{} {}",
+                    i18n.t(crate::MessageId::ActivityToolLabel),
+                    activity_status_label(i18n, row.status)
+                )
             } else {
-                let status_prefix = format!("{} · ", row.status);
+                let status = activity_status_label(i18n, row.status);
+                let status_prefix = format!("{status} · ");
                 let summary = summary.strip_prefix(&status_prefix).unwrap_or(&summary);
-                format!("Tool {}: {summary}", row.status)
+                format!(
+                    "{} {}: {summary}",
+                    i18n.t(crate::MessageId::ActivityToolLabel),
+                    status
+                )
             }
         }
         _ => {
+            let kind = activity_kind_label(i18n, row.kind);
             if let Some(subject) = activity_subject_suffix(row) {
-                format!("{}: {} {}", row.kind, summary, subject)
+                format!("{kind}: {summary} {subject}")
             } else {
-                format!("{}: {}", row.kind, summary)
+                format!("{kind}: {summary}")
             }
         }
     }
 }
 
-fn styled_activity_row_line(row: &ActivityRowModel<'_>) -> Line<'static> {
-    let text = activity_row_text(row);
+fn activity_kind_label(i18n: &crate::I18n, kind: &str) -> String {
+    match kind {
+        "skill" => i18n.t(crate::MessageId::ActivitySkillLabel).to_string(),
+        "output" => i18n
+            .t(crate::MessageId::ActivityToolOutputLabel)
+            .to_string(),
+        "tool" => i18n.t(crate::MessageId::ActivityToolLabel).to_string(),
+        "shell" => i18n.t(crate::MessageId::ActivityShellLabel).to_string(),
+        _ => kind.to_string(),
+    }
+}
+
+fn activity_status_label<'a>(i18n: &crate::I18n, status: &'a str) -> &'a str {
+    match status {
+        "loading" => i18n.t(crate::MessageId::ActivityStatusLoading),
+        "loaded" => i18n.t(crate::MessageId::ActivityStatusLoaded),
+        "failed" => i18n.t(crate::MessageId::ActivityStatusFailed),
+        "called" => i18n.t(crate::MessageId::ActivityStatusCalled),
+        "requested" => i18n.t(crate::MessageId::ActivityStatusRequested),
+        "captured" => i18n.t(crate::MessageId::ActivityStatusCaptured),
+        "completed" => i18n.t(crate::MessageId::ActivityStatusCompleted),
+        "error" => i18n.t(crate::MessageId::ActivityStatusError),
+        "interrupted" => i18n.t(crate::MessageId::ActivityStatusInterrupted),
+        _ => status,
+    }
+}
+
+fn styled_activity_row_line(i18n: &crate::I18n, row: &ActivityRowModel<'_>) -> Line<'static> {
+    let text = activity_row_text(i18n, row);
     let Some((label, rest)) = text.split_once(':') else {
         return Line::from(Span::styled(text, Style::default().fg(Color::White)));
     };
@@ -264,7 +330,11 @@ fn styled_activity_row_line(row: &ActivityRowModel<'_>) -> Line<'static> {
     ])
 }
 
-fn activity_row_heights(model: &ActivityPanelModel<'_>, width: usize) -> Vec<u16> {
+fn activity_row_heights(
+    i18n: &crate::I18n,
+    model: &ActivityPanelModel<'_>,
+    width: usize,
+) -> Vec<u16> {
     if model.rows.is_empty() {
         return vec![1];
     }
@@ -272,7 +342,11 @@ fn activity_row_heights(model: &ActivityPanelModel<'_>, width: usize) -> Vec<u16
     model
         .rows
         .iter()
-        .map(|row| wrap_plain_line(&activity_row_text(row), width).len().max(1) as u16)
+        .map(|row| {
+            wrap_plain_line(&activity_row_text(i18n, row), width)
+                .len()
+                .max(1) as u16
+        })
         .collect()
 }
 
@@ -288,14 +362,19 @@ fn activity_subject_suffix<'a>(row: &ActivityRowModel<'a>) -> Option<&'a str> {
     }
 }
 
-fn activity_details_panel_height(model: &ActivityDetailsPanelModel<'_>, width: u16) -> u16 {
-    activity_details_lines(model, panel_content_width(width))
+fn activity_details_panel_height(
+    i18n: &crate::I18n,
+    model: &ActivityDetailsPanelModel<'_>,
+    width: u16,
+) -> u16 {
+    activity_details_lines(i18n, model, panel_content_width(width))
         .len()
         .max(1) as u16
         + 2
 }
 
 fn render_activity_details_panel(
+    i18n: &crate::I18n,
     model: ActivityDetailsPanelModel<'_>,
     area: Rect,
     buffer: &mut Buffer,
@@ -303,7 +382,7 @@ fn render_activity_details_panel(
     let block = Block::bordered()
         .title(Line::from(vec![
             Span::styled(
-                " Activity details ",
+                format!(" {} ", i18n.t(crate::MessageId::ActivityDetailsTitle)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} ", model.id)),
@@ -314,6 +393,7 @@ fn render_activity_details_panel(
     block.render(area, buffer);
 
     Paragraph::new(Text::from(activity_details_lines(
+        i18n,
         &model,
         inner.width as usize,
     )))
@@ -321,6 +401,7 @@ fn render_activity_details_panel(
 }
 
 fn activity_details_lines(
+    i18n: &crate::I18n,
     model: &ActivityDetailsPanelModel<'_>,
     width: usize,
 ) -> Vec<Line<'static>> {
@@ -329,14 +410,26 @@ fn activity_details_lines(
         &mut lines,
         &format!(
             "{} - {} - {}",
-            model.kind,
-            activity_summary(model.status, model.summary),
+            activity_kind_label(i18n, model.kind),
+            activity_summary(i18n, model.status, model.summary),
             model.subject
         ),
         width,
     );
-    push_wrapped_line(&mut lines, &format!("Run: {}", model.run_id), width);
-    push_wrapped_line(&mut lines, "Detail:", width);
+    push_wrapped_line(
+        &mut lines,
+        &format!(
+            "{}: {}",
+            i18n.t(crate::MessageId::ActivityRunLabel),
+            model.run_id
+        ),
+        width,
+    );
+    push_wrapped_line(
+        &mut lines,
+        &format!("{}:", i18n.t(crate::MessageId::ActivityDetailLabel)),
+        width,
+    );
     for detail_line in model.detail.lines() {
         push_wrapped_line(&mut lines, detail_line, width);
     }

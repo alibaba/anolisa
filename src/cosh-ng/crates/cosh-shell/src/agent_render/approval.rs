@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
-use crate::approval_actions::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
+use super::actions::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
@@ -52,7 +52,7 @@ impl RatatuiInlineRenderer {
         let height = approval_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_panel(model, area, &mut buffer);
+        render_approval_panel(model, self.i18n(), area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -65,7 +65,7 @@ impl RatatuiInlineRenderer {
         let height = approval_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_panel(model, area, &mut buffer);
+        render_approval_panel(model, self.i18n(), area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -74,6 +74,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn plain_approval_panel_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
+        let i18n = self.i18n();
         if is_command_approval_request(&model) {
             let command_rows = command_preview_rows(
                 model.preview,
@@ -81,53 +82,76 @@ impl RatatuiInlineRenderer {
                 max_preview_rows(model.expanded),
             );
             let mut lines = vec![
-                "Approval required".to_string(),
-                command_request_heading(model.subject).to_string(),
+                i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
+                command_request_heading(model.subject, i18n).to_string(),
             ];
             lines.extend(command_rows);
             if model.queue_total > 1 {
-                let mut queue = format!(
-                    "Queue: {}/{} pending",
-                    model.queue_position, model.queue_total
+                let position = model.queue_position.to_string();
+                let total = model.queue_total.to_string();
+                let mut queue = i18n.format(
+                    crate::MessageId::ApprovalQueueCompactLine,
+                    &[("position", position.as_str()), ("total", total.as_str())],
                 );
                 if let Some(next) = model.next_label {
-                    queue.push_str(&format!("; next {next}"));
+                    queue.push_str(
+                        &i18n.format(crate::MessageId::ApprovalQueueNextSuffix, &[("next", next)]),
+                    );
                 }
                 lines.push(queue);
             }
-            lines.push(approval_action_line(model.selected_action));
+            lines.push(approval_action_line(model.selected_action, i18n));
             if model.expanded {
                 lines.push(
-                    "Default: deny; approved command is rechecked by read-only broker.".to_string(),
+                    i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy)
+                        .to_string(),
                 );
-                lines.push(
-                    "Keys: Left/Right select · Enter confirm · d details · Esc cancel".to_string(),
-                );
+                lines.push(format!(
+                    "{}{}",
+                    i18n.t(crate::MessageId::ApprovalKeysPrefix),
+                    i18n.t(crate::MessageId::ApprovalKeysText)
+                ));
             }
             return lines;
         }
 
+        let position = model.queue_position.to_string();
+        let total = model.queue_total.to_string();
+        let risk = i18n.format(
+            crate::MessageId::ApprovalRiskSuffix,
+            &[("risk", model.risk)],
+        );
         let mut lines = vec![
-            "Approval required".to_string(),
-            format!("{} · {} · {} risk", model.id, model.kind, model.risk),
-            format!(
-                "Queue: {} of {} pending",
-                model.queue_position, model.queue_total
+            i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
+            format!("{} · {} · {}", model.id, model.kind, risk),
+            i18n.format(
+                crate::MessageId::ApprovalQueueFullLine,
+                &[("position", position.as_str()), ("total", total.as_str())],
             ),
-            format!("Subject: {}", model.subject),
+            format!(
+                "{}{}",
+                i18n.t(crate::MessageId::ApprovalSubjectLabel),
+                model.subject
+            ),
             format!("{}: {}", model.preview_label, model.preview),
         ];
         if let Some(next) = model.next_label {
-            lines.push(format!("Next: {next}"));
+            lines.push(format!(
+                "{}{next}",
+                i18n.t(crate::MessageId::ApprovalNextLabel)
+            ));
         }
-        lines.push(approval_action_line(model.selected_action));
+        lines.push(approval_action_line(model.selected_action, i18n));
         if model.expanded {
             lines.push(
-                "Policy: user approval is required before any executable tool request".to_string(),
+                i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
+                    .to_string(),
             );
-            lines.push(
-                "Keys: ←/→ select · Enter confirm · d details · Esc/Ctrl+C cancel".to_string(),
-            );
+            lines.push(format!(
+                "{}{}",
+                i18n.t(crate::MessageId::ApprovalKeysPrefix),
+                i18n.t(crate::MessageId::ApprovalKeysText)
+            ));
         }
         lines
     }
@@ -160,9 +184,14 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     7 + preview_rows + next_rows + policy_rows
 }
 
-fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut Buffer) {
+fn render_approval_panel(
+    model: ApprovalPanelModel<'_>,
+    i18n: crate::I18n,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
     if is_command_approval_request(&model) {
-        render_command_tool_approval_panel(model, area, buffer);
+        render_command_tool_approval_panel(model, i18n, area, buffer);
         return;
     }
 
@@ -174,7 +203,10 @@ fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
-            Span::styled(" Approval ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", i18n.t(crate::MessageId::ApprovalTitle)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("{} ", model.id)),
         ]))
         .border_set(ROUNDED)
@@ -206,16 +238,31 @@ fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut
     Paragraph::new(Line::from(vec![
         Span::styled(model.kind, Style::default().fg(Color::Cyan)),
         Span::raw("  "),
-        Span::styled(format!("{} risk", model.risk), Style::default().fg(border)),
+        Span::styled(
+            i18n.format(
+                crate::MessageId::ApprovalRiskSuffix,
+                &[("risk", model.risk)],
+            ),
+            Style::default().fg(border),
+        ),
         Span::raw(format!(
-            "  queue {}/{} pending",
-            model.queue_position, model.queue_total
+            "  {}",
+            i18n.format(
+                crate::MessageId::ApprovalQueueCompactLine,
+                &[
+                    ("position", model.queue_position.to_string().as_str()),
+                    ("total", model.queue_total.to_string().as_str()),
+                ],
+            )
         )),
     ]))
     .render(chunks[0], buffer);
 
     Paragraph::new(Line::from(vec![
-        Span::styled("Subject: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            i18n.t(crate::MessageId::ApprovalSubjectLabel),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::raw(model.subject),
     ]))
     .render(chunks[1], buffer);
@@ -236,24 +283,30 @@ fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut
 
     if let Some(next) = model.next_label {
         Paragraph::new(Line::from(vec![
-            Span::styled("Next: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                i18n.t(crate::MessageId::ApprovalNextLabel),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(next.to_string()),
         ]))
         .render(chunks[4], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action)).render(chunks[5], buffer);
+    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[5], buffer);
 
     Paragraph::new(Line::from(vec![
-        Span::styled("Keys: ", Style::default().fg(Color::DarkGray)),
-        Span::raw("Left/Right select  Enter confirm  d details  Esc cancel"),
+        Span::styled(
+            i18n.t(crate::MessageId::ApprovalKeysPrefix),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
     ]))
     .render(chunks[6], buffer);
 
     if model.expanded {
         Paragraph::new(Text::from(vec![
-            Line::from("Policy: user approval is required before any executable tool request."),
-            Line::from("Only approved read-only Bash/shell tool requests may run in this MVP."),
+            Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)),
+            Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicyExtra)),
         ]))
         .wrap(Wrap { trim: true })
         .render(chunks[7], buffer);
@@ -262,6 +315,7 @@ fn render_approval_panel(model: ApprovalPanelModel<'_>, area: Rect, buffer: &mut
 
 fn render_command_tool_approval_panel(
     model: ApprovalPanelModel<'_>,
+    i18n: crate::I18n,
     area: Rect,
     buffer: &mut Buffer,
 ) {
@@ -273,7 +327,10 @@ fn render_command_tool_approval_panel(
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
-            Span::styled(" Approval ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", i18n.t(crate::MessageId::ApprovalTitle)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("{} ", model.id)),
         ]))
         .border_set(ROUNDED)
@@ -302,7 +359,7 @@ fn render_command_tool_approval_panel(
     let policy_index = 5;
 
     Paragraph::new(Line::from(Span::styled(
-        command_request_heading(model.subject),
+        command_request_heading(model.subject, i18n),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -316,12 +373,16 @@ fn render_command_tool_approval_panel(
     Paragraph::new(Text::from(command_lines)).render(chunks[1], buffer);
 
     if model.queue_total > 1 {
-        let mut queue = format!(
-            "Queue: {}/{} pending",
-            model.queue_position, model.queue_total
+        let position = model.queue_position.to_string();
+        let total = model.queue_total.to_string();
+        let mut queue = i18n.format(
+            crate::MessageId::ApprovalQueueCompactLine,
+            &[("position", position.as_str()), ("total", total.as_str())],
         );
         if let Some(next) = model.next_label {
-            queue.push_str(&format!("; next {next}"));
+            queue.push_str(
+                &i18n.format(crate::MessageId::ApprovalQueueNextSuffix, &[("next", next)]),
+            );
         }
         Paragraph::new(Line::from(Span::styled(
             queue,
@@ -330,29 +391,32 @@ fn render_command_tool_approval_panel(
         .render(chunks[2], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action))
+    Paragraph::new(approval_action_spans(model.selected_action, i18n))
         .render(chunks[action_index], buffer);
 
     if model.expanded {
         Paragraph::new(Line::from(vec![
-            Span::styled("Keys: ", Style::default().fg(Color::DarkGray)),
-            Span::raw("Left/Right select  Enter confirm  d details  Esc cancel"),
+            Span::styled(
+                i18n.t(crate::MessageId::ApprovalKeysPrefix),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
         ]))
         .render(chunks[keys_index], buffer);
-        Paragraph::new("Default: deny. Approved command is rechecked by read-only broker.")
+        Paragraph::new(i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy))
             .wrap(Wrap { trim: true })
             .render(chunks[policy_index], buffer);
     }
 }
 
-fn approval_action_spans(selected: ApprovalPanelAction) -> Line<'static> {
+fn approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, descriptor) in APPROVAL_PANEL_ACTIONS.iter().enumerate() {
         if idx > 0 {
             spans.push(Span::raw("  "));
         }
         spans.push(action_span(
-            descriptor.label,
+            approval_action_label(descriptor.action, i18n),
             descriptor.action,
             selected == descriptor.action,
         ));
@@ -360,21 +424,31 @@ fn approval_action_spans(selected: ApprovalPanelAction) -> Line<'static> {
     Line::from(spans)
 }
 
-fn approval_action_line(selected: ApprovalPanelAction) -> String {
+fn approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
     APPROVAL_PANEL_ACTIONS
         .iter()
         .map(|descriptor| {
+            let label = approval_action_label(descriptor.action, i18n);
             if descriptor.action == selected {
-                format!("[{}]", descriptor.label)
+                format!("[{label}]")
             } else {
-                descriptor.label.to_string()
+                label.to_string()
             }
         })
         .collect::<Vec<_>>()
         .join("  ")
 }
 
-fn action_span(label: &'static str, action: ApprovalPanelAction, selected: bool) -> Span<'static> {
+fn approval_action_label(action: ApprovalPanelAction, i18n: crate::I18n) -> &'static str {
+    match action {
+        ApprovalPanelAction::Approve => i18n.t(crate::MessageId::ApprovalActionAllowOnce),
+        ApprovalPanelAction::AlwaysTrust => i18n.t(crate::MessageId::ApprovalActionAlwaysTrust),
+        ApprovalPanelAction::Deny => i18n.t(crate::MessageId::ApprovalActionDeny),
+        ApprovalPanelAction::Details => i18n.t(crate::MessageId::ApprovalActionDetails),
+    }
+}
+
+fn action_span(label: &str, action: ApprovalPanelAction, selected: bool) -> Span<'static> {
     if selected {
         Span::styled(format!("> [ {label} ] "), selected_action_style(action))
     } else {
@@ -385,6 +459,7 @@ fn action_span(label: &'static str, action: ApprovalPanelAction, selected: bool)
 fn selected_action_style(action: ApprovalPanelAction) -> Style {
     let background = match action {
         ApprovalPanelAction::Approve => Color::Green,
+        ApprovalPanelAction::AlwaysTrust => Color::Cyan,
         ApprovalPanelAction::Deny => Color::Red,
         ApprovalPanelAction::Details => Color::Blue,
     };
@@ -414,11 +489,11 @@ fn is_command_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
             && model.subject.eq_ignore_ascii_case("shell command"))
 }
 
-fn command_request_heading(subject: &str) -> &'static str {
+fn command_request_heading(subject: &str, i18n: crate::I18n) -> &'static str {
     if subject.eq_ignore_ascii_case("tool shell") || subject.eq_ignore_ascii_case("shell command") {
-        "Run shell command?"
+        i18n.t(crate::MessageId::ApprovalRunShellCommandPrompt)
     } else {
-        "Run Bash command?"
+        i18n.t(crate::MessageId::ApprovalRunBashCommandPrompt)
     }
 }
 

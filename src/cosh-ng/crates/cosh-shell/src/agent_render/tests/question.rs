@@ -40,6 +40,35 @@ fn question_panel_renders_options_with_compact_instructions() {
 }
 
 #[test]
+fn question_panel_uses_zh_labels_without_translating_options() {
+    let renderer = RatatuiInlineRenderer::with_width(100).with_language(crate::Language::ZhCn);
+    let options = vec!["Green".to_string(), "Blue".to_string()];
+    let text = renderer
+        .question_panel_lines(QuestionPanelModel {
+            id: "q-1",
+            question: "Choose a color for the next step",
+            options: &options,
+            selected_option: 1,
+            selected_options: &[],
+            custom_answer: "",
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        })
+        .join("\n");
+
+    assert!(text.contains("Agent 问题"), "{text}");
+    assert!(text.contains("Choose a color for the next step"), "{text}");
+    assert!(text.contains("选择一项:"), "{text}");
+    assert!(text.contains("[1] Green"), "{text}");
+    assert!(text.contains("> [2] Blue"), "{text}");
+    assert!(text.contains("[3] 其他..."), "{text}");
+    assert!(text.contains("按键:"), "{text}");
+    assert!(text.contains("左/右移动"), "{text}");
+    assert!(text.contains("Enter 发送"), "{text}");
+    assert_rendered_width(&text, 100);
+}
+
+#[test]
 fn question_panel_renders_multiple_choice_toggles() {
     let renderer = RatatuiInlineRenderer::with_width(100);
     let options = vec![
@@ -175,6 +204,7 @@ fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
         width: 100,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let options = vec!["Approve".to_string(), "Deny".to_string()];
     let mut output = Vec::new();

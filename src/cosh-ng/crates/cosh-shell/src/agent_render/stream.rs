@@ -19,6 +19,7 @@ use super::RatatuiInlineRenderer;
 pub struct StreamingAgentBlock {
     width: usize,
     plain: bool,
+    title: String,
     current_width: usize,
     started: bool,
     seen_text: bool,
@@ -36,10 +37,11 @@ pub struct MarkdownStreamBlock {
 }
 
 impl StreamingAgentBlock {
-    pub(super) fn new(width: usize, plain: bool) -> Self {
+    pub(super) fn new(width: usize, plain: bool, title: &str) -> Self {
         Self {
             width,
             plain,
+            title: title.to_string(),
             current_width: 0,
             started: false,
             seen_text: false,
@@ -219,10 +221,10 @@ impl StreamingAgentBlock {
         if !self.started {
             writeln!(output)?;
             if self.plain {
-                writeln!(output, "Agent:")?;
+                writeln!(output, "{}:", self.title)?;
                 write!(output, "  ")?;
             } else {
-                writeln!(output, "{}", self.frame().top("Agent"))?;
+                writeln!(output, "{}", self.frame().top(&self.title))?;
                 write!(output, "│ ")?;
             }
             self.started = true;
@@ -314,9 +316,18 @@ impl MarkdownStreamBlock {
 
         if !self.started {
             if self.renderer.plain {
-                writeln!(output, "Agent:")?;
+                writeln!(
+                    output,
+                    "{}:",
+                    self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)
+                )?;
             } else {
-                writeln!(output, "{}", self.frame().top("Agent"))?;
+                writeln!(
+                    output,
+                    "{}",
+                    self.frame()
+                        .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+                )?;
             }
             self.started = true;
         }
@@ -337,7 +348,12 @@ impl MarkdownStreamBlock {
         output: &mut W,
         text: &str,
     ) -> io::Result<()> {
-        let lines = MarkdownRenderModel::parse(text, self.renderer.content_width()).styled_lines();
+        let lines = MarkdownRenderModel::parse_with_language(
+            text,
+            self.renderer.content_width(),
+            self.renderer.language,
+        )
+        .styled_lines();
         if lines.is_empty()
             || lines
                 .iter()
@@ -347,7 +363,12 @@ impl MarkdownStreamBlock {
         }
 
         if !self.started {
-            writeln!(output, "{}", self.frame().top("Agent"))?;
+            writeln!(
+                output,
+                "{}",
+                self.frame()
+                    .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+            )?;
             self.started = true;
         }
 

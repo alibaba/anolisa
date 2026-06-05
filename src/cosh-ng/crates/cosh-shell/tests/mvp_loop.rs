@@ -1,12 +1,19 @@
 use std::os::unix::fs::PermissionsExt;
 
-use cosh_shell::{
-    adapter_for_kind, agent_request_after_confirmation, agent_request_confirmed_by_events,
-    build_command_blocks, findings_from_blocks, govern_agent_events, interventions_from_findings,
-    render_transcript, AdapterKind, AgentAdapter, AgentEvent, ClaudeCodeAdapter, CommandStatus,
-    CoshApprovalMode, FakeAgentAdapter, FindingKind, GovernanceDecision, InterventionDecision,
-    Policy, QuestionSelectionMode, QwenCliAdapter, ShellEvent, ShellEventKind,
+use cosh_shell::adapter::{ClaudeCodeAdapter, FakeAgentAdapter, QwenCliAdapter};
+use cosh_shell::governance::{govern_agent_events, govern_agent_events_with_language};
+use cosh_shell::ledger::build_command_blocks;
+use cosh_shell::parser::{
+    agent_request_after_confirmation, agent_request_confirmed_by_events, findings_from_blocks,
+    interventions_from_findings,
 };
+use cosh_shell::renderer::render_transcript;
+use cosh_shell::types::{
+    AgentEvent, CommandStatus, CoshApprovalMode, FindingKind, GovernanceDecision,
+    GovernancePolicyDecision, InterventionDecision, Policy, QuestionSelectionMode, ShellEvent,
+    ShellEventKind,
+};
+use cosh_shell::{adapter_for_kind, AdapterKind, AgentAdapter, Language};
 
 fn failed_command_events() -> Vec<ShellEvent> {
     vec![
@@ -163,7 +170,7 @@ fn fake_agent_streams_events_through_adapter_boundary() {
 }
 
 #[test]
-fn governance_rejects_tool_calls_and_agent_actions() {
+fn governance_outputs_executable_policy_decisions() {
     let events = vec![
         AgentEvent::StatusChanged {
             run_id: "run-1".to_string(),
@@ -172,6 +179,7 @@ fn governance_rejects_tool_calls_and_agent_actions() {
         },
         AgentEvent::ToolCall {
             run_id: "run-1".to_string(),
+            tool_id: None,
             name: "shell".to_string(),
             input: "rm -rf /tmp/example".to_string(),
         },
@@ -204,9 +212,21 @@ fn governance_rejects_tool_calls_and_agent_actions() {
 
     let governed = govern_agent_events(&events, &Policy::default());
     assert_eq!(governed.events[0].decision, GovernanceDecision::Display);
-    assert_eq!(governed.events[1].decision, GovernanceDecision::Rejected);
+    assert_eq!(governed.events[1].decision, GovernanceDecision::Display);
+    assert_eq!(
+        governed.events[1].policy_decision,
+        GovernancePolicyDecision::NeedsUserApproval
+    );
     assert_eq!(governed.events[2].decision, GovernanceDecision::Rejected);
+    assert_eq!(
+        governed.events[2].policy_decision,
+        GovernancePolicyDecision::HostBlocked
+    );
     assert_eq!(governed.events[3].decision, GovernanceDecision::Degraded);
+    assert_eq!(
+        governed.events[3].policy_decision,
+        GovernancePolicyDecision::DisplayOnly
+    );
     assert_eq!(governed.events[4].decision, GovernanceDecision::Display);
     assert_eq!(governed.events[5].decision, GovernanceDecision::Display);
     assert_eq!(governed.events[6].decision, GovernanceDecision::Display);
@@ -237,6 +257,102 @@ fn governance_rejects_tool_calls_and_agent_actions() {
 }
 
 #[test]
+fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
+    let events = vec![
+        AgentEvent::StatusChanged {
+            run_id: "run-1".to_string(),
+            phase: "requesting".to_string(),
+            message: "waiting for approval".to_string(),
+        },
+        AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: None,
+            name: "Bash".to_string(),
+            input: "pwd".to_string(),
+        },
+        AgentEvent::Action {
+            run_id: "run-1".to_string(),
+            command: "rm -rf /tmp/demo".to_string(),
+        },
+        AgentEvent::Recommendation {
+            run_id: "run-1".to_string(),
+            summary: "建议只读检查".to_string(),
+            commands: vec!["pwd".to_string()],
+            auto_execute: true,
+        },
+        AgentEvent::SkillLoadStarted {
+            run_id: "run-1".to_string(),
+            skill: "service-debug".to_string(),
+            reason: "diagnostic".to_string(),
+        },
+        AgentEvent::SkillLoadCompleted {
+            run_id: "run-1".to_string(),
+            skill: "service-debug".to_string(),
+            summary: "ready".to_string(),
+        },
+        AgentEvent::SkillLoadFailed {
+            run_id: "run-1".to_string(),
+            skill: "service-debug".to_string(),
+            error: "missing".to_string(),
+        },
+        AgentEvent::ToolOutputDelta {
+            run_id: "run-1".to_string(),
+            tool_id: "tool-1".to_string(),
+            stream: "stdout".to_string(),
+            text: "line 1".to_string(),
+        },
+        AgentEvent::ToolCompleted {
+            run_id: "run-1".to_string(),
+            tool_id: "tool-1".to_string(),
+            status: "failed".to_string(),
+        },
+        AgentEvent::UserQuestion {
+            run_id: "run-1".to_string(),
+            question: "继续吗？".to_string(),
+            options: vec!["继续".to_string(), "停止".to_string()],
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        },
+        AgentEvent::AgentCancelled {
+            run_id: "run-1".to_string(),
+            reason: "user requested cancellation".to_string(),
+        },
+    ];
+
+    let governed = govern_agent_events_with_language(&events, &Policy::default(), Language::ZhCn);
+    let text = governed
+        .events
+        .iter()
+        .map(|event| event.display_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("状态: requesting"), "{text}");
+    assert!(text.contains("需要审批: Bash 命令"), "{text}");
+    assert!(text.contains("需要审批: Shell 命令"), "{text}");
+    assert!(text.contains("已阻止: 需要用户审批"), "{text}");
+    assert!(text.contains("推荐命令:"), "{text}");
+    assert!(text.contains("正在加载技能: service-debug"), "{text}");
+    assert!(text.contains("原因: diagnostic"), "{text}");
+    assert!(text.contains("技能已加载: service-debug"), "{text}");
+    assert!(text.contains("摘要: ready"), "{text}");
+    assert!(text.contains("技能失败: service-debug"), "{text}");
+    assert!(text.contains("错误: missing"), "{text}");
+    assert!(text.contains("Tool 输出: tool-1 stdout"), "{text}");
+    assert!(text.contains("Tool 已完成: tool-1"), "{text}");
+    assert!(text.contains("问题: 继续吗？"), "{text}");
+    assert!(text.contains("Agent 已取消"), "{text}");
+    assert!(text.contains("原因: 用户请求取消"), "{text}");
+    assert!(!text.contains("Approval required:"), "{text}");
+    assert!(!text.contains("Blocked: user approval required"), "{text}");
+    assert!(!text.contains("recommended commands:"), "{text}");
+    assert!(!text.contains("Skill loading:"), "{text}");
+    assert!(!text.contains("Skill loaded:"), "{text}");
+    assert!(!text.contains("Skill failed:"), "{text}");
+    assert!(!text.contains("Tool output:"), "{text}");
+}
+
+#[test]
 fn cli_adapters_prepare_safe_non_intrusive_invocations() {
     let ledger = build_command_blocks(&failed_command_events());
     let findings = findings_from_blocks(&ledger.blocks);
@@ -244,7 +360,7 @@ fn cli_adapters_prepare_safe_non_intrusive_invocations() {
         .expect("confirmed request");
 
     let claude =
-        ClaudeCodeAdapter::default().prepare_invocation(&request, CoshApprovalMode::Suggest);
+        ClaudeCodeAdapter::default().prepare_invocation(&request, CoshApprovalMode::Recommend);
     assert_eq!(claude.program, "claude");
     assert!(claude.args.contains(&"--print".to_string()));
     assert!(claude.args.contains(&"--output-format".to_string()));
@@ -267,7 +383,7 @@ fn cli_adapters_prepare_safe_non_intrusive_invocations() {
     assert!(claude
         .prompt
         .contains("approval system that reviews every tool request"));
-    let qwen = QwenCliAdapter::default().prepare_invocation(&request, CoshApprovalMode::Suggest);
+    let qwen = QwenCliAdapter::default().prepare_invocation(&request, CoshApprovalMode::Recommend);
     assert_eq!(qwen.program, "co");
     assert!(qwen.args.contains(&"--approval-mode".to_string()));
     assert!(qwen.args.contains(&"plan".to_string()));
@@ -314,14 +430,14 @@ fn continuation_prompts_do_not_reenter_generic_shell_request_mode() {
     let tool_prompt = ClaudeCodeAdapter::default()
         .prepare_invocation(&request, CoshApprovalMode::default())
         .prompt;
-    assert!(tool_prompt.contains("approved tool result"));
+    assert!(tool_prompt.contains("this tool result"));
     assert!(tool_prompt.contains("Analyze only the result below"));
     assert!(tool_prompt.contains("pre-approval prose"));
     assert!(tool_prompt.contains("do not continue an earlier recommendation list"));
     assert!(!tool_prompt.contains("Return explanation and recommended next commands only"));
 
     request.user_input = Some(
-        "Approval result for request req-1\nTool: tool Bash\nCommand: pwd\nDecision: denied by user\nNo command ran.".to_string(),
+        "Approval result for request req-1\nTool: tool Bash\nCommand: pwd\nDecision: denied by user\nStatus: not_executed\nNo command ran.".to_string(),
     );
     let approval_prompt = ClaudeCodeAdapter::default()
         .prepare_invocation(&request, CoshApprovalMode::default())
@@ -355,7 +471,7 @@ fn fake_and_qwen_use_same_agent_adapter_boundary() {
     assert!(qwen_events.iter().any(|event| matches!(
         event,
         AgentEvent::TextDelta { text, .. }
-            if text.contains("--approval-mode plan") && text.contains("Qwen")
+            if text.contains("--approval-mode plan") && text.contains("co adapter")
     )));
 
     let governed = govern_agent_events(&qwen_events, &Policy::default());

@@ -7,8 +7,8 @@ echo '{"type":"assistant","session_id":"mock-session-write","message":{"content"
 echo '{"type":"control_request","request_id":"mock-req-write","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-write.html","content":"<html>ok</html>"},"description":"Write file","tool_use_id":"toolu_write001"}}'
 read -r line
 if echo "$line" | grep -q '"allow"'; then
-    if ! echo "$line" | grep -q '"toolUseID":"toolu_write001"'; then
-        echo '{"type":"result","subtype":"error","session_id":"mock-session-write","is_error":true,"result":"wrong toolUseID in write_file allow response"}'
+    if ! echo "$line" | grep -q '"updatedInput":{"file_path":"/tmp/cosh-write.html","content":"<html>ok</html>"}'; then
+        echo '{"type":"result","subtype":"error","session_id":"mock-session-write","is_error":true,"result":"missing updatedInput in write_file allow response"}'
         exit 1
     fi
     if echo "$line" | grep -q '"updatedInput":{}'; then

@@ -1,0 +1,140 @@
+use super::*;
+
+const MEMORY_SKILL: &str = "memory-analysis";
+const HIGH_MEMORY_CLI_HINT: &str =
+    "ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head -20";
+const MEMORY_PRESSURE_CLI_HINT: &str =
+    "free -m && ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head -20";
+const INTERACTIVE_TOP_CLI_HINT: &str = "top -b -n1 -o %MEM | head -30";
+
+pub(super) fn interactive_top_guidance_finding() -> HookFinding {
+    HookFinding {
+        hook_id: "interactive-top-guidance".into(),
+        severity: FindingSeverity::Info,
+        title: "Top output is not a one-shot diagnostic snapshot".into(),
+        description: "The command did not use a one-shot batch top form. Interactive or multi-frame top output can contain ANSI control sequences and partial refresh frames, so cosh-shell does not treat it as stable diagnostic evidence.".into(),
+        suggestion: format!(
+            "Capture a one-shot batch snapshot before asking Agent to analyze top output: {INTERACTIVE_TOP_CLI_HINT}"
+        ),
+        skill: Some(MEMORY_SKILL.into()),
+        cli_hint: Some(INTERACTIVE_TOP_CLI_HINT.into()),
+        context_refs: Vec::new(),
+    }
+}
+
+pub(super) fn high_memory_finding(rows: &[ProcessMemoryRow]) -> Option<HookFinding> {
+    let mut candidates: Vec<&ProcessMemoryRow> =
+        rows.iter().filter(|row| row.mem_pct >= 20.0).collect();
+    candidates.sort_by(|a, b| b.mem_pct.total_cmp(&a.mem_pct));
+    let top = candidates.first()?;
+
+    let severity = if top.mem_pct >= 50.0 {
+        FindingSeverity::Critical
+    } else if top.mem_pct >= 30.0 {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Info
+    };
+
+    let summary = candidates
+        .iter()
+        .take(3)
+        .map(|row| {
+            let rss = row
+                .rss_kib
+                .map(|rss| format!(", RSS {} MiB", kib_to_mib(rss)))
+                .unwrap_or_default();
+            format!(
+                "{} (PID {}) MEM {:.1}%{}",
+                display_command(&row.command),
+                row.pid,
+                row.mem_pct,
+                rss
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Some(HookFinding {
+        hook_id: "high-memory-process".into(),
+        severity,
+        title: format!(
+            "{} (PID {}) uses {:.1}% MEM",
+            display_command(&top.command),
+            top.pid,
+            top.mem_pct
+        ),
+        description: format!(
+            "Process-level memory candidates from command output. Top matches: {summary}"
+        ),
+        suggestion: "Use memory-analysis to inspect memory pressure and high %MEM processes."
+            .into(),
+        skill: Some(MEMORY_SKILL.into()),
+        cli_hint: Some(HIGH_MEMORY_CLI_HINT.into()),
+        context_refs: Vec::new(),
+    })
+}
+
+pub(super) fn memory_pressure_finding(metrics: Option<&MemoryMetrics>) -> Option<HookFinding> {
+    let metrics = metrics?;
+    if metrics.total_mib <= 0.0 {
+        return None;
+    }
+    let available_ratio = metrics.available_mib / metrics.total_mib;
+    let swap_ratio = match (metrics.swap_total_mib, metrics.swap_used_mib) {
+        (Some(total), Some(used)) if total > 0.0 => Some(used / total),
+        _ => None,
+    };
+
+    let memory_severity = if available_ratio <= 0.05 {
+        Some(FindingSeverity::Critical)
+    } else if available_ratio <= 0.10 {
+        Some(FindingSeverity::Warning)
+    } else {
+        None
+    };
+    let swap_severity = match swap_ratio {
+        Some(ratio) if ratio >= 0.20 => Some(FindingSeverity::Info),
+        _ => None,
+    };
+    let severity = max_severity(memory_severity, swap_severity)?;
+    let swap_note = swap_ratio
+        .map(|ratio| format!(", swap used {:.1}%", ratio * 100.0))
+        .unwrap_or_default();
+    let confidence_note = if metrics.confidence == MetricsConfidence::Low {
+        " Confidence is lower; verify with a higher-resolution one-shot command before giving a root-cause conclusion."
+    } else {
+        ""
+    };
+
+    let title = if memory_severity.is_some() {
+        format!(
+            "Available memory is low: {} MiB / {} MiB",
+            round_mib(metrics.available_mib),
+            round_mib(metrics.total_mib)
+        )
+    } else {
+        format!(
+            "Swap usage is high while available memory is healthy: {} MiB / {} MiB",
+            round_mib(metrics.available_mib),
+            round_mib(metrics.total_mib)
+        )
+    };
+
+    Some(HookFinding {
+        hook_id: "memory-pressure".into(),
+        severity,
+        title,
+        description: format!(
+            "Command output shows available memory at {:.1}% of total{}.{confidence_note}",
+            available_ratio * 100.0,
+            swap_note
+        ),
+        suggestion:
+            "Use memory-analysis to inspect memory pressure, swap usage, and high %MEM processes."
+                .into(),
+        skill: Some(MEMORY_SKILL.into()),
+        cli_hint: Some(MEMORY_PRESSURE_CLI_HINT.into()),
+        context_refs: Vec::new(),
+    })
+}

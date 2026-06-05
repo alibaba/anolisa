@@ -1,4 +1,11 @@
-use crate::types::{AgentEvent, AuditRecord, GovernanceDecision, GovernedEvent, Policy};
+use crate::{
+    config::Language,
+    i18n::{I18n, MessageId},
+    types::{
+        AgentEvent, AuditRecord, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+        Policy,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceOutput {
@@ -7,15 +14,28 @@ pub struct GovernanceOutput {
 }
 
 pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> GovernanceOutput {
+    govern_agent_events_with_language(events, policy, Language::EnUs)
+}
+
+pub fn govern_agent_events_with_language(
+    events: &[AgentEvent],
+    policy: &Policy,
+    language: Language,
+) -> GovernanceOutput {
+    let i18n = I18n::new(language);
     let mut governed = Vec::new();
     let mut audit = Vec::new();
 
     for (idx, event) in events.iter().cloned().enumerate() {
-        let (decision, reason, display_text, auto_execute) = match &event {
+        let (decision, policy_decision, reason, display_text, auto_execute) = match &event {
             AgentEvent::StatusChanged { phase, message, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "agent status is display-only".to_string(),
-                format!("Status: {phase}\n{message}"),
+                format!(
+                    "{}\n{message}",
+                    i18n.format(MessageId::AgentGovernanceStatusLine, &[("phase", phase)])
+                ),
                 false,
             ),
             AgentEvent::Recommendation {
@@ -36,33 +56,37 @@ pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> Governance
                     } else {
                         GovernanceDecision::Display
                     },
+                    GovernancePolicyDecision::DisplayOnly,
                     reason,
                     format!(
                         "{}{}",
                         summary,
-                        render_recommended_commands(commands.as_slice())
+                        render_recommended_commands(commands.as_slice(), &i18n)
                     ),
                     false,
                 )
             }
             AgentEvent::ToolCall { name, input, .. } => (
-                GovernanceDecision::Rejected,
-                "tool calls cannot enter the shell execution path".to_string(),
-                render_blocked_tool_request(name, input),
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::NeedsUserApproval,
+                "tool call requires explicit approval before execution".to_string(),
+                render_blocked_tool_request(name, input, &i18n),
                 false,
             ),
             AgentEvent::UserQuestion {
                 question, options, ..
             } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "agent question requires explicit user input".to_string(),
-                render_user_question(question, options),
+                render_user_question(question, options, &i18n),
                 false,
             ),
             AgentEvent::Action { command, .. } => (
                 GovernanceDecision::Rejected,
+                GovernancePolicyDecision::HostBlocked,
                 "agent actions cannot execute commands in MVP".to_string(),
-                render_blocked_shell_command(command),
+                render_blocked_shell_command(command, &i18n),
                 false,
             ),
             AgentEvent::ToolPermissionRequest {
@@ -73,27 +97,55 @@ pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> Governance
                 let input_str = serde_json::to_string(tool_input).unwrap_or_default();
                 (
                     GovernanceDecision::Display,
+                    GovernancePolicyDecision::NeedsUserApproval,
                     "tool permission request via control protocol".to_string(),
-                    render_blocked_tool_request(tool_name, &input_str),
+                    render_blocked_tool_request(tool_name, &input_str, &i18n),
                     false,
                 )
             }
             AgentEvent::SkillLoadStarted { skill, reason, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "skill activity is display-only".to_string(),
-                format!("Skill loading: {skill}\nReason: {reason}"),
+                format!(
+                    "{}\n{}",
+                    i18n.format(
+                        MessageId::AgentGovernanceSkillLoadingLine,
+                        &[("skill", skill)]
+                    ),
+                    i18n.format(MessageId::AgentGovernanceReasonLine, &[("reason", reason)])
+                ),
                 false,
             ),
             AgentEvent::SkillLoadCompleted { skill, summary, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "skill activity is display-only".to_string(),
-                format!("Skill loaded: {skill}\nSummary: {summary}"),
+                format!(
+                    "{}\n{}",
+                    i18n.format(
+                        MessageId::AgentGovernanceSkillLoadedLine,
+                        &[("skill", skill)]
+                    ),
+                    i18n.format(
+                        MessageId::AgentGovernanceSummaryLine,
+                        &[("summary", summary)]
+                    )
+                ),
                 false,
             ),
             AgentEvent::SkillLoadFailed { skill, error, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "skill activity is display-only".to_string(),
-                format!("Skill failed: {skill}\nError: {error}"),
+                format!(
+                    "{}\n{}",
+                    i18n.format(
+                        MessageId::AgentGovernanceSkillFailedLine,
+                        &[("skill", skill)]
+                    ),
+                    i18n.format(MessageId::AgentGovernanceErrorLine, &[("error", error)])
+                ),
                 false,
             ),
             AgentEvent::ToolOutputDelta {
@@ -103,46 +155,73 @@ pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> Governance
                 ..
             } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::AuditOnly,
                 "tool output is display-only".to_string(),
-                format!("Tool output: {tool_id} {stream}\n{text}"),
+                format!(
+                    "{}\n{text}",
+                    i18n.format(
+                        MessageId::AgentGovernanceToolOutputLine,
+                        &[("tool_id", tool_id), ("stream", stream)]
+                    )
+                ),
                 false,
             ),
             AgentEvent::ToolCompleted {
                 tool_id, status, ..
             } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::AuditOnly,
                 "tool completion is display-only".to_string(),
-                format!("Tool completed: {tool_id}\nStatus: {status}"),
+                format!(
+                    "{}\n{}",
+                    i18n.format(
+                        MessageId::AgentGovernanceToolCompletedLine,
+                        &[("tool_id", tool_id)]
+                    ),
+                    i18n.format(MessageId::AgentGovernanceStatusLine, &[("phase", status)])
+                ),
                 false,
             ),
             AgentEvent::TextDelta { text, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "assistant text is display-only".to_string(),
                 text.clone(),
                 false,
             ),
             AgentEvent::AgentCompleted { summary, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "agent completion is display-only".to_string(),
                 summary.clone(),
                 false,
             ),
             AgentEvent::AgentFailed { error, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "agent failure is display-only".to_string(),
                 error.clone(),
                 false,
             ),
             AgentEvent::AgentCancelled { reason, .. } => (
                 GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
                 "agent cancellation is display-only".to_string(),
-                format!("Agent cancelled\nReason: {reason}"),
+                format!(
+                    "{}\n{}",
+                    i18n.t(MessageId::FailedAnalysisCancelledTitle),
+                    i18n.format(
+                        MessageId::AgentGovernanceReasonLine,
+                        &[("reason", &agent_cancelled_reason(reason, &i18n))]
+                    )
+                ),
                 false,
             ),
         };
 
         let governed_event = GovernedEvent {
             decision: decision.clone(),
+            policy_decision,
             event,
             reason: reason.clone(),
             display_text,
@@ -164,7 +243,7 @@ pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> Governance
     }
 }
 
-fn render_recommended_commands(commands: &[String]) -> String {
+fn render_recommended_commands(commands: &[String], i18n: &I18n) -> String {
     if commands.is_empty() {
         return String::new();
     }
@@ -173,31 +252,54 @@ fn render_recommended_commands(commands: &[String]) -> String {
         .iter()
         .map(|command| format!("\n  - {command}"))
         .collect::<String>();
-    format!("\nrecommended commands:{rendered}")
-}
-
-fn render_blocked_tool_request(name: &str, input: &str) -> String {
     format!(
-        "Approval required: {}\nCommand: {input}\nBlocked: user approval required",
-        user_facing_tool_name(name)
+        "\n{}{rendered}",
+        i18n.t(MessageId::AgentRecommendedCommandsLabel)
     )
 }
 
-fn render_blocked_shell_command(command: &str) -> String {
-    format!("Approval required: Shell command\nCommand: {command}\nBlocked: user approval required")
+fn render_blocked_tool_request(name: &str, input: &str, i18n: &I18n) -> String {
+    format!(
+        "{}\n{}: {input}\n{}",
+        i18n.format(
+            MessageId::AgentGovernanceApprovalRequiredLine,
+            &[("subject", &user_facing_tool_name(name, i18n))]
+        ),
+        i18n.t(MessageId::ApprovalCommandLabel),
+        i18n.t(MessageId::AgentGovernanceBlockedUserApprovalLine)
+    )
 }
 
-fn user_facing_tool_name(name: &str) -> String {
+fn render_blocked_shell_command(command: &str, i18n: &I18n) -> String {
+    format!(
+        "{}\n{}: {command}\n{}",
+        i18n.format(
+            MessageId::AgentGovernanceApprovalRequiredLine,
+            &[(
+                "subject",
+                i18n.t(MessageId::AgentGovernanceShellCommandSubject)
+            )]
+        ),
+        i18n.t(MessageId::ApprovalCommandLabel),
+        i18n.t(MessageId::AgentGovernanceBlockedUserApprovalLine)
+    )
+}
+
+fn user_facing_tool_name(name: &str, i18n: &I18n) -> String {
     if name.eq_ignore_ascii_case("bash") || name.eq_ignore_ascii_case("shell") {
-        "Bash command".to_string()
+        i18n.t(MessageId::AgentGovernanceBashCommandSubject)
+            .to_string()
     } else {
-        format!("{name} tool")
+        i18n.format(MessageId::AgentGovernanceToolSubject, &[("tool", name)])
     }
 }
 
-fn render_user_question(question: &str, options: &[String]) -> String {
+fn render_user_question(question: &str, options: &[String], i18n: &I18n) -> String {
     if options.is_empty() {
-        return format!("Question: {question}");
+        return i18n.format(
+            MessageId::AgentGovernanceQuestionLine,
+            &[("question", question)],
+        );
     }
 
     let rendered = options
@@ -205,5 +307,20 @@ fn render_user_question(question: &str, options: &[String]) -> String {
         .enumerate()
         .map(|(idx, option)| format!("\n  {}. {}", idx + 1, option))
         .collect::<String>();
-    format!("Question: {question}{rendered}")
+    format!(
+        "{}{rendered}",
+        i18n.format(
+            MessageId::AgentGovernanceQuestionLine,
+            &[("question", question)]
+        )
+    )
+}
+
+fn agent_cancelled_reason(reason: &str, i18n: &I18n) -> String {
+    if reason == "user requested cancellation" {
+        return i18n
+            .t(MessageId::AgentCancelledUserRequestedReason)
+            .to_string();
+    }
+    reason.to_string()
 }

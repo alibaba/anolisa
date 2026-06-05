@@ -50,6 +50,25 @@ fn markdown_text_renders_fenced_code_as_indented_commands() {
 }
 
 #[test]
+fn markdown_code_block_uses_zh_catalog_label_without_translating_language() {
+    let rich = RatatuiInlineRenderer::with_width(60)
+        .with_language(crate::Language::ZhCn)
+        .markdown_text_lines("```bash\necho ok\n```")
+        .join("\n");
+    let plain = RatatuiInlineRenderer::plain_with_width(60)
+        .with_language(crate::Language::ZhCn)
+        .markdown_text_lines("```\necho ok\n```")
+        .join("\n");
+
+    assert!(rich.contains("┌ 代码: bash"), "{rich}");
+    assert!(rich.contains("│ echo ok"), "{rich}");
+    assert!(plain.contains("+-- 代码"), "{plain}");
+    assert!(plain.contains("| echo ok"), "{plain}");
+    assert!(!rich.contains("code:"), "{rich}");
+    assert!(!plain.contains("+-- code"), "{plain}");
+}
+
+#[test]
 fn markdown_text_renders_indented_code_as_code_block() {
     let lines = RatatuiInlineRenderer::with_width(58).markdown_text_lines(
         "建议执行：\n\n    cargo test --package cosh-shell\n    git status --short\n\n完成后继续分析。",
@@ -109,6 +128,20 @@ fn markdown_text_keeps_pipe_tables_readable_in_narrow_width() {
     );
     assert!(!text.contains("| --- | --- | --- | --- |"), "{text}");
     assert_rendered_width(&text, 50);
+}
+
+#[test]
+fn markdown_table_uses_zh_catalog_label_without_translating_cells() {
+    let markdown = "| Command | Result |\n| --- | --- |\n| git status | clean |";
+    let text = RatatuiInlineRenderer::with_width(64)
+        .with_language(crate::Language::ZhCn)
+        .markdown_text_lines(markdown)
+        .join("\n");
+
+    assert!(text.contains("┌ 表格"), "{text}");
+    assert!(text.contains("│Command"), "{text}");
+    assert!(text.contains("git status"), "{text}");
+    assert!(!text.contains("┌ table"), "{text}");
 }
 
 #[test]
@@ -448,6 +481,7 @@ fn markdown_agent_response_styles_inline_bold_and_code_for_terminal_output() {
         width: 80,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let mut output = Vec::new();
 
@@ -465,11 +499,26 @@ fn markdown_agent_response_styles_inline_bold_and_code_for_terminal_output() {
 }
 
 #[test]
+fn markdown_agent_response_uses_zh_catalog_title() {
+    let renderer = RatatuiInlineRenderer::with_width(80).with_language(crate::Language::ZhCn);
+    let mut output = Vec::new();
+
+    renderer
+        .write_agent_response(&mut output, "你好，已收到。", None)
+        .expect("render zh markdown response");
+
+    let text = String::from_utf8(output).expect("utf8 output");
+    assert!(text.contains("╭ Agent 回复"), "{text}");
+    assert!(!text.contains("╭ Agent ─"), "{text}");
+}
+
+#[test]
 fn markdown_agent_response_keeps_styled_cjk_list_card_aligned() {
     let renderer = RatatuiInlineRenderer {
         width: 118,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let mut output = Vec::new();
 
@@ -515,6 +564,7 @@ fn markdown_agent_response_keeps_styled_inline_code_and_table_borders_aligned() 
         width: 96,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let mut output = Vec::new();
 
@@ -548,6 +598,7 @@ fn markdown_stream_styles_inline_bold_and_code_for_terminal_output() {
         width: 90,
         plain: false,
         styled: true,
+        language: crate::Language::EnUs,
     };
     let mut stream = renderer.stream_markdown_agent();
     let mut output = Vec::new();
@@ -565,6 +616,22 @@ fn markdown_stream_styles_inline_bold_and_code_for_terminal_output() {
     assert!(text.contains("\x1b[0;1;36m• "), "{text:?}");
     assert!(text.contains("\x1b[0;1mBuild"), "{text:?}");
     assert!(text.contains("\x1b[0;7;33mcargo test"), "{text:?}");
+}
+
+#[test]
+fn markdown_stream_uses_zh_catalog_title() {
+    let renderer = RatatuiInlineRenderer::with_width(80).with_language(crate::Language::ZhCn);
+    let mut stream = renderer.stream_markdown_agent();
+    let mut output = Vec::new();
+
+    stream
+        .write_delta(&mut output, "流式响应第一段。")
+        .expect("write stream");
+    stream.finish(&mut output, None).expect("finish stream");
+
+    let text = String::from_utf8(output).expect("utf8 output");
+    assert!(text.contains("╭ Agent 回复"), "{text}");
+    assert!(!text.contains("╭ Agent ─"), "{text}");
 }
 
 #[test]

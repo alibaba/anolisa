@@ -9,7 +9,11 @@ use ratatui::{
 use super::super::buffer_to_lines;
 use super::super::wrap::{char_width, display_width};
 
-pub(super) fn render_ratatui_markdown_table(rows: &[Vec<String>], width: usize) -> Vec<String> {
+pub(super) fn render_ratatui_markdown_table(
+    i18n: &crate::I18n,
+    rows: &[Vec<String>],
+    width: usize,
+) -> Vec<String> {
     let Some(table_model) = table_model(rows, width, TableRenderMode::Rich) else {
         return Vec::new();
     };
@@ -39,7 +43,7 @@ pub(super) fn render_ratatui_markdown_table(rows: &[Vec<String>], width: usize) 
         .block(
             Block::bordered()
                 .title(Line::from(Span::styled(
-                    " table ",
+                    format!(" {} ", i18n.t(crate::MessageId::MarkdownTableLabel)),
                     Style::default().add_modifier(Modifier::BOLD),
                 )))
                 .border_style(Style::default().fg(Color::DarkGray)),

@@ -150,6 +150,172 @@ fn claude_stream_parser_extracts_tool_use_and_session_id() {
 }
 
 #[test]
+fn claude_stream_parser_extracts_streaming_bash_tool_use() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
+        )
+        .is_empty());
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
+        )
+        .is_empty());
+    let events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#);
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::ToolCall { name, input, .. }] if name == "Bash" && input == "pwd"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_tool_result_to_output_and_completion() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"user","message":{"content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"/Users/quejianming/vscode/cosh-ng","is_error":false}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [
+            AgentEvent::ToolOutputDelta {
+                tool_id,
+                stream,
+                text,
+                ..
+            },
+            AgentEvent::ToolCompleted {
+                tool_id: completed_id,
+                status,
+                ..
+            }
+        ] if tool_id == "toolu_1"
+            && completed_id == "toolu_1"
+            && stream == "stdout"
+            && text == "/Users/quejianming/vscode/cosh-ng"
+            && status == "success"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_error_tool_result_to_stderr() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Denied by preflight test","is_error":true,"tool_use_id":"toolu_deny"}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [
+            AgentEvent::ToolOutputDelta {
+                tool_id,
+                stream,
+                text,
+                ..
+            },
+            AgentEvent::ToolCompleted {
+                tool_id: completed_id,
+                status,
+                ..
+            }
+        ] if tool_id == "toolu_deny"
+            && completed_id == "toolu_deny"
+            && stream == "stderr"
+            && text == "Denied by preflight test"
+            && status == "error"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_tool_use_result_stdout_and_stderr_fields() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_io","stdout":"ok\n","stderr":"warn\n","is_error":false}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [
+            AgentEvent::ToolOutputDelta {
+                tool_id: stdout_id,
+                stream: stdout_stream,
+                text: stdout,
+                ..
+            },
+            AgentEvent::ToolOutputDelta {
+                tool_id: stderr_id,
+                stream: stderr_stream,
+                text: stderr,
+                ..
+            },
+            AgentEvent::ToolCompleted { tool_id, status, .. }
+        ] if stdout_id == "toolu_io"
+            && stderr_id == "toolu_io"
+            && tool_id == "toolu_io"
+            && stdout_stream == "stdout"
+            && stderr_stream == "stderr"
+            && stdout == "ok\n"
+            && stderr == "warn\n"
+            && status == "error"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_maps_interrupted_tool_result_status() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_int","content":"interrupted by user","status":"interrupted"}]}}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [
+            AgentEvent::ToolOutputDelta { stream, text, .. },
+            AgentEvent::ToolCompleted { tool_id, status, .. }
+        ] if stream == "stderr"
+            && text == "interrupted by user"
+            && tool_id == "toolu_int"
+            && status == "interrupted"
+    ));
+}
+
+#[test]
+fn claude_stream_parser_bounds_large_tool_result() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+    let large = "x".repeat(4_010);
+    let line = serde_json::json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_large",
+                "content": large,
+                "is_error": false
+            }]
+        }
+    })
+    .to_string();
+
+    let events = parser.parse_line(&line);
+
+    assert!(matches!(
+        &events[..],
+        [
+            AgentEvent::ToolOutputDelta { text, .. },
+            AgentEvent::ToolCompleted { .. }
+        ] if text.len() < 4_100 && text.contains("10 chars omitted")
+    ));
+}
+
+#[test]
 fn claude_stream_parser_maps_ask_user_question_to_question_event() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 

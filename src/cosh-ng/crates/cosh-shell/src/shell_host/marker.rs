@@ -25,6 +25,19 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
   fi
 fi
 
+_cosh_load_native_bash_history_if_empty() {
+  if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "${HISTFILE:-}" || ! -r "$HISTFILE" ]]; then
+    return 0
+  fi
+  if [[ -n "$(builtin history 1 2>/dev/null)" ]]; then
+    return 0
+  fi
+  builtin history -r "$HISTFILE" 2>/dev/null || true
+}
+
 # ── Mode-dependent shell settings ──
 if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
   : # native mode: keep user PS1, HISTFILE, etc.
@@ -35,6 +48,7 @@ else
   export HISTCONTROL=
   export HISTTIMEFORMAT=
 fi
+_cosh_load_native_bash_history_if_empty
 
 _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
@@ -82,8 +96,9 @@ _cosh_emit_marker() {
   local timestamp
   timestamp="$(_cosh_now_ms)"
 
-  printf '\033]1337;COSH;{"event":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s}\a' \
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s}\a' \
     "$(_cosh_json_escape "$event")" \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -97,7 +112,8 @@ _cosh_emit_intercept_marker() {
   local timestamp
   timestamp="$(_cosh_now_ms)"
 
-  printf '\033]1337;COSH;{"event":"intercept","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0}\a' \
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0}\a' \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -133,7 +149,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -170,7 +186,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       return 0
       ;;
   esac
@@ -235,18 +251,17 @@ _cosh_precmd_marker() {
   local status=$?
   _cosh_emit_marker "precmd" "" "$status"
   _COSH_AT_PROMPT=1
-  return $status
 }
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 trap '_cosh_preexec_marker' DEBUG
-# Prepend precmd so it captures $? before other PROMPT_COMMAND entries
+# Append precmd to existing PROMPT_COMMAND
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND=(_cosh_precmd_marker "${PROMPT_COMMAND[@]}")
+  PROMPT_COMMAND+=(_cosh_precmd_marker)
 else
-  PROMPT_COMMAND="_cosh_precmd_marker${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
 fi
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
@@ -269,12 +284,18 @@ export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
 # ── Source user startup files (native mode) ──
 if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
   if [[ -n "${COSH_ZDOTDIR_ORIG:-}" ]]; then
+    _cosh_marker_zdotdir="${ZDOTDIR:-}"
+    if [[ -n "$_cosh_marker_zdotdir" && "${HISTFILE:-}" == "$_cosh_marker_zdotdir/.zsh_history" ]]; then
+      HISTFILE="${COSH_ZDOTDIR_ORIG}/.zsh_history"
+    fi
+    export ZDOTDIR="${COSH_ZDOTDIR_ORIG}"
     [[ -f "${COSH_ZDOTDIR_ORIG}/.zshenv" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshenv"
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
       [[ -f "${COSH_ZDOTDIR_ORIG}/.zprofile" ]] && source "${COSH_ZDOTDIR_ORIG}/.zprofile"
       [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
     fi
     [[ -f "${COSH_ZDOTDIR_ORIG}/.zshrc" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshrc"
+    unset _cosh_marker_zdotdir
   else
     [[ -f ~/.zshenv ]] && source ~/.zshenv
     if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
@@ -284,6 +305,19 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
     [[ -f ~/.zshrc ]] && source ~/.zshrc
   fi
 fi
+
+_cosh_load_native_zsh_history_if_empty() {
+  if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "${HISTFILE:-}" || ! -r "$HISTFILE" ]]; then
+    return 0
+  fi
+  if fc -l 1 >/dev/null 2>&1; then
+    return 0
+  fi
+  fc -R "$HISTFILE" 2>/dev/null || true
+}
 
 # ── Mode-dependent shell settings ──
 if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
@@ -295,6 +329,7 @@ else
   HISTSIZE="${COSH_HISTSIZE:-1000}"
   SAVEHIST=0
 fi
+_cosh_load_native_zsh_history_if_empty
 setopt NO_BEEP 2>/dev/null || true
 setopt NO_PROMPT_CR 2>/dev/null || true
 setopt NO_PROMPT_SP 2>/dev/null || true
@@ -321,8 +356,9 @@ _cosh_emit_marker() {
   local timestamp
   timestamp="$(_cosh_now_ms)"
 
-  printf '\033]1337;COSH;{"event":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s}\a' \
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s}\a' \
     "$(_cosh_json_escape "$event")" \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -336,7 +372,8 @@ _cosh_emit_intercept_marker() {
   local timestamp
   timestamp="$(_cosh_now_ms)"
 
-  printf '\033]1337;COSH;{"event":"intercept","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0}\a' \
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0}\a' \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -372,7 +409,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -409,7 +446,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       return 0
       ;;
   esac

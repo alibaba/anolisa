@@ -15,6 +15,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct ApprovalReceiptPanelModel<'a> {
     pub title: &'a str,
+    pub negative: bool,
     pub id: &'a str,
     pub kind: &'a str,
     pub decision: &'a str,
@@ -47,11 +48,12 @@ impl RatatuiInlineRenderer {
             return compact_approval_receipt_lines(&model, self.styled);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = approval_receipt_panel_height(&model, width);
+        let height = approval_receipt_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_receipt_panel(model, area, &mut buffer);
+        render_approval_receipt_panel(&i18n, model, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -66,11 +68,12 @@ impl RatatuiInlineRenderer {
             return compact_approval_receipt_lines(&model, self.styled);
         }
 
+        let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = approval_receipt_panel_height(&model, width);
+        let height = approval_receipt_panel_height(&i18n, &model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_receipt_panel(model, area, &mut buffer);
+        render_approval_receipt_panel(&i18n, model, area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -82,6 +85,7 @@ impl RatatuiInlineRenderer {
         &self,
         model: ApprovalReceiptPanelModel<'_>,
     ) -> Vec<String> {
+        let i18n = self.i18n();
         if !approval_receipt_has_body(&model) {
             return vec![format!("{} {}", model.title, model.id)];
         }
@@ -91,7 +95,7 @@ impl RatatuiInlineRenderer {
         let mut lines = vec![format!("{} {}", model.title, model.id)];
         if !model.preview.is_empty() {
             lines.extend(wrapped_receipt_rows(
-                receipt_preview_label(model.subject),
+                receipt_preview_label(&i18n, model.subject),
                 model.preview,
                 content_width,
             ));
@@ -103,7 +107,11 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn approval_receipt_panel_height(model: &ApprovalReceiptPanelModel<'_>, width: u16) -> u16 {
+fn approval_receipt_panel_height(
+    i18n: &crate::I18n,
+    model: &ApprovalReceiptPanelModel<'_>,
+    width: u16,
+) -> u16 {
     if !approval_receipt_has_body(model) {
         return 1;
     }
@@ -113,7 +121,7 @@ fn approval_receipt_panel_height(model: &ApprovalReceiptPanelModel<'_>, width: u
         0
     } else {
         wrapped_receipt_rows(
-            receipt_preview_label(model.subject),
+            receipt_preview_label(i18n, model.subject),
             model.preview,
             content_width,
         )
@@ -154,7 +162,7 @@ fn compact_approval_receipt_text(model: &ApprovalReceiptPanelModel<'_>) -> Strin
 }
 
 fn receipt_status_style(model: &ApprovalReceiptPanelModel<'_>) -> Style {
-    let color = if model.title == "Denied" || model.title == "Cancelled" {
+    let color = if model.negative {
         Color::Red
     } else {
         Color::Green
@@ -163,11 +171,12 @@ fn receipt_status_style(model: &ApprovalReceiptPanelModel<'_>) -> Style {
 }
 
 fn render_approval_receipt_panel(
+    i18n: &crate::I18n,
     model: ApprovalReceiptPanelModel<'_>,
     area: Rect,
     buffer: &mut Buffer,
 ) {
-    let border = if model.title == "Denied" || model.title == "Cancelled" {
+    let border = if model.negative {
         Color::Red
     } else {
         Color::Green
@@ -194,7 +203,7 @@ fn render_approval_receipt_panel(
     if !model.preview.is_empty() {
         constraints.push(Constraint::Length(
             wrapped_receipt_rows(
-                receipt_preview_label(model.subject),
+                receipt_preview_label(i18n, model.subject),
                 model.preview,
                 content_width,
             )
@@ -210,21 +219,18 @@ fn render_approval_receipt_panel(
 
     let mut chunk_index = 0;
     if !model.preview.is_empty() {
-        let preview_lines = wrapped_receipt_rows(
-            receipt_preview_label(model.subject),
-            model.preview,
-            content_width,
-        )
-        .into_iter()
-        .enumerate()
-        .map(|(idx, line)| {
-            if idx == 0 {
-                styled_receipt_label_line(line, receipt_preview_label(model.subject))
-            } else {
-                Line::from(Span::raw(line))
-            }
-        })
-        .collect::<Vec<_>>();
+        let preview_label = receipt_preview_label(i18n, model.subject);
+        let preview_lines = wrapped_receipt_rows(preview_label, model.preview, content_width)
+            .into_iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                if idx == 0 {
+                    styled_receipt_label_line(line, preview_label)
+                } else {
+                    Line::from(Span::raw(line))
+                }
+            })
+            .collect::<Vec<_>>();
         Paragraph::new(preview_lines).render(chunks[chunk_index], buffer);
         chunk_index += 1;
     }
@@ -238,12 +244,12 @@ fn approval_receipt_has_body(model: &ApprovalReceiptPanelModel<'_>) -> bool {
     !model.preview.is_empty() || !model.message.is_empty()
 }
 
-pub(super) fn receipt_preview_label(subject: &str) -> &'static str {
+pub(super) fn receipt_preview_label(i18n: &crate::I18n, subject: &str) -> &'static str {
     let subject = subject.to_ascii_lowercase();
     if subject.contains("bash") || subject.contains("shell") {
-        "Command"
+        i18n.t(crate::MessageId::ApprovalCommandLabel)
     } else {
-        "Preview"
+        i18n.t(crate::MessageId::ApprovalJournalPreviewLabel)
     }
 }
 

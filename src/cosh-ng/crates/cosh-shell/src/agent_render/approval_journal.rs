@@ -10,7 +10,6 @@ use ratatui::{
 
 use super::{
     approval::{approval_content_width, wrapped_preview_rows},
-    approval_receipt::receipt_preview_label,
     buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer,
 };
 
@@ -24,6 +23,13 @@ pub struct ApprovalJournalEntryModel<'a> {
     pub risk: &'a str,
     pub subject: &'a str,
     pub preview: &'a str,
+    pub preview_hash: &'a str,
+    pub request_id: Option<&'a str>,
+    pub tool_use_id: Option<&'a str>,
+    pub actor: &'a str,
+    pub execution_path: Option<&'a str>,
+    pub command_block_id: Option<&'a str>,
+    pub redaction_status: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,10 +59,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_journal_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = approval_journal_panel_height(&model, width, &i18n);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_journal_panel(model, area, &mut buffer);
+        render_approval_journal_panel(model, area, &mut buffer, &i18n);
         buffer_to_lines(&buffer, area)
     }
 
@@ -69,10 +76,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_journal_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = approval_journal_panel_height(&model, width, &i18n);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_journal_panel(model, area, &mut buffer);
+        render_approval_journal_panel(model, area, &mut buffer, &i18n);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -84,27 +92,83 @@ impl RatatuiInlineRenderer {
         &self,
         model: ApprovalJournalPanelModel<'_>,
     ) -> Vec<String> {
+        let i18n = self.i18n();
         if model.entries.is_empty() {
             return vec![
-                "Approval journal".to_string(),
-                "No approval decisions recorded in this shell session.".to_string(),
+                i18n.t(crate::MessageId::ApprovalJournalTitle).to_string(),
+                i18n.t(crate::MessageId::ApprovalJournalEmptyBody)
+                    .to_string(),
             ];
         }
 
+        let decision_count = approval_journal_decision_count(&i18n, model.entries.len());
         let mut lines = vec![format!(
-            "Approval journal - {} decisions",
-            model.entries.len()
+            "{} - {decision_count}",
+            i18n.t(crate::MessageId::ApprovalJournalTitle)
         )];
         for entry in model.entries {
+            let risk = i18n.format(
+                crate::MessageId::ApprovalRiskSuffix,
+                &[("risk", entry.risk)],
+            );
             lines.push(format!(
-                "{} {} - {} - {} risk",
-                entry.id, entry.decision, entry.kind, entry.risk
+                "{} {} - {} - {}",
+                entry.id, entry.decision, entry.kind, risk
             ));
-            lines.push(format!("  Source: {}  Run: {}", entry.source, entry.run_id));
-            lines.push(format!("  Subject: {}", entry.subject));
+            lines.push(format!(
+                "  {}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsSourceLabel),
+                entry.source,
+                i18n.t(crate::MessageId::ApprovalDetailsRunLabel),
+                entry.run_id
+            ));
+            lines.push(format!(
+                "  {}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsExecutionLabel),
+                entry
+                    .execution_path
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsPendingValue)),
+                i18n.t(crate::MessageId::ApprovalDetailsCommandBlockLabel),
+                entry
+                    .command_block_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+            ));
             lines.push(format!(
                 "  {}: {}",
-                receipt_preview_label(entry.subject),
+                i18n.t(crate::MessageId::ApprovalDetailsRedactionLabel),
+                entry
+                    .redaction_status
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNotApplicableValue))
+            ));
+            lines.push(format!(
+                "  {}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsProviderRequestLabel),
+                entry
+                    .request_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue)),
+                i18n.t(crate::MessageId::ApprovalDetailsToolUseLabel),
+                entry
+                    .tool_use_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+            ));
+            lines.push(format!(
+                "  {}: {}",
+                i18n.t(crate::MessageId::ApprovalJournalActorLabel),
+                entry.actor
+            ));
+            lines.push(format!(
+                "  {}: {}",
+                i18n.t(crate::MessageId::ApprovalJournalPreviewHashLabel),
+                entry.preview_hash
+            ));
+            lines.push(format!(
+                "  {}: {}",
+                i18n.t(crate::MessageId::ApprovalJournalSubjectLabel),
+                entry.subject
+            ));
+            lines.push(format!(
+                "  {}: {}",
+                approval_journal_preview_label(&i18n, entry.subject),
                 entry.preview
             ));
         }
@@ -112,7 +176,11 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn approval_journal_panel_height(model: &ApprovalJournalPanelModel<'_>, width: u16) -> u16 {
+fn approval_journal_panel_height(
+    model: &ApprovalJournalPanelModel<'_>,
+    width: u16,
+    i18n: &crate::I18n,
+) -> u16 {
     if model.entries.is_empty() {
         return 4;
     }
@@ -127,7 +195,7 @@ fn approval_journal_panel_height(model: &ApprovalJournalPanelModel<'_>, width: u
             let preview_rows = wrapped_preview_rows(
                 &format!(
                     "{}: {}",
-                    receipt_preview_label(entry.subject),
+                    approval_journal_preview_label(i18n, entry.subject),
                     entry.preview
                 ),
                 content_width,
@@ -135,7 +203,7 @@ fn approval_journal_panel_height(model: &ApprovalJournalPanelModel<'_>, width: u
             )
             .len()
             .max(1) as u16;
-            separator_rows + 3 + preview_rows
+            separator_rows + 8 + preview_rows
         })
         .sum::<u16>();
     2 + row_count
@@ -145,22 +213,24 @@ fn render_approval_journal_panel(
     model: ApprovalJournalPanelModel<'_>,
     area: Rect,
     buffer: &mut Buffer,
+    i18n: &crate::I18n,
 ) {
+    let decision_count = approval_journal_decision_count(i18n, model.entries.len());
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(
-                " Approval journal ",
+                format!(" {} ", i18n.t(crate::MessageId::ApprovalJournalTitle)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{} decisions ", model.entries.len())),
+            Span::raw(format!("{decision_count} ")),
         ]))
         .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     block.render(area, buffer);
 
     if model.entries.is_empty() {
-        Paragraph::new("No approval decisions recorded in this shell session.")
+        Paragraph::new(i18n.t(crate::MessageId::ApprovalJournalEmptyBody))
             .wrap(Wrap { trim: true })
             .render(inner, buffer);
         return;
@@ -178,6 +248,10 @@ fn render_approval_journal_panel(
         } else {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         };
+        let risk = i18n.format(
+            crate::MessageId::ApprovalRiskSuffix,
+            &[("risk", entry.risk)],
+        );
         lines.push(Line::from(vec![
             Span::styled(
                 entry.id.to_string(),
@@ -188,26 +262,125 @@ fn render_approval_journal_panel(
             Span::raw("  "),
             Span::styled(entry.kind.to_string(), Style::default().fg(Color::Cyan)),
             Span::raw("  "),
-            Span::styled(
-                format!("{} risk", entry.risk),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(risk, Style::default().fg(Color::Yellow)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}: ", i18n.t(crate::MessageId::ApprovalDetailsSourceLabel)),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(entry.source.to_string()),
             Span::raw("  "),
-            Span::styled("Run: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}: ", i18n.t(crate::MessageId::ApprovalDetailsRunLabel)),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(entry.run_id.to_string()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Subject: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalDetailsExecutionLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(
+                entry
+                    .execution_path
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsPendingValue))
+                    .to_string(),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalDetailsCommandBlockLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(
+                entry
+                    .command_block_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                    .to_string(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalDetailsRedactionLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(
+                entry
+                    .redaction_status
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNotApplicableValue))
+                    .to_string(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalDetailsProviderRequestLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(
+                entry
+                    .request_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                    .to_string(),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalDetailsToolUseLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(
+                entry
+                    .tool_use_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                    .to_string(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}: ", i18n.t(crate::MessageId::ApprovalJournalActorLabel)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(entry.actor.to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalJournalPreviewHashLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(entry.preview_hash.to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}: ",
+                    i18n.t(crate::MessageId::ApprovalJournalSubjectLabel)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(entry.subject.to_string()),
         ]));
         for row in wrapped_preview_rows(
             &format!(
                 "{}: {}",
-                receipt_preview_label(entry.subject),
+                approval_journal_preview_label(i18n, entry.subject),
                 entry.preview
             ),
             inner.width.saturating_sub(2) as usize,
@@ -220,4 +393,20 @@ fn render_approval_journal_panel(
     Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: true })
         .render(inner, buffer);
+}
+
+fn approval_journal_decision_count(i18n: &crate::I18n, count: usize) -> String {
+    i18n.format(
+        crate::MessageId::ApprovalJournalDecisionCount,
+        &[("count", &count.to_string())],
+    )
+}
+
+fn approval_journal_preview_label(i18n: &crate::I18n, subject: &str) -> &'static str {
+    let subject = subject.to_ascii_lowercase();
+    if subject.contains("bash") || subject.contains("shell") {
+        i18n.t(crate::MessageId::ApprovalCommandLabel)
+    } else {
+        i18n.t(crate::MessageId::ApprovalJournalPreviewLabel)
+    }
 }

@@ -2,8 +2,12 @@
 name = "cosh-shell"
 version.workspace = true
 edition.workspace = true
+description = "Shell-first interactive Agent shell for cosh-ng"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
+keywords = ["shell", "agent", "terminal", "approval", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "cosh-shell"
@@ -14,4 +18,5 @@ nix = { workspace = true, features = ["term"] }
 ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 wait-timeout = "0.2"

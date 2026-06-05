@@ -1,19 +1,19 @@
 use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
-
-use nix::libc;
 
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
+mod driver;
+
+use self::driver::{start_cancellable_qwen_process, start_control_protocol_qwen_process};
 use super::claude::{join_reader_thread, read_lossy, send_agent_event, terminate_process};
 use super::qwen_stream::QwenStreamParser;
 use super::{
-    prompt_from_request, provider_prompt_contract, start_threaded_adapter_run, AdapterError,
-    AdapterInstance, AgentAdapter, AgentBackendCapabilities, AgentRunHandle, PreparedInvocation,
+    commit_pending_session, prompt_from_request, provider_prompt_contract,
+    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
+    AgentBackendCapabilities, AgentRunHandle, PreparedInvocation, ProviderLineProgress,
 };
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,15 @@ impl QwenCliAdapter {
         request: &AgentRequest,
         mode: CoshApprovalMode,
     ) -> PreparedInvocation {
-        let resume_session = self.session_id.lock().ok().and_then(|guard| guard.clone());
+        let disable_resume = request
+            .context_hints
+            .iter()
+            .any(|hint| hint.contains("disable provider resume"));
+        let resume_session = if disable_resume {
+            None
+        } else {
+            self.session_id.lock().ok().and_then(|guard| guard.clone())
+        };
         let mut args = vec![
             "--output-format".to_string(),
             "stream-json".to_string(),
@@ -53,14 +61,8 @@ impl QwenCliAdapter {
 
         args.extend(["--input-format".to_string(), "stream-json".to_string()]);
         match mode {
-            CoshApprovalMode::Suggest => {
+            CoshApprovalMode::Recommend => {
                 args.extend(["--approval-mode".to_string(), "plan".to_string()]);
-            }
-            CoshApprovalMode::Ask => {
-                args.extend(["--approval-mode".to_string(), "default".to_string()]);
-            }
-            CoshApprovalMode::Trust => {
-                args.extend(["--approval-mode".to_string(), "yolo".to_string()]);
             }
             CoshApprovalMode::Auto => {
                 args.extend(["--approval-mode".to_string(), "default".to_string()]);
@@ -69,6 +71,9 @@ impl QwenCliAdapter {
                     "Read,Grep,Glob,LS,read_file,grep_search,glob,list_directory,read_many_files"
                         .to_string(),
                 ]);
+            }
+            CoshApprovalMode::Trust => {
+                args.extend(["--approval-mode".to_string(), "default".to_string()]);
             }
         }
 
@@ -95,21 +100,21 @@ impl QwenCliAdapter {
             return start_threaded_adapter_run(adapter, request);
         }
 
-        if !mode.uses_control_protocol() {
-            return start_cancellable_qwen_process(
+        if mode.uses_control_protocol() {
+            return start_control_protocol_qwen_process(
                 request.id,
                 prepared,
                 Arc::clone(&self.session_id),
             );
         }
 
-        start_control_protocol_qwen_process(request.id, prepared, Arc::clone(&self.session_id))
+        start_cancellable_qwen_process(request.id, prepared, Arc::clone(&self.session_id))
     }
 }
 
 impl AgentAdapter for QwenCliAdapter {
     fn name(&self) -> &'static str {
-        "qwen-cli"
+        "co"
     }
 
     fn capabilities(&self) -> AgentBackendCapabilities {
@@ -138,7 +143,7 @@ impl AgentAdapter for QwenCliAdapter {
         request: &AgentRequest,
         sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
     ) -> Result<(), AdapterError> {
-        let prepared = self.prepare_invocation(request, CoshApprovalMode::Suggest);
+        let prepared = self.prepare_invocation(request, CoshApprovalMode::Recommend);
         if !self.allow_model_call {
             for event in qwen_dry_run_events(request, &prepared) {
                 sink(event)?;
@@ -149,43 +154,52 @@ impl AgentAdapter for QwenCliAdapter {
         sink(AgentEvent::StatusChanged {
             run_id: request.id.clone(),
             phase: "starting".to_string(),
-            message: "starting qwen-cli stream-json backend".to_string(),
+            message: "starting co stream-json backend".to_string(),
         })?;
 
         let mut child = Command::new(&prepared.program)
-            .args(&prepared.args)
-            .arg(&prepared.prompt)
+            .args(qwen_args_with_prompt(&prepared))
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| AdapterError {
-                message: format!("failed to run qwen cli: {err}"),
+                message: format!("failed to run co cli: {err}"),
             })?;
 
         let stdout = child.stdout.take().ok_or_else(|| AdapterError {
-            message: "failed to capture qwen cli stdout".to_string(),
+            message: "failed to capture co cli stdout".to_string(),
         })?;
         let stderr = child.stderr.take().ok_or_else(|| AdapterError {
-            message: "failed to capture qwen cli stderr".to_string(),
+            message: "failed to capture co cli stderr".to_string(),
         })?;
         let stderr_handle = thread::spawn(move || read_lossy(stderr));
 
+        let pending_session = Arc::new(Mutex::new(None));
         let mut parser =
-            QwenStreamParser::new(request.id.clone(), Some(Arc::clone(&self.session_id)));
+            QwenStreamParser::new(request.id.clone(), Some(Arc::clone(&pending_session)));
+        let mut completed = false;
+        let mut failed = false;
+        let mut terminal_events = Vec::new();
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(|err| AdapterError {
-                message: format!("failed to read qwen cli stream: {err}"),
+                message: format!("failed to read co cli stream: {err}"),
             })?;
             for event in parser.parse_line(&line) {
-                sink(event)?;
+                update_completion_flags(&event, &mut completed, &mut failed);
+                if is_terminal_agent_event(&event) {
+                    terminal_events.push(event);
+                } else {
+                    sink(event)?;
+                }
             }
         }
 
         let status = child.wait().map_err(|err| AdapterError {
-            message: format!("failed to wait for qwen cli: {err}"),
+            message: format!("failed to wait for co cli: {err}"),
         })?;
         if !status.success() {
-            let error = join_reader_thread(stderr_handle, "qwen cli stderr")?;
+            let error = join_reader_thread(stderr_handle, "co cli stderr")?;
             sink(AgentEvent::AgentFailed {
                 run_id: request.id.clone(),
                 error: error.trim().to_string(),
@@ -193,402 +207,64 @@ impl AgentAdapter for QwenCliAdapter {
             return Ok(());
         }
 
-        let _stderr = join_reader_thread(stderr_handle, "qwen cli stderr")?;
-        parser.finish(sink)
+        let _stderr = join_reader_thread(stderr_handle, "co cli stderr")?;
+        parser.finish(&mut |event| {
+            update_completion_flags(&event, &mut completed, &mut failed);
+            if is_terminal_agent_event(&event) {
+                terminal_events.push(event);
+                Ok(())
+            } else {
+                sink(event)
+            }
+        })?;
+        if completed && !failed {
+            commit_pending_session(&self.session_id, &pending_session);
+        }
+        for event in terminal_events {
+            sink(event)?;
+        }
+        Ok(())
     }
 }
 
 fn qwen_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> String {
     format!(
-        "{}{}\
-         \n\n\
-         Qwen adapter compatibility:\n\
-         - When the cosh-shell Agent contract asks for shell evidence, use co's `run_shell_command` tool.\n\
-         - Do not answer only with a suggested shell command in agent mode when `run_shell_command` can gather the evidence.\n\
-         If you need to ask the user for more input and an AskUserQuestion tool is not available, \
-         output exactly one line and no surrounding prose:\n\
-         COSH_QUESTION: {{\"question\":\"<visible question>\",\"options\":[\"option 1\",\"option 2\"],\"allow_free_text\":true,\"multi_select\":false}}\n\
-         Use an empty options array for free-text-only questions. Never say AskUserQuestion is unavailable.",
+        "{}{}",
         prompt_from_request(request),
         provider_prompt_contract(mode, "run_shell_command")
     )
 }
 
-fn start_cancellable_qwen_process(
-    run_id: String,
-    prepared: PreparedInvocation,
-    session_state: Arc<Mutex<Option<String>>>,
-) -> AgentRunHandle {
-    let (sender, receiver) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child_pid = Arc::new(Mutex::new(None::<u32>));
-
-    let cancel_flag = Arc::clone(&cancelled);
-    let cancel_pid = Arc::clone(&child_pid);
-    let cancel = Arc::new(move || {
-        cancel_flag.store(true, Ordering::SeqCst);
-        if let Some(pid) = cancel_pid.lock().ok().and_then(|guard| *guard) {
-            terminate_process(pid);
-        }
-    });
-
-    thread::spawn(move || {
-        send_agent_event(
-            &sender,
-            AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "starting".to_string(),
-                message: "starting qwen-cli stream-json backend".to_string(),
-            },
-        );
-
-        let mut command = Command::new(&prepared.program);
-        command
-            .args(&prepared.args)
-            .arg(&prepared.prompt)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = sender.send(Err(AdapterError {
-                    message: format!("failed to run qwen cli: {err}"),
-                }));
-                return;
-            }
-        };
-
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = Some(child.id());
-        }
-        if cancelled.load(Ordering::SeqCst) {
-            terminate_process(child.id());
-        }
-
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                let _ = sender.send(Err(AdapterError {
-                    message: "failed to capture qwen cli stdout".to_string(),
-                }));
-                return;
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                let _ = sender.send(Err(AdapterError {
-                    message: "failed to capture qwen cli stderr".to_string(),
-                }));
-                return;
-            }
-        };
-        let stderr_handle = thread::spawn(move || read_lossy(stderr));
-
-        let mut parser = QwenStreamParser::new(run_id.clone(), Some(session_state));
-        for line in BufReader::new(stdout).lines() {
-            if cancelled.load(Ordering::SeqCst) {
-                terminate_process(child.id());
-                break;
-            }
-            let line = match line {
-                Ok(line) => line,
-                Err(err) => {
-                    let _ = sender.send(Err(AdapterError {
-                        message: format!("failed to read qwen cli stream: {err}"),
-                    }));
-                    return;
-                }
-            };
-            for event in parser.parse_line(&line) {
-                send_agent_event(&sender, event);
-            }
-        }
-
-        let status = match child.wait() {
-            Ok(status) => status,
-            Err(err) => {
-                let _ = sender.send(Err(AdapterError {
-                    message: format!("failed to wait for qwen cli: {err}"),
-                }));
-                return;
-            }
-        };
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = None;
-        }
-
-        if cancelled.load(Ordering::SeqCst) {
-            let _stderr = join_reader_thread(stderr_handle, "qwen cli stderr");
-            send_agent_event(
-                &sender,
-                AgentEvent::AgentCancelled {
-                    run_id,
-                    reason: "user requested cancellation".to_string(),
-                },
-            );
-            return;
-        }
-
-        if !status.success() {
-            let error = join_reader_thread(stderr_handle, "qwen cli stderr")
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|e| e.message);
-            send_agent_event(&sender, AgentEvent::AgentFailed { run_id, error });
-            return;
-        }
-
-        let _stderr = join_reader_thread(stderr_handle, "qwen cli stderr");
-        let _ = parser.finish(&mut |event| {
-            send_agent_event(&sender, event);
-            Ok(())
-        });
-    });
-
-    AgentRunHandle {
-        receiver,
-        cancel,
-        approval_sender: None,
-        question_sender: None,
+fn line_progress(progressed: bool) -> ProviderLineProgress {
+    if progressed {
+        ProviderLineProgress::Progress
+    } else {
+        ProviderLineProgress::NoProgress
     }
 }
 
-fn start_control_protocol_qwen_process(
-    run_id: String,
-    prepared: PreparedInvocation,
-    session_state: Arc<Mutex<Option<String>>>,
-) -> AgentRunHandle {
-    let (event_tx, event_rx) = mpsc::channel();
-    let (approval_tx, approval_rx) = mpsc::channel::<super::ApprovalResponse>();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child_pid = Arc::new(Mutex::new(None::<u32>));
+fn qwen_args_with_prompt(prepared: &PreparedInvocation) -> Vec<String> {
+    let mut args = prepared.args.clone();
+    args.push("--prompt".to_string());
+    args.push(prepared.prompt.clone());
+    args
+}
 
-    let cancel_flag = Arc::clone(&cancelled);
-    let cancel_pid = Arc::clone(&child_pid);
-    let cancel = Arc::new(move || {
-        cancel_flag.store(true, Ordering::SeqCst);
-        if let Some(pid) = cancel_pid.lock().ok().and_then(|guard| *guard) {
-            terminate_process(pid);
-        }
-    });
-
-    let prompt = prepared.prompt.clone();
-
-    thread::spawn(move || {
-        send_agent_event(
-            &event_tx,
-            AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "starting".to_string(),
-                message: "starting qwen-cli control protocol backend".to_string(),
-            },
-        );
-
-        let mut command = Command::new(&prepared.program);
-        command
-            .args(&prepared.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = event_tx.send(Err(AdapterError {
-                    message: format!("failed to run qwen cli: {err}"),
-                }));
-                return;
-            }
-        };
-
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = Some(child.id());
-        }
-        if cancelled.load(Ordering::SeqCst) {
-            terminate_process(child.id());
-        }
-
-        let stdin = match child.stdin.take() {
-            Some(stdin) => stdin,
-            None => {
-                let _ = event_tx.send(Err(AdapterError {
-                    message: "failed to capture stdin".to_string(),
-                }));
-                return;
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                let _ = event_tx.send(Err(AdapterError {
-                    message: "failed to capture stdout".to_string(),
-                }));
-                return;
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                let _ = event_tx.send(Err(AdapterError {
-                    message: "failed to capture stderr".to_string(),
-                }));
-                return;
-            }
-        };
-
-        // stderr reader thread
-        let stderr_handle = thread::spawn(move || read_lossy(stderr));
-
-        // stdin writer thread
-        thread::spawn(move || {
-            use std::io::Write;
-            let mut writer = std::io::BufWriter::new(stdin);
-
-            let init_msg = super::control_protocol::serialize_initialize("init-1");
-            let _ = writeln!(writer, "{init_msg}");
-            let _ = writer.flush();
-
-            if !prompt.is_empty() {
-                let user_msg = super::control_protocol::serialize_user_message(&prompt, None);
-                let _ = writeln!(writer, "{user_msg}");
-                let _ = writer.flush();
-            }
-
-            while let Ok(response) = approval_rx.recv() {
-                let msg = match &response.decision {
-                    super::ApprovalDecision::Allow => match response.tool_use_id.as_deref() {
-                        Some(tool_use_id) => super::control_protocol::serialize_allow(
-                            &response.request_id,
-                            tool_use_id,
-                        ),
-                        None => super::control_protocol::serialize_deny(
-                            &response.request_id,
-                            "Missing provider tool_use_id",
-                        ),
-                    },
-                    super::ApprovalDecision::Deny { message } => {
-                        super::control_protocol::serialize_deny(&response.request_id, message)
-                    }
-                };
-                if writeln!(writer, "{msg}").is_err() {
-                    break;
-                }
-                if writer.flush().is_err() {
-                    break;
-                }
-            }
-        });
-
-        // stdout reader — parse events + control requests
-        let mut parser = QwenStreamParser::new(run_id.clone(), Some(session_state));
-        for line in BufReader::new(stdout).lines() {
-            if cancelled.load(Ordering::SeqCst) {
-                terminate_process(child.id());
-                break;
-            }
-            let line = match line {
-                Ok(line) => line,
-                Err(err) => {
-                    let _ = event_tx.send(Err(AdapterError {
-                        message: format!("failed to read stream: {err}"),
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(ctrl) = super::control_protocol::parse_control_request(&line) {
-                match ctrl {
-                    super::control_protocol::ControlRequest::CanUseTool {
-                        request_id,
-                        tool_name,
-                        tool_input,
-                        tool_use_id,
-                    } => {
-                        send_agent_event(
-                            &event_tx,
-                            AgentEvent::ToolPermissionRequest {
-                                run_id: run_id.clone(),
-                                request_id,
-                                tool_name,
-                                tool_input,
-                                tool_use_id,
-                            },
-                        );
-                    }
-                    super::control_protocol::ControlRequest::Initialize { .. } => {}
-                    super::control_protocol::ControlRequest::AskUser { .. } => {}
-                }
-                continue;
-            }
-
-            for event in parser.parse_line(&line) {
-                send_agent_event(&event_tx, event);
-            }
-        }
-
-        let status = match child.wait() {
-            Ok(status) => status,
-            Err(err) => {
-                let _ = event_tx.send(Err(AdapterError {
-                    message: format!("failed to wait for qwen cli: {err}"),
-                }));
-                return;
-            }
-        };
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = None;
-        }
-
-        if cancelled.load(Ordering::SeqCst) {
-            let _stderr = join_reader_thread(stderr_handle, "stderr");
-            send_agent_event(
-                &event_tx,
-                AgentEvent::AgentCancelled {
-                    run_id,
-                    reason: "user requested cancellation".to_string(),
-                },
-            );
-            return;
-        }
-
-        if !status.success() {
-            let error = join_reader_thread(stderr_handle, "stderr")
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|e| e.message);
-            send_agent_event(&event_tx, AgentEvent::AgentFailed { run_id, error });
-            return;
-        }
-
-        let _stderr = join_reader_thread(stderr_handle, "stderr");
-        let _ = parser.finish(&mut |event| {
-            send_agent_event(&event_tx, event);
-            Ok(())
-        });
-    });
-
-    AgentRunHandle {
-        receiver: event_rx,
-        cancel,
-        approval_sender: Some(approval_tx),
-        question_sender: None,
+fn update_completion_flags(event: &AgentEvent, completed: &mut bool, failed: &mut bool) {
+    match event {
+        AgentEvent::AgentCompleted { .. } => *completed = true,
+        AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => *failed = true,
+        _ => {}
     }
+}
+
+fn is_terminal_agent_event(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::AgentCompleted { .. }
+            | AgentEvent::AgentFailed { .. }
+            | AgentEvent::AgentCancelled { .. }
+    )
 }
 
 fn qwen_dry_run_events(request: &AgentRequest, prepared: &PreparedInvocation) -> Vec<AgentEvent> {
@@ -597,28 +273,31 @@ fn qwen_dry_run_events(request: &AgentRequest, prepared: &PreparedInvocation) ->
         AgentEvent::StatusChanged {
             run_id: run_id.clone(),
             phase: "dry_run".to_string(),
-            message: "prepared qwen cli invocation without model call".to_string(),
+            message: "prepared co invocation without model call".to_string(),
         },
         AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: format!(
-                "Qwen CLI adapter prepared a safe recommend-only invocation; model execution is disabled by default.\n\nPrepared invocation:\n  {}",
+                "co adapter prepared a safe recommend-only invocation; model execution is disabled by default.\n\nPrepared invocation:\n  {}",
                 prepared.argv_preview().join(" ")
             ),
         },
         AgentEvent::AgentCompleted {
             run_id,
-            summary: "qwen cli dry-run completed without model call".to_string(),
+            summary: "co dry-run completed without model call".to_string(),
         },
     ]
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{start_cancellable_qwen_process, PreparedInvocation, QwenCliAdapter};
+    use super::{driver::start_cancellable_qwen_process, PreparedInvocation, QwenCliAdapter};
     use crate::adapter::AgentRunHandle;
     use crate::types::{
         AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode,
@@ -664,9 +343,37 @@ mod tests {
         }
     }
 
+    fn shell_evidence_request() -> AgentRequest {
+        let mut request = test_request();
+        request.id = "evidence-follow-up".to_string();
+        request.user_input = Some(
+            "ShellEvidenceExcerpt\n\
+             output_id: terminal-output://sess/blk\n\
+             command_id: blk\n\
+             command: echo test\n\
+             excerpt_status: included\n\
+             redaction_status: excerpt_included\n\
+             bounded_output_excerpt:\n\
+             test\n"
+                .to_string(),
+        );
+        request
+    }
+
+    fn mock_provider_script(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("cosh-qwen-{name}-{}", std::process::id()));
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write mock provider");
+        let mut permissions = fs::metadata(&path)
+            .expect("mock provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("chmod mock provider");
+        path
+    }
+
     #[test]
-    fn mode_flags_co_suggest() {
-        let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Suggest);
+    fn mode_flags_co_recommend() {
+        let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Recommend);
         assert!(inv.args.contains(&"--approval-mode".to_string()));
         assert!(inv.args.contains(&"plan".to_string()));
         assert!(inv.args.contains(&"--input-format".to_string()));
@@ -682,33 +389,25 @@ mod tests {
     }
 
     #[test]
-    fn mode_flags_co_ask() {
-        let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Ask);
-        assert!(inv.args.contains(&"--approval-mode".to_string()));
-        assert!(inv.args.contains(&"default".to_string()));
-        assert!(inv.args.contains(&"--input-format".to_string()));
-        assert!(inv.args.contains(&"stream-json".to_string()));
-        assert!(inv.prompt.contains("COSH_QUESTION:"));
-        assert!(inv
-            .prompt
-            .contains("Never say AskUserQuestion is unavailable"));
-        assert!(inv.prompt.contains("agent mode"), "{}", inv.prompt);
-        assert!(inv
-            .prompt
-            .contains("approval system is handled by cosh-shell"));
-        assert!(inv.prompt.contains("run_shell_command"), "{}", inv.prompt);
-        assert!(!inv.args.contains(&"--verbose".to_string()));
-        assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
-    }
-
-    #[test]
     fn mode_flags_co_auto() {
         let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
+        assert!(inv.args.contains(&"--approval-mode".to_string()));
+        assert!(inv.args.contains(&"default".to_string()));
         assert!(inv.args.contains(&"--allowed-tools".to_string()));
-        assert!(inv
-            .args
-            .iter()
-            .any(|arg| arg.contains("read_file") && arg.contains("grep_search")));
+        assert!(inv.args.iter().any(|arg| arg.contains("read_file")));
+        assert!(inv.prompt.contains("run_shell_command"), "{}", inv.prompt);
+        assert!(
+            inv.prompt
+                .contains("Always emit a provider permission request"),
+            "{}",
+            inv.prompt
+        );
+        assert!(
+            !inv.prompt.contains("Qwen adapter compatibility"),
+            "{}",
+            inv.prompt
+        );
+        assert!(!inv.prompt.contains("COSH_QUESTION"), "{}", inv.prompt);
         assert!(!inv.args.contains(&"--allowedTools".to_string()));
     }
 
@@ -716,7 +415,8 @@ mod tests {
     fn mode_flags_co_trust() {
         let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Trust);
         assert!(inv.args.contains(&"--approval-mode".to_string()));
-        assert!(inv.args.contains(&"yolo".to_string()));
+        assert!(inv.args.contains(&"default".to_string()));
+        assert!(!inv.args.contains(&"yolo".to_string()));
         assert!(inv.args.contains(&"--input-format".to_string()));
     }
 
@@ -727,9 +427,52 @@ mod tests {
             allow_model_call: false,
             session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
         };
-        let inv = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Ask);
+        let inv = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
         assert!(inv.args.contains(&"--resume".to_string()));
         assert!(inv.args.contains(&"prev-sess".to_string()));
+    }
+
+    #[test]
+    fn co_evidence_follow_up_reuses_committed_session_as_plain_prompt() {
+        let adapter = QwenCliAdapter {
+            program: "qwen".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
+        };
+        let inv = adapter.prepare_invocation(&shell_evidence_request(), CoshApprovalMode::Auto);
+        assert!(inv.args.contains(&"--resume".to_string()));
+        assert!(inv.args.contains(&"prev-sess".to_string()));
+        assert!(
+            inv.prompt.contains("user-requested shell evidence excerpt"),
+            "{}",
+            inv.prompt
+        );
+        assert!(
+            !inv.prompt.contains("Tool result for request"),
+            "{}",
+            inv.prompt
+        );
+        assert!(
+            !inv.prompt.contains("host_executed_shell"),
+            "{}",
+            inv.prompt
+        );
+    }
+
+    #[test]
+    fn mode_flags_co_fallback_can_disable_session_resume() {
+        let adapter = QwenCliAdapter {
+            program: "qwen".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
+        };
+        let mut request = test_request();
+        request
+            .context_hints
+            .push("disable provider resume for shell handoff fallback".to_string());
+        let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+        assert!(!inv.args.contains(&"--resume".to_string()));
+        assert!(!inv.args.contains(&"prev-sess".to_string()));
     }
 
     #[test]
@@ -765,5 +508,114 @@ mod tests {
             }
         }
         assert!(saw_cancelled);
+    }
+
+    #[test]
+    fn commits_session_only_after_successful_completion() {
+        let script = mock_provider_script(
+            "success",
+            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-ok\",\"model\":\"qwen\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"sess-ok\",\"result\":\"done\"}'",
+        );
+        let committed = Arc::new(Mutex::new(None));
+        let handle: AgentRunHandle = start_cancellable_qwen_process(
+            "run-success".to_string(),
+            PreparedInvocation {
+                program: script.display().to_string(),
+                args: Vec::new(),
+                prompt: String::new(),
+            },
+            Arc::clone(&committed),
+        );
+
+        let mut saw_completed = false;
+        for _ in 0..10 {
+            if matches!(
+                handle
+                    .next_event_timeout(Duration::from_secs(1))
+                    .expect("event"),
+                Some(AgentEvent::AgentCompleted { .. })
+            ) {
+                saw_completed = true;
+                break;
+            }
+        }
+        let _ = fs::remove_file(script);
+        assert!(saw_completed);
+        assert_eq!(
+            committed.lock().expect("committed session").as_deref(),
+            Some("sess-ok")
+        );
+    }
+
+    #[test]
+    fn passes_prompt_with_flag_when_allowed_tools_are_present() {
+        let script = mock_provider_script(
+            "prompt-flag",
+            "saw_prompt=0\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--prompt\" ]; then saw_prompt=1; fi\ndone\nif [ \"$saw_prompt\" -ne 1 ]; then exit 7; fi\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"sess-prompt\",\"result\":\"done\"}'",
+        );
+        let handle: AgentRunHandle = start_cancellable_qwen_process(
+            "run-prompt".to_string(),
+            PreparedInvocation {
+                program: script.display().to_string(),
+                args: vec![
+                    "--allowed-tools".to_string(),
+                    "Read,Grep,Glob,LS".to_string(),
+                ],
+                prompt: "hello prompt".to_string(),
+            },
+            Arc::new(Mutex::new(None)),
+        );
+
+        let mut saw_completed = false;
+        for _ in 0..10 {
+            if matches!(
+                handle
+                    .next_event_timeout(Duration::from_secs(1))
+                    .expect("event"),
+                Some(AgentEvent::AgentCompleted { .. })
+            ) {
+                saw_completed = true;
+                break;
+            }
+        }
+        let _ = fs::remove_file(script);
+        assert!(saw_completed);
+    }
+
+    #[test]
+    fn does_not_commit_session_after_provider_failure() {
+        let script = mock_provider_script(
+            "failure",
+            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-bad\",\"model\":\"qwen\"}'\nexit 2",
+        );
+        let committed = Arc::new(Mutex::new(Some("sess-prev".to_string())));
+        let handle: AgentRunHandle = start_cancellable_qwen_process(
+            "run-failure".to_string(),
+            PreparedInvocation {
+                program: script.display().to_string(),
+                args: Vec::new(),
+                prompt: String::new(),
+            },
+            Arc::clone(&committed),
+        );
+
+        let mut saw_failed = false;
+        for _ in 0..10 {
+            if matches!(
+                handle
+                    .next_event_timeout(Duration::from_secs(1))
+                    .expect("event"),
+                Some(AgentEvent::AgentFailed { .. })
+            ) {
+                saw_failed = true;
+                break;
+            }
+        }
+        let _ = fs::remove_file(script);
+        assert!(saw_failed);
+        assert_eq!(
+            committed.lock().expect("committed session").as_deref(),
+            Some("sess-prev")
+        );
     }
 }

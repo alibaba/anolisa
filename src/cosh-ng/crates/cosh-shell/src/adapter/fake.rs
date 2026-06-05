@@ -1,9 +1,25 @@
-use std::thread;
-use std::time::Duration;
-
+use crate::context_window::provider_safe_command_fact_line;
 use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
 
 use super::{first_token, AdapterError, AgentAdapter, AgentBackendCapabilities};
+use control_protocol::emit_fake_control_protocol_stream;
+use fixtures::{
+    extract_fake_approval_result, extract_fake_pending_answer, extract_fake_tool_result,
+    fake_long_tool_output,
+};
+use responses_markdown::fake_markdown_response;
+use stream_markdown::emit_fake_markdown_stream;
+use stream_state::{
+    emit_fake_late_card_or_artifact_stream, emit_fake_slow_stream, emit_fake_stale_question_stream,
+};
+use stream_tool_approval::emit_fake_tool_approval_stream;
+
+mod control_protocol;
+mod fixtures;
+mod responses_markdown;
+mod stream_markdown;
+mod stream_state;
+mod stream_tool_approval;
 
 #[derive(Debug, Default, Clone)]
 pub struct FakeAgentAdapter;
@@ -76,6 +92,88 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
+            if input.contains("ShellCommandCompleted evidence") {
+                let approval = input
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("approval_id: "))
+                    .unwrap_or("<unknown>");
+                if input.contains("trigger resume timeout")
+                    && !request
+                        .context_hints
+                        .iter()
+                        .any(|hint| hint.contains("disable provider resume"))
+                {
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "Agent timed out: No provider response within 20s".to_string(),
+                    }]);
+                }
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "shell_evidence_received".to_string(),
+                        message: "received foreground shell evidence".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: format!(
+                            "Command result analysis for {approval}: foreground shell evidence received. No additional shell command is required."
+                        ),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "shell evidence handled without requesting another tool"
+                            .to_string(),
+                    },
+                ]);
+            }
+            if input.contains("ShellEvidenceExcerpt") {
+                if input.contains("history_index:") {
+                    let text = if input.contains("token=<redacted>")
+                        && !input.contains("command: echo token=super-secret")
+                    {
+                        "Redacted history index received by fake adapter."
+                    } else {
+                        "Evidence history index received by fake adapter."
+                    };
+                    return Ok(vec![
+                        AgentEvent::StatusChanged {
+                            run_id: run_id.clone(),
+                            phase: "evidence_history_received".to_string(),
+                            message: "received shell history index".to_string(),
+                        },
+                        AgentEvent::TextDelta {
+                            run_id: run_id.clone(),
+                            text: text.to_string(),
+                        },
+                        AgentEvent::AgentCompleted {
+                            run_id,
+                            summary: "evidence history handled".to_string(),
+                        },
+                    ]);
+                }
+                if input.contains("bounded_output_excerpt:") {
+                    let excerpt = input
+                        .split_once("bounded_output_excerpt:\n")
+                        .map(|(_, excerpt)| excerpt.trim())
+                        .unwrap_or("<missing excerpt>");
+                    return Ok(vec![
+                        AgentEvent::StatusChanged {
+                            run_id: run_id.clone(),
+                            phase: "evidence_excerpt_received".to_string(),
+                            message: "received bounded shell evidence excerpt".to_string(),
+                        },
+                        AgentEvent::TextDelta {
+                            run_id: run_id.clone(),
+                            text: format!("Evidence excerpt received by fake adapter: {excerpt}"),
+                        },
+                        AgentEvent::AgentCompleted {
+                            run_id,
+                            summary: "evidence excerpt handled".to_string(),
+                        },
+                    ]);
+                }
+            }
             if let Some(approval_result) = extract_fake_approval_result(input) {
                 return Ok(vec![
                     AgentEvent::StatusChanged {
@@ -117,19 +215,7 @@ impl AgentAdapter for FakeAgentAdapter {
                 let context = request
                     .context_blocks
                     .iter()
-                    .map(|block| {
-                        format!(
-                            "{} exit={} ref={} command={}",
-                            block.id,
-                            block.exit_code,
-                            block
-                                .output
-                                .terminal_output_ref
-                                .as_deref()
-                                .unwrap_or("<missing>"),
-                            block.command
-                        )
-                    })
+                    .map(provider_safe_command_fact_line)
                     .collect::<Vec<_>>()
                     .join("\n");
                 let hook_hints = request.context_hints.join("\n");
@@ -142,7 +228,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
                         text: format!(
-                            "Recent context visible to Agent:\n{}\nHook hints visible to Agent:\n{}",
+                            "Recent context visible to Agent:\n{}\nHook routing hints visible to Agent:\n{}",
                             if context.is_empty() {
                                 "<none>".to_string()
                             } else {
@@ -161,90 +247,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
-            if input.contains("markdown indented code") {
-                return Ok(vec![
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "rendering".to_string(),
-                        message: "returning indented markdown code guidance".to_string(),
-                    },
-                    AgentEvent::TextDelta {
-                        run_id: run_id.clone(),
-                        text: "Indented code check\n\n    cargo test --package cosh-shell\n    git status --short\n\nDone.".to_string(),
-                    },
-                    AgentEvent::AgentCompleted {
-                        run_id,
-                        summary: "markdown indented code fake analysis completed".to_string(),
-                    },
-                ]);
-            }
-            if input.contains("markdown paragraph") {
-                return Ok(vec![
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "rendering".to_string(),
-                        message: "returning soft-wrapped markdown paragraph".to_string(),
-                    },
-                    AgentEvent::TextDelta {
-                        run_id: run_id.clone(),
-                        text: "Paragraph rendering\n\nThis Agent answer is split\nacross multiple source lines with 中文内容\nbut should read as one Markdown paragraph.".to_string(),
-                    },
-                    AgentEvent::AgentCompleted {
-                        run_id,
-                        summary: "markdown paragraph fake analysis completed".to_string(),
-                    },
-                ]);
-            }
-            if input.contains("markdown pipe output") {
-                return Ok(vec![
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "rendering".to_string(),
-                        message: "returning markdown pipe output".to_string(),
-                    },
-                    AgentEvent::TextDelta {
-                        run_id: run_id.clone(),
-                        text: "Shell output:\n\n| 1 | Virtualization.VirtualMachine | ~1470 MB |\n| 2 | Node | ~572 MB |\n\nDone.".to_string(),
-                    },
-                    AgentEvent::AgentCompleted {
-                        run_id,
-                        summary: "markdown pipe output fake analysis completed".to_string(),
-                    },
-                ]);
-            }
-            if input.contains("markdown table") {
-                return Ok(vec![
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "rendering".to_string(),
-                        message: "returning markdown table guidance".to_string(),
-                    },
-                    AgentEvent::TextDelta {
-                        run_id: run_id.clone(),
-                        text: "内存占用 Top 10 分析:\n\n| 排名 | 进程 | RSS (MB) | 说明 |\n| --- | --- | --- | --- |\n| 1 | Virtualization.VirtualMachine | ~1470 MB | 虚拟机进程，最大内存消耗者 |\n| 2 | ps aux \\| grep cosh | ~42 MB | escaped pipe 应保留在单元格中 |\n\n关键发现：Qoder 占用最多。".to_string(),
-                    },
-                    AgentEvent::AgentCompleted {
-                        run_id,
-                        summary: "markdown table fake analysis completed".to_string(),
-                    },
-                ]);
-            }
-            if input.contains("markdown") {
-                return Ok(vec![
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "rendering".to_string(),
-                        message: "returning markdown guidance".to_string(),
-                    },
-                    AgentEvent::TextDelta {
-                        run_id: run_id.clone(),
-                        text: "# Project check\n\n- Run `git status`\n- Build workspace\n  - Use package scoped tests\n  1. Keep shell-first validation repeatable\n1. Review rendered transcript\n\n```bash\ncargo build --workspace\nif test -d crates; then\n  cargo test --package cosh-shell\nfi\n```\n\n> Commands are suggestions only.".to_string(),
-                    },
-                    AgentEvent::AgentCompleted {
-                        run_id,
-                        summary: "markdown fake analysis completed".to_string(),
-                    },
-                ]);
+            if let Some(events) = fake_markdown_response(input, &run_id) {
+                return Ok(events);
             }
             if input.contains("ask") && input.contains("question") {
                 let (question, options, selection_mode) = if input.contains("multi") {
@@ -282,7 +286,6 @@ impl AgentAdapter for FakeAgentAdapter {
                         options,
                         allow_free_text: true,
                         selection_mode,
-                        request_id: None,
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
@@ -299,11 +302,13 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
+                        tool_id: None,
                         name: "Read".to_string(),
                         input: r#"{"file_path":"Cargo.toml"}"#.to_string(),
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
+                        tool_id: None,
                         name: "Grep".to_string(),
                         input: r#"{"pattern":"cosh","path":"crates/cosh-shell"}"#.to_string(),
                     },
@@ -327,6 +332,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
+                        tool_id: None,
                         name: "Bash".to_string(),
                         input: "touch /tmp/cosh-shell-fake-action-should-not-run".to_string(),
                     },
@@ -349,12 +355,125 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
+                        tool_id: None,
                         name: "Bash".to_string(),
                         input: "sleep 4; printf done".to_string(),
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
                         summary: "long-running tool request requires approval".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("provider native tool") {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "routing".to_string(),
+                        message: "matching provider-native fake tool workflow".to_string(),
+                    },
+                    AgentEvent::ToolPermissionRequest {
+                        run_id: run_id.clone(),
+                        request_id: "ctrl-1".to_string(),
+                        tool_name: "run_shell_command".to_string(),
+                        tool_input: serde_json::json!({ "command": "git status" }),
+                        tool_use_id: "toolu-1".to_string(),
+                    },
+                    AgentEvent::ToolOutputDelta {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-1".to_string(),
+                        stream: "stdout".to_string(),
+                        text: "On branch main\nnothing to commit\n".to_string(),
+                    },
+                    AgentEvent::ToolCompleted {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-1".to_string(),
+                        status: "completed".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "Provider-native tool result rendered.".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "provider-native fake tool completed".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("provider interactive failure") {
+                return Ok(vec![
+                    AgentEvent::ToolCall {
+                        run_id: run_id.clone(),
+                        tool_id: Some("toolu-tty".to_string()),
+                        name: "run_shell_command".to_string(),
+                        input: r#"{"command":"git status"}"#.to_string(),
+                    },
+                    AgentEvent::ToolOutputDelta {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-tty".to_string(),
+                        stream: "stderr".to_string(),
+                        text: "sudo: a terminal is required\n".to_string(),
+                    },
+                    AgentEvent::ToolCompleted {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-tty".to_string(),
+                        status: "error".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "provider interactive failure rendered".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("tool output finalization") {
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "Before tool **markdown**.\n\n".to_string(),
+                    },
+                    AgentEvent::ToolOutputDelta {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-md".to_string(),
+                        stream: "stdout".to_string(),
+                        text: "clean\n".to_string(),
+                    },
+                    AgentEvent::ToolCompleted {
+                        run_id: run_id.clone(),
+                        tool_id: "toolu-md".to_string(),
+                        status: "success".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "\nAfter tool **markdown**.".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "markdown around provider tool output completed".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("request shell history evidence") {
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "I need shell history.\n```cosh-request\nhistory\n```\n".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "requested shell history evidence".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("request captured output evidence") {
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "I need captured output.\n```cosh-request\noutput terminal-output://raw-session/cmd-1 tail\nlines 2\n```\n"
+                            .to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "requested captured output evidence".to_string(),
                     },
                 ]);
             }
@@ -381,6 +500,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
+                        tool_id: None,
                         name: "shell".to_string(),
                         input: "git status".to_string(),
                     },
@@ -466,249 +586,35 @@ impl AgentAdapter for FakeAgentAdapter {
         request: &AgentRequest,
         sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
     ) -> Result<(), AdapterError> {
-        let Some(input) = &request.user_input else {
+        let input = request
+            .user_input
+            .as_deref()
+            .unwrap_or(request.command_block.command.as_str());
+
+        if input.contains("ShellCommandCompleted evidence") {
             for event in self.run(request)? {
                 sink(event)?;
             }
             return Ok(());
-        };
+        }
 
-        if input.contains("stream markdown table") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming markdown table fake response".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "# Streaming table\n\n".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "| 排名 | 进程 | RSS |\n".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "| --- | --- | --- |\n| 1 | ps aux \\| grep cosh | ~42 MB |\n\nDone."
-                    .to_string(),
-            })?;
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream markdown table fake analysis completed".to_string(),
-            })?;
+        if emit_fake_markdown_stream(input, request, sink)? {
             return Ok(());
         }
 
-        if input.contains("stream markdown paragraph") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming markdown paragraph fake response".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "# Streaming paragraph\n\nThis Agent answer starts\n".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "and continues on another source line with 中文内容.\n\nDone.".to_string(),
-            })?;
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream markdown paragraph fake analysis completed".to_string(),
-            })?;
+        if emit_fake_tool_approval_stream(input, request, sink)? {
             return Ok(());
         }
 
-        if input.contains("stream markdown") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming markdown fake response".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "# Streaming check\n\n".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "- First item\n- Second item\n\n".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "```bash\ncargo test --package cosh-shell\n```\n\nDone.".to_string(),
-            })?;
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream markdown fake analysis completed".to_string(),
-            })?;
+        if emit_fake_stale_question_stream(input, request, sink)? {
             return Ok(());
         }
 
-        if input.contains("stream pwd tool approval") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming fake pwd approval request".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "Preparing a streamed pwd request before finishing.".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::ToolCall {
-                run_id: run_id.clone(),
-                name: "Bash".to_string(),
-                input: "pwd".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream pwd approval fake analysis completed".to_string(),
-            })?;
+        if emit_fake_late_card_or_artifact_stream(input, request, sink)? {
             return Ok(());
         }
 
-        if input.contains("stream stale tool approval") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming fake stale approval request".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "Preparing a command before approval.".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::ToolCall {
-                run_id: run_id.clone(),
-                name: "Bash".to_string(),
-                input: "pwd".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "STALE APPROVAL TEXT SHOULD NOT RENDER".to_string(),
-            })?;
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream stale approval fake analysis completed".to_string(),
-            })?;
-            return Ok(());
-        }
-
-        if input.contains("stream tool approval") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming fake approval request".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "Preparing a streamed tool request before finishing.".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::ToolCall {
-                run_id: run_id.clone(),
-                name: "Bash".to_string(),
-                input: "git status --short".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stream approval fake analysis completed".to_string(),
-            })?;
-            return Ok(());
-        }
-
-        if input.contains("stream long tool approval") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming fake long approval request".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "Preparing a long-running streamed tool request before finishing."
-                    .to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::ToolCall {
-                run_id: run_id.clone(),
-                name: "Bash".to_string(),
-                input: "sleep 4; printf done".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "long stream approval fake analysis completed".to_string(),
-            })?;
-            return Ok(());
-        }
-
-        if input.contains("stream piped tool approval")
-            || input.contains("stream blocked tool approval")
-        {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "streaming".to_string(),
-                message: "streaming fake piped approval request".to_string(),
-            })?;
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "Preparing a piped streamed tool request before finishing.".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(100));
-            sink(AgentEvent::ToolCall {
-                run_id: run_id.clone(),
-                name: "Bash".to_string(),
-                input: "ps aux | head".to_string(),
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "piped stream approval fake analysis completed".to_string(),
-            })?;
-            return Ok(());
-        }
-
-        if input.contains("stream stale question") {
-            let run_id = format!("fake-run-{}", request.command_block.id);
-            sink(AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "question".to_string(),
-                message: "streaming fake question request".to_string(),
-            })?;
-            sink(AgentEvent::UserQuestion {
-                run_id: run_id.clone(),
-                question: "Choose a color for the next step".to_string(),
-                options: vec!["Green".to_string(), "Blue".to_string()],
-                allow_free_text: true,
-                selection_mode: QuestionSelectionMode::Single,
-                request_id: None,
-            })?;
-            thread::sleep(Duration::from_millis(800));
-            sink(AgentEvent::TextDelta {
-                run_id: run_id.clone(),
-                text: "STALE QUESTION TEXT SHOULD NOT RENDER".to_string(),
-            })?;
-            sink(AgentEvent::AgentCompleted {
-                run_id,
-                summary: "stale question fake analysis completed".to_string(),
-            })?;
+        if emit_fake_control_protocol_stream(input, request, sink)? {
             return Ok(());
         }
 
@@ -719,86 +625,6 @@ impl AgentAdapter for FakeAgentAdapter {
             return Ok(());
         }
 
-        let run_id = format!("fake-run-{}", request.command_block.id);
-        sink(AgentEvent::StatusChanged {
-            run_id: run_id.clone(),
-            phase: "thinking".to_string(),
-            message: "simulating a slow fake Agent run".to_string(),
-        })?;
-        let delay = if input.contains("hold test") {
-            Duration::from_millis(1800)
-        } else if input.contains("very slow") {
-            Duration::from_millis(1500)
-        } else {
-            Duration::from_millis(500)
-        };
-        thread::sleep(delay);
-        sink(AgentEvent::TextDelta {
-            run_id: run_id.clone(),
-            text: format!("Slow fake response for: {input}"),
-        })?;
-        sink(AgentEvent::AgentCompleted {
-            run_id,
-            summary: "slow fake analysis completed".to_string(),
-        })?;
-        Ok(())
+        emit_fake_slow_stream(input, request, sink)
     }
-}
-
-fn fake_long_tool_output() -> String {
-    (1..=24)
-        .map(|idx| format!("line {idx}: fake tool output for details view"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn extract_fake_pending_answer(input: &str) -> Option<String> {
-    input
-        .lines()
-        .find_map(|line| line.strip_prefix("User answer: "))
-        .map(str::trim)
-        .filter(|answer| !answer.is_empty())
-        .map(ToString::to_string)
-}
-
-struct FakeToolResult {
-    request: String,
-    status: Option<String>,
-}
-
-fn extract_fake_tool_result(input: &str) -> Option<FakeToolResult> {
-    let prefix = if input.starts_with("Tool result for request ") {
-        "Tool result for request "
-    } else if input.starts_with("Tool result for approved request ") {
-        "Tool result for approved request "
-    } else {
-        return None;
-    };
-    let request = input
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix(prefix))
-        .map(str::trim)
-        .filter(|request| !request.is_empty())
-        .map(ToString::to_string)?;
-    let status = input
-        .lines()
-        .find_map(|line| line.strip_prefix("Status: "))
-        .map(str::trim)
-        .filter(|status| !status.is_empty())
-        .map(ToString::to_string);
-    Some(FakeToolResult { request, status })
-}
-
-fn extract_fake_approval_result(input: &str) -> Option<String> {
-    if !input.starts_with("Approval result for request ") {
-        return None;
-    }
-    input
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("Approval result for request "))
-        .map(str::trim)
-        .filter(|request| !request.is_empty())
-        .map(ToString::to_string)
 }

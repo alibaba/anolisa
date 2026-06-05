@@ -1,8 +1,11 @@
 use crate::exit_classify::{classify_exit, first_program_token, ExitCodeCategory};
 use crate::hook_engine::BuiltinHook;
 use crate::hook_types::*;
+use crate::linux_memory_hooks::{
+    HighMemoryProcessHook, InteractiveTopGuidanceHook, MemoryPressureHook,
+};
 
-pub struct FailedCommandHook {
+struct FailedCommandHook {
     matcher: HookMatcher,
 }
 
@@ -13,7 +16,7 @@ impl Default for FailedCommandHook {
 }
 
 impl FailedCommandHook {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             matcher: HookMatcher {
                 id: "failed-command".into(),
@@ -51,7 +54,7 @@ impl BuiltinHook for FailedCommandHook {
                     input.exit_code
                 ),
                 description: format!("Command failed in {}", input.cwd),
-                suggestion: "Use /explain to analyze the failure".into(),
+                suggestion: "Use Analyze to inspect the failure".into(),
                 skill: None,
                 cli_hint: None,
                 context_refs: Vec::new(),
@@ -60,7 +63,7 @@ impl BuiltinHook for FailedCommandHook {
     }
 }
 
-pub struct TestFailureHook {
+struct TestFailureHook {
     matcher: HookMatcher,
 }
 
@@ -80,7 +83,7 @@ impl TestFailureHook {
         "make test",
     ];
 
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             matcher: HookMatcher {
                 id: "test-failure".into(),
@@ -137,6 +140,9 @@ pub fn default_builtin_hooks() -> Vec<Box<dyn BuiltinHook>> {
     vec![
         Box::new(FailedCommandHook::new()),
         Box::new(TestFailureHook::new()),
+        Box::new(HighMemoryProcessHook::new()),
+        Box::new(MemoryPressureHook::new()),
+        Box::new(InteractiveTopGuidanceHook::new()),
     ]
 }
 
@@ -214,11 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn default_builtin_hooks_returns_two() {
+    fn default_builtin_hooks_includes_command_result_hooks() {
         let hooks = default_builtin_hooks();
-        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks.len(), 5);
         assert_eq!(hooks[0].id(), "failed-command");
         assert_eq!(hooks[1].id(), "test-failure");
+        assert_eq!(hooks[2].id(), "high-memory-process");
+        assert_eq!(hooks[3].id(), "memory-pressure");
+        assert_eq!(hooks[4].id(), "interactive-top-guidance");
     }
 
     #[test]

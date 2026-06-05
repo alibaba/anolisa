@@ -5,15 +5,18 @@ use crate::types::{AgentEvent, QuestionSelectionMode};
 
 use super::AdapterError;
 
+const MAX_TOOL_OUTPUT_CHARS: usize = 4_000;
+
 pub(super) struct ClaudeStreamParser {
     run_id: String,
     session_state: Option<Arc<Mutex<Option<String>>>>,
     assistant_text: String,
+    current_stream_text: String,
     seen_tool_uses: HashSet<String>,
+    seen_tool_results: HashSet<String>,
     streaming_tool_uses: HashMap<usize, StreamingClaudeToolUse>,
     emitted_text: bool,
     emitted_startup_status: bool,
-    saw_stream_delta: bool,
     completed: bool,
 }
 
@@ -23,11 +26,12 @@ impl ClaudeStreamParser {
             run_id,
             session_state,
             assistant_text: String::new(),
+            current_stream_text: String::new(),
             seen_tool_uses: HashSet::new(),
+            seen_tool_results: HashSet::new(),
             streaming_tool_uses: HashMap::new(),
             emitted_text: false,
             emitted_startup_status: false,
-            saw_stream_delta: false,
             completed: false,
         }
     }
@@ -42,6 +46,7 @@ impl ClaudeStreamParser {
             return Vec::new();
         };
         self.remember_session_id(&value);
+        self.remember_stream_boundary(&value);
 
         let mut events = Vec::new();
         if let Some((phase, message)) = self.extract_claude_status(&value) {
@@ -57,20 +62,24 @@ impl ClaudeStreamParser {
                 message,
             });
         } else if let Some(text) = extract_claude_stream_delta(&value) {
-            self.saw_stream_delta = true;
-            self.push_text_event(&mut events, text);
+            self.push_stream_text_event(&mut events, text);
         } else if let Some(tool_call) = self.extract_streaming_tool_call(&value) {
             events.push(tool_call);
         } else if self.contains_streaming_tool_snapshot(&value) {
             return events;
         } else if let Some(tool_call) = self.extract_tool_call(&value) {
             events.push(tool_call);
-        } else if !self.saw_stream_delta {
-            if let Some(text) = self.extract_assistant_snapshot_delta(&value) {
-                self.push_text_event(&mut events, text);
-            } else if !self.emitted_text {
-                if let Some(text) = extract_claude_result_text(&value) {
+        } else {
+            let tool_result_events = self.extract_tool_result_events(&value);
+            if !tool_result_events.is_empty() {
+                events.extend(tool_result_events);
+            } else {
+                if let Some(text) = self.extract_assistant_snapshot_delta(&value) {
                     self.push_text_event(&mut events, text);
+                } else if !self.emitted_text {
+                    if let Some(text) = extract_claude_result_text(&value) {
+                        self.push_text_event(&mut events, text);
+                    }
                 }
             }
         }
@@ -103,6 +112,16 @@ impl ClaudeStreamParser {
             if let Ok(mut current) = state.lock() {
                 *current = Some(session_id.to_string());
             }
+        }
+    }
+
+    fn remember_stream_boundary(&mut self, value: &serde_json::Value) {
+        if value
+            .pointer("/event/type")
+            .and_then(|value| value.as_str())
+            == Some("message_start")
+        {
+            self.current_stream_text.clear();
         }
     }
 
@@ -194,11 +213,11 @@ impl ClaudeStreamParser {
                 user_question_from_tool_input(&tool.input_value, tool.context_text.as_deref());
             return Some(AgentEvent::UserQuestion {
                 run_id: self.run_id.clone(),
+                provider_request_id: None,
                 question,
                 options,
                 allow_free_text,
                 selection_mode,
-                request_id: None,
             });
         }
         if !self.seen_tool_uses.insert(tool.id.clone()) {
@@ -206,6 +225,7 @@ impl ClaudeStreamParser {
         }
         Some(AgentEvent::ToolCall {
             run_id: self.run_id.clone(),
+            tool_id: Some(tool.id),
             name: tool.name,
             input: tool.input,
         })
@@ -245,28 +265,68 @@ impl ClaudeStreamParser {
         }
     }
 
+    fn extract_tool_result_events(&mut self, value: &serde_json::Value) -> Vec<AgentEvent> {
+        let Some(parts) = message_parts(value) else {
+            return Vec::new();
+        };
+
+        let mut events = Vec::new();
+        for part in parts {
+            let Some(result) = tool_result_part(value, part) else {
+                continue;
+            };
+            let tool_id = result.tool_id;
+            if !self.seen_tool_results.insert(tool_id.clone()) {
+                continue;
+            }
+            let status = result.status;
+            for (stream, content) in result.outputs {
+                events.push(AgentEvent::ToolOutputDelta {
+                    run_id: self.run_id.clone(),
+                    tool_id: tool_id.clone(),
+                    stream,
+                    text: content,
+                });
+            }
+            events.push(AgentEvent::ToolCompleted {
+                run_id: self.run_id.clone(),
+                tool_id,
+                status,
+            });
+        }
+        events
+    }
+
     fn push_text_event(&mut self, events: &mut Vec<AgentEvent>, text: String) {
         if text.is_empty() {
             return;
         }
         self.emitted_text = true;
-        if let Some(question) = synthetic_question_from_text(&self.run_id, &text) {
-            events.push(question);
-            return;
-        }
         events.push(AgentEvent::TextDelta {
             run_id: self.run_id.clone(),
             text,
         });
     }
 
+    fn push_stream_text_event(&mut self, events: &mut Vec<AgentEvent>, text: String) {
+        self.current_stream_text.push_str(&text);
+        self.push_text_event(events, text);
+    }
+
     fn extract_assistant_snapshot_delta(&mut self, value: &serde_json::Value) -> Option<String> {
         let text = extract_claude_assistant_text(value)?;
-        let delta = if text.starts_with(&self.assistant_text) {
+        let delta = if !self.current_stream_text.is_empty()
+            && text.starts_with(&self.current_stream_text)
+        {
+            text[self.current_stream_text.len()..].to_string()
+        } else if text.starts_with(&self.assistant_text) {
             text[self.assistant_text.len()..].to_string()
         } else {
             text.clone()
         };
+        if !self.current_stream_text.is_empty() && text.starts_with(&self.current_stream_text) {
+            self.current_stream_text = text.clone();
+        }
         self.assistant_text = text;
         if delta.is_empty() {
             None
@@ -367,6 +427,87 @@ fn extract_content_text(value: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+fn tool_result_content(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(text) = extract_content_text(Some(value)) {
+        return text;
+    }
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn tool_result_outputs(part: &serde_json::Value) -> Vec<(&'static str, String)> {
+    let mut outputs = Vec::new();
+    if let Some(stdout) = tool_result_text_field(part, "stdout") {
+        outputs.push(("stdout", bound_tool_output(stdout)));
+    }
+    if let Some(stderr) = tool_result_text_field(part, "stderr") {
+        outputs.push(("stderr", bound_tool_output(stderr)));
+    }
+    if !outputs.is_empty() {
+        return outputs;
+    }
+
+    let content = bound_tool_output(tool_result_content(part.get("content")));
+    if content.is_empty() {
+        return outputs;
+    }
+    let stream = if tool_result_status(part) == "success" {
+        "stdout"
+    } else {
+        "stderr"
+    };
+    outputs.push((stream, content));
+    outputs
+}
+
+fn tool_result_text_field(part: &serde_json::Value, field: &str) -> Option<String> {
+    part.get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn tool_result_status(part: &serde_json::Value) -> String {
+    if part
+        .get("interrupted")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || part.get("status").and_then(|value| value.as_str()) == Some("interrupted")
+    {
+        return "interrupted".to_string();
+    }
+    if part
+        .get("is_error")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || part
+            .get("stderr")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
+    {
+        return "error".to_string();
+    }
+    "success".to_string()
+}
+
+fn bound_tool_output(text: String) -> String {
+    let mut chars = text.chars();
+    let preview = chars
+        .by_ref()
+        .take(MAX_TOOL_OUTPUT_CHARS)
+        .collect::<String>();
+    let omitted = chars.count();
+    if omitted == 0 {
+        return preview;
+    }
+    format!("{preview}\n... {omitted} chars omitted")
+}
+
 #[derive(Debug, Clone)]
 struct ClaudeToolUse {
     id: String,
@@ -412,49 +553,172 @@ fn extract_claude_tool_uses(value: &serde_json::Value) -> Vec<ClaudeToolUse> {
         return vec![tool];
     }
 
-    let content = value
-        .pointer("/message/content")
-        .or_else(|| value.get("content"));
-    let Some(parts) = content.and_then(|value| value.as_array()) else {
+    let Some(parts) = message_parts(value) else {
         return Vec::new();
     };
 
-    let context_text = extract_content_text(content);
+    let context_text = extract_content_text(
+        value
+            .pointer("/message/content")
+            .or_else(|| value.pointer("/message/parts"))
+            .or_else(|| value.get("content")),
+    );
     parts
         .iter()
-        .filter(|part| part.get("type").and_then(|value| value.as_str()) == Some("tool_use"))
-        .map(|part| {
-            let id = part
-                .get("id")
+        .filter_map(|part| tool_use_from_part(part, context_text.clone()))
+        .collect()
+}
+
+fn message_parts(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    value
+        .pointer("/message/content")
+        .or_else(|| value.pointer("/message/parts"))
+        .or_else(|| value.get("content"))
+        .and_then(|value| value.as_array())
+}
+
+fn tool_use_from_part(
+    part: &serde_json::Value,
+    context_text: Option<String>,
+) -> Option<ClaudeToolUse> {
+    if part.get("type").and_then(|value| value.as_str()) == Some("tool_use") {
+        let id = part
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("tool-use")
+            .to_string();
+        let name = part
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("tool")
+            .to_string();
+        let input_value = part
+            .get("input")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        return Some(ClaudeToolUse {
+            id,
+            name,
+            input: tool_input_display(&input_value),
+            input_value,
+            context_text,
+        });
+    }
+
+    let function_call = part.get("functionCall")?;
+    let id = function_call
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("tool-use")
+        .to_string();
+    let name = function_call
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("tool")
+        .to_string();
+    let input_value = function_call
+        .get("args")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Some(ClaudeToolUse {
+        id,
+        name,
+        input: tool_input_display(&input_value),
+        input_value,
+        context_text,
+    })
+}
+
+fn tool_input_display(input_value: &serde_json::Value) -> String {
+    if let Some(command) = input_value.get("command").and_then(|value| value.as_str()) {
+        command.to_string()
+    } else {
+        serde_json::to_string(input_value).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+struct ParsedToolResult {
+    tool_id: String,
+    status: String,
+    outputs: Vec<(String, String)>,
+}
+
+fn tool_result_part(
+    envelope: &serde_json::Value,
+    part: &serde_json::Value,
+) -> Option<ParsedToolResult> {
+    if part.get("type").and_then(|value| value.as_str()) == Some("tool_result") {
+        let tool_id = part
+            .get("tool_use_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("tool-result")
+            .to_string();
+        return Some(ParsedToolResult {
+            tool_id,
+            status: tool_result_status(part),
+            outputs: tool_result_outputs(part)
+                .into_iter()
+                .map(|(stream, text)| (stream.to_string(), text))
+                .collect(),
+        });
+    }
+
+    let function_response = part.get("functionResponse")?;
+    let tool_id = function_response
+        .get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            envelope
+                .pointer("/toolCallResult/callId")
                 .and_then(|value| value.as_str())
-                .unwrap_or("tool-use")
-                .to_string();
-            let name = part
+        })
+        .or_else(|| {
+            function_response
                 .get("name")
                 .and_then(|value| value.as_str())
-                .unwrap_or("tool")
-                .to_string();
-            let input_value = part
-                .get("input")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let input = if let Some(command) =
-                input_value.get("command").and_then(|value| value.as_str())
-            {
-                command.to_string()
+        })
+        .unwrap_or("tool-result")
+        .to_string();
+    let status = envelope
+        .pointer("/toolCallResult/status")
+        .and_then(|value| value.as_str())
+        .map(|status| {
+            if status == "success" {
+                "success".to_string()
             } else {
-                serde_json::to_string(&input_value).unwrap_or_else(|_| "{}".to_string())
-            };
-
-            ClaudeToolUse {
-                id,
-                name,
-                input,
-                input_value,
-                context_text: context_text.clone(),
+                "error".to_string()
             }
         })
-        .collect()
+        .unwrap_or_else(|| "success".to_string());
+    let output = envelope
+        .pointer("/toolCallResult/resultDisplay")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            function_response
+                .pointer("/response/output")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| {
+            serde_json::to_string(
+                function_response
+                    .get("response")
+                    .unwrap_or(function_response),
+            )
+            .unwrap_or_default()
+        });
+    let stream = if status == "success" {
+        "stdout"
+    } else {
+        "stderr"
+    };
+    Some(ParsedToolResult {
+        tool_id,
+        status,
+        outputs: vec![(stream.to_string(), bound_tool_output(output))],
+    })
 }
 
 fn extract_claude_permission_tool_use(value: &serde_json::Value) -> Option<ClaudeToolUse> {
@@ -601,50 +865,6 @@ fn option_candidates_from_context_line(line: &str) -> Vec<String> {
         return vec![trimmed.to_string()];
     }
     Vec::new()
-}
-
-fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> {
-    let marker = "COSH_QUESTION:";
-    let json_text = text.split_once(marker)?.1.trim().lines().next()?.trim();
-    let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
-    let question = value.get("question")?.as_str()?.to_string();
-    let options = value
-        .get("options")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_str()
-                        .map(ToString::to_string)
-                        .or_else(|| item.get("label").and_then(|l| l.as_str()).map(ToString::to_string))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let allow_free_text = value
-        .get("allow_free_text")
-        .or_else(|| value.get("allowFreeText"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(options.is_empty());
-    let selection_mode = if value
-        .get("multi_select")
-        .or_else(|| value.get("multiSelect"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        QuestionSelectionMode::Multiple
-    } else {
-        QuestionSelectionMode::Single
-    };
-    Some(AgentEvent::UserQuestion {
-        run_id: run_id.to_string(),
-        question,
-        options,
-        allow_free_text,
-        selection_mode,
-        request_id: None,
-    })
 }
 
 fn question_selection_mode(input: &serde_json::Value) -> QuestionSelectionMode {

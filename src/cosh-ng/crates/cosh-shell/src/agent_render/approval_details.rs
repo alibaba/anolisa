@@ -24,6 +24,11 @@ pub struct ApprovalDetailsPanelModel<'a> {
     pub subject: &'a str,
     pub preview_label: &'a str,
     pub preview: &'a str,
+    pub request_id: Option<&'a str>,
+    pub tool_use_id: Option<&'a str>,
+    pub execution_path: Option<&'a str>,
+    pub command_block_id: Option<&'a str>,
+    pub redaction_status: Option<&'a str>,
 }
 
 impl RatatuiInlineRenderer {
@@ -51,7 +56,8 @@ impl RatatuiInlineRenderer {
         let height = approval_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_details_panel(model, area, &mut buffer);
+        let i18n = self.i18n();
+        render_approval_details_panel(model, area, &mut buffer, &i18n);
         buffer_to_lines(&buffer, area)
     }
 
@@ -67,7 +73,8 @@ impl RatatuiInlineRenderer {
         let height = approval_details_panel_height(&model, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_details_panel(model, area, &mut buffer);
+        let i18n = self.i18n();
+        render_approval_details_panel(model, area, &mut buffer, &i18n);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -79,14 +86,68 @@ impl RatatuiInlineRenderer {
         &self,
         model: ApprovalDetailsPanelModel<'_>,
     ) -> Vec<String> {
+        let i18n = self.i18n();
+        let risk = i18n.format(
+            crate::MessageId::ApprovalRiskSuffix,
+            &[("risk", model.risk)],
+        );
         vec![
-            format!("Approval details {}", model.id),
-            format!("{} - {} - {} risk", model.kind, model.status, model.risk),
-            format!("Source: {}  Run: {}", model.source, model.run_id),
-            "Default: deny".to_string(),
-            format!("Request: {}", user_facing_subject(model.subject)),
-            format!("{}: {}", user_facing_preview_label(&model), model.preview),
-            "Policy: user approval is required before any executable tool request.".to_string(),
+            format!(
+                "{} {}",
+                i18n.t(crate::MessageId::ApprovalDetailsTitle),
+                model.id
+            ),
+            format!("{} - {} - {}", model.kind, model.status, risk),
+            format!(
+                "{}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsSourceLabel),
+                model.source,
+                i18n.t(crate::MessageId::ApprovalDetailsRunLabel),
+                model.run_id
+            ),
+            format!(
+                "{}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsExecutionLabel),
+                model
+                    .execution_path
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsPendingValue)),
+                i18n.t(crate::MessageId::ApprovalDetailsCommandBlockLabel),
+                model
+                    .command_block_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+            ),
+            format!(
+                "{}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsRedactionLabel),
+                model
+                    .redaction_status
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNotApplicableValue))
+            ),
+            format!(
+                "{}: {}  {}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsProviderRequestLabel),
+                model
+                    .request_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue)),
+                i18n.t(crate::MessageId::ApprovalDetailsToolUseLabel),
+                model
+                    .tool_use_id
+                    .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+            ),
+            i18n.t(crate::MessageId::ApprovalDetailsDefaultDenyLine)
+                .to_string(),
+            format!(
+                "{}: {}",
+                i18n.t(crate::MessageId::ApprovalDetailsRequestLabel),
+                user_facing_subject(&i18n, model.subject)
+            ),
+            format!(
+                "{}: {}",
+                user_facing_preview_label(&i18n, &model),
+                model.preview
+            ),
+            i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
+                .to_string(),
         ]
     }
 }
@@ -96,13 +157,14 @@ fn approval_details_panel_height(model: &ApprovalDetailsPanelModel<'_>, width: u
     let preview_rows = wrapped_preview_rows(model.preview, content_width, 6)
         .len()
         .max(1) as u16;
-    8 + preview_rows
+    11 + preview_rows
 }
 
 fn render_approval_details_panel(
     model: ApprovalDetailsPanelModel<'_>,
     area: Rect,
     buffer: &mut Buffer,
+    i18n: &crate::I18n,
 ) {
     let border = if model.risk == "high" {
         Color::Red
@@ -113,7 +175,7 @@ fn render_approval_details_panel(
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(
-                " Approval details ",
+                format!(" {} ", i18n.t(crate::MessageId::ApprovalDetailsTitle)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} ", model.id)),
@@ -124,7 +186,14 @@ fn render_approval_details_panel(
 
     let preview_rows =
         wrapped_preview_rows(model.preview, inner.width.saturating_sub(2) as usize, 6);
+    let risk = i18n.format(
+        crate::MessageId::ApprovalRiskSuffix,
+        &[("risk", model.risk)],
+    );
     let chunks = Layout::vertical(vec![
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -140,61 +209,160 @@ fn render_approval_details_panel(
         Span::raw("  "),
         Span::raw(model.status.to_string()),
         Span::raw("  "),
-        Span::styled(format!("{} risk", model.risk), Style::default().fg(border)),
+        Span::styled(risk, Style::default().fg(border)),
     ]))
     .render(chunks[0], buffer);
     Paragraph::new(Line::from(vec![
-        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}: ", i18n.t(crate::MessageId::ApprovalDetailsSourceLabel)),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(model.source.to_string()),
         Span::raw("  "),
-        Span::styled("Run: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}: ", i18n.t(crate::MessageId::ApprovalDetailsRunLabel)),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(model.run_id.to_string()),
     ]))
     .render(chunks[1], buffer);
-    Paragraph::new("Default: deny").render(chunks[2], buffer);
     Paragraph::new(Line::from(vec![
-        Span::styled("Request: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(user_facing_subject(model.subject)),
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsExecutionLabel)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(
+            model
+                .execution_path
+                .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsPendingValue))
+                .to_string(),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsCommandBlockLabel)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(
+            model
+                .command_block_id
+                .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                .to_string(),
+        ),
+    ]))
+    .render(chunks[2], buffer);
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsRedactionLabel)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(
+            model
+                .redaction_status
+                .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNotApplicableValue))
+                .to_string(),
+        ),
     ]))
     .render(chunks[3], buffer);
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsProviderRequestLabel)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(
+            model
+                .request_id
+                .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                .to_string(),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsToolUseLabel)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(
+            model
+                .tool_use_id
+                .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
+                .to_string(),
+        ),
+    ]))
+    .render(chunks[4], buffer);
+    Paragraph::new(i18n.t(crate::MessageId::ApprovalDetailsDefaultDenyLine))
+        .render(chunks[5], buffer);
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(
+                "{}: ",
+                i18n.t(crate::MessageId::ApprovalDetailsRequestLabel)
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(user_facing_subject(i18n, model.subject)),
+    ]))
+    .render(chunks[6], buffer);
     Paragraph::new(Line::from(Span::styled(
-        format!("{}:", user_facing_preview_label(&model)),
+        format!("{}:", user_facing_preview_label(i18n, &model)),
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )))
-    .render(chunks[4], buffer);
+    .render(chunks[7], buffer);
     Paragraph::new(Text::from(
         preview_rows
             .into_iter()
             .map(|line| Line::from(Span::raw(line)))
             .collect::<Vec<_>>(),
     ))
-    .render(chunks[5], buffer);
-    Paragraph::new("Policy: user approval is required before any executable tool request.")
+    .render(chunks[8], buffer);
+    Paragraph::new(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy))
         .wrap(Wrap { trim: true })
-        .render(chunks[6], buffer);
+        .render(chunks[9], buffer);
 }
 
-fn user_facing_subject(subject: &str) -> String {
+fn user_facing_subject(i18n: &crate::I18n, subject: &str) -> String {
     let subject = subject.trim();
     if subject.eq_ignore_ascii_case("tool Bash") || subject.eq_ignore_ascii_case("tool shell") {
-        "Bash command".to_string()
+        i18n.t(crate::MessageId::ApprovalDetailsBashCommandSubject)
+            .to_string()
     } else if subject.eq_ignore_ascii_case("shell command") {
-        "Shell command".to_string()
+        i18n.t(crate::MessageId::ApprovalDetailsShellCommandSubject)
+            .to_string()
     } else if let Some(tool) = subject.strip_prefix("tool ") {
-        format!("{tool} tool")
+        i18n.format(
+            crate::MessageId::ApprovalDetailsToolSubject,
+            &[("tool", tool)],
+        )
     } else {
         subject.to_string()
     }
 }
 
-fn user_facing_preview_label(model: &ApprovalDetailsPanelModel<'_>) -> String {
+fn user_facing_preview_label(i18n: &crate::I18n, model: &ApprovalDetailsPanelModel<'_>) -> String {
     let subject = model.subject.to_ascii_lowercase();
+    let en_tool_input =
+        crate::I18n::new(crate::Language::EnUs).t(crate::MessageId::ApprovalToolInputLabel);
     if subject.contains("bash") || subject.contains("shell") {
-        "Command".to_string()
-    } else if model.preview_label.eq_ignore_ascii_case("Tool input") {
-        "Input".to_string()
+        i18n.t(crate::MessageId::ApprovalCommandLabel).to_string()
+    } else if model.preview_label.eq_ignore_ascii_case(en_tool_input)
+        || model.preview_label == i18n.t(crate::MessageId::ApprovalToolInputLabel)
+    {
+        i18n.t(crate::MessageId::ApprovalDetailsInputLabel)
+            .to_string()
     } else {
         model.preview_label.to_string()
     }

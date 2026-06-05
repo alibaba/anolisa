@@ -12,6 +12,27 @@ pub enum ExitCodeCategory {
     GenericError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+    TimedOut,
+    NotExecuted,
+}
+
+impl CommandOutcome {
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::TimedOut => "timed_out",
+            Self::NotExecuted => "not_executed",
+        }
+    }
+}
+
 pub fn classify_exit(exit_code: i32, command: &str) -> ExitCodeCategory {
     match exit_code {
         0 => ExitCodeCategory::Success,
@@ -26,8 +47,30 @@ pub fn classify_exit(exit_code: i32, command: &str) -> ExitCodeCategory {
     }
 }
 
+pub fn classify_executed_command_outcome(exit_code: i32, command: &str) -> CommandOutcome {
+    match classify_exit(exit_code, command) {
+        ExitCodeCategory::Success => CommandOutcome::Completed,
+        ExitCodeCategory::UserInterrupt => CommandOutcome::Interrupted,
+        _ => CommandOutcome::Failed,
+    }
+}
+
+pub fn classify_shell_handoff_command_outcome(
+    exit_code: i32,
+    command: &str,
+    timeout_interrupt_sent: bool,
+) -> CommandOutcome {
+    if timeout_interrupt_sent {
+        CommandOutcome::TimedOut
+    } else {
+        classify_executed_command_outcome(exit_code, command)
+    }
+}
+
 pub fn first_program_token(command: &str) -> &str {
     let mut rest = command;
+    let mut after_sudo = false;
+    let mut skip_next_sudo_arg = false;
     loop {
         let token = match rest.split_whitespace().next() {
             Some(t) => t,
@@ -39,14 +82,23 @@ pub fn first_program_token(command: &str) -> &str {
         if is_env_assignment(token) {
             continue;
         }
-        if token == "sudo" {
-            continue;
-        }
-        // Strip path: /usr/bin/grep → grep
-        return match token.rsplit_once('/') {
+        let basename = match token.rsplit_once('/') {
             Some((_, basename)) => basename,
             None => token,
         };
+        if basename == "sudo" {
+            after_sudo = true;
+            continue;
+        }
+        if skip_next_sudo_arg {
+            skip_next_sudo_arg = false;
+            continue;
+        }
+        if after_sudo && is_sudo_option_token(token, &mut skip_next_sudo_arg) {
+            continue;
+        }
+        // Strip path: /usr/bin/grep → grep
+        return basename;
     }
 }
 
@@ -81,6 +133,39 @@ fn is_env_assignment(token: &str) -> bool {
         && !name.bytes().next().unwrap_or(0).is_ascii_digit()
 }
 
+fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
+    match token {
+        "--" => return true,
+        "-u" | "-g" | "-h" | "-p" | "-C" | "-T" | "--user" | "--group" | "--host" | "--prompt"
+        | "--close-from" | "--command-timeout" => {
+            *skip_next_arg = true;
+            return true;
+        }
+        "--askpass" | "--background" | "--edit" | "--help" | "--login" | "--non-interactive"
+        | "--preserve-env" | "--reset-timestamp" | "--remove-timestamp" | "--shell" | "--stdin"
+        | "--validate" | "--version" | "-A" | "-b" | "-E" | "-e" | "-H" | "-K" | "-k" | "-l"
+        | "-n" | "-P" | "-S" | "-s" | "-V" | "-v" => return true,
+        _ => {}
+    }
+    if token.starts_with("--user=")
+        || token.starts_with("--group=")
+        || token.starts_with("--host=")
+        || token.starts_with("--prompt=")
+        || token.starts_with("--close-from=")
+        || token.starts_with("--command-timeout=")
+        || token.starts_with("--preserve-env=")
+    {
+        return true;
+    }
+    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+        return true;
+    }
+    token
+        .strip_prefix('-')
+        .filter(|opts| !opts.starts_with('-') && !opts.is_empty())
+        .is_some_and(|opts| opts.chars().all(|ch| "AbEeHKklnPSsVv".contains(ch)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +197,35 @@ mod tests {
             classify_exit(130, "sleep 100"),
             ExitCodeCategory::UserInterrupt
         );
+    }
+
+    #[test]
+    fn command_outcome_statuses_cover_executed_commands() {
+        for (exit_code, command, expected) in [
+            (0, "df -h", CommandOutcome::Completed),
+            (1, "make build", CommandOutcome::Failed),
+            (1, "sudo -n df -h", CommandOutcome::Failed),
+            (130, "sleep 100", CommandOutcome::Interrupted),
+        ] {
+            assert_eq!(
+                classify_executed_command_outcome(exit_code, command),
+                expected,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            classify_shell_handoff_command_outcome(0, "sleep 10", true),
+            CommandOutcome::TimedOut
+        );
+        assert_eq!(
+            classify_shell_handoff_command_outcome(130, "sleep 100", false),
+            CommandOutcome::Interrupted
+        );
+        assert_eq!(CommandOutcome::Completed.status(), "completed");
+        assert_eq!(CommandOutcome::Failed.status(), "failed");
+        assert_eq!(CommandOutcome::Interrupted.status(), "interrupted");
+        assert_eq!(CommandOutcome::TimedOut.status(), "timed_out");
+        assert_eq!(CommandOutcome::NotExecuted.status(), "not_executed");
     }
 
     #[test]
@@ -255,6 +369,25 @@ mod tests {
     #[test]
     fn first_program_token_with_sudo() {
         assert_eq!(first_program_token("sudo apt install foo"), "apt");
+    }
+
+    #[test]
+    fn first_program_token_with_sudo_options() {
+        assert_eq!(first_program_token("sudo -n -E free -m"), "free");
+        assert_eq!(
+            first_program_token("sudo -u root /usr/bin/top -b -n1"),
+            "top"
+        );
+        assert_eq!(first_program_token("/usr/bin/sudo -n free -m"), "free");
+        assert_eq!(
+            first_program_token("sudo --non-interactive -- free -m"),
+            "free"
+        );
+        assert_eq!(first_program_token("LANG=C sudo -n free -m"), "free");
+        assert_eq!(
+            first_program_token("sudo --definitely-unknown free -m"),
+            "--definitely-unknown"
+        );
     }
 
     #[test]

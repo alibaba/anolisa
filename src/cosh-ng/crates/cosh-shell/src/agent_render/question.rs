@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 
 use crate::{
-    question_choice_count as shared_question_choice_count, question_custom_answer_index,
+    question_choices::{
+        question_choice_count as shared_question_choice_count, question_custom_answer_index,
+    },
     types::QuestionSelectionMode,
 };
 
@@ -57,10 +59,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = question_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = question_panel_height(&model, i18n, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_question_panel(model, area, &mut buffer);
+        render_question_panel(model, i18n, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
@@ -70,10 +73,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = question_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = question_panel_height(&model, i18n, width);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_question_panel(model, area, &mut buffer);
+        render_question_panel(model, i18n, area, &mut buffer);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -84,11 +88,12 @@ impl RatatuiInlineRenderer {
     fn plain_question_panel_lines(&self, model: QuestionPanelModel<'_>) -> Vec<String> {
         let width = self.panel_standard_width();
         let content_width = question_content_width(width);
-        let mut lines = vec!["Agent question".to_string()];
+        let i18n = self.i18n();
+        let mut lines = vec![i18n.t(crate::MessageId::QuestionTitle).to_string()];
         lines.extend(wrap_plain_line(model.question, content_width));
         if !model.options.is_empty() {
             let selected = selected_option(&model);
-            lines.push(question_option_heading(&model).to_string());
+            lines.push(question_option_heading(&model, i18n).to_string());
             lines.extend(
                 model.options.iter().enumerate().flat_map(|(idx, option)| {
                     plain_option_lines(&model, idx, option, content_width)
@@ -101,18 +106,18 @@ impl RatatuiInlineRenderer {
                 let prefix = format!("{marker}[{}] ", idx + 1);
                 lines.extend(wrap_option_text(
                     &prefix,
-                    &custom_option_label(model.custom_answer),
+                    &custom_option_label(i18n, model.custom_answer),
                     content_width,
                 ));
             }
             lines.extend(wrap_plain_line(
-                &instruction_text(&model, selected),
+                &instruction_text(&model, i18n, selected),
                 content_width,
             ));
         }
         if model.options.is_empty() {
             lines.extend(wrap_plain_line(
-                &instruction_text(&model, selected_option(&model)),
+                &instruction_text(&model, i18n, selected_option(&model)),
                 content_width,
             ));
         }
@@ -151,7 +156,12 @@ impl RatatuiInlineRenderer {
         styled: bool,
     ) -> Vec<String> {
         let content_width = question_content_width(width);
-        let lines = wrapped_question_label_rows("Answer", model.answer, content_width);
+        let i18n = self.i18n();
+        let lines = wrapped_question_label_rows(
+            i18n.t(crate::MessageId::QuestionAnswerLabel),
+            model.answer,
+            content_width,
+        );
         if !styled {
             return lines;
         }
@@ -174,20 +184,25 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn question_panel_height(model: &QuestionPanelModel<'_>, width: u16) -> u16 {
+fn question_panel_height(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: u16) -> u16 {
     let content_width = question_content_width(width);
     question_rows(model, content_width)
-        + option_rows(model, content_width)
-        + instruction_rows(model, content_width)
+        + option_rows(model, i18n, content_width)
+        + instruction_rows(model, i18n, content_width)
         + 2
 }
 
-fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut Buffer) {
+fn render_question_panel(
+    model: QuestionPanelModel<'_>,
+    i18n: crate::I18n,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
     let selected_option = selected_option(&model);
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(Span::styled(
-            " Agent question ",
+            format!(" {} ", i18n.t(crate::MessageId::QuestionTitle)),
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .border_set(ROUNDED)
@@ -197,8 +212,8 @@ fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut
 
     let content_width = inner.width as usize;
     let question_rows = question_rows(&model, content_width);
-    let option_rows = option_rows(&model, content_width);
-    let instruction_rows = instruction_rows(&model, content_width);
+    let option_rows = option_rows(&model, i18n, content_width);
+    let instruction_rows = instruction_rows(&model, i18n, content_width);
     let chunks = Layout::vertical(vec![
         Constraint::Length(question_rows),
         Constraint::Length(option_rows),
@@ -211,7 +226,7 @@ fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut
         .render(chunks[0], buffer);
 
     let mut option_lines = vec![Line::from(Span::styled(
-        question_option_heading(&model).to_string(),
+        question_option_heading(&model, i18n).to_string(),
         Style::default().add_modifier(Modifier::BOLD),
     ))];
     if !model.options.is_empty() {
@@ -226,6 +241,7 @@ fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut
             option_lines.extend(render_custom_option_lines(
                 idx,
                 selected,
+                i18n,
                 model.custom_answer,
                 content_width,
             ));
@@ -237,9 +253,12 @@ fn render_question_panel(model: QuestionPanelModel<'_>, area: Rect, buffer: &mut
             .render(chunks[1], buffer);
     }
 
-    let instruction = instruction_text(&model, selected_option);
+    let instruction = instruction_text(&model, i18n, selected_option);
     Paragraph::new(Line::from(vec![
-        Span::styled("Keys: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            i18n.t(crate::MessageId::QuestionKeysPrefix),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(instruction),
     ]))
     .wrap(Wrap { trim: true })
@@ -260,7 +279,7 @@ fn question_rows(model: &QuestionPanelModel<'_>, width: usize) -> u16 {
     wrapped_row_count(model.question, width)
 }
 
-fn option_rows(model: &QuestionPanelModel<'_>, width: usize) -> u16 {
+fn option_rows(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: usize) -> u16 {
     if model.options.is_empty() {
         return 0;
     }
@@ -271,35 +290,50 @@ fn option_rows(model: &QuestionPanelModel<'_>, width: usize) -> u16 {
         .map(|(idx, option)| wrapped_row_count(&option_line_text(model, idx, option), width))
         .sum::<u16>()
         + question_custom_answer_index(model.options.len(), model.allow_free_text)
-            .map(|idx| wrapped_row_count(&custom_option_text(idx, model.custom_answer), width))
+            .map(|idx| {
+                wrapped_row_count(&custom_option_text(idx, i18n, model.custom_answer), width)
+            })
             .unwrap_or(0);
     1 + option_count
 }
 
-fn instruction_rows(model: &QuestionPanelModel<'_>, width: usize) -> u16 {
-    wrapped_row_count(&instruction_text(model, selected_option(model)), width)
+fn instruction_rows(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: usize) -> u16 {
+    wrapped_row_count(
+        &instruction_text(model, i18n, selected_option(model)),
+        width,
+    )
 }
 
-fn instruction_text(model: &QuestionPanelModel<'_>, selected_option: usize) -> String {
+fn instruction_text(
+    model: &QuestionPanelModel<'_>,
+    i18n: crate::I18n,
+    selected_option: usize,
+) -> String {
     if !model.options.is_empty() {
         let custom_selected =
             question_custom_answer_index(model.options.len(), model.allow_free_text)
                 .is_some_and(|idx| selected_option >= idx);
         if model.selection_mode == QuestionSelectionMode::Multiple {
             if custom_selected {
-                "Left/Right move | type answer | Enter send".to_string()
+                i18n.t(crate::MessageId::QuestionInstructionMoveTypeSend)
+                    .to_string()
             } else {
-                "Left/Right move | Space toggle | Enter send".to_string()
+                i18n.t(crate::MessageId::QuestionInstructionMoveToggleSend)
+                    .to_string()
             }
         } else if custom_selected {
-            "Left/Right move | type answer | Enter send".to_string()
+            i18n.t(crate::MessageId::QuestionInstructionMoveTypeSend)
+                .to_string()
         } else {
-            "Left/Right move | Enter send".to_string()
+            i18n.t(crate::MessageId::QuestionInstructionMoveSend)
+                .to_string()
         }
     } else if model.allow_free_text {
-        "Type answer | Enter send".to_string()
+        i18n.t(crate::MessageId::QuestionInstructionTypeSend)
+            .to_string()
     } else {
-        "No selectable answer is available.".to_string()
+        i18n.t(crate::MessageId::QuestionInstructionNoAnswer)
+            .to_string()
     }
 }
 
@@ -353,13 +387,13 @@ fn option_line_text(model: &QuestionPanelModel<'_>, idx: usize, option: &str) ->
     }
 }
 
-fn question_option_heading(model: &QuestionPanelModel<'_>) -> &'static str {
+fn question_option_heading(model: &QuestionPanelModel<'_>, i18n: crate::I18n) -> &'static str {
     if model.options.is_empty() {
-        "Answer:"
+        i18n.t(crate::MessageId::QuestionAnswerLabel)
     } else if model.selection_mode == QuestionSelectionMode::Multiple {
-        "Select one or more:"
+        i18n.t(crate::MessageId::QuestionSelectMultipleLabel)
     } else {
-        "Select one:"
+        i18n.t(crate::MessageId::QuestionSelectOneLabel)
     }
 }
 
@@ -390,6 +424,7 @@ fn rendered_option_lines(
 fn render_custom_option_lines(
     idx: usize,
     selected: bool,
+    i18n: crate::I18n,
     custom_answer: &str,
     width: usize,
 ) -> Vec<Line<'static>> {
@@ -397,7 +432,7 @@ fn render_custom_option_lines(
     let prefix = format!("{marker} [{}] ", idx + 1);
     render_wrapped_option(
         &prefix,
-        &custom_option_label(custom_answer),
+        &custom_option_label(i18n, custom_answer),
         option_marker_style(selected),
         width,
     )
@@ -427,15 +462,23 @@ fn render_wrapped_option(
         .collect()
 }
 
-fn custom_option_text(idx: usize, custom_answer: &str) -> String {
-    format!("  [{}] {}", idx + 1, custom_option_label(custom_answer))
+fn custom_option_text(idx: usize, i18n: crate::I18n, custom_answer: &str) -> String {
+    format!(
+        "  [{}] {}",
+        idx + 1,
+        custom_option_label(i18n, custom_answer)
+    )
 }
 
-fn custom_option_label(custom_answer: &str) -> String {
+fn custom_option_label(i18n: crate::I18n, custom_answer: &str) -> String {
     if custom_answer.is_empty() {
-        "Other...".to_string()
+        i18n.t(crate::MessageId::QuestionOtherEmptyLabel)
+            .to_string()
     } else {
-        format!("Other: {custom_answer}")
+        i18n.format(
+            crate::MessageId::QuestionOtherValueLabel,
+            &[("answer", custom_answer)],
+        )
     }
 }
 

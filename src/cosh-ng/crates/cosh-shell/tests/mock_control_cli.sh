@@ -22,8 +22,8 @@ read -r line
 
 # Check response behavior
 if echo "$line" | grep -q '"allow"'; then
-    if ! echo "$line" | grep -q '"toolUseID":"toolu_mock001"'; then
-        echo '{"type":"result","subtype":"error","session_id":"mock-session-001","is_error":true,"result":"wrong toolUseID in allow response"}'
+    if ! echo "$line" | grep -q '"updatedInput":{"command":"echo hello"}'; then
+        echo '{"type":"result","subtype":"error","session_id":"mock-session-001","is_error":true,"result":"missing updatedInput in allow response"}'
         exit 1
     fi
     # Emit updated assistant text with tool result

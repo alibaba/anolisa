@@ -27,30 +27,48 @@ use table::{render_plain_markdown_table, render_ratatui_markdown_table};
 pub(super) struct MarkdownRenderModel {
     lines: Vec<MarkdownLine>,
     width: usize,
+    language: crate::Language,
 }
 
 impl MarkdownRenderModel {
+    #[cfg(test)]
     pub(super) fn parse(text: &str, width: usize) -> Self {
+        Self::parse_with_language(text, width, crate::Language::EnUs)
+    }
+
+    pub(super) fn parse_with_language(text: &str, width: usize, language: crate::Language) -> Self {
         Self {
             lines: lines_from_markdown(text),
             width,
+            language,
         }
     }
 
     pub(super) fn rich_text_lines(&self) -> Vec<String> {
-        render_markdown_lines(self.lines.clone(), self.width, MarkdownRenderMode::Rich)
+        render_markdown_lines(
+            self.lines.clone(),
+            self.width,
+            self.language,
+            MarkdownRenderMode::Rich,
+        )
     }
 
     pub(super) fn plain_text_lines(&self) -> Vec<String> {
-        render_markdown_lines(self.lines.clone(), self.width, MarkdownRenderMode::Plain)
+        render_markdown_lines(
+            self.lines.clone(),
+            self.width,
+            self.language,
+            MarkdownRenderMode::Plain,
+        )
     }
 
     pub(super) fn styled_lines(&self) -> Vec<Line<'static>> {
+        let i18n = crate::I18n::new(self.language);
         let mut rendered = self
             .lines
             .clone()
             .into_iter()
-            .flat_map(|line| styled_lines_from_markdown_line(line, self.width))
+            .flat_map(|line| styled_lines_from_markdown_line(&i18n, line, self.width))
             .collect::<Vec<_>>();
         rendered = compact_styled_lines(rendered);
         while rendered.last().is_some_and(line_is_empty) {
@@ -69,8 +87,10 @@ enum MarkdownRenderMode {
 fn render_markdown_lines(
     lines: Vec<MarkdownLine>,
     width: usize,
+    language: crate::Language,
     mode: MarkdownRenderMode,
 ) -> Vec<String> {
+    let i18n = crate::I18n::new(language);
     let mut rendered = lines
         .into_iter()
         .flat_map(|line| match line {
@@ -96,11 +116,15 @@ fn render_markdown_lines(
                 }
             },
             MarkdownLine::Code { language, lines } => match mode {
-                MarkdownRenderMode::Rich => render_ratatui_code_block(&language, &lines, width),
-                MarkdownRenderMode::Plain => render_plain_code_block(&language, &lines, width),
+                MarkdownRenderMode::Rich => {
+                    render_ratatui_code_block(&i18n, &language, &lines, width)
+                }
+                MarkdownRenderMode::Plain => {
+                    render_plain_code_block(&i18n, &language, &lines, width)
+                }
             },
             MarkdownLine::Table(rows) => match mode {
-                MarkdownRenderMode::Rich => render_ratatui_markdown_table(&rows, width),
+                MarkdownRenderMode::Rich => render_ratatui_markdown_table(&i18n, &rows, width),
                 MarkdownRenderMode::Plain => render_plain_markdown_table(&rows, width),
             },
         })
@@ -333,7 +357,11 @@ fn markdown_line_is_empty(line: &MarkdownLine) -> bool {
     }
 }
 
-fn styled_lines_from_markdown_line(line: MarkdownLine, width: usize) -> Vec<Line<'static>> {
+fn styled_lines_from_markdown_line(
+    i18n: &crate::I18n,
+    line: MarkdownLine,
+    width: usize,
+) -> Vec<Line<'static>> {
     match line {
         MarkdownLine::Heading { level, text } => render_ratatui_heading(level, &text, width)
             .into_iter()
@@ -350,12 +378,12 @@ fn styled_lines_from_markdown_line(line: MarkdownLine, width: usize) -> Vec<Line
             text,
         } => vec![styled_list_line(&indent, &marker, &text)],
         MarkdownLine::Code { language, lines } => {
-            render_ratatui_code_block(&language, &lines, width)
+            render_ratatui_code_block(i18n, &language, &lines, width)
                 .into_iter()
                 .map(Line::from)
                 .collect()
         }
-        MarkdownLine::Table(rows) => render_ratatui_markdown_table(&rows, width)
+        MarkdownLine::Table(rows) => render_ratatui_markdown_table(i18n, &rows, width)
             .into_iter()
             .map(Line::from)
             .collect(),
