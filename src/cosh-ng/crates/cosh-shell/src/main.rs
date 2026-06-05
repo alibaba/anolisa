@@ -278,6 +278,11 @@ fn run_raw(adapter_name: &str, run_model: bool, shell_kind: RawShellKind) -> i32
     let config = ShellHostConfig::new("raw-session", work_dir);
     let adapter = build_adapter(kind, run_model);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    let mut hook_engine = cosh_shell::HookEngine::new();
+    for hook in cosh_shell::default_builtin_hooks() {
+        hook_engine.register(hook);
+    }
+    inline_state.hook_engine = hook_engine;
     let raw_result = match shell_kind {
         RawShellKind::Bash => {
             run_raw_interactive_bash_with_output_control(&config, |events, output| {
@@ -468,6 +473,22 @@ fn render_inline_guidance<W: Write>(
     render_slash_actions(events, state, output)?;
     let ledger = build_command_blocks(events);
     let findings = findings_from_blocks(&ledger.blocks);
+    for block in &ledger.blocks {
+        if state.handled_command_hooks.contains(&block.id) {
+            continue;
+        }
+        state.handled_command_hooks.insert(block.id.clone());
+        let hook_findings = state.hook_engine.evaluate(block);
+        for finding in hook_findings {
+            state.command_hook_hints.push(RuntimeCommandHookHint {
+                id: format!("hook-{}", block.id),
+                command_block_id: block.id.clone(),
+                ended_at_ms: block.ended_at_ms,
+                prompt_hint: finding.title.clone(),
+                finding_markdown: Some(finding.description.clone()),
+            });
+        }
+    }
     record_command_result_hooks(&ledger.blocks, state);
     render_command_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(events, &ledger.blocks, adapter, state, output)?;

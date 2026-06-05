@@ -3,9 +3,9 @@ use crate::types::AgentRequest;
 pub fn prompt_from_request(request: &AgentRequest) -> String {
     let context = recent_context_prompt(request);
     let hook_hints = command_hook_hints_prompt(request);
-    if let Some(input) = &request.user_input {
+    let base = if let Some(input) = &request.user_input {
         if input.starts_with("Answer to pending Agent question:") {
-            return format!(
+            format!(
                 "Continue the same Shell-first Agent session using this user answer.\n\
                  Do not ask the same question again. Do not treat this answer as a shell command. \
                  No shell command ran while collecting the answer.\n\
@@ -15,11 +15,9 @@ pub fn prompt_from_request(request: &AgentRequest) -> String {
                  cwd: {}\n\
                  mode: {:?}{}{}",
                 input, request.command_block.cwd, request.mode, context, hook_hints
-            );
-        }
-
-        if input.starts_with("Tool result for approved request ") {
-            return format!(
+            )
+        } else if input.starts_with("Tool result for approved request ") {
+            format!(
                 "Continue the same Shell-first Agent session using this approved tool result.\n\
                  The native shell transcript has already printed the command and stdout/stderr. \
                  Any earlier pre-approval prose in this same session is obsolete. \
@@ -34,11 +32,9 @@ pub fn prompt_from_request(request: &AgentRequest) -> String {
                  cwd: {}\n\
                  mode: {:?}{}{}",
                 input, request.command_block.cwd, request.mode, context, hook_hints
-            );
-        }
-
-        if input.starts_with("Approval result for request ") {
-            return format!(
+            )
+        } else if input.starts_with("Approval result for request ") {
+            format!(
                 "Continue the same Shell-first Agent session using this approval decision.\n\
                  No shell command ran for this request. Do not claim the command executed and \
                  do not invent output. Provide a safe next step or ask for another approval only \
@@ -48,55 +44,77 @@ pub fn prompt_from_request(request: &AgentRequest) -> String {
                  cwd: {}\n\
                  mode: {:?}{}{}",
                 input, request.command_block.cwd, request.mode, context, hook_hints
-            );
+            )
+        } else {
+            format!(
+                "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+                 Return explanation and recommended next commands only. Do not execute commands.\n\
+                 If the user explicitly asks to run or execute a shell command, request the Bash tool \
+                 for that exact command instead of describing it in prose; cosh-shell will review the \
+                 request and will not execute it automatically.\n\
+                 For Bash tool requests, use one read-only command at a time; avoid pipes, redirects, \
+                 command chains, command substitution, and quotes.\n\
+                 If more user input is needed, request AskUserQuestion with the visible question text \
+                 and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
+                 Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
+                 user_input: {}\n\
+                 cwd: {}\n\
+                 mode: {:?}{}{}",
+                input, request.command_block.cwd, request.mode, context, hook_hints
+            )
         }
+    } else {
+        let findings = request
+            .findings
+            .iter()
+            .map(|finding| format!("- {:?}: {}", finding.kind, finding.message))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        return format!(
-            "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+        format!(
+            "Analyze this failed shell command for a Shell-first assistant.\n\
              Return explanation and recommended next commands only. Do not execute commands.\n\
-             If the user explicitly asks to run or execute a shell command, request the Bash tool \
-             for that exact command instead of describing it in prose; cosh-shell will review the \
-             request and will not execute it automatically.\n\
-             For Bash tool requests, use one read-only command at a time; avoid pipes, redirects, \
-             command chains, command substitution, and quotes.\n\
-             If more user input is needed, request AskUserQuestion with the visible question text \
-             and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
              Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
-             user_input: {}\n\
+             command: {}\n\
              cwd: {}\n\
-             mode: {:?}{}{}",
-            input, request.command_block.cwd, request.mode, context, hook_hints
-        );
+             exit_code: {}\n\
+             terminal_output_ref: {}\n\
+             findings:\n{}{}{}",
+            request.command_block.command,
+            request.command_block.cwd,
+            request.command_block.exit_code,
+            request
+                .command_block
+                .output
+                .terminal_output_ref
+                .as_deref()
+                .unwrap_or("<missing>"),
+            findings,
+            context,
+            hook_hints
+        )
+    };
+
+    let hook_suffix = hook_finding_prompt(request);
+    if hook_suffix.is_empty() {
+        base
+    } else {
+        format!("{base}{hook_suffix}")
     }
+}
 
-    let findings = request
-        .findings
-        .iter()
-        .map(|finding| format!("- {:?}: {}", finding.kind, finding.message))
-        .collect::<Vec<_>>()
-        .join("\n");
-
+fn hook_finding_prompt(request: &AgentRequest) -> String {
+    let Some(finding) = &request.hook_finding else {
+        return String::new();
+    };
+    let skill = request
+        .recommended_skill
+        .as_deref()
+        .or(finding.skill.as_deref())
+        .unwrap_or("none");
     format!(
-        "Analyze this failed shell command for a Shell-first assistant.\n\
-         Return explanation and recommended next commands only. Do not execute commands.\n\
-         Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
-         command: {}\n\
-         cwd: {}\n\
-         exit_code: {}\n\
-         terminal_output_ref: {}\n\
-         findings:\n{}{}{}",
-        request.command_block.command,
-        request.command_block.cwd,
-        request.command_block.exit_code,
-        request
-            .command_block
-            .output
-            .terminal_output_ref
-            .as_deref()
-            .unwrap_or("<missing>"),
-        findings,
-        context,
-        hook_hints
+        "\n\nHook finding: {}\nDescription: {}\nRecommended skill: {}",
+        finding.title, finding.description, skill
     )
 }
 
@@ -153,6 +171,7 @@ fn command_hook_hints_prompt(request: &AgentRequest) -> String {
 mod tests {
     use super::prompt_from_request;
     use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
+    use crate::hook_types::HookFinding;
 
     #[test]
     fn prompt_includes_recent_shell_context_refs_without_full_output() {
@@ -171,6 +190,8 @@ mod tests {
             findings: Vec::new(),
             mode: AgentMode::RecommendOnly,
             user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
         };
 
         let prompt = prompt_from_request(&request);
@@ -209,6 +230,8 @@ mod tests {
             findings: Vec::new(),
             mode: AgentMode::RecommendOnly,
             user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
         };
 
         let prompt = prompt_from_request(&request);
@@ -221,6 +244,62 @@ mod tests {
             prompt.contains("Treat these as routing hints only"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn prompt_appends_hook_finding_when_present() {
+        let request = AgentRequest {
+            id: "agent-request-input-1".to_string(),
+            session_id: "session-1".to_string(),
+            command_block: command_block("input-1", "please explain context", 0, None),
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("please explain context".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: Some(HookFinding {
+                hook_id: "test-failure".to_string(),
+                severity: crate::hook_types::FindingSeverity::Warning,
+                title: "Test failed".to_string(),
+                description: "cargo test exited with code 101".to_string(),
+                suggestion: "Use /rust-project".to_string(),
+                skill: Some("rust-project".to_string()),
+                cli_hint: None,
+            }),
+            recommended_skill: None,
+        };
+
+        let prompt = prompt_from_request(&request);
+        assert!(prompt.contains("Hook finding: Test failed"), "{prompt}");
+        assert!(
+            prompt.contains("Description: cargo test exited with code 101"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Recommended skill: rust-project"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn prompt_omits_hook_finding_when_none() {
+        let request = AgentRequest {
+            id: "agent-request-input-1".to_string(),
+            session_id: "session-1".to_string(),
+            command_block: command_block("input-1", "please explain context", 0, None),
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("please explain context".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        };
+
+        let prompt = prompt_from_request(&request);
+        assert!(!prompt.contains("Hook finding:"), "{prompt}");
     }
 
     fn command_block(

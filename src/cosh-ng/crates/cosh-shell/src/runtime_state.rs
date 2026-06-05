@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use cosh_shell::{agent_render::ApprovalPanelAction, GovernedEvent};
+use cosh_shell::{agent_render::ApprovalPanelAction, GovernedEvent, HookEngine};
 
 use super::activity_runtime::RuntimeActivityRow;
 use super::agent_run_runtime::{ActiveAgentRun, PendingAgentRequest};
@@ -50,6 +50,7 @@ pub(super) struct InlineState {
     pub(super) approval_mode: ApprovalMode,
     pub(super) analysis_mode: AnalysisMode,
     pub(super) needs_prompt_after_agent_run: bool,
+    pub(super) hook_engine: HookEngine,
 }
 
 impl InlineState {

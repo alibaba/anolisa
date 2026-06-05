@@ -104,6 +104,8 @@ pub fn agent_request_after_confirmation(
             .collect(),
         mode: AgentMode::RecommendOnly,
         user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
     })
 }
 
@@ -154,6 +156,8 @@ pub fn agent_request_from_intercepted_input(
         findings: Vec::new(),
         mode: AgentMode::RecommendOnly,
         user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
     })
 }
 

@@ -1,3 +1,4 @@
+use crate::hook_types::HookFinding;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +191,10 @@ pub struct AgentRequest {
     pub findings: Vec<Finding>,
     pub mode: AgentMode,
     pub user_confirmed: bool,
+    #[serde(default)]
+    pub hook_finding: Option<HookFinding>,
+    #[serde(default)]
+    pub recommended_skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

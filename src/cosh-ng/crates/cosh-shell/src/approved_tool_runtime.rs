@@ -18,7 +18,7 @@ pub(super) fn render_approved_tool_result<W: Write>(
 
 pub(super) fn request_is_executable_bash_tool(request: &RuntimeApprovalRequest) -> bool {
     request.kind == ApprovalRequestKind::Tool
-        && matches!(request.subject.as_str(), "tool Bash" | "tool shell")
+        && matches!(request.subject.as_str(), "Bash" | "tool Bash" | "tool shell")
 }
 
 pub(super) fn request_is_readonly_builtin_tool(request: &RuntimeApprovalRequest) -> bool {
@@ -28,7 +28,7 @@ pub(super) fn request_is_readonly_builtin_tool(request: &RuntimeApprovalRequest)
 
     matches!(
         request.subject.as_str(),
-        "tool Read" | "tool Grep" | "tool Glob" | "tool LS"
+        "Read" | "Grep" | "Glob" | "tool Read" | "tool Grep" | "tool Glob" | "tool LS"
     )
 }
 
@@ -268,5 +268,7 @@ fn tool_result_agent_request(
         findings: Vec::new(),
         mode: AgentMode::RecommendOnly,
         user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
     }
 }

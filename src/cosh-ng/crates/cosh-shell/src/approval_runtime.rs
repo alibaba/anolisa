@@ -409,6 +409,8 @@ fn approval_resolution_agent_request(request: &RuntimeApprovalRequest) -> AgentR
         findings: Vec::new(),
         mode: AgentMode::RecommendOnly,
         user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
     }
 }
 
