@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::io::Write;
 
+use nix::libc;
+
 mod activity_runtime;
 mod agent_run_runtime;
 mod approval_runtime;
@@ -78,6 +80,48 @@ use cosh_shell::{
     ToolExecutionStatus,
 };
 
+static mut ORIGINAL_TERMIOS: Option<libc::termios> = None;
+
+fn install_terminal_recovery() {
+    let fd = libc::STDIN_FILENO;
+    if unsafe { libc::isatty(fd) } != 1 {
+        return;
+    }
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
+        return;
+    }
+    unsafe { ORIGINAL_TERMIOS = Some(original) };
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        prev_hook(info);
+    }));
+
+    unsafe {
+        libc::signal(libc::SIGTERM, restore_and_exit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, restore_and_exit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGQUIT, restore_and_exit as *const () as libc::sighandler_t);
+    }
+}
+
+fn restore_terminal() {
+    unsafe {
+        if let Some(ref original) = ORIGINAL_TERMIOS {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
+        }
+    }
+}
+
+extern "C" fn restore_and_exit(sig: libc::c_int) {
+    restore_terminal();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
 
@@ -89,6 +133,8 @@ fn main() {
         print_usage_help();
         std::process::exit(0);
     }
+
+    install_terminal_recovery();
 
     let has_subcommand = matches!(
         args.get(1).map(String::as_str),
