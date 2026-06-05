@@ -1340,7 +1340,7 @@ do_install_deps() {
     if $DRY_RUN; then
         step "Dependency plan"
         echo "DRY-RUN: detect Linux distribution and package manager"
-        if want_component cosh || want_component sec-core; then
+        if want_component cosh || want_component sec-core || want_component sight; then
             echo "DRY-RUN: check/install Node.js and build tools if needed"
         fi
         if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
@@ -1362,7 +1362,7 @@ do_install_deps() {
     step "Detecting system"
     detect_distro
 
-    if want_component cosh || want_component sec-core; then
+    if want_component cosh || want_component sec-core || want_component sight; then
         install_node
         install_build_tools
     fi
