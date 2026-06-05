@@ -3,6 +3,7 @@ pub mod agent_render;
 mod approval_actions;
 pub mod builtin_hooks;
 pub mod config;
+pub mod context_window;
 pub mod exit_classify;
 pub mod governance;
 pub mod hook_engine;
@@ -22,6 +23,7 @@ pub mod types;
 
 pub use builtin_hooks::*;
 pub use config::*;
+pub use context_window::*;
 pub use exit_classify::*;
 pub use hook_engine::*;
 pub use hook_types::*;

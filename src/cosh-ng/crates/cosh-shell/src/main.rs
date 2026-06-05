@@ -487,20 +487,22 @@ fn render_inline_guidance<W: Write>(
     render_slash_actions(events, state, output)?;
     let ledger = build_command_blocks(events);
     let findings = findings_from_blocks(&ledger.blocks);
-    for block in &ledger.blocks {
-        if state.handled_command_hooks.contains(&block.id) {
-            continue;
-        }
-        state.handled_command_hooks.insert(block.id.clone());
-        let hook_findings = state.hook_engine.evaluate(block);
-        for finding in hook_findings {
-            state.command_hook_hints.push(RuntimeCommandHookHint {
-                id: format!("hook-{}", block.id),
-                command_block_id: block.id.clone(),
-                ended_at_ms: block.ended_at_ms,
-                prompt_hint: finding.title.clone(),
-                finding_markdown: Some(finding.description.clone()),
-            });
+    if state.analysis_mode != AnalysisMode::Manual {
+        for block in &ledger.blocks {
+            if state.handled_command_hooks.contains(&block.id) {
+                continue;
+            }
+            state.handled_command_hooks.insert(block.id.clone());
+            let hook_findings = state.hook_engine.evaluate(block);
+            for finding in hook_findings {
+                state.command_hook_hints.push(RuntimeCommandHookHint {
+                    id: format!("hook-{}", block.id),
+                    command_block_id: block.id.clone(),
+                    ended_at_ms: block.ended_at_ms,
+                    prompt_hint: finding.title.clone(),
+                    finding_markdown: Some(finding.description.clone()),
+                });
+            }
         }
     }
     record_command_result_hooks(&ledger.blocks, state);
@@ -555,7 +557,6 @@ fn render_owned_shell_prompt<W: Write>(
     if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
         write!(output, "cosh-osc$ ")?;
     }
-    // native mode: shell's own precmd will output the real prompt
     output.flush()?;
     state.needs_prompt_after_agent_run = false;
     Ok(())

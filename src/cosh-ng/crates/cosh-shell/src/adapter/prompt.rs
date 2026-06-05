@@ -1,7 +1,10 @@
+use crate::context_window::{
+    build_context_window, format_context_prompt, ContextWindowConfig,
+};
 use crate::types::AgentRequest;
 
 pub fn prompt_from_request(request: &AgentRequest) -> String {
-    let context = recent_context_prompt(request);
+    let context = rich_context_prompt(request);
     let hook_hints = command_hook_hints_prompt(request);
     let base = if let Some(input) = &request.user_input {
         if input.starts_with("Answer to pending Agent question:") {
@@ -48,10 +51,12 @@ pub fn prompt_from_request(request: &AgentRequest) -> String {
         } else {
             format!(
                 "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
-                 Return explanation and recommended next commands only. Do not execute commands.\n\
-                 If the user explicitly asks to run or execute a shell command, request the Bash tool \
-                 for that exact command instead of describing it in prose; cosh-shell will review the \
-                 request and will not execute it automatically.\n\
+                 Decide based on user intent:\n\
+                 - If the user wants to DO something (view files, check status, run tests, inspect system, debug), \
+                 use the Bash tool directly. cosh-shell has an approval system that reviews every tool request \
+                 before execution.\n\
+                 - If the user wants to KNOW something (ask a question, request explanation, compare options), \
+                 answer in prose with example commands in code blocks.\n\
                  For Bash tool requests, use one read-only command at a time; avoid pipes, redirects, \
                  command chains, command substitution, and quotes.\n\
                  If more user input is needed, request AskUserQuestion with the visible question text \
@@ -73,7 +78,9 @@ pub fn prompt_from_request(request: &AgentRequest) -> String {
 
         format!(
             "Analyze this failed shell command for a Shell-first assistant.\n\
-             Return explanation and recommended next commands only. Do not execute commands.\n\
+             First use the Read tool to inspect the terminal_output_ref if available. \
+             Then explain the failure and suggest fixes. \
+             cosh-shell has an approval system that reviews every tool request.\n\
              Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
              command: {}\n\
              cwd: {}\n\
@@ -118,35 +125,21 @@ fn hook_finding_prompt(request: &AgentRequest) -> String {
     )
 }
 
-fn recent_context_prompt(request: &AgentRequest) -> String {
+fn rich_context_prompt(request: &AgentRequest) -> String {
     if request.context_blocks.is_empty() {
         return String::new();
     }
 
-    let lines = request
+    let before_ms = request
         .context_blocks
         .iter()
-        .map(|block| {
-            format!(
-                "- {} cwd={} exit={} output_ref={} command={}",
-                block.id,
-                block.cwd,
-                block.exit_code,
-                block
-                    .output
-                    .terminal_output_ref
-                    .as_deref()
-                    .unwrap_or("<missing>"),
-                block.command
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        "\n\nRecent shell context:\n{}\nUse output_ref only when needed; do not claim command output you have not read.",
-        lines
-    )
+        .map(|b| b.ended_at_ms)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let config = ContextWindowConfig::default();
+    let entries = build_context_window(&request.context_blocks, before_ms, &config);
+    format_context_prompt(&entries)
 }
 
 fn command_hook_hints_prompt(request: &AgentRequest) -> String {
@@ -195,22 +188,30 @@ mod tests {
         };
 
         let prompt = prompt_from_request(&request);
-        assert!(prompt.contains("Recent shell context:"), "{prompt}");
-        assert!(prompt.contains("cmd-1 cwd=/repo exit=0"), "{prompt}");
         assert!(
-            prompt.contains("output_ref=/tmp/cosh-out/cmd-1.txt"),
+            prompt.contains("Recent shell context (1 commands)"),
             "{prompt}"
         );
-        assert!(prompt.contains("command=echo shell-context-ok"), "{prompt}");
+        assert!(prompt.contains("[cmd-1]"), "{prompt}");
+        assert!(prompt.contains("exit=0"), "{prompt}");
+        assert!(prompt.contains("cwd=/repo"), "{prompt}");
         assert!(
-            prompt.contains("Use output_ref only when needed"),
+            prompt.contains("ref=/tmp/cosh-out/cmd-1.txt"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("echo shell-context-ok"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Use Read tool on output_ref paths"),
             "{prompt}"
         );
 
         request.context_blocks.clear();
         let prompt_without_context = prompt_from_request(&request);
         assert!(
-            !prompt_without_context.contains("Recent shell context:"),
+            !prompt_without_context.contains("Recent shell context"),
             "{prompt_without_context}"
         );
     }

@@ -44,7 +44,7 @@ pub(super) fn render_post_failure_actions<W: Write>(
         };
 
         state.handled_confirmations.insert(key);
-        start_agent_for_block(block, findings, adapter, state, output, Some(idx))?;
+        start_agent_for_block(block, blocks, findings, adapter, state, output, Some(idx))?;
         output.flush()?;
     }
 
@@ -105,6 +105,7 @@ pub(super) fn block_end_event_index(events: &[ShellEvent], block: &CommandBlock)
 
 pub(super) fn start_agent_for_block<W: Write>(
     block: &CommandBlock,
+    blocks: &[CommandBlock],
     findings: &[Finding],
     adapter: &AdapterInstance,
     state: &mut InlineState,
@@ -141,6 +142,10 @@ pub(super) fn start_agent_for_block<W: Write>(
 
     match agent_request_after_confirmation(&block.session_id, block, findings, true) {
         Some(mut request) => {
+            let ctx_config = cosh_shell::ContextWindowConfig::default();
+            let ctx_entries =
+                cosh_shell::build_context_window(blocks, block.ended_at_ms, &ctx_config);
+            request.context_blocks = cosh_shell::context_blocks_from_entries(&ctx_entries);
             request.context_hints = command_hook_hints_for_block(state, block);
             start_agent_run(
                 &request,

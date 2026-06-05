@@ -263,7 +263,7 @@ fn cli_adapters_prepare_safe_non_intrusive_invocations() {
     assert!(!claude
         .args
         .contains(&"--dangerously-skip-permissions".to_string()));
-    assert!(claude.prompt.contains("Do not execute commands."));
+    assert!(claude.prompt.contains("approval system that reviews every tool request"));
     let qwen = QwenCliAdapter::default().prepare_invocation(&request);
     assert_eq!(qwen.program, "qwen");
     assert!(qwen.args.contains(&"--approval-mode".to_string()));
@@ -281,9 +281,9 @@ fn natural_language_prompt_guides_tool_and_question_intents() {
 
     let claude = ClaudeCodeAdapter::default().prepare_invocation(&request);
 
-    assert!(claude.prompt.contains("request the Bash tool"));
+    assert!(claude.prompt.contains("use the Bash tool directly"));
     assert!(claude.prompt.contains("request AskUserQuestion"));
-    assert!(claude.prompt.contains("Do not execute commands."));
+    assert!(claude.prompt.contains("Decide based on user intent:"));
 }
 
 #[test]
