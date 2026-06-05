@@ -22,6 +22,10 @@ _RTK_LOCAL_LIB = os.path.join(os.path.expanduser("~"), ".local", "lib", "anolisa
 SKIP_TOOLS: set[str] = {
     "Read", "read_file", "Glob", "list_directory",
     "NotebookRead", "notebook_read", "notebookread", "read", "glob",
+    # Shell execution tools — stdout may contain full documents, must not truncate
+    "Bash", "bash", "Shell", "run_shell_command", "terminal", "execute_command",
+    # Search tools — stdout may contain large file contents, must not truncate
+    "Grep", "grep",
 }
 
 # -- Context file for rewrite session tracking --
@@ -101,7 +105,7 @@ def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
         f.write(f"{tool_use_id}\n")
 
 
-def run(args: list[str], input_data: str, timeout: int = 10) -> subprocess.CompletedProcess | None:
+def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.CompletedProcess | None:
     """Run a subprocess with input data, returning None on failure."""
     try:
         return subprocess.run(

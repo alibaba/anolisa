@@ -205,11 +205,13 @@ def main() -> None:
             proc = subprocess.run(
                 cmd,
                 input=tool_response,
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=3,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-                compressed = proc.stdout.strip()
-                used_resp_compression = True
+                candidate = proc.stdout.strip()
+                if len(candidate) < len(tool_response):
+                    compressed = candidate
+                    used_resp_compression = True
         except Exception as e:
             warn(f"Response compression error: {e}")
 
@@ -228,7 +230,7 @@ def main() -> None:
                 proc = subprocess.run(
                     toon_cmd,
                     input=compressed,
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=1,
                 )
                 if proc.returncode == 0 and proc.stdout.strip():
                     candidate = proc.stdout.strip()

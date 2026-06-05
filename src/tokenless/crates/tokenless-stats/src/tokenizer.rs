@@ -1,12 +1,39 @@
 //! Tokenizer for estimating token counts.
 
 /// Estimate token count from text using character-based heuristic.
-/// Uses ~4 characters per token for English text as a rough approximation.
+/// CJK characters count as ~1 token each; other characters use ~4 per token.
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    text.chars().count().div_ceil(4)
+    let mut cjk = 0usize;
+    let mut other = 0usize;
+    for c in text.chars() {
+        if is_cjk(c) {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    cjk + other.div_ceil(4)
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{2A6DF}'
+        | '\u{2A700}'..='\u{2B73F}'
+        | '\u{2B740}'..='\u{2B81F}'
+        | '\u{2B820}'..='\u{2CEAF}'
+        | '\u{2CEB0}'..='\u{2EBEF}'
+        | '\u{30000}'..='\u{3134F}'
+        | '\u{3100}'..='\u{312F}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{3040}'..='\u{309F}'
+        | '\u{30A0}'..='\u{30FF}'
+    )
 }
 
 /// Estimate token count from byte length when text is unavailable.
@@ -73,8 +100,8 @@ mod tests {
 
     #[test]
     fn cjk_text() {
-        // 4 CJK chars / 4 = 1 token
-        assert_eq!(estimate_tokens("你好世界"), 1);
+        // 4 CJK chars × 1 token/char = 4 tokens
+        assert_eq!(estimate_tokens("你好世界"), 4);
         assert_eq!(count_chars("你好世界"), 4);
     }
 
@@ -87,10 +114,10 @@ mod tests {
 
     #[test]
     fn mixed_text() {
-        // ASCII + CJK mixed
+        // 5 ASCII chars / 4 = 2 tokens + 2 CJK chars = 2 tokens → 4 total
         let text = "Hello你好";
         assert_eq!(count_chars(text), 7);
-        assert_eq!(estimate_tokens(text), 2);
+        assert_eq!(estimate_tokens(text), 4);
     }
 
     #[test]

@@ -26,8 +26,8 @@ impl Default for ResponseCompressor {
 
         Self {
             drop_fields,
-            truncate_strings_at: 512,
-            truncate_arrays_at: 16,
+            truncate_strings_at: 4096,
+            truncate_arrays_at: 32,
             drop_nulls: true,
             drop_empty_fields: true,
             // Runtime responses rarely nest beyond a handful of levels in
@@ -267,10 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn test_string_truncation_512_default() {
+    fn test_string_truncation_4096_default() {
         let compressor = ResponseCompressor::new();
 
-        let long_string = "x".repeat(600);
+        let long_string = "x".repeat(5000);
         let result = compressor.compress(&json!(long_string));
 
         let s = result.as_str().unwrap();
@@ -291,15 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn test_array_truncation_16_default() {
+    fn test_array_truncation_32_default() {
         let compressor = ResponseCompressor::new();
 
-        let arr: Vec<i32> = (1..=30).collect();
+        let arr: Vec<i32> = (1..=50).collect();
         let result = compressor.compress(&json!(arr));
 
         let arr_result = result.as_array().unwrap();
-        // 16 items + 1 truncation marker = 17
-        assert_eq!(arr_result.len(), 17);
+        // 32 items + 1 truncation marker = 33
+        assert_eq!(arr_result.len(), 33);
     }
 
     #[test]

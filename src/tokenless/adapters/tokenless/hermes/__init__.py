@@ -72,7 +72,11 @@ logger = logging.getLogger(__name__)
 AGENT_ID = "hermes-agent"
 _MIN_RESPONSE_LEN = 200
 
-_SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {"session_search", "list_sessions"}
+_SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
+    "session_search", "list_sessions",
+    # Search tools — stdout may contain large file contents, must not truncate
+    "grep",
+}
 
 _MIN_RTK_VERSION = (0, 35, 0)
 _SHELL_TOOLS: set[str] = {"terminal"}
@@ -145,7 +149,7 @@ def _compress_response(
         return None
 
     compressed = proc.stdout.strip()
-    if compressed == result:
+    if len(compressed) >= len(result):
         return None
     return compressed
 
@@ -170,13 +174,12 @@ def _encode_toon(data: str, session_id: str = "", tool_call_id: str = "") -> tup
     if tool_call_id:
         cmd.extend(["--tool-use-id", tool_call_id])
 
-    proc = _run(cmd, data)
+    proc = _run(cmd, data, timeout=1)
     if not proc or proc.returncode != 0 or not proc.stdout.strip():
         return None
 
     toon_text = proc.stdout.strip()
-    # Skip if TOON didn't reduce size
-    if toon_text == data or len(toon_text) >= len(data):
+    if len(toon_text) >= len(data):
         return None
 
     savings_pct = 0

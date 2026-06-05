@@ -6,8 +6,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::process;
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
-use tokenless_stats::estimate_tokens_from_bytes;
 use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, TokenlessConfig};
+use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 use tokenless_stats::{format_list, format_show, format_summary};
 
 #[derive(Parser)]
@@ -53,6 +53,15 @@ enum Commands {
         /// Tool use ID
         #[arg(long)]
         tool_use_id: Option<String>,
+        /// Max string length before truncation
+        #[arg(long)]
+        truncate_strings_at: Option<usize>,
+        /// Max array length before truncation
+        #[arg(long)]
+        truncate_arrays_at: Option<usize>,
+        /// Max nesting depth before truncation
+        #[arg(long)]
+        max_depth: Option<usize>,
     },
     /// View and export statistics
     #[command(subcommand)]
@@ -271,27 +280,20 @@ fn run() -> Result<(), (String, i32)> {
 
             let compressor = SchemaCompressor::new();
 
-            let (result_json, after_compact) = if batch || value.is_array() {
+            let after_compact = if batch || value.is_array() {
                 let arr = value
                     .as_array()
                     .ok_or_else(|| ("Expected a JSON array for --batch mode".to_string(), 1))?;
                 let results: Vec<serde_json::Value> =
                     arr.iter().map(|item| compressor.compress(item)).collect();
-                let compact = serde_json::to_string(&results).unwrap_or_default();
-                let pretty = serde_json::to_string_pretty(&results)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
-                (pretty, compact)
+                serde_json::to_string(&results).unwrap_or_default()
             } else {
                 let result = compressor.compress(&value);
-                let compact = serde_json::to_string(&result).unwrap_or_default();
-                let pretty = serde_json::to_string_pretty(&result)
-                    .map_err(|e| (format!("Serialization error: {}", e), 2))?;
-                (pretty, compact)
+                serde_json::to_string(&result).unwrap_or_default()
             };
 
-            // If no token savings, output original instead of compressed result
-            let before_tokens = estimate_tokens_from_bytes(input.len());
-            let after_tokens = estimate_tokens_from_bytes(after_compact.len());
+            let before_tokens = estimate_tokens(&input);
+            let after_tokens = estimate_tokens(&after_compact);
             let output_text = if after_tokens >= before_tokens {
                 eprintln!(
                     "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
@@ -299,7 +301,7 @@ fn run() -> Result<(), (String, i32)> {
                 );
                 input.clone()
             } else {
-                result_json.clone()
+                after_compact.clone()
             };
 
             println!("{}", output_text);
@@ -318,20 +320,29 @@ fn run() -> Result<(), (String, i32)> {
             agent_id,
             session_id,
             tool_use_id,
+            truncate_strings_at,
+            truncate_arrays_at,
+            max_depth,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = serde_json::from_str(&input)
                 .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
-            let compressor = ResponseCompressor::new();
+            let mut compressor = ResponseCompressor::new();
+            if let Some(v) = truncate_strings_at {
+                compressor = compressor.with_truncate_strings_at(v);
+            }
+            if let Some(v) = truncate_arrays_at {
+                compressor = compressor.with_truncate_arrays_at(v);
+            }
+            if let Some(v) = max_depth {
+                compressor = compressor.with_max_depth(v);
+            }
             let result = compressor.compress(&value);
             let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
-            let result_json = serde_json::to_string_pretty(&result)
-                .map_err(|e| (format!("Serialization error: {}", e), 2))?;
 
-            // If no token savings, output original instead of compressed result
-            let before_tokens = estimate_tokens_from_bytes(input.len());
-            let after_tokens = estimate_tokens_from_bytes(after_compact.len());
+            let before_tokens = estimate_tokens(&input);
+            let after_tokens = estimate_tokens(&after_compact);
             let output_text = if after_tokens >= before_tokens {
                 eprintln!(
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
@@ -339,7 +350,7 @@ fn run() -> Result<(), (String, i32)> {
                 );
                 input.clone()
             } else {
-                result_json.clone()
+                after_compact.clone()
             };
 
             println!("{}", output_text);

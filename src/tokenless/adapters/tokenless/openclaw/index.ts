@@ -189,12 +189,11 @@ function tryCompressToon(response: any, sessionId?: string, toolCallId?: string)
     if (toolCallId) args.push("--tool-use-id", toolCallId);
     const toonText = execFileSync(tokenlessPath, args, {
       encoding: "utf-8",
-      timeout: 3000,
+      timeout: 1000,
       input,
       env: buildEnv(),
     }).trim();
-    if (!toonText || toonText === input) return null;
-    if (toonText.length >= beforeChars) return null;
+    if (!toonText || toonText.length >= beforeChars) return null;
 
     const afterChars = toonText.length;
     const savingsPct = beforeChars > 0 ? Math.round(((beforeChars - afterChars) / beforeChars) * 100) : 0;
@@ -251,7 +250,7 @@ export default {
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
   const toonCompressionEnabled = pluginConfig.toon_compression_enabled === true;
   const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;
-  const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead"]).map((t: string) => t.toLowerCase()));
+  const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead", "Bash", "bash", "Grep", "grep", "Shell", "run_shell_command", "terminal", "execute_command"]).map((t: string) => t.toLowerCase()));
   const verbose = pluginConfig.verbose !== false;
 
   // ---- 0. Session mapping (sessionKey → sessionId) ---------------------------

@@ -89,8 +89,8 @@ Recursively traverses JSON values and applies **7 compression rules** to reduce 
 
 | Rule | Name | Condition | Action | Default Threshold |
 |------|------|-----------|--------|-------------------|
-| R1 | String Truncation | Length > 512 bytes | Truncate at UTF-8 boundary, append `… (truncated)` | 512 bytes |
-| R2 | Array Truncation | Elements > 16 | Keep first 16, append `<... N more items truncated>` | 16 elements |
+| R1 | String Truncation | Length > 4096 bytes | Truncate at UTF-8 boundary, append `… (truncated)` | 4096 bytes |
+| R2 | Array Truncation | Elements > 32 | Keep first 32, append `<... N more items truncated>` | 32 elements |
 | R3 | Field Deletion | Key matches blacklist | Remove entire field | 7 fields |
 | R4 | Null Removal | Value is `null` | Delete from object/array | Enabled |
 | R5 | Empty Removal | Value is `""`/`[]`/`{}` | Delete from object/array | Enabled |
@@ -851,8 +851,8 @@ All integration paths use **fail-open** strategy:
 
 | Parameter | Default | Builder Method |
 |-----------|---------|----------------|
-| `truncate_strings_at` | 512 | `with_truncate_strings_at(len)` |
-| `truncate_arrays_at` | 16 | `with_truncate_arrays_at(len)` |
+| `truncate_strings_at` | 4096 | `with_truncate_strings_at(len)` |
+| `truncate_arrays_at` | 32 | `with_truncate_arrays_at(len)` |
 | `drop_nulls` | true | `with_drop_nulls(bool)` |
 | `drop_empty_fields` | true | `with_drop_empty_fields(bool)` |
 | `max_depth` | 8 | `with_max_depth(depth)` |

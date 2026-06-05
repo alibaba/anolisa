@@ -531,7 +531,7 @@ EOF
     # ==========================================
     log_info "Test 6.23: Attribution — ENV_DEPENDENCY_MISSING"
     local attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
-    local attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Shell","tool_response":$r}')
+    local attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
     local attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_DEPENDENCY_MISSING" "Attribution detects command not found"
     assert_contains "$attr_out" "Skip retry" "Attribution includes Skip retry"
@@ -541,7 +541,7 @@ EOF
     # ==========================================
     log_info "Test 6.24: Attribution — ENV_PERMISSION"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_PERMISSION" "Attribution detects Permission denied"
 
@@ -550,7 +550,7 @@ EOF
     # ==========================================
     log_info "Test 6.25: Attribution — ENV_FILE_MISSING"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
 

@@ -89,8 +89,8 @@ Token-Less/
 
 | 规则 | 名称 | 判断条件 | 处理方式 | 默认阈值 |
 |------|------|---------|---------|---------|
-| R1 | 字符串截断 | 长度 > 512 字节 | 在 UTF-8 安全边界截断，追加 `… (truncated)` | 512 字节 |
-| R2 | 数组截断 | 元素 > 16 个 | 保留前 16 个，追加 `<... N more items truncated>` | 16 个 |
+| R1 | 字符串截断 | 长度 > 4096 字节 | 在 UTF-8 安全边界截断，追加 `… (truncated)` | 4096 字节 |
+| R2 | 数组截断 | 元素 > 32 个 | 保留前 32 个，追加 `<... N more items truncated>` | 32 个 |
 | R3 | 字段删除 | key 匹配黑名单 | 整个字段移除 | 7 个字段 |
 | R4 | null 移除 | 值为 `null` | 从对象/数组中删除 | 启用 |
 | R5 | 空值移除 | 值为 `""`/`[]`/`{}` | 从对象/数组中删除 | 启用 |
@@ -850,8 +850,8 @@ jq --version
 
 | 参数 | 默认值 | Builder 方法 |
 |------|-------|-------------|
-| `truncate_strings_at` | 512 | `with_truncate_strings_at(len)` |
-| `truncate_arrays_at` | 16 | `with_truncate_arrays_at(len)` |
+| `truncate_strings_at` | 4096 | `with_truncate_strings_at(len)` |
+| `truncate_arrays_at` | 32 | `with_truncate_arrays_at(len)` |
 | `drop_nulls` | true | `with_drop_nulls(bool)` |
 | `drop_empty_fields` | true | `with_drop_empty_fields(bool)` |
 | `max_depth` | 8 | `with_max_depth(depth)` |
