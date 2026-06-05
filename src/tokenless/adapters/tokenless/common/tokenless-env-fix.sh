@@ -317,8 +317,12 @@ install_via_symlink() {
   # The +x must live on the source file (symlinks have no permissions of
   # their own). Try without sudo first — $HOME-relative trusted paths are
   # owned by the current uid — then escalate for root-owned system paths.
+  # Only attempt the sudo path when $SUDO_PREFIX is non-empty; otherwise
+  # the retry is identical to the first attempt and would always fail.
   if [ ! -x "$source" ]; then
-    chmod +x "$source" 2>>"$FIX_LOG" || $SUDO_PREFIX chmod +x "$source" 2>>"$FIX_LOG" || return 1
+    chmod +x "$source" 2>>"$FIX_LOG" || \
+      { [ -n "$SUDO_PREFIX" ] && $SUDO_PREFIX chmod +x "$source" 2>>"$FIX_LOG"; } || \
+      return 1
   fi
 }
 
@@ -343,7 +347,10 @@ install_via_path() {
     # Resolve home from passwd (not $HOME) to prevent an attacker-controlled
     # $HOME from redirecting rc-file writes. Falls back to $HOME only when
     # getent is unavailable — the is_trusted_source_path guard already
-    # covers this path.
+    # covers this path. NOTE: Rust-side home.rs uses getpwuid_r and never
+    # falls back to $HOME; the shell-side fallback here is a tolerated
+    # inconsistency because install_via_path is only called after the
+    # stricter is_trusted_source_path check passes.
     local real_home="$HOME"
     if command -v getent &>/dev/null; then
       real_home=$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1{print $6}') || true

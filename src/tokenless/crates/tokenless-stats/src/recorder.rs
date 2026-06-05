@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Result type for stats operations
 pub type StatsResult<T> = Result<T, StatsError>;
@@ -181,7 +182,14 @@ impl StatsRecorder {
             .filter_map(|r| match r {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
+                    static CORRUPT_LOGGED: AtomicBool = AtomicBool::new(false);
+                    if !CORRUPT_LOGGED.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "[tokenless-stats] skipping corrupt row(s): {} \
+                             (further corrupt rows suppressed)",
+                            e
+                        );
+                    }
                     None
                 }
             })
