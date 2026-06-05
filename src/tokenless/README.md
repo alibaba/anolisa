@@ -14,6 +14,9 @@ Three integration paths are available:
 - **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
 - **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and Tool Ready environment pre-check via Hermes's native plugin system.
+- **Qoder CLI plugin** — Tool Ready, command rewriting, and response compression via Qoder's native hook system.
+- **Claude Code plugin** — RTK command rewriting, response/TOON compression, and Tool Ready via Claude Code's official plugin marketplace.
+- **Codex plugin** — response compression, TOON encoding, Tool Ready, and command rewriting via Codex's native hook system.
 
 ## Features
 
@@ -27,6 +30,9 @@ Three integration paths are available:
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ✅ |
 | copilot-shell hooks | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ✅ |
 | Hermes Agent plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
+| Qoder CLI plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅ |
+| Claude Code plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| Codex plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Architecture
@@ -35,8 +41,8 @@ Three integration paths are available:
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
-├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes)
-│   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes targets)
+├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes, qoder, claude-code, codex)
+│   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes + qoder + claude-code + codex)
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
 │   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
@@ -44,10 +50,10 @@ Token-Less/
 │   │   ├── tokenless-env-fix.sh # Auto-fix script for missing deps
 │   │   └── commands/            # Hook command configs
 │   ├── openclaw/                # OpenClaw plugin + agent scripts
-│   └── hermes/                  # Hermes Agent plugin + scripts
-│       ├── scripts/               # detect/install/uninstall (user-driven registration)
-│       ├── plugin.yaml            # Plugin manifest
-│       └── __init__.py            # register(ctx): transform_tool_result + pre_tool_call (env-check + rtk rewrite) + on_session_start
+│   ├── hermes/                  # Hermes Agent plugin + scripts
+│   ├── qoder/                   # Qoder CLI plugin + scripts
+│   ├── claude-code/             # Claude Code plugin + marketplace + hooks
+│   └── codex/                   # Codex plugin + scripts
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -243,6 +249,62 @@ plugins:
     - tokenless
 ```
 
+## Qoder CLI Plugin
+
+The plugin registers hooks at three Qoder events, covering three strategies:
+
+| Strategy | Event | Action | Status |
+|---|---|---|---|
+| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
+
+Each hook degrades gracefully — if the corresponding binary is not installed, that hook is silently skipped.
+
+### Install
+
+```bash
+make qoder-install
+```
+
+## Claude Code Plugin
+
+The plugin registers hooks at two Claude Code events, covering four strategies:
+
+| Strategy | Event | Action | Status |
+|---|---|---|---|
+| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Command rewriting | `PreToolUse` (Bash) | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
+| TOON encoding | `PostToolUse` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
+
+Claude Code v2 requires plugins to be sourced from a registered marketplace. We expose the adapter's `claude-code/` directory as a single-plugin marketplace (`anolisa`), then install `tokenless@anolisa` from it.
+
+### Install
+
+```bash
+make claude-code-install
+```
+
+## Codex Plugin
+
+The plugin registers hooks at four Codex events, covering four strategies:
+
+| Strategy | Event | Action | Status |
+|---|---|---|---|
+| Session check | `SessionStart` | Verifies tokenless CLI is installed and functional (non-blocking) | ✅ Active |
+| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
+| Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format, injects compressed summary as `additionalContext` | ✅ Active |
+
+> **Codex Protocol Constraint**: PostToolUse hooks cannot suppress the original tool output. The plugin injects a compressed *summary* as `additionalContext` — the model sees both the original output and the compressed summary.
+
+### Install
+
+```bash
+make codex-install
+```
+
 ## Build
 
 | Target | Description |
@@ -264,6 +326,12 @@ plugins:
 | `make openclaw-uninstall` | Remove OpenClaw plugin |
 | `make hermes-install` | Install Hermes Agent plugin |
 | `make hermes-uninstall` | Remove Hermes Agent plugin |
+| `make qoder-install` | Install Qoder CLI plugin |
+| `make qoder-uninstall` | Remove Qoder CLI plugin |
+| `make claude-code-install` | Install Claude Code plugin |
+| `make claude-code-uninstall` | Remove Claude Code plugin |
+| `make codex-install` | Install Codex plugin |
+| `make codex-uninstall` | Remove Codex plugin |
 | `make setup` | Full setup: build + install + all adapters |
 
 Override install paths:
@@ -280,6 +348,9 @@ make install BIN_DIR=/usr/local/bin
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
 | `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
 | `adapters/tokenless/hermes/` | Hermes Agent adapter — plugin + detect/install/uninstall scripts |
+| `adapters/tokenless/qoder/` | Qoder CLI adapter — plugin + detect/install/uninstall scripts |
+| `adapters/tokenless/claude-code/` | Claude Code adapter — marketplace + plugin + hooks dispatcher |
+| `adapters/tokenless/codex/` | Codex adapter — plugin + Python hook scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
 | `Makefile` | Unified build system for the entire workspace |

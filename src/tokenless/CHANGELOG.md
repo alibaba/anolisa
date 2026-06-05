@@ -2,6 +2,12 @@
 
 ## 0.4.1
 
+- fix version_ge 3-segment truncation in env_check.rs (compare all segments)
+- add qoder, claude-code, codex adapter plugins and documentation
+- sync manifest.json with template to include all six agents
+- update README and user manuals for new agent integrations
+- add __pycache__ to root .gitignore
+- update response-compression.md with all agent integration paths
 - derive Makefile version from Cargo.toml, fix spec changelog weekday
 - normalize adapter version numbers to 0.4.0
 - derive adapter plugin versions from Cargo.toml instead of hardcoding

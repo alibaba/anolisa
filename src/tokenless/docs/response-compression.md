@@ -90,7 +90,39 @@ Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
 
 **TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
 
-### 路径 3：CLI 直接使用
+### 路径 3：Hermes Agent 插件（`transform_tool_result` hook）
+
+```
+工具执行完成
+   ↓
+Hermes 触发 transform_tool_result 事件
+   ↓
+检查：是否为内容检索工具（Read/Glob/...）→ 跳过
+   ↓
+检查：响应长度 < 200 字符 → 跳过
+   ↓
+Step 1：tokenless compress-response（有损压缩）
+   ↓
+Step 2：tokenless compress-toon（无损 TOON 编码）
+   ↓
+两步均采用 fail-open 策略
+   ↓
+返回压缩后的结果字符串
+```
+
+### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
+
+使用共享的 `compress_response_hook.py`（与 copilot-shell 共用），通过 `hooks.json` 中的 `${QODER_TOKENLESS_HOOKS}` 变量引用共享 hook 路径。
+
+### 路径 5：Claude Code 插件（`PostToolUse` hook）
+
+通过 `run-hook.sh` 调度器定位共享 hook 脚本，调用 `compress_response_hook.py`。Claude Code 复制插件到版本化缓存目录，因此 `run-hook.sh` 通过 FHS 路径查找共享 hook。
+
+### 路径 6：Codex 插件（`PostToolUse` hook）
+
+独立的 Python hook 脚本 `compress-response`，实现完整的压缩+TOON+环境错误检测流水线。与 copilot-shell 的 hook 不同，Codex 的 PostToolUse **不能抑制原始输出**（`suppressOutput` 被拒绝），因此注入压缩摘要作为 `additionalContext`。
+
+### 路径 7：CLI 直接使用
 
 ```bash
 # 从文件
@@ -264,11 +296,16 @@ curl -s https://api.example.com/data | tokenless compress-response
 | Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
 | 公开 API | `crates/tokenless-schema/src/lib.rs` |
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
+| 环境检查 | `crates/tokenless-cli/src/env_check.rs` |
 | 统计记录器（SQLite WAL） | `crates/tokenless-stats/src/recorder.rs` |
 | 统计记录类型及操作枚举 | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw 插件 | `adapters/tokenless/openclaw/index.ts` |
+| OpenClaw 插件 | `adapters/tokenless/openclaw/dist/index.js` |
 | OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
 | copilot-shell hook（响应+TOON 流水线） | `adapters/tokenless/common/hooks/compress_response_hook.py` |
+| Hermes 插件 | `adapters/tokenless/hermes/__init__.py` |
+| Qoder 插件配置 | `adapters/tokenless/qoder/hooks.json` |
+| Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
+| Codex 压缩 hook | `adapters/tokenless/codex/scripts/compress-response` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
