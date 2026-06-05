@@ -688,6 +688,20 @@ impl GenAISqliteStore {
         Ok(())
     }
 
+    pub fn count_interruption_type_for_conversation(
+        &self,
+        conversation_id: &str,
+        itype: &str,
+    ) -> u32 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM genai_events WHERE conversation_id = ?1 AND interruption_type = ?2",
+            params![conversation_id, itype],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+    }
+
     /// List all pending calls for a specific PID.
     ///
     /// Returns (call_id, session_id, trace_id, conversation_id) tuples for all

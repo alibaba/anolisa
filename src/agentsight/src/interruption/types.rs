@@ -26,6 +26,8 @@ pub enum InterruptionType {
     TokenLimit,
     /// HTTP status_code >= 400 的通用兜底（优先级最低，在所有特定类型之后）
     LlmError,
+    /// Same error type repeated > threshold times in one conversation (agent stuck retrying)
+    RetryStorm,
 }
 
 impl InterruptionType {
@@ -42,6 +44,7 @@ impl InterruptionType {
             Self::ContextOverflow    => "context_overflow",
             Self::TokenLimit         => "token_limit",
             Self::LlmError           => "llm_error",
+            Self::RetryStorm         => "retry_storm",
         }
     }
 
@@ -57,6 +60,7 @@ impl InterruptionType {
             "context_overflow"    => Some(Self::ContextOverflow),
             "token_limit"         => Some(Self::TokenLimit),
             "llm_error"           => Some(Self::LlmError),
+            "retry_storm"         => Some(Self::RetryStorm),
             _ => None,
         }
     }
@@ -74,6 +78,7 @@ impl InterruptionType {
             Self::ContextOverflow    => Severity::High,
             Self::TokenLimit         => Severity::Medium,
             Self::LlmError           => Severity::High,
+            Self::RetryStorm         => Severity::Critical,
         }
     }
 }
@@ -190,6 +195,7 @@ mod tests {
         assert_eq!(InterruptionType::ContextOverflow.as_str(), "context_overflow");
         assert_eq!(InterruptionType::TokenLimit.as_str(), "token_limit");
         assert_eq!(InterruptionType::LlmError.as_str(), "llm_error");
+        assert_eq!(InterruptionType::RetryStorm.as_str(), "retry_storm");
     }
 
     #[test]
@@ -204,6 +210,7 @@ mod tests {
         assert_eq!(InterruptionType::from_str("context_overflow"), Some(InterruptionType::ContextOverflow));
         assert_eq!(InterruptionType::from_str("token_limit"), Some(InterruptionType::TokenLimit));
         assert_eq!(InterruptionType::from_str("llm_error"), Some(InterruptionType::LlmError));
+        assert_eq!(InterruptionType::from_str("retry_storm"), Some(InterruptionType::RetryStorm));
         assert_eq!(InterruptionType::from_str("unknown"), None);
         assert_eq!(InterruptionType::from_str(""), None);
     }
@@ -220,6 +227,7 @@ mod tests {
         assert_eq!(InterruptionType::ContextOverflow.default_severity(), Severity::High);
         assert_eq!(InterruptionType::TokenLimit.default_severity(), Severity::Medium);
         assert_eq!(InterruptionType::LlmError.default_severity(), Severity::High);
+        assert_eq!(InterruptionType::RetryStorm.default_severity(), Severity::Critical);
     }
 
     #[test]

@@ -304,6 +304,21 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
     }
     out.push('\n');
 
+    // agentsight_interruptions_total (per type, all-time)
+    if let Some(ref istore) = data.interruption_store {
+        if let Ok(stats) = istore.stats(0, i64::MAX) {
+            out.push_str("# HELP agentsight_interruptions_total Total interruption events by type\n");
+            out.push_str("# TYPE agentsight_interruptions_total counter\n");
+            for s in &stats {
+                out.push_str(&format!(
+                    "agentsight_interruptions_total{{type=\"{}\"}} {}\n",
+                    escape_label(&s.interruption_type), s.count
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
         .body(out)

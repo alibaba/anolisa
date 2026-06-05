@@ -778,6 +778,8 @@ impl AgentSight {
                         // Deduplicate: skip if same (conversation_id, type, error_msg)
                         // already recorded.  Same error retried N times produces only
                         // 1 interruption; different errors each get 1.
+                        // NOTE: RetryStorm detection only fires when conversation_id is Some.
+                        // When None, each error inserts a separate row (no dedup, no storm detect).
                         if let Some(ref cid) = ie.conversation_id {
                             let error_msg = llm_call.error.as_deref();
                             if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
@@ -794,6 +796,35 @@ impl AgentSight {
                                         &llm_call.call_id,
                                         ie.interruption_type.as_str(),
                                     );
+                                    // RetryStorm: if >= 5 total calls with same error type in
+                                    // this conversation, emit critical alert
+                                    let count = sqlite.count_interruption_type_for_conversation(
+                                        cid,
+                                        ie.interruption_type.as_str(),
+                                    );
+                                    if count >= 5 && ie.interruption_type != crate::interruption::InterruptionType::RetryStorm {
+                                        let storm_event = crate::interruption::InterruptionEvent::new(
+                                            crate::interruption::InterruptionType::RetryStorm,
+                                            ie.session_id.clone(),
+                                            ie.trace_id.clone(),
+                                            ie.conversation_id.clone(),
+                                            ie.call_id.clone(),
+                                            ie.pid,
+                                            ie.agent_name.clone(),
+                                            llm_call.end_timestamp_ns as i64,
+                                            Some(serde_json::json!({
+                                                "repeated_type": ie.interruption_type.as_str(),
+                                                "count": count,
+                                            })),
+                                        );
+                                        if !istore.exists_for_conversation(cid, &crate::interruption::InterruptionType::RetryStorm, None) {
+                                            let _ = istore.insert(&storm_event);
+                                            log::warn!(
+                                                "RetryStorm detected: {} × {:?} in conversation {}",
+                                                count, ie.interruption_type, cid
+                                            );
+                                        }
+                                    }
                                 }
                                 continue;
                             }

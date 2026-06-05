@@ -388,6 +388,7 @@ export const INTERRUPTION_TYPE_CN: Record<string, string> = {
   network_timeout: '网络超时',
   service_unavailable: '服务不可用',
   safety_filter: '安全过滤',
+  retry_storm: '重试风暴',
 };
 
 /**
