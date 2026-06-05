@@ -130,6 +130,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Jun 05 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.3-1
+- Added per-workspace policy override with hermes/openclaw plugin support
+- Added /proc cwd occupant guard for init and rollback
+- Added Hermes adapter runner script
+- Fixed write lock contention and cwd guard deadlock in rollback
+- Fixed input validation for non-UTF-8 paths and path-traversal snapshot IDs
+- Fixed seccomp arch selection, workspace registry concurrency, and RPM packaging
+
 * Thu May 28 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.2-1
 - Fixed openclaw uninstall to remove tool whitelist from config
 - Fixed parent path refusal to apply as workspace-level rules for skill and openclaw plugin
