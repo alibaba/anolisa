@@ -11,6 +11,15 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
+
+// Regex to extract the first version-like token from --version output.
+// `split_whitespace().last()` is fragile: tools like `curl` print
+// "curl 8.1.2 (x86_64-linux-gnu)" where `.last()` gives the arch suffix,
+// and `jq-1.6` has no whitespace around the version. A targeted regex
+// anchored on digit groups avoids these false matches.
+static VERSION_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -41,6 +50,11 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
         return true;
     }
     // Resolve symlink target before owner/perm checks
+    let symlink_parent = if path.is_symlink() {
+        path.parent().map(|p| p.to_path_buf())
+    } else {
+        None
+    };
     let check_path = if path.is_symlink() {
         match fs::canonicalize(path) {
             Ok(resolved) => {
@@ -59,17 +73,33 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
     } else {
         path.to_path_buf()
     };
-    // Use symlink_metadata to check the target's metadata (not the symlink itself)
-    // Check the parent directory first — a world-writable directory allows an
-    // attacker to unlink and replace the file (TOCTOU), even if the file itself
-    // has correct ownership and permissions.
-    if let Some(parent) = check_path.parent() {
+    // Helper: check a directory for foreign ownership or world-writable bit.
+    fn check_parent_dir(parent: &std::path::Path) -> bool {
         if let Ok(parent_meta) = fs::symlink_metadata(parent) {
             let parent_uid = parent_meta.uid();
             if parent_uid != current_uid() && parent_uid != 0 {
                 return false;
             }
             if parent_meta.mode() & 0o002 != 0 {
+                return false;
+            }
+        }
+        true
+    }
+    // Check the parent of the resolved target (or the file itself when not
+    // a symlink) — a world-writable directory allows TOCTOU file replacement.
+    if let Some(parent) = check_path.parent() {
+        if !check_parent_dir(parent) {
+            return false;
+        }
+    }
+    // When the path is a symlink, also check the symlink's own parent
+    // directory. If the symlink sits in a world-writable or foreign-owned
+    // directory, an attacker can replace the symlink to point at a
+    // malicious file, bypassing the target-level checks.
+    if let Some(ref sp) = symlink_parent {
+        if sp != check_path.parent().unwrap_or(std::path::Path::new("")) {
+            if !check_parent_dir(sp) {
                 return false;
             }
         }
@@ -455,7 +485,7 @@ fn version_ge(installed: &str, required: &str) -> bool {
     let i_parts = parse_ver(installed);
     let r_parts = parse_ver(required);
 
-    for i in 0..3 {
+    for i in 0..i_parts.len().max(r_parts.len()) {
         let iv = i_parts.get(i).copied().unwrap_or(0);
         let rv = r_parts.get(i).copied().unwrap_or(0);
         if iv > rv {
@@ -525,14 +555,13 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 let installed_version = match version_output {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
-                        stdout
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .split_whitespace()
-                            .last()
-                            .unwrap_or("0.0.0")
-                            .to_string()
+                        // Use regex to find the first version-like token
+                        // (digits.digits.digits), not split_whitespace().last()
+                        // which fails for "curl 8.1.2 (x86_64...)" and "jq-1.6".
+                        VERSION_RE
+                            .find(&stdout)
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_else(|| "0.0.0".to_string())
                     }
                     Err(_) => "0.0.0".to_string(),
                 };

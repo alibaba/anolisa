@@ -31,9 +31,14 @@ impl TokenlessConfig {
         // Resolve home via the shared passwd-rooted helper so an attacker
         // cannot redirect the config path by setting $HOME before invoking
         // any tokenless binary. When no trusted home is available, return
-        // a path under "" — the open call will fail loudly rather than
-        // landing in the CWD.
-        PathBuf::from(crate::home::get_home_dir()).join(".tokenless/config.json")
+        // a path under /dev/null so the open/create call fails loudly
+        // (ENOENT or ENOTDIR) rather than silently landing in the CWD
+        // (which PathBuf::from("").join(...) would produce).
+        let home = crate::home::get_home_dir();
+        if home.is_empty() {
+            return PathBuf::from("/dev/null/.tokenless/config.json");
+        }
+        PathBuf::from(home).join(".tokenless/config.json")
     }
 
     /// Whether a config file exists on disk.
@@ -81,7 +86,15 @@ impl TokenlessConfig {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)
+        std::fs::write(&path, json)?;
+        // Restrict to owner-only — the config may contain per-user
+        // settings that should not be readable by other local users.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        Ok(())
     }
 
     /// Returns true if stats recording is enabled (env override or file config).

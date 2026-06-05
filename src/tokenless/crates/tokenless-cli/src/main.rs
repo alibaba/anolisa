@@ -201,6 +201,13 @@ pub fn get_home_dir() -> String {
 /// location (e.g. `/etc/evil.db`).
 fn get_db_path() -> String {
     let home = get_home_dir();
+    // When no trusted home is available (empty string from passwd lookup
+    // failure), return a path that will safely fail on open/create rather
+    // than silently writing to / or CWD.
+    if home.is_empty() {
+        eprintln!("[tokenless] no home directory available — stats DB writes disabled");
+        return "/dev/null/.tokenless/stats.db".to_string();
+    }
     match std::env::var("TOKENLESS_STATS_DB") {
         Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, &home) {
             Ok(path) => return path,
@@ -224,6 +231,17 @@ fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
     if home.is_empty() {
         return Err("no trusted home directory available".to_string());
     }
+    // Canonicalize the home anchor as well as the candidate path. Passwd
+    // entries can name a directory that traverses a symlink (e.g. macOS
+    // /Users/u where /Users is a symlink to /home, or distros that put
+    // /home/u behind /export/home/u). If we compare a canonicalized
+    // env_path against a raw home, the prefix check rejects legitimate
+    // paths AND, conversely, a `home == "/"` slip-through (rejected at
+    // the passwd layer in tokenless-stats::home but defended in depth
+    // here) would match every absolute path under `starts_with`.
+    let canonical_home = std::path::Path::new(home)
+        .canonicalize()
+        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
     let p = std::path::Path::new(env_path);
     // Accept only paths under the user's real home directory.
     // For not-yet-created DB files, the parent directory MUST itself
@@ -239,7 +257,7 @@ fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
                 .and_then(|parent| parent.canonicalize())
         })
         .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
-    if resolved.starts_with(home) {
+    if resolved.starts_with(&canonical_home) {
         Ok(env_path.to_string())
     } else {
         Err(format!(
@@ -642,6 +660,25 @@ mod tests {
         // "cannot be resolved" (parent itself unreachable). Both are valid
         // rejections — what matters is no Ok return.
         assert!(err.contains("outside home") || err.contains("cannot be resolved"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn validate_db_path_canonicalizes_home_with_symlink_prefix() {
+        // If the caller passes a home that contains a symlink in any
+        // prefix (e.g. /tmp on macOS resolves to /private/tmp), the
+        // candidate path will canonicalize to the resolved form and
+        // diverge from the raw home unless validate_db_path canonicalizes
+        // home too. Linux /tmp has no such symlink, so the assertion is
+        // informational there but real coverage on macOS.
+        let home = temp_subdir("sym-prefix");
+        let inner = home.join("stats.db");
+        let result = validate_db_path(inner.to_str().unwrap(), home.to_str().unwrap());
+        assert!(
+            result.is_ok(),
+            "raw (non-canonical) home should be accepted after internal canonicalization: {:?}",
+            result
+        );
         std::fs::remove_dir_all(&home).ok();
     }
 

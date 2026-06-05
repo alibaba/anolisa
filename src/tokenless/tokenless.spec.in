@@ -303,6 +303,30 @@ rm -rf "$HOME/.copilot-shell/extensions/tokenless" 2>/dev/null || true
 # Clean up stale hermes-plugin dir (renamed to hermes/ with scripts)
 rm -rf "/usr/share/anolisa/adapters/tokenless/hermes-plugin" 2>/dev/null || true
 rm -rf "$HOME/.local/share/anolisa/adapters/tokenless/hermes-plugin" 2>/dev/null || true
+# Clean up old openclaw plugin id (tokenless-openclaw → tokenless rename).
+# Runs on both install ($1=1) and upgrade ($1=2) — a fresh install simply
+# finds nothing to delete; an upgrade from a pre-rename build leaves a dead
+# extension dir and config entries that would shadow the new registration.
+# NOTE: %post runs as root, so only root's ~/.openclaw is cleaned here.
+# Other users' stale `tokenless-openclaw` entries are covered by the
+# backward-compat alias in scripts/anolisa-adapter-runner until they
+# next reinstall or manually rename.
+rm -rf "$HOME/.openclaw/extensions/tokenless-openclaw" 2>/dev/null || true
+OPENCLAW_CFG="$HOME/.openclaw/openclaw.json"
+if [ -f "$OPENCLAW_CFG" ] && command -v jq &>/dev/null; then
+    # Keep a backup so a broken edit can be recovered. The backup is
+    # left in place intentionally — rpm does not clean up user data.
+    cp -p "$OPENCLAW_CFG" "${OPENCLAW_CFG}.anolisa-bak" 2>/dev/null || true
+    if jq '(.plugins.allow // [] | map(select(. != "tokenless-openclaw"))) as $allow |
+        (.plugins.entries // {} | del(.["tokenless-openclaw"])) as $entries |
+        .plugins.allow = $allow | .plugins.entries = $entries' \
+        "$OPENCLAW_CFG" > "${OPENCLAW_CFG}.tmp" 2>/dev/null; then
+        mv "${OPENCLAW_CFG}.tmp" "$OPENCLAW_CFG" 2>/dev/null || \
+            rm -f "${OPENCLAW_CFG}.tmp" 2>/dev/null || true
+    else
+        rm -f "${OPENCLAW_CFG}.tmp" 2>/dev/null || true
+    fi
+fi
 hash -r 2>/dev/null || true
 
 %preun

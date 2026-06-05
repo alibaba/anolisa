@@ -44,10 +44,17 @@ fi
 # Extract version number
 VERSION_CLEAN="$(echo "$VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")"
 
-cat <<EOF
+# Use jq --arg to safely embed variables into JSON — avoids broken output
+# when paths contain characters that need JSON escaping.
+if command -v jq &>/dev/null; then
+  jq -n --arg ver "$VERSION_CLEAN" --arg p "$TOKENLESS_BIN" \
+    '{installed: true, version: $ver, path: $p}'
+else
+  cat <<EOF
 {
   "installed": true,
   "version": "$VERSION_CLEAN",
   "path": "$TOKENLESS_BIN"
 }
 EOF
+fi

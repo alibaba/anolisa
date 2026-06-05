@@ -29,7 +29,14 @@ pub struct StatsRecorder {
 impl StatsRecorder {
     /// Create a new recorder with database at the given path
     pub fn new<P: AsRef<Path>>(db_path: P) -> StatsResult<Self> {
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path)?;
+        // Restrict the stats DB to owner-only — before_text/after_text
+        // columns may contain tool output with sensitive content.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(db_path.as_ref(), std::fs::Permissions::from_mode(0o600)).ok();
+        }
 
         conn.execute_batch(
             "
@@ -78,16 +85,20 @@ impl StatsRecorder {
         )?;
 
         // Schema migration: add columns introduced in v0.3.0 if missing.
-        // NOTE: pragma_table_info does not support parameterized queries, so
-        // column names are interpolated via format!(). The values come from
-        // hardcoded literals in the for loop — never from user input.
+        // Use PRAGMA table_info to check column existence before ALTER TABLE
+        // instead of relying on error-message string matching, which is
+        // fragile across SQLite versions and locales.
         for col in &["before_output", "after_output"] {
-            let check = conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), []);
-            match check {
-                Err(e) if !e.to_string().contains("duplicate column name") => {
-                    return Err(StatsError::Database(e));
-                }
-                _ => {}
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = ?",
+                    [col],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !exists {
+                conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), [])?;
             }
         }
 
@@ -147,6 +158,10 @@ impl StatsRecorder {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Default limit when no limit is specified — caps memory usage
+    /// from unbounded loads while remaining generous for practical use.
+    const DEFAULT_LIMIT: usize = 10_000;
+
     /// Query all records, newest first, with optional limit
     pub fn all_records(&self, limit: Option<usize>) -> StatsResult<Vec<StatsRecord>> {
         let conn = self.lock_conn();
@@ -156,38 +171,21 @@ impl StatsRecorder {
                         before_chars, before_tokens, after_chars, after_tokens,
                         before_text, after_text, before_output, after_output";
 
-        let records = match limit {
-            Some(n) => {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
-                    SELECT_COLS
-                ))?;
-                let rows = stmt.query_map([n as i64], Self::row_to_record)?;
-                rows.filter_map(|r| match r {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
-                        None
-                    }
-                })
-                .collect()
-            }
-            None => {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM stats ORDER BY timestamp DESC",
-                    SELECT_COLS
-                ))?;
-                let rows = stmt.query_map([], Self::row_to_record)?;
-                rows.filter_map(|r| match r {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
-                        None
-                    }
-                })
-                .collect()
-            }
-        };
+        let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
+            SELECT_COLS
+        ))?;
+        let rows = stmt.query_map([n as i64], Self::row_to_record)?;
+        let records: Vec<_> = rows
+            .filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("[tokenless-stats] skipping corrupt row: {}", e);
+                    None
+                }
+            })
+            .collect();
 
         Ok(records)
     }
@@ -242,13 +240,16 @@ impl StatsRecorder {
                     );
                     chrono::Local::now()
                 }),
-            operation: OperationType::from_str(&row.get::<_, String>(2)?).unwrap_or_else(|e| {
-                eprintln!(
-                    "[tokenless-stats] unknown operation type, falling back to compress-schema: {}",
-                    e
-                );
-                OperationType::CompressSchema
-            }),
+            operation: OperationType::from_str(&row.get::<_, String>(2)?).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown operation type: {}", e),
+                    )),
+                )
+            })?,
             agent_id,
             source_pid: row.get(4)?,
             session_id: row.get(5)?,

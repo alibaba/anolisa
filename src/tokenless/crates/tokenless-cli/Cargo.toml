@@ -19,4 +19,5 @@ toon-format.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 rusqlite.workspace = true
 libc.workspace = true
+regex.workspace = true
 

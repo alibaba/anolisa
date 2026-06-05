@@ -34,6 +34,7 @@ is_trusted_file() {
   case "$f" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
   # Resolve symlink target before owner/perm checks
   local check_path="$f"
+  local symlink_parent=""
   if [ -L "$f" ]; then
     local target
     target=$(readlink -f "$f" 2>/dev/null || realpath "$f" 2>/dev/null || echo "")
@@ -41,6 +42,39 @@ is_trusted_file() {
     case "$target" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
     [ -z "$target" ] && return 1
     check_path="$target"
+    # Also check the symlink's own parent directory — if the symlink sits
+    # in a world-writable directory, an attacker can replace the symlink
+    # to point at a malicious file, bypassing the target-level checks below.
+    symlink_parent=$(dirname "$f")
+  fi
+  # Check the parent directory of the resolved target (or the file itself
+  # when it's not a symlink) — a world-writable directory allows an
+  # attacker to unlink and replace the file (TOCTOU), even if the file
+  # itself has correct ownership and permissions. Mirrors the Rust
+  # implementation in env_check.rs (`is_trusted_path`).
+  _check_parent() {
+    local pd="$1"
+    local po
+    po=$(stat -c '%u' "$pd" 2>/dev/null || stat -f '%u' "$pd" 2>/dev/null || echo "-1")
+    if [ "$po" != "$(id -u)" ] && [ "$po" != "0" ]; then
+      log_v "BLOCKED: parent dir of $f owned by uid $po (expected $(id -u) or 0)"
+      return 1
+    fi
+    local pp
+    pp=$(stat -c '%a' "$pd" 2>/dev/null || stat -f '%Lp' "$pd" 2>/dev/null || echo "777")
+    local ppo="${pp: -1}"
+    if (( ppo & 2 )); then
+      log_v "BLOCKED: parent dir of $f is world-writable (perms=$pp)"
+      return 1
+    fi
+    return 0
+  }
+  local parent_dir
+  parent_dir=$(dirname "$check_path")
+  _check_parent "$parent_dir" || return 1
+  # When the path is a symlink, also check the symlink's own parent.
+  if [ -n "$symlink_parent" ] && [ "$symlink_parent" != "$parent_dir" ]; then
+    _check_parent "$symlink_parent" || return 1
   fi
   local file_owner
   file_owner=$(stat -c '%u' "$check_path" 2>/dev/null || stat -f '%u' "$check_path" 2>/dev/null || echo "-1")

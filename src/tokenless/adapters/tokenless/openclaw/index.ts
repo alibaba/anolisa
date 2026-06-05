@@ -93,8 +93,12 @@ function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null 
 }
 
 function checkRtk(): boolean {
-  // Refresh stale false cache (binary may have been installed since last check)
-  if (rtkAvailable === false && rtkCheckedAt && (Date.now() - rtkCheckedAt > CACHE_TTL_MS)) {
+  // Refresh BOTH true and false cache once stale: a binary that was
+  // present at first check can disappear (manual uninstall, FS error,
+  // overlay swap) and a previously-missing binary can be installed by
+  // auto-fix. Asymmetric TTL would either keep using a vanished path
+  // (stale true) or never re-check after install (stale false).
+  if (rtkAvailable !== null && rtkCheckedAt && (Date.now() - rtkCheckedAt > CACHE_TTL_MS)) {
     rtkAvailable = null;
   }
   if (rtkAvailable !== null) return rtkAvailable;
@@ -117,8 +121,8 @@ function isSkillContent(message: any): boolean {
 }
 
 function checkTokenless(): boolean {
-  // Refresh stale false cache
-  if (tokenlessAvailable === false && tokenlessCheckedAt && (Date.now() - tokenlessCheckedAt > CACHE_TTL_MS)) {
+  // Refresh BOTH true and false cache once stale (see checkRtk for rationale).
+  if (tokenlessAvailable !== null && tokenlessCheckedAt && (Date.now() - tokenlessCheckedAt > CACHE_TTL_MS)) {
     tokenlessAvailable = null;
   }
   if (tokenlessAvailable !== null) return tokenlessAvailable;

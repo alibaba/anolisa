@@ -29,27 +29,10 @@ CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
 
-# Resolve codex binary (RPM %preun runs with restricted PATH).
-resolve_codex() {
-    if [[ -n "$CODEX_BIN" ]] && command -v "$CODEX_BIN" &>/dev/null; then
-        echo "$CODEX_BIN"
-        return
-    fi
-    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
-        if command -v "$candidate" &>/dev/null; then
-            echo "$candidate"
-            return
-        fi
-    done
-    # Last resort: direct path check
-    for candidate in /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
-        if [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return
-        fi
-    done
-    echo ""
-}
+# Resolve codex binary via shared helper (see _common.sh).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=./_common.sh
+source "$SCRIPT_DIR/_common.sh"
 
 echo "[tokenless] Codex plugin uninstall"
 

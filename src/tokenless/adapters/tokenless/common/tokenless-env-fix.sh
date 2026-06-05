@@ -146,6 +146,20 @@ is_trusted_source_path() {
       if [ "$owner_uid" != "$(id -u)" ] && [ "$owner_uid" != "0" ]; then
         return 1
       fi
+      # Check the parent directory for TOCTOU protection.
+      local _pd
+      _pd=$(dirname "$p")
+      local _pdo
+      _pdo=$(stat -c '%u' "$_pd" 2>/dev/null || stat -f '%u' "$_pd" 2>/dev/null || echo "-1")
+      if [ "$_pdo" != "$(id -u)" ] && [ "$_pdo" != "0" ]; then
+        return 1
+      fi
+      local _pdp
+      _pdp=$(stat -c '%a' "$_pd" 2>/dev/null || stat -f '%Lp' "$_pd" 2>/dev/null || echo "777")
+      local _pdop="${_pdp: -1}"
+      if (( _pdop & 2 )); then
+        return 1
+      fi
       return 0
       ;;
   esac
@@ -160,7 +174,7 @@ install_via_system() {
   local package="$1"
   # Refresh package index before first install on apt-based systems
   case "$PACKAGE_MANAGER" in
-    apt)  if [ "$_APT_UPDATED" != true ]; then $SUDO_PREFIX apt-get update -qq 2>>"$FIX_LOG" || log_fix "apt-get update failed (network issue?)"; _APT_UPDATED=true; fi ;;
+    apt)  if [ "$_APT_UPDATED" != true ]; then $SUDO_PREFIX apt-get update -qq 2>>"$FIX_LOG" || log_fix "apt-get-update" "failed" "network issue?"; _APT_UPDATED=true; fi ;;
   esac
   # Try detected system manager first, then others as fallback (Alinux dnf/yum > apt > apk).
   # Stderr is appended to $FIX_LOG (instead of 2>/dev/null) so a chain of "all
@@ -296,16 +310,47 @@ install_via_symlink() {
     echo "[tokenless-env-fix] BLOCKED: symlink source not in trusted path or wrong owner: $source"
     return 1
   fi
-  $SUDO_PREFIX ln -sf "$source" /usr/local/bin/"$binary" 2>>"$FIX_LOG" || true
-  chmod +x "$source" 2>>"$FIX_LOG" || true
+  # Hard-fail on ln/chmod errors (formerly `|| true`, which caused
+  # install_via_symlink to report success even when the symlink wasn't
+  # actually created — env-check then reported NOT_READY with no trail).
+  $SUDO_PREFIX ln -sf "$source" /usr/local/bin/"$binary" 2>>"$FIX_LOG" || return 1
+  # The +x must live on the source file (symlinks have no permissions of
+  # their own). Try without sudo first — $HOME-relative trusted paths are
+  # owned by the current uid — then escalate for root-owned system paths.
+  if [ ! -x "$source" ]; then
+    chmod +x "$source" 2>>"$FIX_LOG" || $SUDO_PREFIX chmod +x "$source" 2>>"$FIX_LOG" || return 1
+  fi
 }
 
 install_via_path() {
   local path_dir="$1"
+  # Reject anything that isn't an absolute path with safe characters.
+  # path_dir is appended verbatim into shell rc files, so an unconstrained
+  # value (e.g. "/x\"; rm -rf $HOME #") would inject arbitrary shell into
+  # every future login. Spaces are intentionally excluded — system install
+  # paths never contain spaces, and spaces in PATH assignments create
+  # word-splitting ambiguity in shell rc files.
+  if [ -z "$path_dir" ] || [ "${path_dir:0:1}" != "/" ]; then
+    echo "[tokenless-env-fix] BLOCKED: install_via_path requires an absolute path, got: ${path_dir}"
+    return 1
+  fi
+  if ! echo "$path_dir" | grep -qE '^/[A-Za-z0-9._/+-]+$'; then
+    echo "[tokenless-env-fix] BLOCKED: install_via_path path contains unsafe characters: ${path_dir}"
+    return 1
+  fi
   if [[ ":$PATH:" != *":${path_dir}:"* ]]; then
     export PATH="${path_dir}:${PATH}"
-    local shell_rc="${HOME}/.bashrc"
-    [ -f "${HOME}/.zshrc" ] && shell_rc="${HOME}/.zshrc"
+    # Resolve home from passwd (not $HOME) to prevent an attacker-controlled
+    # $HOME from redirecting rc-file writes. Falls back to $HOME only when
+    # getent is unavailable — the is_trusted_source_path guard already
+    # covers this path.
+    local real_home="$HOME"
+    if command -v getent &>/dev/null; then
+      real_home=$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1{print $6}') || true
+    fi
+    [ -n "$real_home" ] || real_home="$HOME"
+    local shell_rc="${real_home}/.bashrc"
+    [ -f "${real_home}/.zshrc" ] && shell_rc="${real_home}/.zshrc"
     if ! grep -Fq "export PATH=\"${path_dir}" "$shell_rc" 2>/dev/null; then
       echo "[tokenless-env-fix] adding ${path_dir} to PATH in ${shell_rc}"
       echo "export PATH=\"${path_dir}:\$PATH\"" >> "$shell_rc"
@@ -321,25 +366,53 @@ install_via_curl_pipe_sh() {
   local url="$1"
   local args="${2:-}"
   local timeout_secs="${3:-120}"
-  # Only allow HTTPS URLs from trusted domains (anchored with path separator)
-  local allowed_domains="^https://(github\.com/|raw\.githubusercontent\.com/|sh\.rustup\.rs(/|$)|get\.docker\.com(/|$)|cli\.run\.nu(/|$)|get\.starship\.rs(/|$)|astral\.sh(/|$))"
+  # Only allow HTTPS URLs from trusted install-script hosts. The github
+  # entries require a concrete owner/repo path segment (no root-level
+  # github.com/ or raw.githubusercontent.com/), so an attacker who only
+  # controls a repo cannot satisfy the regex with a single-segment URL.
+  local allowed_domains='^https://('
+  allowed_domains+='raw\.githubusercontent\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/'
+  allowed_domains+='|github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/raw/'
+  allowed_domains+='|sh\.rustup\.rs(/|$)'
+  allowed_domains+='|get\.docker\.com(/|$)'
+  allowed_domains+='|cli\.run\.nu(/|$)'
+  allowed_domains+='|get\.starship\.rs(/|$)'
+  allowed_domains+='|astral\.sh(/|$)'
+  allowed_domains+=')'
   if ! echo "$url" | grep -qE "$allowed_domains"; then
     echo "[tokenless-env-fix] BLOCKED: curl|sh denied — untrusted or non-HTTPS URL: $url"
     return 1
   fi
   echo "[tokenless-env-fix] NOTE: executing remote script from $url (timeout: ${timeout_secs}s)"
+  # Append curl/wget stderr to $FIX_LOG (instead of /dev/null) so a silent
+  # network failure leaves a diagnostic behind. PIPESTATUS is then inspected
+  # to surface a non-zero downloader exit — a bare `curl … | sh` would
+  # otherwise return 0 whenever `sh` consumes a truncated/empty pipe.
+  local rc
   if command -v curl &>/dev/null; then
     if [ -n "$args" ]; then
-      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>/dev/null | timeout "$timeout_secs" sh -s -- "$args"
+      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>>"$FIX_LOG" | timeout "$timeout_secs" sh -s -- "$args"
     else
-      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>/dev/null | timeout "$timeout_secs" sh
+      timeout "$timeout_secs" curl -fsSL --max-redirs 5 "$url" 2>>"$FIX_LOG" | timeout "$timeout_secs" sh
     fi
+    rc=("${PIPESTATUS[@]}")
+    if [ "${rc[0]:-1}" -ne 0 ]; then
+      echo "[tokenless-env-fix] curl failed for $url (exit ${rc[0]:-?}); see $FIX_LOG" >&2
+      return 1
+    fi
+    return "${rc[1]:-0}"
   elif command -v wget &>/dev/null; then
     if [ -n "$args" ]; then
-      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" | timeout "$timeout_secs" sh -s -- "$args"
+      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" 2>>"$FIX_LOG" | timeout "$timeout_secs" sh -s -- "$args"
     else
-      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" | timeout "$timeout_secs" sh
+      timeout "$timeout_secs" wget --max-redirect=5 -qO- "$url" 2>>"$FIX_LOG" | timeout "$timeout_secs" sh
     fi
+    rc=("${PIPESTATUS[@]}")
+    if [ "${rc[0]:-1}" -ne 0 ]; then
+      echo "[tokenless-env-fix] wget failed for $url (exit ${rc[0]:-?}); see $FIX_LOG" >&2
+      return 1
+    fi
+    return "${rc[1]:-0}"
   else
     return 1
   fi

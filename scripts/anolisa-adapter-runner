@@ -196,9 +196,12 @@ resolve_plugin_component() {
     case "$TARGET" in
         openclaw)
             case "$pid" in
-                agent-sec)           echo "sec-core" ;;
-                tokenless)  echo "tokenless" ;;
-                ws-ckpt)             echo "ws-ckpt" ;;
+                agent-sec)                       echo "sec-core" ;;
+                # tokenless-openclaw is the pre-rename plugin id, kept as a
+                # backward-compat alias so existing openclaw.json entries
+                # still resolve until the %post cleanup runs.
+                tokenless|tokenless-openclaw)    echo "tokenless" ;;
+                ws-ckpt)                         echo "ws-ckpt" ;;
                 *) return 1 ;;
             esac ;;
         hermes)

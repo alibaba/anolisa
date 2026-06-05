@@ -37,29 +37,12 @@ BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 
-# Resolve codex binary (may not be on PATH in RPM %post scripts).
-resolve_codex() {
-    if [[ -n "$CODEX_BIN" ]] && command -v "$CODEX_BIN" &>/dev/null; then
-        echo "$CODEX_BIN"
-        return
-    fi
-    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
-        if command -v "$candidate" &>/dev/null; then
-            echo "$candidate"
-            return
-        fi
-    done
-    for candidate in /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
-        if [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return
-        fi
-    done
-    echo ""
-}
+# Resolve codex binary via shared helper (see _common.sh).
 
 # Resolve the codex plugin source directory.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=./_common.sh
+source "$SCRIPT_DIR/_common.sh"
 PLUGIN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"   # codex/ directory
 
 # ---------------------------------------------------------------------------

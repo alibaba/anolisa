@@ -6,19 +6,10 @@ static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
 static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
-/// Find a valid UTF-8 char boundary at or before `pos`.
-/// Equivalent to `str::floor_char_boundary` (stabilized in 1.89).
-fn find_char_boundary(s: &str, pos: usize) -> usize {
-    let pos = pos.min(s.len());
-    if s.is_char_boundary(pos) {
-        pos
-    } else {
-        let mut i = pos;
-        while i > 0 && !s.is_char_boundary(i) {
-            i -= 1;
-        }
-        i
-    }
+/// Convert a character count `n` to a byte offset in `s`. Returns `s.len()`
+/// when `n` exceeds the number of characters.
+fn char_index(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
 }
 
 /// SchemaCompressor compresses OpenAI Function Calling schema
@@ -163,7 +154,10 @@ impl SchemaCompressor {
         // Stack-overflow guard for pathological schemas. Beyond max_depth we
         // stop descending — the deepest nodes keep their original shape, which
         // is acceptable since this path is best-effort token reduction.
-        if depth >= self.max_depth {
+        // Use `>` (not `>=`) so the threshold matches response_compressor.rs
+        // semantics: a node at depth==max_depth is still processed, only its
+        // grandchildren (depth+1 > max_depth) are skipped.
+        if depth > self.max_depth {
             return;
         }
 
@@ -261,10 +255,14 @@ impl SchemaCompressor {
         }
 
         // Try to find a sentence boundary in the range [max_len*0.5, max_len]
-        // floor_char_boundary is unstable before 1.89; use inline fallback
+        // Convert char counts to byte positions via char_index so the search
+        // range and hard-truncation fallback use correct byte offsets even for
+        // multi-byte text (CJK, emoji, etc.). Previously max_len was passed
+        // directly as a byte position, truncating CJK text far more
+        // aggressively than expected (e.g. 300 chars cut to ~85 instead of 256).
         let min_target = (max_len as f64 * 0.5) as usize;
-        let min_pos = find_char_boundary(&text, min_target);
-        let max_pos = find_char_boundary(&text, max_len.min(text.len()));
+        let min_pos = char_index(&text, min_target);
+        let max_pos = char_index(&text, max_len.min(text.chars().count()));
         let search_range = &text[min_pos..max_pos];
 
         // Look for sentence endings: . 。 ！ ？
@@ -282,13 +280,8 @@ impl SchemaCompressor {
             return text[..pos].trim().to_string();
         }
 
-        // No sentence boundary found, hard truncate
-        // Handle UTF-8 properly by finding char boundary
-        let mut truncate_pos = max_len;
-        while !text.is_char_boundary(truncate_pos) && truncate_pos > 0 {
-            truncate_pos -= 1;
-        }
-
+        // No sentence boundary found, hard truncate at max_len characters
+        let truncate_pos = char_index(&text, max_len);
         text[..truncate_pos].trim().to_string()
     }
 }

@@ -129,6 +129,16 @@ def _build_additional_context(
 # -- main --------------------------------------------------------------------
 
 
+def _warn_subprocess(label: str, proc: subprocess.CompletedProcess) -> None:
+    """Log a non-zero subprocess exit with truncated stderr."""
+    detail = (proc.stderr or "").strip()[:200]
+    warn(
+        f"{label} exited {proc.returncode}: {detail}"
+        if detail
+        else f"{label} exited {proc.returncode} with empty stderr"
+    )
+
+
 def main() -> None:
     # 1. Resolve binaries
     tokenless_bin = resolve_binary("tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB)
@@ -208,10 +218,12 @@ def main() -> None:
                 capture_output=True, text=True, timeout=3,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-                candidate = proc.stdout.strip()
+candidate = proc.stdout.strip()
                 if len(candidate) < len(tool_response):
                     compressed = candidate
                     used_resp_compression = True
+            elif proc.returncode != 0:
+                _warn_subprocess("compress-response", proc)
         except Exception as e:
             warn(f"Response compression error: {e}")
 
@@ -236,6 +248,8 @@ def main() -> None:
                     candidate = proc.stdout.strip()
                     if len(candidate) < len(compressed):
                         toon_output = candidate
+                elif proc.returncode != 0:
+                    _warn_subprocess("compress-toon", proc)
             except Exception as e:
                 warn(f"TOON encoding error: {e}")
 
