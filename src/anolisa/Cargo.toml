@@ -63,3 +63,11 @@ anolisa-core = { path = "crates/anolisa-core" }
 anolisa-env = { path = "crates/anolisa-env" }
 anolisa-build = { path = "crates/anolisa-build" }
 anolisa-platform = { path = "crates/anolisa-platform" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = true
+strip = "debuginfo"
+split-debuginfo = "packed"

@@ -1,90 +1,151 @@
 # AGENTS.md
 
-本文件约定本仓库中 AI 协作者编写代码时遵循的工程规范。
+Engineering conventions for AI collaborators working in this repository.
 
-## 注释原则（Rust）
+## Comment Guidelines (Rust)
 
-遵循 Rust 官方风格指南与 API Guidelines，写「让读者更快理解意图」的注释，而不是把代码翻译成自然语言。
+Follow the Rust style guide and API Guidelines. Write comments that help
+readers understand intent faster — not comments that paraphrase code.
 
-### 1. 注释类型与位置
+### 1. Comment types and placement
 
-- **`//!` 模块级文档**：放在文件/模块顶部，一两句话说清楚这个模块负责什么、何时使用。
-- **`///` 文档注释**：用于一切公开 (`pub`) 的 item —— struct、enum、trait、函数、方法、重要字段、变体。这些会进入 `cargo doc`。
-- **`//` 普通注释**：仅用于实现内部需要解释「为什么这么写」的地方。
-- 不要在私有的、内部显而易见的辅助函数上堆 `///`。
+- **`//!` module-level docs**: Place at the top of a file/module. One or
+  two sentences describing what the module does and when to use it.
+- **`///` doc comments**: Required on all public (`pub`) items — structs,
+  enums, traits, functions, methods, significant fields, and variants.
+  These appear in `cargo doc`.
+- **`//` inline comments**: Only where the implementation needs to
+  explain *why* something is done a certain way.
+- Do not pile `///` on private, self-explanatory helper functions.
 
-### 2. 写「为什么」，不写「是什么」
+### 2. Write "why", not "what"
 
-- 类型名、字段名、函数名已经说明 *是什么*；注释应补充 *为什么* 和 *不变量*。
-  - 好：`// 序列化为 untagged，因为多数 provider 不返回 type 字段`
-  - 坏：`// 这是一个枚举，表示助手内容`
-- 描述**不变量**（例如 `NonEmptyVec` 保证至少一个元素）、**前置条件**、**副作用**、**与外部协议的约定**（如 provider 需要原样回传的字段）。
-- 凡能从签名/类型/命名直接读出的事实，不要重复。
+- Type names, field names, and function names already say *what*;
+  comments should explain *why* and document *invariants*.
+  - Good: `// Serialize as untagged because most providers omit the type field`
+  - Bad: `// This is an enum representing assistant content`
+- Document **invariants** (e.g. `NonEmptyVec` guarantees at least one
+  element), **preconditions**, **side effects**, and **protocol
+  contracts** (e.g. fields that providers expect to be echoed back).
+- Never repeat facts that are already obvious from the signature, type,
+  or naming.
 
-### 3. 简洁优先
+### 3. Brevity first
 
-- 一行能说清的不写两行；trivial setter保持无注释或一句话足矣。
-- 避免礼貌性废话：「This function returns ...」「这是一个用于 ...」。直接用祈使句或名词短语开头：「Returns ...」「Builds ...」「构造 ...」。
-- 第一行是摘要句，独立成行；需要细节时空一行再展开。
+- If one line suffices, do not write two. Trivial setters need no comment
+  or at most a single sentence.
+- Avoid politeness filler: "This function returns …". Start with an
+  imperative or noun phrase: "Returns …", "Builds …".
+- First line is a standalone summary; expand after a blank line if needed.
 
-### 4. 链接与交叉引用
+### 4. Links and cross-references
 
-- 用 intra-doc link 引用其它 item。
-- 在父类型上提到子字段时用 `` [`Field`](Self::field) ``，让 rustdoc 渲染成跳转链接。
+- Use intra-doc links to reference other items.
+- When mentioning child fields on a parent type, use
+  `` [`Field`](Self::field) `` so rustdoc renders a clickable link.
 
-### 5. 文档约定段落
+### 5. Conventional doc sections
 
-按需使用 rustdoc 约定的段落标题，缺失时不要硬凑：
+Use rustdoc section headings as needed; do not force them when they add
+no value:
 
-- `# Errors` —— 返回 `Result` 的函数：列出失败条件。
-- `# Panics` —— 可能 panic 的函数：列出触发条件。
-- `# Safety` —— `unsafe fn`：调用方必须保证的不变量。
-- `# Examples` —— 公共 API 的典型用法，写在 ```` ```rust ```` 代码块里，能被 `cargo test --doc` 跑过。
+- `# Errors` — for functions returning `Result`: list failure conditions.
+- `# Panics` — for functions that can panic: list trigger conditions.
+- `# Safety` — for `unsafe fn`: state invariants the caller must uphold.
+- `# Examples` — typical usage of public APIs in ```` ```rust ```` blocks,
+  runnable by `cargo test --doc`.
 
-### 6. 不变量与协议字段
+### 6. Invariants and protocol fields
 
-- 涉及序列化/外部协议的字段（`#[serde(...)]`、provider id、signature 等），注释要说明它在线协议中的角色，以及为什么需要保留/原样回传。
-- 使用 `#[serde(skip_serializing_if = ...)]`、`flatten`、`untagged` 等非默认属性时，注释说明动机。
+- For serialization/protocol fields (`#[serde(...)]`, provider IDs,
+  signatures, etc.), explain the field's role in the wire protocol and
+  why it must be preserved or echoed.
+- When using non-default serde attributes (`skip_serializing_if`,
+  `flatten`, `untagged`, etc.), explain the motivation.
 
-### 7. 禁止事项
+### 7. Prohibited patterns
 
-- 不写「TODO（无 owner、无上下文）」；要写就带原因和处理条件。
-- 不留注释掉的旧代码；用 git 历史。
-- 不写时间戳、作者名、变更日志类注释；交给 VCS。
-- 不写「修复了 issue #123」之类引用，PR 描述里写。
-- 不在注释里复述类型签名。
+- No bare `TODO` without owner and context; always include the reason
+  and the condition under which it should be addressed.
+- No commented-out old code — use git history.
+- No timestamps, author names, or changelog-style comments — VCS
+  handles that.
+- No "fixes issue #123" in comments — put that in the PR description.
+- No restating the type signature in comments.
 
-### 8. 校验
+### 8. Verification
 
-- 提交前跑 `cargo check` 与 `cargo doc --no-deps` 确保无 broken intra-doc link。
-- 公共 API 可在 crate 顶部开启 `#![warn(missing_docs)]` 强制覆盖。
+- Run `cargo check` and `cargo doc --no-deps` before committing to
+  ensure no broken intra-doc links.
+- Public API crates may enable `#![warn(missing_docs)]` at the crate
+  root to enforce coverage.
 
-## 工作区结构与 crate 职责
+## Workspace structure and crate responsibilities
 
-## 模块组织：no `mod.rs` 风格
+## Module organization: no `mod.rs`
 
-统一采用 Rust 2018+ 推荐的非 `mod.rs` 布局：父模块用同名 `.rs` 文件，子模块放进同名目录。
+Use the Rust 2018+ recommended layout: parent modules are `.rs` files
+with matching directories for child modules.
 
-理由：避免一个仓库里出现一堆同名的 `mod.rs`，文件树和编辑器标签更易辨识；与 `rustfmt`、`cargo new` 默认行为一致。新增模块时不要创建任何 `mod.rs`，CR 中遇到也要求改掉。
+Rationale: avoids a sea of identically-named `mod.rs` files; makes file
+trees and editor tabs more readable; aligns with `rustfmt` and
+`cargo new` defaults. Never create a `mod.rs`; fix any encountered
+during code review.
 
-## 依赖管理
+## Dependency management
 
-- 所有第三方依赖在 `[workspace.dependencies]` 中统一声明版本；子 crate 用 `dep_name = { workspace = true }` 引用，绝不在子 crate 里写死版本号。
-- 新增依赖前先 grep `Cargo.toml` 看是否已有等价库（例如已有 `serde_json` 就别再引入 `simd-json`）。
-- 不擅自升级已声明依赖的大版本（major），有需要时单独提出讨论。
-- feature flag 在 workspace 声明处集中开启，子 crate 不要重复 `features = [...]`，除非真的需要扩展。
+- All third-party dependencies declare their version in
+  `[workspace.dependencies]`; crates reference them via
+  `dep_name = { workspace = true }` — never pin versions in sub-crates.
+- Before adding a dependency, grep `Cargo.toml` to check whether an
+  equivalent crate already exists (e.g. do not add `simd-json` when
+  `serde_json` is already present).
+- Do not bump a declared dependency's major version without discussion.
+- Feature flags are enabled centrally in the workspace declaration;
+  sub-crates should not repeat `features = [...]` unless genuinely
+  extending them.
 
-## 错误处理
+## Error handling
 
-- **库 crate**：用 `thiserror` 定义具名 `enum` 错误类型；每个 crate 自己的错误枚举不要跨 crate 复用，而是用 `#[from]` 包装上游错误。
-- **二进制**：可以使用 `anyhow::Result` 简化错误传播。
-- 库代码里禁止 `unwrap()` / `expect()` / `panic!()`，除非能在注释里证明该条件由类型系统保证不可能发生（这种情况优先用 `unreachable!()` 并写明原因）。
-- 错误信息面向开发者：包含失败的上下文与变量值，避免「something went wrong」式空话。
-- 优先用 `?` 传播；不要用 `match` + 立即 `return Err(...)` 重写已经能 `?` 的代码。
+- **Library crates**: Define named `enum` error types with `thiserror`.
+  Each crate owns its error enum and wraps upstream errors via `#[from]`
+  — do not reuse error enums across crate boundaries.
+- **Binaries**: May use `anyhow::Result` for ergonomic error propagation.
+- Library code must not use `unwrap()` / `expect()` / `panic!()` unless
+  a comment proves the condition is guaranteed unreachable by the type
+  system (prefer `unreachable!()` with an explanation in that case).
+- Error messages target developers: include failure context and relevant
+  variable values; avoid "something went wrong" style messages.
+- Prefer `?` propagation; do not rewrite `?`-eligible code with `match`
+  + immediate `return Err(...)`.
 
-## 提交前检查
+## Pre-commit checks
 
-提交/打开 PR 前，工作区根目录运行以下命令，全部通过才算完成：
+### Commit conventions
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/)
+style; write commit messages in English.
+
+Trailer format per
+[kernel coding-assistants](https://docs.kernel.org/process/coding-assistants.html):
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+Assisted-by: AGENT_NAME:MODEL_VERSION
+Signed-off-by: Human Name <email>
+```
+
+- `Assisted-by` attributes the AI tool that assisted development, in
+  `tool:version` format.
+- `Signed-off-by` is added only by human contributors, certifying the
+  DCO.
+- AI agents MUST NOT add `Signed-off-by`.
+- Use `git commit -s` to append the trailer automatically.
+
+### Check commands
 
 ```bash
 cargo fmt --all -- --check
@@ -93,6 +154,10 @@ cargo check --workspace --all-targets
 cargo test --workspace
 ```
 
-- 修改了公共 API 或 doc 注释时，额外跑 `cargo doc --workspace --no-deps` 检查 intra-doc link。
-- clippy 警告默认拒绝；确有理由放过的，用 `#[allow(clippy::xxx)]` 在最小作用域上加，并写注释说明原因。
-- 不要为了让检查通过而注释掉测试或删掉断言；查根因。
+- When modifying public APIs or doc comments, additionally run
+  `cargo doc --workspace --no-deps` to verify intra-doc links.
+- Clippy warnings are denied by default; if there is genuine reason to
+  suppress one, use `#[allow(clippy::xxx)]` at the narrowest possible
+  scope with a comment explaining why.
+- Never comment out tests or remove assertions just to pass checks —
+  find and fix the root cause.
