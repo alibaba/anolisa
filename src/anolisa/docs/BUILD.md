@@ -11,6 +11,39 @@
 cd src/anolisa
 ```
 
+### Rustup Toolchain Source
+
+This workspace pins Rust `1.88.0` via `rust-toolchain.toml`. When using
+rustup-managed `cargo`, the required toolchain is selected automatically
+and downloaded if missing.
+
+Before building, verify that `cargo`, `rustc`, and `rustdoc` come from the
+same rustup toolchain:
+
+```bash
+which cargo
+cargo -Vv
+rustc -Vv
+rustdoc -Vv
+```
+
+If your configured rustup source cannot provide Rust `1.88.0`, configure a
+working source or preinstall the toolchain on the build machine.
+
+For bash/zsh:
+
+```bash
+export RUSTUP_DIST_SERVER=<rustup-dist-server>
+export RUSTUP_UPDATE_ROOT=<rustup-update-root>
+```
+
+For fish:
+
+```fish
+set -x RUSTUP_DIST_SERVER <rustup-dist-server>
+set -x RUSTUP_UPDATE_ROOT <rustup-update-root>
+```
+
 ---
 
 ## Local Development
