@@ -555,9 +555,38 @@ EOF
     assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
 
     # ==========================================
-    # 6.26 No docker_socket or https_outbound in spec
+    # 6.26 SKIP_TOOLS attribution: Bash + env error
     # ==========================================
-    log_info "Test 6.26: Spec has no runtime state checks (docker_socket/https_outbound removed)"
+    log_info "Test 6.26a: SKIP_TOOLS (Bash) + ENV_DEPENDENCY_MISSING — attribution reachable"
+    local skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
+    local skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    local skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$skip_attr_out" "ENV_DEPENDENCY_MISSING" "Bash attribution detects command not found"
+    assert_contains "$skip_attr_out" "Skip retry" "Bash attribution includes Skip retry"
+
+    log_info "Test 6.26b: SKIP_TOOLS (Bash) + ENV_PERMISSION — attribution reachable"
+    skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
+    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$skip_attr_out" "ENV_PERMISSION" "Bash attribution detects Permission denied"
+
+    log_info "Test 6.26c: SKIP_TOOLS (Bash) + ENV_FILE_MISSING — attribution reachable"
+    skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
+    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$skip_attr_out" "ENV_FILE_MISSING" "Bash attribution detects No such file"
+
+    log_info "Test 6.26d: SKIP_TOOLS (Bash) + no env error — skip entirely"
+    skip_attr_resp='{"exit_code":0,"stdout":"hello world from shell","stderr":""}'
+    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_not_contains "$skip_attr_out" "ENV_" "Bash no-error: no attribution emitted"
+    assert_not_contains "$skip_attr_out" "compress" "Bash no-error: no compression emitted"
+
+    # ==========================================
+    # 6.27 No docker_socket or https_outbound in spec
+    # ==========================================
+    log_info "Test 6.27: Spec has no runtime state checks (docker_socket/https_outbound removed)"
     local spec_content=$(cat "$SPEC_FILE")
     ! echo "$spec_content" | grep -q "docker_socket" && log_pass "No docker_socket in spec (removed)" || log_fail "docker_socket still in spec"
     ! echo "$spec_content" | grep -q "https_outbound" && log_pass "No https_outbound in spec (removed)" || log_fail "https_outbound still in spec"

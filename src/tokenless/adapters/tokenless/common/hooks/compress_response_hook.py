@@ -5,12 +5,14 @@ Reads a PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
 format via ``tokenless compress-toon`` for additional token savings.
 
-Pipeline: Env Attribution → Response Compression → TOON Encoding
+Pipeline: Env Attribution → Skip-tool分流 → Response Compression → TOON Encoding
   1. If tool_response contains errors, classify as environment vs logic issue
      and inject "Skip retry" guidance for LLM
-  2. Strip debug fields, nulls, empty values; truncate long strings/arrays
-  3. If the compressed result is still valid JSON, encode to TOON format
-  4. Stats are recorded automatically by tokenless compress-response.
+  2. For skip-tools (shell/search): emit attribution only (no compression);
+     for other tools: proceed with full compression pipeline
+  3. Strip debug fields, nulls, empty values; truncate long strings/arrays
+  4. If the compressed result is still valid JSON, encode to TOON format
+  5. Stats are recorded automatically by tokenless compress-response.
 
 Hook point: **PostToolUse**
 
@@ -153,10 +155,8 @@ def main() -> None:
         warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
 
-    # 3. Skip content-retrieval tools
+    # 3. Extract tool_name (skip-tools分流 handled after attribution)
     tool_name = input_data.get("tool_name", "unknown")
-    if tool_name in SKIP_TOOLS:
-        skip()
 
     # 4. Extract tool_response
     tool_response_raw = input_data.get("tool_response", "")
@@ -178,20 +178,16 @@ def main() -> None:
     else:
         skip()
 
-    # 7. Skip small responses (character count, not byte length)
-    if len(tool_response) < _MIN_RESPONSE_CHARS:
-        skip()
-
-    # 8. Validate it's JSON
+    # 7. Validate it's JSON (needed for attribution on skip-tools too)
     parsed = try_parse_json(tool_response)
     if parsed is None:
         skip()
 
-    # 9. Extract caller context
+    # 8. Extract caller context
     session_id = input_data.get("session_id", "")
     tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
 
-    # 9b. Environment attribution analysis
+    # 9. Environment attribution analysis
     env_attribution = ""
     attr_category, attr_fix_hint = _classify_env_error(parsed if isinstance(parsed, dict) else {})
     if attr_category:
@@ -200,7 +196,25 @@ def main() -> None:
             f"{attr_category} ({attr_fix_hint}). Skip retry."
         )
 
-    # 10. Step 1: Response compression (only on JSON objects/arrays)
+    # 10. Skip content-retrieval / shell tools — attribution only, no compression
+    if tool_name in SKIP_TOOLS:
+        if env_attribution:
+            output = {
+                "suppressOutput": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": env_attribution,
+                },
+            }
+            print(json.dumps(output, ensure_ascii=False))
+            return
+        skip()
+
+    # 11. Skip small responses (only for compression path — attribution already handled)
+    if len(tool_response) < _MIN_RESPONSE_CHARS:
+        skip()
+
+    # 12. Step 1: Response compression (only on JSON objects/arrays)
     compressed = tool_response
     used_resp_compression = False
 
@@ -227,7 +241,7 @@ candidate = proc.stdout.strip()
         except Exception as e:
             warn(f"Response compression error: {e}")
 
-    # 11. Step 2: TOON encoding (via tokenless compress-toon for stats)
+    # 13. Step 2: TOON encoding (via tokenless compress-toon for stats)
     toon_output = ""
 
     if tokenless_bin:
@@ -256,7 +270,7 @@ candidate = proc.stdout.strip()
     # Determine final output
     final_output = toon_output if toon_output else compressed
 
-    # 12. Build response
+    # 14. Build response
     context = _build_additional_context(
         final_output,
         env_attribution=env_attribution,
