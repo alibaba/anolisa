@@ -75,14 +75,16 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
     };
     // Helper: check a directory for foreign ownership or world-writable bit.
     fn check_parent_dir(parent: &std::path::Path) -> bool {
-        if let Ok(parent_meta) = fs::symlink_metadata(parent) {
-            let parent_uid = parent_meta.uid();
-            if parent_uid != current_uid() && parent_uid != 0 {
-                return false;
-            }
-            if parent_meta.mode() & 0o002 != 0 {
-                return false;
-            }
+        let parent_meta = match fs::symlink_metadata(parent) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let parent_uid = parent_meta.uid();
+        if parent_uid != current_uid() && parent_uid != 0 {
+            return false;
+        }
+        if parent_meta.mode() & 0o002 != 0 {
+            return false;
         }
         true
     }

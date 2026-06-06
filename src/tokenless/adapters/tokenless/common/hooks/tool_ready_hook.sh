@@ -305,6 +305,8 @@ for i in $(seq 0 $((req_count - 1))); do
   esac
 done
 
+REQUIRED_MISSING_COUNT=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
+
 # Check recommended deps
 rec_count=$(echo "$RECOMMENDED" | jq 'length')
 missing_count_rec=0
@@ -363,7 +365,9 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
         binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
         if ! resolve_binary "$binary" >/dev/null 2>&1; then
             STILL_MISSING="${STILL_MISSING} ${binary}"
-            HAS_REQUIRED_MISSING=true
+            if [ "$i" -lt "$REQUIRED_MISSING_COUNT" ]; then
+                HAS_REQUIRED_MISSING=true
+            fi
         fi
     done
 
