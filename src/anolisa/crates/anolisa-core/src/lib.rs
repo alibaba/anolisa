@@ -25,6 +25,7 @@ pub mod lock;
 pub mod manifest;
 pub mod path_safety;
 pub mod registry;
+pub mod self_update;
 pub mod service;
 pub mod state;
 pub mod subscription;
@@ -69,6 +70,10 @@ pub use lifecycle::{
 pub use lock::{InstallLock, LockError};
 pub use manifest::{ComponentManifest, DistributionSelector, HealthSpec};
 pub use registry::Registry;
+pub use self_update::{
+    ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,
+    check_update, update_url,
+};
 pub use service::{
     FakeServiceManager, NotSupportedServiceManager, ServiceError, ServiceManager, ServiceOp,
     ServiceOutcome, ServiceState, SystemdServiceManager,
