@@ -5,13 +5,14 @@ import sys
 from typing import Any
 
 import typer
+from pydantic import ValidationError
+
 from agent_sec_cli.observability import record_observability
 from agent_sec_cli.observability.schema import (
     ObservabilityRecord,
     observability_record_json_schema,
     validate_observability_record,
 )
-from pydantic import ValidationError
 
 app = typer.Typer(help="Record observability metrics.")
 
@@ -136,13 +137,21 @@ def review() -> None:
 
 @app.command()
 def report(
-    session_id: str = typer.Option(None, "--session-id", help="Session ID to report on."),
-    last: bool = typer.Option(False, "--last", help="Report on the most recent session."),
-    format_: str = typer.Option("text", "--format", help="Output format: text or json."),
+    session_id: str = typer.Option(
+        None, "--session-id", help="Session ID to report on."
+    ),
+    last: bool = typer.Option(
+        False, "--last", help="Report on the most recent session."
+    ),
+    format_: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
 ) -> None:
     """Print a per-session debrief (LLM calls, tools, security)."""
     if format_ not in ("text", "json"):
-        typer.echo(f"Error: --format must be 'text' or 'json', got '{format_}'.", err=True)
+        typer.echo(
+            f"Error: --format must be 'text' or 'json', got '{format_}'.", err=True
+        )
         raise typer.Exit(code=1)
     if not session_id and not last:
         typer.echo("Error: specify --session-id or --last.", err=True)
@@ -152,8 +161,12 @@ def report(
         build_session_report,
         format_text,
     )
-    from agent_sec_cli.observability.sqlite_reader import ObservabilityReader  # noqa: PLC0415
-    from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader  # noqa: PLC0415
+    from agent_sec_cli.observability.sqlite_reader import (  # noqa: PLC0415
+        ObservabilityReader,
+    )
+    from agent_sec_cli.security_events.sqlite_reader import (  # noqa: PLC0415
+        SqliteEventReader,
+    )
 
     reader = ObservabilityReader()
     security_reader = None
