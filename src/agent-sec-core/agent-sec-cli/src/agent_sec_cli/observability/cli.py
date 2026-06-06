@@ -5,14 +5,13 @@ import sys
 from typing import Any
 
 import typer
-from pydantic import ValidationError
-
 from agent_sec_cli.observability import record_observability
 from agent_sec_cli.observability.schema import (
     ObservabilityRecord,
     observability_record_json_schema,
     validate_observability_record,
 )
+from pydantic import ValidationError
 
 app = typer.Typer(help="Record observability metrics.")
 
