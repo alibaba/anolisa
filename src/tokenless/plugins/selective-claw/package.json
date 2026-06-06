@@ -27,8 +27,5 @@
     "extensions": [
       "./dist/index.js"
     ]
-  },
-  "dependencies": {
-    "2": "^3.0.0"
   }
 }
