@@ -675,13 +675,13 @@ stage_from_local() {
   local index_dest="$INDEX_DIR/index.toml"
   if [ -f "$oracle_index" ]; then
     log "interpolating distribution index with ANOLISA_MIRROR=$ANOLISA_MIRROR / ANOLISA_CHANNEL=$ANOLISA_CHANNEL"
-    # Inline sed: substitute the two placeholders the OSS template uses.
-    # Backslashes / ampersands in the mirror URL would break sed; we use
-    # the unlikely "|" delimiter and assume mirror URLs do not contain it.
-    sed \
-      -e "s|@ANOLISA_MIRROR@|$ANOLISA_MIRROR|g" \
-      -e "s|@ANOLISA_CHANNEL@|$ANOLISA_CHANNEL|g" \
-      "$oracle_index" >"$index_dest"
+    # Use bash parameter expansion for safe interpolation — no sed
+    # metacharacter issues (&, \, |e flag injection).
+    local _idx_content
+    _idx_content=$(<"$oracle_index")
+    _idx_content="${_idx_content//@ANOLISA_MIRROR@/$ANOLISA_MIRROR}"
+    _idx_content="${_idx_content//@ANOLISA_CHANNEL@/$ANOLISA_CHANNEL}"
+    printf '%s\n' "$_idx_content" >"$index_dest"
   elif [ -f "$default_index" ]; then
     log "OSS-targeted index not found at $oracle_index; using empty dev-tree index"
     cp "$default_index" "$index_dest"
