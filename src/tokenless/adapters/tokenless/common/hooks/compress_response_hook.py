@@ -232,7 +232,7 @@ def main() -> None:
                 capture_output=True, text=True, timeout=3,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-candidate = proc.stdout.strip()
+                candidate = proc.stdout.strip()
                 if len(candidate) < len(tool_response):
                     compressed = candidate
                     used_resp_compression = True
