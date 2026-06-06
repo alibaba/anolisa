@@ -5,14 +5,13 @@ import sys
 from typing import Any
 
 import typer
-from pydantic import ValidationError
-
 from agent_sec_cli.observability import record_observability
 from agent_sec_cli.observability.schema import (
     ObservabilityRecord,
     observability_record_json_schema,
     validate_observability_record,
 )
+from pydantic import ValidationError
 
 app = typer.Typer(help="Record observability metrics.")
 
@@ -107,10 +106,18 @@ def review() -> None:
 
     # Lazy-import Textual so the hot `record` / `schema` paths don't pay its
     # import cost.
-    from agent_sec_cli.observability.correlation import SecurityCorrelationService  # noqa: PLC0415
-    from agent_sec_cli.observability.review import ObservabilityReviewApp  # noqa: PLC0415
-    from agent_sec_cli.observability.sqlite_reader import ObservabilityReader  # noqa: PLC0415
-    from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader  # noqa: PLC0415
+    from agent_sec_cli.observability.correlation import (  # noqa: PLC0415
+        SecurityCorrelationService,
+    )
+    from agent_sec_cli.observability.review import (  # noqa: PLC0415
+        ObservabilityReviewApp,
+    )
+    from agent_sec_cli.observability.sqlite_reader import (  # noqa: PLC0415
+        ObservabilityReader,
+    )
+    from agent_sec_cli.security_events.sqlite_reader import (  # noqa: PLC0415
+        SqliteEventReader,
+    )
 
     reader = ObservabilityReader()
     security_reader = None
