@@ -1,4 +1,10 @@
+use anolisa_core::{
+    ConsentState, LATER_EXPIRE_SECS, current_operator, require_root, RegistrationManager,
+    UploadConfig, UploadStarter,
+};
 use clap::{Parser, Subcommand};
+use unicode_width::UnicodeWidthStr;
+use std::io::IsTerminal;
 
 use crate::context::CliContext;
 use crate::response::CliError;
@@ -11,32 +17,457 @@ pub struct SubscriptionArgs {
 
 #[derive(Subcommand)]
 pub enum SubscriptionCommands {
-    /// Register this machine with ANOLISA subscription service
+    /// Register this machine for token collection (requires root/sudo)
     Register {
+        /// Skip interactive confirmation (for scripts / automation)
         #[arg(long)]
-        org: Option<String>,
-        #[arg(long, env = "ANOLISA_SUBSCRIPTION_KEY", hide_env_values = true)]
-        key: Option<String>,
-        #[arg(long)]
-        server: Option<String>,
+        yes: bool,
     },
-    /// Unregister this machine
+    /// Withdraw consent and stop token upload (requires root/sudo)
     Unregister {
+        /// Skip interactive confirmation
         #[arg(long)]
         force: bool,
     },
-    /// Show subscription status
-    Status,
-    /// Refresh entitlements from server
-    Refresh,
+    /// Show token collection registration status
+    Status {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Defer the registration decision — you will be reminded in 30 days (requires root/sudo)
+    Later,
 }
 
+/// Dispatch `subscription` subcommands to their respective handlers
 pub fn handle(args: SubscriptionArgs, _ctx: &CliContext) -> Result<(), CliError> {
-    let command = match args.command {
-        SubscriptionCommands::Register { .. } => "subscription register",
-        SubscriptionCommands::Unregister { .. } => "subscription unregister",
-        SubscriptionCommands::Status => "subscription status",
-        SubscriptionCommands::Refresh => "subscription refresh",
+    let mgr = RegistrationManager::new();
+    match args.command {
+        SubscriptionCommands::Register { yes } => handle_register(&mgr, yes),
+        SubscriptionCommands::Unregister { force } => handle_unregister(&mgr, force),
+        SubscriptionCommands::Status { json } => handle_status(&mgr, json),
+        SubscriptionCommands::Later => handle_later(&mgr),
+    }
+}
+
+// ── register ──────────────────────────────────────────────────────────────────
+
+fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError> {
+    require_root().map_err(|e| CliError::Runtime {
+        command: "subscription register".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    if mgr.read_state() == ConsentState::Registered {
+        println!("Already registered.");
+        println!("Use 'anolisa subscription status' to check.");
+        return Ok(());
+    }
+
+    if mgr.is_sysom_registered() {
+        println!("Already registered (via sysom).");
+        println!("Use 'anolisa subscription status' to check.");
+        return Ok(());
+    }
+
+    let operator = current_operator();
+
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::Runtime {
+                command: "subscription register".to_string(),
+                reason: "non-interactive session detected; pass --yes to confirm registration".to_string(),
+            });
+        }
+        print_register_banner();
+        println!();
+        if !prompt_yn("Register? [Y/N]: ", false) {
+            println!("Cancelled.");
+            return Err(CliError::Runtime {
+                command: "subscription register".to_string(),
+                reason: "user cancelled".to_string(),
+            });
+        }
+    }
+
+    let upload_cfg = build_upload_config();
+    if let Err(e) = UploadStarter::new(upload_cfg).start() {
+        return Err(CliError::Runtime {
+            command: "subscription register".to_string(),
+            reason: format!("unable to start data upload service: {e}\n  Please check network connectivity and try again."),
+        });
+    }
+
+    mgr.do_register(&operator).map_err(|e| CliError::Runtime {
+        command: "subscription register".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    println!();
+    println!("Registered successfully.");
+    println!("  Status:      registered");
+    if let Some(rec) = mgr.read_record() {
+        if let Some(t) = rec.registration_time {
+            println!("  Registered:  {}", t.format("%Y-%m-%dT%H:%M:%SZ"));
+        }
+    }
+    println!("  Upload:      active");
+
+    if !mgr.is_agentsight_running() {
+        println!();
+        println!("  agentsight is not running. Subscription functionality is incomplete.");
+        println!("  You can install it with: anolisa install agentsight");
+    }
+
+    Ok(())
+}
+
+// ── unregister ────────────────────────────────────────────────────────────────
+
+fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliError> {
+    require_root().map_err(|e| CliError::Runtime {
+        command: "subscription unregister".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    if mgr.read_state() == ConsentState::Unregistered {
+        println!("Not currently registered.");
+        return Ok(());
+    }
+
+    if !force {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::Runtime {
+                command: "subscription unregister".to_string(),
+                reason: "non-interactive session detected; pass --force to confirm unregistration".to_string(),
+            });
+        }
+        if !prompt_yn("Stop subscription? [y/N]: ", false) {
+            println!("Cancelled.");
+            return Err(CliError::Runtime {
+                command: "subscription unregister".to_string(),
+                reason: "user cancelled".to_string(),
+            });
+        }
+    }
+
+    let operator = current_operator();
+    mgr.do_unregister(&operator).map_err(|e| CliError::Runtime {
+        command: "subscription unregister".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let upload_cfg = build_upload_config();
+    if let Err(e) = UploadStarter::new(upload_cfg).stop() {
+        eprintln!("warn: unregistration succeeded but ilogtail teardown failed: {e}");
+    }
+
+    println!("Unregistered. Data upload stopped.");
+    println!("  To re-enable: sudo anolisa subscription register");
+
+    Ok(())
+}
+
+// ── status ────────────────────────────────────────────────────────────────────
+
+fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> {
+    let (state, rec) = mgr.read_state_and_record();
+    let product_type = mgr.detect_product_type();
+    let sysom_active = mgr.is_sysom_registered();
+
+    if json {
+        print_status_json(&state, &rec, &product_type, sysom_active);
+        return Ok(());
+    }
+
+    println!("═══════════════════════════════════════");
+    println!("  ANOLISA Registration Status");
+    println!("═══════════════════════════════════════");
+    println!("  Product:       {}", product_type.display_name());
+    println!();
+
+    // sysom service registration (sysak_meta is active)
+    if sysom_active {
+        let source_is_sysom = rec
+            .as_ref()
+            .and_then(|r| r.source.as_ref())
+            .map(|s| *s == anolisa_core::RegisterSource::Console)
+            .unwrap_or(false);
+
+        if state != ConsentState::Registered || source_is_sysom {
+            println!("  Consent State: REGISTERED");
+            println!("  Data Upload:   active");
+            println!("  Source:        console");
+            if let Some(r) = &rec {
+                if let Some(t) = r.registration_time {
+                    println!("  Registered:    {}", t.format("%Y-%m-%d %H:%M"));
+                }
+                if let Some(op) = &r.operator {
+                    println!("  Operator:      {op}");
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    match &state {
+        ConsentState::InitFresh => {
+            println!("  Consent State: INIT (not yet decided)");
+            println!("  Data Upload:   disabled (local only)");
+            println!();
+            println!("  You haven't decided whether to enable Token collection.");
+            println!("  Run 'sudo anolisa subscription register' to enable.");
+            return Err(CliError::Runtime {
+                command: "subscription status".to_string(),
+                reason: "not registered".to_string(),
+            });
+        }
+        ConsentState::InitLater { later_start_time } => {
+            let remaining = format_remaining(*later_start_time);
+            println!("  Consent State: INIT (decided later)");
+            println!("  Data Upload:   disabled (local only)");
+            println!();
+            println!("  Reminder in {remaining}.");
+            println!("  Run 'sudo anolisa subscription register' to enable now.");
+            return Err(CliError::Runtime {
+                command: "subscription status".to_string(),
+                reason: "not registered (deferred)".to_string(),
+            });
+        }
+        ConsentState::Unregistered => {
+            println!("  Consent State: UNREGISTERED");
+            println!("  Data Upload:   disabled (local only)");
+            if let Some(r) = &rec {
+                if let Some(t) = r.registration_time {
+                    let via = format_source(&r.source);
+                    println!("  Last Registered: {}{via}", t.format("%Y-%m-%d %H:%M"));
+                }
+            }
+            println!();
+            println!("  To enable upload: sudo anolisa subscription register");
+        }
+        ConsentState::Registered => {
+            println!("  Consent State: REGISTERED");
+            println!("  Data Upload:   active");
+            if let Some(r) = &rec {
+                if let Some(t) = r.registration_time {
+                    let via = format_source(&r.source);
+                    println!("  Registered:    {}{via}", t.format("%Y-%m-%d %H:%M"));
+                }
+                if let Some(op) = &r.operator {
+                    println!("  Operator:      {op}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── later ─────────────────────────────────────────────────────────────────────
+
+fn handle_later(mgr: &RegistrationManager) -> Result<(), CliError> {
+    require_root().map_err(|e| CliError::Runtime {
+        command: "subscription later".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    // core do_later also has the same state validation (defensive guard);
+    // check here first to provide friendlier error messages.
+    let state = mgr.read_state();
+    match state {
+        ConsentState::Registered => {
+            return Err(CliError::Runtime {
+                command: "subscription later".to_string(),
+                reason: "already registered. Use 'anolisa subscription unregister' to withdraw first".to_string(),
+            });
+        }
+        ConsentState::Unregistered => {
+            return Err(CliError::Runtime {
+                command: "subscription later".to_string(),
+                reason: "already unregistered. Use 'anolisa subscription register' to re-enable".to_string(),
+            });
+        }
+        ConsentState::InitFresh | ConsentState::InitLater { .. } => {}
+    }
+
+    let operator = current_operator();
+    mgr.do_later(&operator).map_err(|e| CliError::Runtime {
+        command: "subscription later".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    println!("Decision deferred. You will be reminded in 30 days.");
+    Ok(())
+}
+
+// ── JSON output ─────────────────────────────────────────────────────────────
+
+fn print_status_json(
+    state: &ConsentState,
+    rec: &Option<anolisa_core::RegisterRecord>,
+    product_type: &anolisa_core::ProductType,
+    sysom_active: bool,
+) {
+    let state_str = if sysom_active && state != &ConsentState::Registered {
+        "registered"
+    } else {
+        match state {
+            ConsentState::InitFresh | ConsentState::InitLater { .. } => "init",
+            ConsentState::Unregistered => "unregistered",
+            ConsentState::Registered => "registered",
+        }
     };
-    Err(CliError::not_implemented(command))
+
+    let upload_active = state == &ConsentState::Registered || sysom_active;
+
+    let mut obj = serde_json::json!({
+        "product_type": product_type.to_string(),
+        "consent_state": state_str,
+        "upload_active": upload_active,
+    });
+
+    if let Some(r) = rec {
+        if let Some(t) = r.registration_time {
+            obj["registration_time"] =
+                serde_json::Value::String(t.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        }
+        if let Some(op) = &r.operator {
+            obj["operator"] = serde_json::Value::String(op.clone());
+        }
+        if let Some(src) = &r.source {
+            obj["source"] = serde_json::Value::String(src.to_string());
+        }
+        if let ConsentState::InitLater { later_start_time } = state {
+            let total_secs =
+                LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
+            let days_left = (total_secs as f64 / 86_400.0).ceil() as i64;
+            obj["later_days_remaining"] =
+                serde_json::Value::Number(days_left.max(0).into());
+        }
+    }
+
+    if sysom_active {
+        obj["effective_source"] = serde_json::Value::String("sysom".to_string());
+        obj["sysom_services_active"] = serde_json::Value::Bool(true);
+    }
+
+    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+}
+
+// ── Utility functions ────────────────────────────────────────────────────────
+
+fn format_source(source: &Option<anolisa_core::RegisterSource>) -> String {
+    match source {
+        Some(s) => format!(" (via {s})"),
+        None => String::new(),
+    }
+}
+
+fn format_remaining(later_start_time: chrono::DateTime<chrono::Utc>) -> String {
+    let total_secs =
+        LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
+    if total_secs <= 0 {
+        return "< 1 hour".to_string();
+    }
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    if days > 0 {
+        format!("{days} day(s)")
+    } else if hours > 0 {
+        format!("{hours} hour(s)")
+    } else {
+        "< 1 hour".to_string()
+    }
+}
+
+fn prompt_yn(prompt: &str, default: bool) -> bool {
+    use std::io::{self, BufRead, Write};
+    print!("{prompt}");
+    io::stdout().flush().ok();
+    let line = io::stdin()
+        .lock()
+        .lines()
+        .next()
+        .and_then(|l| l.ok())
+        .unwrap_or_default();
+    match line.trim().to_lowercase().as_str() {
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        "" => default,
+        _ => false,
+    }
+}
+
+fn build_upload_config() -> UploadConfig {
+    let mut cfg = UploadConfig::default();
+    if let Some(id) = read_sls_account_id_override() {
+        cfg.sls_account_id = id;
+    }
+    cfg
+}
+
+fn read_sls_account_id_override() -> Option<String> {
+    if let Ok(val) = std::env::var("ANOLISA_SLS_ACCOUNT_ID") {
+        let v = val.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    let content = std::fs::read_to_string("/etc/anolisa/ilogtail.cfg").ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(val) = line.strip_prefix("SLS_ACCOUNT_ID=") {
+            let v = val.trim().trim_matches('"').trim_matches('\'').to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn print_register_banner() {
+    const BOX_INNER_WIDTH: usize = 75;
+
+    let lines = [
+        "  \u{1F331} Join the Agentic OS Co-Build Program",
+        "  Welcome to Agentic OS \u{2014} the operating system for the Agent era.",
+        "  We invite you to become a co-builder and help make this OS",
+        "  smarter and more in tune with your needs.",
+        "",
+        "  By joining, you will get:",
+        "    \u{2726} Smarter cosh \u{2014} learns from real user scenarios, more accurate",
+        "    \u{2726} Cross-instance Token insights \u{2014} view costs & trends for all",
+        "      instances under your account in one dashboard",
+        "    \u{2726} Personalized optimization \u{2014} model selection, Token savings,",
+        "      Skill recommendations, tailored for you",
+        "    \u{2726} Early access to new features \u{2014} beta Skills / new model",
+        "      adaptations delivered first",
+        "    \u{2726} Product co-build vote \u{2014} your pain points become our next P0",
+        "",
+        "  Our commitments:",
+        "    \u{00B7} Only upload desensitized aggregate statistics",
+        "      (token counts, model ID, request counts, time window)",
+        "    \u{00B7} Your prompts, conversations, keys, files \u{2014} never leave",
+        "      this machine",
+        "    \u{00B7} Uses Alibaba Cloud internal network, zero public network",
+        "      cost, zero extra configuration",
+        "    \u{00B7} You stay in control \u{2014} run 'anolisa subscription unregister'",
+        "      to opt out at any time",
+        "",
+        "  Help us make Agentic OS even better?",
+    ];
+
+    let border = "\u{2500}".repeat(BOX_INNER_WIDTH);
+    println!("\u{256d}{border}\u{256e}");
+    for line in &lines {
+        let w = UnicodeWidthStr::width(*line);
+        let pad = BOX_INNER_WIDTH.saturating_sub(w);
+        println!("\u{2502}{}{}\u{2502}", line, " ".repeat(pad));
+    }
+    println!("\u{2570}{border}\u{256f}");
 }
