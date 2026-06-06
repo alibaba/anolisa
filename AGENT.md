@@ -14,6 +14,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **tokenless** | `src/tokenless/` | Rust | Linux only |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
+| **anolisa** | `src/anolisa/` | Rust | Linux + macOS (arm64) |
 
 > `agent-sec-core`, `agentsight`, `tokenless`, and `agent-memory` require Linux. Do **not** attempt to build them on macOS or Windows.
 
@@ -62,6 +63,12 @@ cd src/agent-memory
 make build       # cargo build --release --locked
 make test        # cargo test --locked
 make smoke       # end-to-end MCP stdio smoke test
+
+# anolisa (per-component)
+cd src/anolisa
+cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
 ```
 
 ## Commit Message Rules
@@ -83,6 +90,7 @@ Format: `type(scope): description`
 | `src/agentsight/` | `sight` |
 | `src/tokenless/` | `tokenless` |
 | `src/agent-memory/` | `memory` |
+| `src/anolisa/` | `anolisa` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -151,6 +159,7 @@ When generating a PR description, use `.github/pull_request_template.md` as the 
 - `sight` → any file under `src/agentsight/`
 - `tokenless` → any file under `src/tokenless/`
 - `memory` → any file under `src/agent-memory/`
+- `anolisa` → any file under `src/anolisa/`
 - `Multiple / Project-wide` → cross-component or root-level changes
 
 **Checklist** — mark items that actually apply to this PR; skip items for unaffected components.

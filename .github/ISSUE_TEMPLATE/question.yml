@@ -21,6 +21,7 @@ body:
         - tokenless
         - ckpt
         - memory
+        - anolisa
         - other
   - type: textarea
     id: question

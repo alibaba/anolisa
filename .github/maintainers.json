@@ -82,6 +82,17 @@
                     "github": "shiloong"
                 }
             ]
+        },
+        {
+            "label": "component:anolisa",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                },
+                {
+                    "github": "ikunkun-sys"
+                }
+            ]
         }
     ],
     "default": {

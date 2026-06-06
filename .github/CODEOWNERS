@@ -33,6 +33,7 @@
 /src/osbase/                            @casparant                  # auto-label: component:osbase
 /src/tokenless/                         @Forrest-ly @shiloong       # auto-label: component:tokenless
 /src/agent-memory/                      @shiloong                   # auto-label: component:memory
+/src/anolisa/                           @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
 
 # ---------------------------------------------------------------------------
 # Scope paths

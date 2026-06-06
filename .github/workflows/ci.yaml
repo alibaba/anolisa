@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_anolisa:
+        description: 'Force run anolisa tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,6 +60,7 @@ jobs:
       tokenless: ${{ steps.changes.outputs.tokenless }}
       ws_ckpt: ${{ steps.changes.outputs.ws_ckpt }}
       agent_memory: ${{ steps.changes.outputs.agent_memory }}
+      anolisa: ${{ steps.changes.outputs.anolisa }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,6 +87,7 @@ jobs:
           TOKENLESS=false
           WS_CKPT=false
           AGENT_MEMORY=false
+          ANOLISA=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -100,6 +107,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
             AGENT_MEMORY=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/anolisa/"; then
+            ANOLISA=true
           fi
 
           # Manual override via workflow_dispatch
@@ -121,6 +131,9 @@ jobs:
           if [[ "${{ inputs.run_agent_memory }}" == "true" ]]; then
             AGENT_MEMORY=true
           fi
+          if [[ "${{ inputs.run_anolisa }}" == "true" ]]; then
+            ANOLISA=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -128,6 +141,7 @@ jobs:
           echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
           echo "ws_ckpt=$WS_CKPT" >> $GITHUB_OUTPUT
           echo "agent_memory=$AGENT_MEMORY" >> $GITHUB_OUTPUT
+          echo "anolisa=$ANOLISA" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -138,6 +152,7 @@ jobs:
           echo "| tokenless | $TOKENLESS |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | $WS_CKPT |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | $AGENT_MEMORY |" >> $GITHUB_STEP_SUMMARY
+          echo "| anolisa | $ANOLISA |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -663,4 +678,39 @@ jobs:
       - name: Run tests
         run: |
           cd src/agent-memory
+          cargo test --locked
+
+  # =========================================================================
+  # Step 9: Test anolisa (Rust workspace)
+  # =========================================================================
+  test-anolisa:
+    name: Test anolisa
+    needs: detect-changes
+    if: needs.detect-changes.outputs.anolisa == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/anolisa
+
+      - name: Check formatting
+        run: |
+          cd src/anolisa
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/anolisa
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/anolisa
           cargo test --locked
