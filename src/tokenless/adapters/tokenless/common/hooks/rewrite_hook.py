@@ -123,8 +123,10 @@ def main() -> None:
     #   3 = Ask/Default verdict (rewrite available but permission model requires
     #       user confirmation; in non-interactive hook context, treat as valid
     #       rewrite since the intent is token optimization, not permission gating)
-    if proc.returncode not in (0, 3):
+    if proc.returncode not in (0, 1, 2, 3):
         warn(f"rtk rewrite exited with unexpected code {proc.returncode}")
+        skip()
+    if proc.returncode in (1, 2):
         skip()
     rewritten = proc.stdout.strip()
     if not rewritten or rewritten == cmd:
