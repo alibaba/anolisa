@@ -63,6 +63,24 @@ pub enum UploadError {
     Command(String),
     #[error("sls_account_id is not configured")]
     MissingAccountId,
+    #[error("invalid sls_account_id: {0}")]
+    InvalidAccountId(String),
+}
+
+/// Validate that an SLS account ID contains only ASCII digits.
+/// This prevents path traversal attacks when the ID is used as a filename
+/// component under `/etc/ilogtail/users/<id>`.
+pub fn validate_sls_account_id(id: &str) -> Result<(), UploadError> {
+    if id.is_empty() {
+        return Err(UploadError::MissingAccountId);
+    }
+    if !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(UploadError::InvalidAccountId(format!(
+            "expected digits only, got {:?}",
+            id
+        )));
+    }
+    Ok(())
 }
 
 // ── RegionProbe ───────────────────────────────────────────────────────
@@ -285,9 +303,7 @@ impl<'a> IlogtailInstaller<'a> {
 
     /// Configure SLS account file: `/etc/ilogtail/users/<account_id>`
     pub fn configure_account(&self) -> Result<(), UploadError> {
-        if self.config.sls_account_id.is_empty() {
-            return Err(UploadError::MissingAccountId);
-        }
+        validate_sls_account_id(&self.config.sls_account_id)?;
         let users_dir = &self.config.ilogtail_users_dir;
         fs::create_dir_all(users_dir)?;
 
@@ -348,9 +364,7 @@ impl UploadStarter {
     ///
     /// Called after `anolisa subscription register` successfully writes register.json.
     pub fn start(&self) -> Result<(), UploadError> {
-        if self.config.sls_account_id.is_empty() {
-            return Err(UploadError::MissingAccountId);
-        }
+        validate_sls_account_id(&self.config.sls_account_id)?;
 
         // 1. Detect region-id and infer network environment
         let probe = RegionProbe::new(&self.config.metadata_url);
@@ -387,8 +401,9 @@ impl UploadStarter {
             fs::remove_file(marker)?;
         }
 
-        // 1. Remove SLS account file
+        // 1. Remove SLS account file (validate ID to prevent path traversal)
         if !self.config.sls_account_id.is_empty() {
+            validate_sls_account_id(&self.config.sls_account_id)?;
             let account_file = self.config.ilogtail_users_dir.join(&self.config.sls_account_id);
             if account_file.exists() {
                 fs::remove_file(&account_file)?;

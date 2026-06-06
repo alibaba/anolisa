@@ -91,17 +91,24 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     }
 
     let upload_cfg = build_upload_config();
-    if let Err(e) = UploadStarter::new(upload_cfg).start() {
+    let starter = UploadStarter::new(upload_cfg);
+    if let Err(e) = starter.start() {
         return Err(CliError::Runtime {
             command: "subscription register".to_string(),
             reason: format!("unable to start data upload service: {e}\n  Please check network connectivity and try again."),
         });
     }
 
-    mgr.do_register(&operator).map_err(|e| CliError::Runtime {
-        command: "subscription register".to_string(),
-        reason: e.to_string(),
-    })?;
+    if let Err(e) = mgr.do_register(&operator) {
+        // Compensate: rollback the upload we just started
+        if let Err(rollback_err) = starter.stop() {
+            eprintln!("warn: rollback of upload start also failed: {rollback_err}");
+        }
+        return Err(CliError::Runtime {
+            command: "subscription register".to_string(),
+            reason: e.to_string(),
+        });
+    }
 
     println!();
     println!("Registered successfully.");
@@ -159,7 +166,17 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
 
     let upload_cfg = build_upload_config();
     if let Err(e) = UploadStarter::new(upload_cfg).stop() {
-        eprintln!("warn: unregistration succeeded but ilogtail teardown failed: {e}");
+        // Upload teardown failed — attempt to restore registration state
+        eprintln!("error: failed to stop data upload: {e}");
+        eprintln!("  Attempting to restore registration state...");
+        if let Err(restore_err) = mgr.do_register(&operator) {
+            eprintln!("  warn: state restore also failed: {restore_err}");
+            eprintln!("  System may be in inconsistent state. Run 'sudo anolisa subscription unregister --force' to retry.");
+        }
+        return Err(CliError::Runtime {
+            command: "subscription unregister".to_string(),
+            reason: format!("failed to stop data upload: {e}. Registration state has been restored."),
+        });
     }
 
     println!("Unregistered. Data upload stopped.");
