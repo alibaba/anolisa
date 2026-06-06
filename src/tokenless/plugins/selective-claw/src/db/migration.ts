@@ -27,27 +27,31 @@ export function runMigrations(db: DatabaseSync): void {
   ).get();
 
   if (!ftsExists) {
-    db.exec(`
-      CREATE VIRTUAL TABLE messages_fts USING fts5(
-        content,
-        content=messages,
-        content_rowid=message_id,
-        tokenize='porter unicode61'
-      );
+    try {
+      db.exec(`
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+          content,
+          content=messages,
+          content_rowid=message_id,
+          tokenize='porter unicode61'
+        );
 
-      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
-        INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
-      END;
+        CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
+        END;
 
-      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
-        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
-      END;
+        CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
+        END;
 
-      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
-        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
-        INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
-      END;
-    `);
+        CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
+          INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
+        END;
+      `);
+    } catch {
+      // FTS5 not available in this SQLite build — full-text search will be unavailable
+    }
   }
 
   if (!columnExists(db, "messages", "turn_seq")) {

@@ -13,5 +13,11 @@ export default defineConfig({
     env: {
       HOME: testHome,
     },
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        execArgv: ["--experimental-sqlite"],
+      },
+    },
   },
 });

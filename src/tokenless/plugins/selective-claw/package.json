@@ -1,7 +1,7 @@
 {
   "name": "selective-claw",
   "version": "0.1.0",
-  "description": "Selective Context Injection plugin for OpenClaw — FTS5 BM25 retrieval + LLM reranking",
+  "description": "Selective Context Injection plugin for OpenClaw — summary compression + fresh tail + expand_turn",
   "type": "module",
   "main": "dist/index.js",
   "license": "MIT",
@@ -27,5 +27,8 @@
     "extensions": [
       "./dist/index.js"
     ]
+  },
+  "dependencies": {
+    "2": "^3.0.0"
   }
 }

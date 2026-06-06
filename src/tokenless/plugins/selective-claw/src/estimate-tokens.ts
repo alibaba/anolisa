@@ -14,6 +14,7 @@ function isCjkCodePoint(cp: number): boolean {
   );
 }
 
+// CJK: ~1.5 tokens/char is conservative (Rust tokenizer uses 1.0); erring high avoids budget overrun.
 function estimateCodePointTokens(cp: number): number {
   if (isCjkCodePoint(cp)) return 1.5;
   if (cp > 0xffff) return 2;

@@ -15,17 +15,20 @@ import { MessageStore } from "./store/message-store.js";
 import { Assembler } from "./assembler.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
+const MAX_CACHED_SESSIONS = 10;
+
 export class SelectiveContextEngine implements ContextEngine {
   readonly info: ContextEngineInfo = {
     id: "selective-claw",
     name: "Selective Context Injection",
-    version: "0.4.0",
+    version: "0.5.0",
     ownsCompaction: true,
   };
 
-  private static sharedActiveSessionId: string | null = null;
-  private static sharedTurnSummaryCache = new Map<string, Map<number, string>>();
-  private static sharedTurnMessagesCache = new Map<string, Map<number, AgentMessage[]>>();
+  private activeSessionId: string | null = null;
+  private turnSummaryCache = new Map<string, Map<number, string>>();
+  private turnMessagesCache = new Map<string, Map<number, AgentMessage[]>>();
+  private sessionAccessOrder: string[] = [];
 
   private store: MessageStore;
   private assembler: Assembler;
@@ -58,7 +61,7 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   getActiveSessionId(): string | null {
-    return SelectiveContextEngine.sharedActiveSessionId;
+    return this.activeSessionId;
   }
 
   async bootstrap(params: {
@@ -66,7 +69,17 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionKey?: string;
     messages?: AgentMessage[];
   }): Promise<BootstrapResult> {
-    SelectiveContextEngine.sharedActiveSessionId = params.sessionId;
+    this.activeSessionId = params.sessionId;
+    this.touchSession(params.sessionId);
+
+    if (params.messages && params.messages.length > 0) {
+      const existingCount = this.store.getMessageCount(params.sessionId);
+      if (existingCount === 0) {
+        this.importMessages(params.sessionId, params.messages);
+        return { bootstrapped: true, importedMessages: params.messages.length };
+      }
+    }
+
     return { bootstrapped: true, importedMessages: 0 };
   }
 
@@ -75,8 +88,31 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionKey?: string;
     message: AgentMessage;
   }): Promise<IngestResult> {
-    SelectiveContextEngine.sharedActiveSessionId = params.sessionId;
-    return { ingested: false };
+    this.activeSessionId = params.sessionId;
+    this.touchSession(params.sessionId);
+
+    const { message, sessionId } = params;
+    const role = this.normalizeRole(message.role);
+    const content = this.extractContent(message);
+    const seq = this.store.getNextSeq(sessionId);
+
+    let turnSeq: number;
+    if (role === "user" || role === "system") {
+      turnSeq = this.store.getMaxTurnSeq(sessionId) + 1;
+    } else {
+      turnSeq = Math.max(this.store.getMaxTurnSeq(sessionId), 1);
+    }
+
+    this.store.createMessage({
+      sessionId,
+      seq,
+      turnSeq,
+      role,
+      content,
+      tokenCount: estimateTokens(content),
+    });
+
+    return { ingested: true };
   }
 
   async assemble(params: {
@@ -86,10 +122,25 @@ export class SelectiveContextEngine implements ContextEngine {
     tokenBudget?: number;
     prompt?: string;
   }): Promise<AssembleResult> {
-    SelectiveContextEngine.sharedActiveSessionId = params.sessionId;
+    this.activeSessionId = params.sessionId;
+    this.touchSession(params.sessionId);
 
-    if (!params.messages || params.messages.length === 0) {
-      return { messages: [], estimatedTokens: 0 };
+    if (params.messages && params.messages.length > 0) {
+      this.reconcileMessages(params.sessionId, params.messages);
+    }
+
+    let messages: AgentMessage[];
+    if (params.messages && params.messages.length > 0) {
+      messages = params.messages;
+    } else {
+      const stored = this.store.getMessages(params.sessionId);
+      if (stored.length === 0) {
+        return { messages: [], estimatedTokens: 0 };
+      }
+      messages = stored.map((m) => ({
+        role: m.role as string,
+        content: m.content,
+      }));
     }
 
     const tokenBudget =
@@ -97,8 +148,7 @@ export class SelectiveContextEngine implements ContextEngine {
         ? params.tokenBudget
         : 128_000;
 
-    const turns = this.deriveTurns(params.messages);
-
+    const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
@@ -108,18 +158,17 @@ export class SelectiveContextEngine implements ContextEngine {
     const summaries = this.getSummariesForSession(params.sessionId);
 
     const result = this.assembler.assemble({
-      messages: params.messages,
+      messages,
       summaries,
       tokenBudget,
       freshTailTurns: this.config.freshTailTurns,
     });
 
-    console.log(
-      `[selective-claw] assemble: input=${params.messages.length} msgs, ` +
-      `turns=${result.stats.totalTurns}, tail=${result.stats.freshTailTurnCount}, ` +
-      `summaries=${result.stats.summaryCount}, dropped=${result.stats.droppedTurns}, ` +
-      `returning=${result.messages.length} msgs`
-    );
+    if (result.estimatedTokens > tokenBudget) {
+      console.warn(
+        `[selective-claw] assembled context (${result.estimatedTokens} tokens) exceeds budget (${tokenBudget})`
+      );
+    }
 
     return {
       messages: result.messages,
@@ -132,7 +181,26 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionKey?: string;
     messages?: AgentMessage[];
   }): Promise<void> {
-    SelectiveContextEngine.sharedActiveSessionId = params.sessionId;
+    this.activeSessionId = params.sessionId;
+    this.touchSession(params.sessionId);
+
+    if (params.messages && params.messages.length > 0) {
+      this.reconcileMessages(params.sessionId, params.messages);
+    }
+
+    const stored = this.store.getMessages(params.sessionId);
+    if (stored.length === 0) return;
+
+    const messages: AgentMessage[] = stored.map((m) => ({
+      role: m.role as string,
+      content: m.content,
+    }));
+    const turns = this.deriveTurns(messages);
+    this.cacheTurnMessages(params.sessionId, turns);
+
+    if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
+      await this.generateMissingSummaries(params.sessionId, turns);
+    }
   }
 
   async compact(params: {
@@ -146,6 +214,91 @@ export class SelectiveContextEngine implements ContextEngine {
       compacted: true,
       reason: "context managed by assemble",
     };
+  }
+
+  expandTurns(sessionId: string, turnSeqs: number[]): {
+    found: number;
+    turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
+  } {
+    const cache = this.turnMessagesCache.get(sessionId);
+    if (cache) {
+      const result: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }> = [];
+      for (const seq of turnSeqs) {
+        const msgs = cache.get(seq);
+        if (msgs) {
+          result.push({
+            turnSeq: seq,
+            messages: msgs.map((m) => ({
+              role: m.role,
+              content: this.extractContent(m),
+            })),
+          });
+        }
+      }
+      if (result.length > 0) return { found: result.length, turns: result };
+    }
+
+    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, turnSeqs);
+    const turnMap = new Map<number, Array<{ role: string; content: string }>>();
+    for (const m of storeMessages) {
+      const arr = turnMap.get(m.turnSeq) ?? [];
+      arr.push({ role: m.role, content: m.content });
+      turnMap.set(m.turnSeq, arr);
+    }
+
+    const result = turnSeqs
+      .filter((ts) => turnMap.has(ts))
+      .map((ts) => ({ turnSeq: ts, messages: turnMap.get(ts)! }));
+
+    return { found: result.length, turns: result };
+  }
+
+  private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
+    const stored = this.store.getMessages(sessionId);
+
+    let matchLen = 0;
+    const minLen = Math.min(stored.length, messages.length);
+    for (let i = 0; i < minLen; i++) {
+      const storedRole = stored[i].role;
+      const incomingRole = this.normalizeRole(messages[i].role);
+      const incomingContent = this.extractContent(messages[i]);
+      if (storedRole === incomingRole && stored[i].content === incomingContent) {
+        matchLen++;
+      } else {
+        break;
+      }
+    }
+
+    if (matchLen < messages.length) {
+      const toImport = messages.slice(matchLen);
+      this.importMessages(sessionId, toImport);
+    }
+  }
+
+  private importMessages(sessionId: string, messages: AgentMessage[]): void {
+    let seq = this.store.getNextSeq(sessionId);
+    let turnSeq = this.store.getMaxTurnSeq(sessionId);
+
+    for (const msg of messages) {
+      const role = this.normalizeRole(msg.role);
+      const content = this.extractContent(msg);
+
+      if (role === "user" || role === "system") {
+        turnSeq++;
+      } else if (turnSeq === 0) {
+        turnSeq = 1;
+      }
+
+      this.store.createMessage({
+        sessionId,
+        seq,
+        turnSeq,
+        role,
+        content,
+        tokenCount: estimateTokens(content),
+      });
+      seq++;
+    }
   }
 
   private async generateMissingSummaries(
@@ -170,36 +323,20 @@ export class SelectiveContextEngine implements ContextEngine {
       }),
     );
 
-    if (!SelectiveContextEngine.sharedTurnSummaryCache.has(sessionId)) {
-      SelectiveContextEngine.sharedTurnSummaryCache.set(sessionId, new Map());
+    if (!this.turnSummaryCache.has(sessionId)) {
+      this.turnSummaryCache.set(sessionId, new Map());
     }
-    const cache = SelectiveContextEngine.sharedTurnSummaryCache.get(sessionId)!;
+    const cache = this.turnSummaryCache.get(sessionId)!;
 
-    let generated = 0;
-    let failed = 0;
-    let fallbacks = 0;
     for (const r of results) {
       if (r.status === "fulfilled") {
-        const isFallback = r.value.summary.endsWith("...");
-        if (isFallback) fallbacks++;
         cache.set(r.value.turnSeq, r.value.summary);
-        generated++;
         try {
           this.store.setTurnSummary(sessionId, r.value.turnSeq, r.value.summary);
         } catch {
-          // best-effort
+          // best-effort persist
         }
-      } else {
-        failed++;
-        console.error(`[selective-claw] summary rejected for turn:`, r.reason);
       }
-    }
-
-    if (generated > 0 || failed > 0) {
-      console.log(
-        `[selective-claw] summaries: generated=${generated}, fallbacks=${fallbacks}, failed=${failed}, ` +
-        `cached=${cache.size}, needed=${needSummary.length}`
-      );
     }
   }
 
@@ -207,36 +344,25 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
   ): void {
-    if (!SelectiveContextEngine.sharedTurnMessagesCache.has(sessionId)) {
-      SelectiveContextEngine.sharedTurnMessagesCache.set(sessionId, new Map());
+    if (!this.turnMessagesCache.has(sessionId)) {
+      this.turnMessagesCache.set(sessionId, new Map());
     }
-    const cache = SelectiveContextEngine.sharedTurnMessagesCache.get(sessionId)!;
+    const cache = this.turnMessagesCache.get(sessionId)!;
     for (const turn of turns) {
       cache.set(turn.turnSeq, turn.messages);
     }
   }
 
-  expandTurns(sessionId: string, turnSeqs: number[]): {
-    found: number;
-    turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
-  } {
-    const cache = SelectiveContextEngine.sharedTurnMessagesCache.get(sessionId);
-    if (!cache) return { found: 0, turns: [] };
+  private touchSession(sessionId: string): void {
+    const idx = this.sessionAccessOrder.indexOf(sessionId);
+    if (idx !== -1) this.sessionAccessOrder.splice(idx, 1);
+    this.sessionAccessOrder.push(sessionId);
 
-    const result: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }> = [];
-    for (const seq of turnSeqs) {
-      const msgs = cache.get(seq);
-      if (msgs) {
-        result.push({
-          turnSeq: seq,
-          messages: msgs.map((m) => ({
-            role: m.role,
-            content: this.extractContent(m),
-          })),
-        });
-      }
+    while (this.sessionAccessOrder.length > MAX_CACHED_SESSIONS) {
+      const evicted = this.sessionAccessOrder.shift()!;
+      this.turnSummaryCache.delete(evicted);
+      this.turnMessagesCache.delete(evicted);
     }
-    return { found: result.length, turns: result };
   }
 
   private deriveTurns(messages: AgentMessage[]): Array<{ turnSeq: number; messages: AgentMessage[] }> {
@@ -262,8 +388,8 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   private getSummariesForSession(sessionId: string): Map<number, string> {
-    if (SelectiveContextEngine.sharedTurnSummaryCache.has(sessionId)) {
-      return SelectiveContextEngine.sharedTurnSummaryCache.get(sessionId)!;
+    if (this.turnSummaryCache.has(sessionId)) {
+      return this.turnSummaryCache.get(sessionId)!;
     }
 
     const map = new Map<number, string>();
@@ -275,7 +401,7 @@ export class SelectiveContextEngine implements ContextEngine {
     } catch {
       // best-effort
     }
-    SelectiveContextEngine.sharedTurnSummaryCache.set(sessionId, map);
+    this.turnSummaryCache.set(sessionId, map);
     return map;
   }
 

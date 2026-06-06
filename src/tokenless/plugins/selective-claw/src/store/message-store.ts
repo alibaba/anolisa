@@ -127,16 +127,20 @@ export class MessageStore {
 
   searchMessages(sessionId: string, query: string, limit: number): MessageRecord[] {
     const sanitized = sanitizeFts5Query(query);
-    const rows = this.db.prepare(`
-      SELECT m.message_id, m.session_id, m.seq, m.turn_seq, m.role, m.content, m.token_count, m.raw_message, m.created_at
-      FROM messages_fts fts
-      JOIN messages m ON m.message_id = fts.rowid
-      WHERE messages_fts MATCH ? AND m.session_id = ?
-      ORDER BY rank
-      LIMIT ?
-    `).all(sanitized, sessionId, limit) as RawMessageRow[];
+    try {
+      const rows = this.db.prepare(`
+        SELECT m.message_id, m.session_id, m.seq, m.turn_seq, m.role, m.content, m.token_count, m.raw_message, m.created_at
+        FROM messages_fts fts
+        JOIN messages m ON m.message_id = fts.rowid
+        WHERE messages_fts MATCH ? AND m.session_id = ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(sanitized, sessionId, limit) as RawMessageRow[];
 
-    return rows.map(toMessageRecord);
+      return rows.map(toMessageRecord);
+    } catch {
+      return [];
+    }
   }
 
   getMessagesByTurnSeqs(sessionId: string, turnSeqs: number[]): MessageRecord[] {
