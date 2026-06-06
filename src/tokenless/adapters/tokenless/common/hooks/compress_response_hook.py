@@ -34,7 +34,6 @@ from hook_utils import (
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
     SKIP_TOOLS,
-    forward_stderr,
     is_skill_file,
     resolve_binary,
     skip,
@@ -253,7 +252,6 @@ def main() -> None:
                 input=tool_response,
                 capture_output=True, text=True, timeout=3,
             )
-            forward_stderr(proc)
             if proc.returncode == 0 and proc.stdout.strip():
                 candidate = proc.stdout.strip()
                 if len(candidate) < len(tool_response):
@@ -281,7 +279,6 @@ def main() -> None:
                     input=compressed,
                     capture_output=True, text=True, timeout=1,
                 )
-                forward_stderr(proc)
                 if proc.returncode == 0 and proc.stdout.strip():
                     candidate = proc.stdout.strip()
                     if len(candidate) < len(compressed):
