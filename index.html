@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANOLISA — The Agentic OS</title>
+<meta name="description" content="Server-side operating layer for AI agent workloads. One command to install.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&gt;</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #050b0f;
+  --surface: rgba(10,20,27,0.75);
+  --surface-solid: #0a141b;
+  --border: rgba(10,110,92,0.2);
+  --border-hover: rgba(10,110,92,0.45);
+  --accent: #0A6E5C;
+  --accent-light: #18ba9e;
+  --accent-dim: rgba(10,110,92,0.12);
+  --accent-glow: rgba(10,110,92,0.4);
+  --text: #e8eeed;
+  --text-2: #94a3b8;
+  --text-3: #4b6060;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --sans: 'Inter', -apple-system, system-ui, sans-serif;
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{overflow-x:clip;scroll-behavior:smooth;scroll-snap-type:y mandatory}
+body{
+  background:var(--bg);color:var(--text);font-family:var(--sans);
+  font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;
+  min-height:100vh;position:relative;overflow-x:hidden;
+}
+body::before{
+  content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:radial-gradient(var(--border) 1px,transparent 1px);
+  background-size:24px 24px;opacity:0.3;
+}
+body::after{
+  content:'';position:fixed;top:-15%;left:50%;transform:translateX(-50%);
+  width:90vw;height:60vh;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse,var(--accent-glow) 0%,transparent 70%);
+  filter:blur(60px);opacity:0.5;
+}
+
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px;position:relative;z-index:1}
+
+/* ── nav ── */
+nav{
+  position:fixed;top:0;left:0;right:0;z-index:100;
+  padding:14px 0;
+  background:rgba(5,11,15,0.8);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-bottom:1px solid rgba(255,255,255,0.04);
+}
+nav .wrap{display:flex;align-items:center;justify-content:space-between}
+.nav-logo{
+  font-family:var(--mono);font-size:0.875rem;font-weight:600;
+  color:var(--text);text-decoration:none;letter-spacing:-0.01em;
+}
+.nav-logo span{color:var(--accent-light)}
+.nav-links{display:flex;gap:24px;list-style:none}
+.nav-links a{
+  font-family:var(--mono);font-size:0.75rem;color:var(--text-2);
+  text-decoration:none;letter-spacing:0.02em;transition:color .15s;
+}
+.nav-links a:hover{color:var(--text)}
+.nav-links a:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:2px}
+
+/* ── hero ── */
+.hero{
+  padding:100px 0 0;
+  min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+  scroll-snap-align:start;scroll-snap-stop:always;
+}
+.hero .wrap{
+  display:flex;flex-direction:column;align-items:flex-start;
+}
+.badge{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:5px 16px;border:1px solid var(--border);border-radius:100px;
+  background:var(--accent-dim);backdrop-filter:blur(4px);
+  font-family:var(--mono);font-size:0.75rem;letter-spacing:0.06em;
+  color:var(--accent-light);margin-bottom:28px;
+}
+.badge-dot{
+  width:7px;height:7px;background:var(--accent-light);border-radius:50%;
+  box-shadow:0 0 8px var(--accent-light);animation:pulse 2s infinite;
+}
+@keyframes pulse{
+  0%,100%{opacity:.6;transform:scale(.9)}
+  50%{opacity:1;transform:scale(1.15);box-shadow:0 0 14px var(--accent-light)}
+}
+h1{
+  font-family:var(--mono);font-size:clamp(2.5rem,5.5vw,4rem);
+  font-weight:600;letter-spacing:-0.03em;line-height:1.1;margin-bottom:20px;
+}
+h1 span{color:var(--accent-light)}
+.hero-sub{
+  font-size:1.05rem;color:var(--text-2);max-width:580px;
+  margin:0 0 24px;line-height:1.8;
+}
+.hero-tagline{
+  font-size:0.75rem;color:var(--text-3);margin:0 0 56px;
+  line-height:1.5;font-family:var(--mono);letter-spacing:0.02em;
+  white-space:nowrap;
+}
+
+/* ── install bar ── */
+.install-bar{
+  display:flex;align-items:center;gap:10px;
+  max-width:540px;margin:0;position:relative;
+}
+.install-cmd{
+  flex:1;min-width:0;display:flex;align-items:center;gap:10px;
+  background:rgba(0,0,0,0.5);border:1px solid var(--border);
+  border-radius:8px;padding:12px 16px;cursor:pointer;
+  border-left:3px solid var(--accent);
+  transition:border-color .15s,background .15s;
+}
+.install-cmd:hover{background:rgba(10,110,92,0.04);border-color:var(--border-hover)}
+.install-cmd code{
+  flex:1;min-width:0;font-family:var(--mono);font-size:0.8125rem;
+  color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  user-select:all;-webkit-user-select:all;
+}
+.install-cmd code .hl{color:var(--accent-light);font-weight:500}
+.copy-btn{
+  flex-shrink:0;width:36px;height:36px;display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+  border-radius:6px;color:var(--text-2);cursor:pointer;transition:all .15s;position:relative;
+}
+.copy-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 4px 8px var(--accent-glow)}
+.copy-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.copy-btn.copied{background:var(--accent);color:#fff;border-color:var(--accent)}
+.copy-btn svg{width:16px;height:16px;transition:opacity .15s,transform .15s}
+.copy-btn .icon-check{position:absolute;opacity:0;transform:scale(.5)}
+.copy-btn.copied .icon-copy{opacity:0;transform:scale(.5)}
+.copy-btn.copied .icon-check{opacity:1;transform:scale(1)}
+
+/* ── copy toast ── */
+.copy-toast{
+  position:absolute;top:-40px;left:50%;transform:translateX(-50%) translateY(6px);
+  background:var(--accent);color:#fff;
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.04em;
+  padding:5px 14px;border-radius:6px;
+  opacity:0;pointer-events:none;
+  transition:opacity .2s,transform .2s cubic-bezier(.16,1,.3,1);
+  white-space:nowrap;
+}
+.copy-toast::after{
+  content:'';position:absolute;bottom:-4px;left:50%;transform:translateX(-50%) rotate(45deg);
+  width:8px;height:8px;background:var(--accent);
+}
+.copy-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ── scroll cue ── */
+.scroll-cue{
+  margin-top:64px;padding-bottom:32px;
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  cursor:pointer;align-self:center;
+}
+.scroll-cue span{
+  color:var(--text-3);font-family:var(--mono);font-size:0.6875rem;
+  letter-spacing:0.06em;transition:color .15s;
+}
+.scroll-cue:hover span{color:var(--text-2)}
+.scroll-arrow{
+  width:20px;height:20px;border-right:1.5px solid var(--text-3);
+  border-bottom:1.5px solid var(--text-3);
+  transform:rotate(45deg);animation:bob 2s ease-in-out infinite;
+  transition:border-color .15s;
+}
+.scroll-cue:hover .scroll-arrow{border-color:var(--text-2)}
+@keyframes bob{0%,100%{transform:translateY(0) rotate(45deg)}50%{transform:translateY(6px) rotate(45deg)}}
+
+/* ── scroll reveal ── */
+.reveal{
+  opacity:0;transform:translateY(40px);
+  transition:opacity .8s cubic-bezier(.16,1,.3,1),transform .8s cubic-bezier(.16,1,.3,1);
+}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal-d1{transition-delay:.08s}
+.reveal-d2{transition-delay:.16s}
+.reveal-d3{transition-delay:.24s}
+.reveal-d4{transition-delay:.32s}
+.reveal-d5{transition-delay:.40s}
+
+/* ── capabilities ── */
+#capabilities{padding:0 0 120px}
+#capabilities{
+  scroll-snap-align:start;scroll-snap-stop:always;
+  height:100vh;
+  position:relative;z-index:1;
+  overflow:hidden;
+}
+.cap-inner{
+  height:100%;display:flex;flex-direction:column;justify-content:center;
+  padding:40px 24px 0;
+}
+.cap-footer{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:16px 0 0;margin-top:auto;
+  border-top:1px solid rgba(255,255,255,0.04);
+  font-family:var(--mono);font-size:0.6875rem;
+}
+
+.cap-header{margin-bottom:36px}
+.cap-label{
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.1em;
+  color:var(--accent-light);text-transform:uppercase;margin-bottom:12px;
+}
+.cap-title{
+  font-family:var(--sans);font-size:clamp(1.25rem,2.5vw,1.75rem);
+  font-weight:700;letter-spacing:-0.025em;line-height:1.25;
+  max-width:520px;
+}
+.cap-title em{
+  font-style:normal;color:var(--accent-light);
+}
+
+/* ── bento grid ── */
+.bento{
+  display:grid;
+  grid-template-columns:repeat(12,1fr);
+  grid-template-rows:auto;
+  gap:12px;
+}
+.bento-item{
+  background:rgba(10,20,27,0.5);
+  border:1px solid rgba(255,255,255,0.04);
+  border-radius:12px;padding:22px 22px;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  transition:all .3s cubic-bezier(.4,0,.2,1);
+  position:relative;overflow:hidden;
+}
+.bento-item::before{
+  content:'';position:absolute;inset:0;
+  background:radial-gradient(ellipse at 30% 0%,rgba(10,110,92,0.08),transparent 70%);
+  opacity:0;transition:opacity .3s;
+}
+.bento-item:hover::before{opacity:1}
+.bento-item:hover{
+  border-color:var(--border);
+  transform:translateY(-2px);
+  box-shadow:0 16px 40px rgba(0,0,0,0.35);
+}
+
+.bento-item.span-8{grid-column:span 8}
+.bento-item.span-4{grid-column:span 4}
+.bento-item.span-6{grid-column:span 6}
+.bento-item.span-5{grid-column:span 5}
+.bento-item.span-7{grid-column:span 7}
+
+.bento-icon{
+  width:36px;height:36px;display:flex;align-items:center;justify-content:center;
+  background:var(--accent-dim);border:1px solid var(--border);border-radius:8px;
+  color:var(--accent-light);margin-bottom:14px;
+  font-family:var(--mono);font-size:0.75rem;font-weight:600;
+  transition:all .3s;position:relative;z-index:1;
+}
+.bento-item:hover .bento-icon{
+  background:var(--accent);color:#fff;
+  box-shadow:0 0 20px var(--accent-glow);
+}
+.bento-h{
+  font-size:0.9375rem;font-weight:600;margin-bottom:5px;
+  line-height:1.3;position:relative;z-index:1;
+}
+.bento-p{
+  font-size:0.78rem;color:var(--text-2);line-height:1.6;
+  position:relative;z-index:1;max-width:440px;
+}
+
+.bento-item.highlight{
+  background:linear-gradient(135deg,rgba(10,110,92,0.12) 0%,rgba(10,20,27,0.6) 100%);
+  border-color:var(--border);
+}
+.bento-item.highlight .bento-icon{
+  background:var(--accent);color:#fff;
+  box-shadow:0 0 16px var(--accent-glow);
+}
+
+/* ── footer ── */
+.foot-left{color:var(--text-3)}
+.foot-links{display:flex;gap:20px;list-style:none}
+.foot-links a{
+  font-family:var(--mono);font-size:0.6875rem;color:var(--text-3);
+  text-decoration:none;transition:color .15s;
+}
+.foot-links a:hover{color:var(--text-2)}
+.foot-links a:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:2px}
+
+/* ── responsive ── */
+@media(max-width:768px){
+  .nav-links{display:none}
+  .hero{padding-top:100px;min-height:auto;padding-bottom:48px}
+  .scroll-cue{display:none}
+  .bento{grid-template-columns:1fr}
+  .bento-item.span-8,.bento-item.span-4,.bento-item.span-6,
+  .bento-item.span-5,.bento-item.span-7{grid-column:span 1}
+  #capabilities{height:auto;min-height:100vh}
+  .cap-inner{height:auto;min-height:100vh}
+  .cap-header{margin-bottom:24px}
+  .cap-footer{flex-direction:column;gap:12px;text-align:center}
+}
+@media(max-width:414px){
+  .wrap{padding:0 16px}
+  .install-cmd code{font-size:0.6875rem}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
+  .reveal{opacity:1;transform:none}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a href="/" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
+    <ul class="nav-links">
+      <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a></li>
+      <li><a href="https://github.com/alibaba/anolisa/tree/main/docs" target="_blank" rel="noopener">Docs</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.0</div>
+    <h1><span>&gt;_</span> ANOLISA</h1>
+    <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
+    <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
+
+    <div class="install-bar" id="install-bar">
+      <div class="install-cmd" id="cmd-block" tabindex="0" role="button" aria-label="Copy install command">
+        <code>curl -fsSL <span class="hl">https://agentic-os.sh/install.sh</span> | bash</code>
+      </div>
+      <button class="copy-btn" id="copy-btn" type="button" aria-label="Copy">
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+      <div class="copy-toast" id="copy-toast">Copied to clipboard</div>
+    </div>
+
+    <div class="scroll-cue" id="scroll-cue" role="button" tabindex="0" aria-label="Scroll to capabilities">
+      <span>SCROLL</span>
+      <div class="scroll-arrow"></div>
+    </div>
+  </div>
+</section>
+
+<main>
+  <section id="capabilities">
+    <div class="cap-inner wrap">
+      <div class="cap-header reveal">
+        <div class="cap-label">Capabilities</div>
+        <h2 class="cap-title">Every agent deserves an <em>operating system</em> that understands it.</h2>
+      </div>
+
+      <div class="bento">
+        <div class="bento-item span-8 highlight reveal reveal-d1">
+          <div class="bento-icon">&gt;_</div>
+          <div class="bento-h">Copilot Shell</div>
+          <p class="bento-p">Terminal-native AI copilot with streaming tool use. Works with any model provider. Contextual autocomplete, operation orchestration, and self-healing diagnostics.</p>
+        </div>
+        <div class="bento-item span-4 reveal reveal-d2">
+          <div class="bento-icon">#!</div>
+          <div class="bento-h">OS-level Sandbox</div>
+          <p class="bento-p">Seccomp + namespace isolation per agent. Least-privilege at the kernel boundary.</p>
+        </div>
+        <div class="bento-item span-5 reveal reveal-d1">
+          <div class="bento-icon">~$</div>
+          <div class="bento-h">Agent Observability</div>
+          <p class="bento-p">eBPF-based kernel tracing for syscalls, file access, and network. Zero overhead.</p>
+        </div>
+        <div class="bento-item span-7 reveal reveal-d2">
+          <div class="bento-icon">%&lt;</div>
+          <div class="bento-h">Token Optimization</div>
+          <p class="bento-p">Transparent prompt caching and context compression at the OS level. Reduce LLM costs by up to 30% without changing agent code.</p>
+        </div>
+        <div class="bento-item span-6 reveal reveal-d3">
+          <div class="bento-icon">!</div>
+          <div class="bento-h">AgentSecCore</div>
+          <p class="bento-p">Security kernel for agent runtimes. Traditional OS security asks "can it run?" &mdash; AgentSecCore asks "is it running correctly?"</p>
+        </div>
+        <div class="bento-item span-6 reveal reveal-d4">
+          <div class="bento-icon">^^</div>
+          <div class="bento-h">Unified CLI</div>
+          <p class="bento-p">One tool to enable, disable, update, and diagnose every component. Declarative manifests, idempotent operations.</p>
+        </div>
+      </div>
+
+      <footer class="cap-footer">
+        <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
+        <ul class="foot-links">
+          <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">Source</a></li>
+          <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+        </ul>
+      </footer>
+    </div>
+  </section>
+</main>
+
+<script>
+const CMD='curl -fsSL https://agentic-os.sh/install.sh | bash';
+const btn=document.getElementById('copy-btn');
+const block=document.getElementById('cmd-block');
+const toast=document.getElementById('copy-toast');
+const capabilities=document.getElementById('capabilities');
+let toastTimer;
+let scrollLock=false;
+
+function fallbackCopy(t){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a)}
+
+function scrollToCapabilities(){
+  scrollLock=true;
+  capabilities.scrollIntoView({behavior:'smooth',block:'start'});
+  setTimeout(()=>{scrollLock=false},900);
+}
+
+async function doCopy(){
+  try{navigator.clipboard?.writeText?await navigator.clipboard.writeText(CMD):fallbackCopy(CMD)}catch(_){fallbackCopy(CMD)}
+  btn.classList.add('copied');
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{btn.classList.remove('copied');toast.classList.remove('show')},1600);
+}
+
+btn.addEventListener('click',e=>{e.stopPropagation();doCopy()});
+block.addEventListener('click',doCopy);
+block.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doCopy()}});
+
+document.getElementById('scroll-cue').addEventListener('click',scrollToCapabilities);
+document.getElementById('scroll-cue').addEventListener('keydown',e=>{
+  if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToCapabilities()}
+});
+
+window.addEventListener('wheel',e=>{
+  if(e.deltaY<=0)return;
+  const beforeCapabilities=capabilities.getBoundingClientRect().top>24;
+  if(scrollLock||beforeCapabilities){
+    e.preventDefault();
+    if(!scrollLock&&beforeCapabilities)scrollToCapabilities();
+  }
+},{passive:false});
+
+const io=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');io.unobserve(e.target)}})
+},{threshold:0.12,rootMargin:'0px 0px -60px 0px'});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+</script>
+</body>
+</html>
