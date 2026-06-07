@@ -6,7 +6,7 @@
 #ifndef __SSLSNIFF_H
 #define __SSLSNIFF_H
 
-#define MAX_BUF_SIZE (8 * 512 * 1024)  // 512KB eBPF buffer size (kernel limit)
+#define MAX_BUF_SIZE (32 * 1024)  // 32KB max capture per SSL/TCP event
 #define TASK_COMM_LEN 16
 
 typedef signed char         s8;

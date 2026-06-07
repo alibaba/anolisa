@@ -112,7 +112,7 @@ mod tests {
 
     /// Create a mock ParsedSseEvent for testing
     ///
-    /// Note: SslEvent is large (~512KB), so we allocate it on the heap
+    /// Note: SslEvent is large (~32KB), so we allocate it on the heap
     fn create_test_event(data: &str) -> ParsedSseEvent {
         use crate::probes::sslsniff::SslEvent;
         use std::rc::Rc;

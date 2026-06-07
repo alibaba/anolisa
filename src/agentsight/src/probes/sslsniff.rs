@@ -45,7 +45,7 @@ const POLL_TIMEOUT_MS: u64 = 100;
 
 /// User-space SslEvent - lightweight version of BPF probe_SSL_data_t
 ///
-/// Unlike the BPF version which has a 512KB fixed-size buffer, this struct
+/// Unlike the BPF version which has a 32KB fixed-size buffer, this struct
 /// only stores the actual data received, significantly reducing memory usage.
 #[derive(Debug, Clone)]
 pub struct SslEvent {
@@ -58,7 +58,7 @@ pub struct SslEvent {
     pub len: u32,
     pub rw: i32,
     pub comm: String,
-    /// Actual data buffer (only contains received data, not full 512KB)
+    /// Actual data buffer (only contains received data, not full 32KB)
     pub buf: Vec<u8>,
     pub is_handshake: bool,
     pub ssl_ptr: u64,
