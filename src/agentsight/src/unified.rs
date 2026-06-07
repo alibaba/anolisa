@@ -558,7 +558,7 @@ impl AgentSight {
                 let path = format!("/proc/{}/timerslack_ns", pid);
                 match std::fs::write(&path, "1") {
                     Ok(()) => log::info!("Set timer_slack_ns=1 for pid {} (wakeup optimization)", pid),
-                    Err(e) => log::debug!("Failed to set timer_slack_ns for pid {}: {}", pid, e),
+                    Err(e) => log::warn!("Failed to set timer_slack_ns for pid {}: {}", pid, e),
                 }
             }
         }
