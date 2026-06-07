@@ -131,7 +131,6 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     if !mgr.is_agentsight_running() {
         println!();
         println!("  agentsight is not running. Subscription functionality is incomplete.");
-        println!("  You can install it with: anolisa install agentsight");
     }
 
     Ok(())
