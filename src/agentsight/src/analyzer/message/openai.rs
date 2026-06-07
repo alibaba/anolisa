@@ -96,7 +96,15 @@ impl OpenAIParser {
         } else if let Some(arr) = input.as_array() {
             for item in arr {
                 if item.get("role").is_some() {
-                    messages.push(item.clone());
+                    let mut msg = item.clone();
+                    if let Some(parts) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        for part in parts.iter_mut() {
+                            if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+                                part["type"] = serde_json::json!("text");
+                            }
+                        }
+                    }
+                    messages.push(msg);
                 } else if let Some(t) = item.get("type").and_then(|t| t.as_str()) {
                     match t {
                         "input_text" => {
@@ -760,6 +768,29 @@ mod tests {
 
         let request = OpenAIParser::parse_request(&json);
         assert!(request.is_some());
+
+        let req = request.unwrap();
+        assert_eq!(req.model, "gpt-4.1");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.messages[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_parse_request_responses_role_with_typed_content() {
+        let json = serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Hello from typed array"}
+                    ]
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json);
+        assert!(request.is_some(), "role item with typed array content must parse");
 
         let req = request.unwrap();
         assert_eq!(req.model, "gpt-4.1");
