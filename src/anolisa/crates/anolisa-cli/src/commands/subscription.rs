@@ -1,10 +1,10 @@
 use anolisa_core::{
-    ConsentState, LATER_EXPIRE_SECS, current_operator, require_root, RegistrationManager,
-    UploadConfig, UploadStarter,
+    ConsentState, LATER_EXPIRE_SECS, RegistrationManager, UploadConfig, UploadStarter,
+    current_operator, require_root,
 };
 use clap::{Parser, Subcommand};
-use unicode_width::UnicodeWidthStr;
 use std::io::IsTerminal;
+use unicode_width::UnicodeWidthStr;
 
 use crate::context::CliContext;
 use crate::response::CliError;
@@ -76,7 +76,8 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
         if !std::io::stdin().is_terminal() {
             return Err(CliError::Runtime {
                 command: "subscription register".to_string(),
-                reason: "non-interactive session detected; pass --yes to confirm registration".to_string(),
+                reason: "non-interactive session detected; pass --yes to confirm registration"
+                    .to_string(),
             });
         }
         print_register_banner();
@@ -95,7 +96,9 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     if let Err(e) = starter.start() {
         return Err(CliError::Runtime {
             command: "subscription register".to_string(),
-            reason: format!("unable to start data upload service: {e}\n  Please check network connectivity and try again."),
+            reason: format!(
+                "unable to start data upload service: {e}\n  Please check network connectivity and try again."
+            ),
         });
     }
 
@@ -153,7 +156,9 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
             if !std::io::stdin().is_terminal() {
                 return Err(CliError::Runtime {
                     command: "subscription unregister".to_string(),
-                    reason: "non-interactive session detected; pass --force to confirm unregistration".to_string(),
+                    reason:
+                        "non-interactive session detected; pass --force to confirm unregistration"
+                            .to_string(),
                 });
             }
             if !prompt_yn("Stop subscription? [y/N]: ", false) {
@@ -168,10 +173,11 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
         // Write consent state FIRST — user intent takes priority over cleanup.
         // Even if stop() fails below, the consent record must reflect "no".
         let operator = current_operator();
-        mgr.do_unregister(&operator).map_err(|e| CliError::Runtime {
-            command: "subscription unregister".to_string(),
-            reason: e.to_string(),
-        })?;
+        mgr.do_unregister(&operator)
+            .map_err(|e| CliError::Runtime {
+                command: "subscription unregister".to_string(),
+                reason: e.to_string(),
+            })?;
     }
 
     // Attempt to tear down upload infrastructure.
@@ -184,7 +190,9 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
         eprintln!("  Retry with: sudo anolisa subscription unregister --force");
         return Err(CliError::Runtime {
             command: "subscription unregister".to_string(),
-            reason: format!("upload teardown failed: {e}. Consent is UNREGISTERED; retry with --force."),
+            reason: format!(
+                "upload teardown failed: {e}. Consent is UNREGISTERED; retry with --force."
+            ),
         });
     }
 
@@ -297,13 +305,16 @@ fn handle_later(mgr: &RegistrationManager) -> Result<(), CliError> {
         ConsentState::Registered => {
             return Err(CliError::Runtime {
                 command: "subscription later".to_string(),
-                reason: "already registered. Use 'anolisa subscription unregister' to withdraw first".to_string(),
+                reason:
+                    "already registered. Use 'anolisa subscription unregister' to withdraw first"
+                        .to_string(),
             });
         }
         ConsentState::Unregistered => {
             return Err(CliError::Runtime {
                 command: "subscription later".to_string(),
-                reason: "already unregistered. Use 'anolisa subscription register' to re-enable".to_string(),
+                reason: "already unregistered. Use 'anolisa subscription register' to re-enable"
+                    .to_string(),
             });
         }
         ConsentState::InitFresh | ConsentState::InitLater { .. } => {}
@@ -360,8 +371,7 @@ fn print_status_json(
             let total_secs =
                 LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
             let days_left = (total_secs as f64 / 86_400.0).ceil() as i64;
-            obj["later_days_remaining"] =
-                serde_json::Value::Number(days_left.max(0).into());
+            obj["later_days_remaining"] = serde_json::Value::Number(days_left.max(0).into());
         }
     }
 
@@ -383,8 +393,7 @@ fn format_source(source: &Option<anolisa_core::RegisterSource>) -> String {
 }
 
 fn format_remaining(later_start_time: chrono::DateTime<chrono::Utc>) -> String {
-    let total_secs =
-        LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
+    let total_secs = LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
     if total_secs <= 0 {
         return "< 1 hour".to_string();
     }

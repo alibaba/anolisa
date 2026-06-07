@@ -161,7 +161,10 @@ impl RegistrationManager {
 
     /// Construct with custom paths (for unit tests only)
     pub fn with_paths(register_path: PathBuf, release_path: PathBuf) -> Self {
-        Self { register_path, release_path }
+        Self {
+            register_path,
+            release_path,
+        }
     }
 
     // ── Read ─────────────────────────────────────────────────────────
@@ -254,7 +257,9 @@ impl RegistrationManager {
                     if !(0..LATER_EXPIRE_SECS).contains(&elapsed) {
                         ConsentState::InitFresh
                     } else {
-                        ConsentState::InitLater { later_start_time: ts }
+                        ConsentState::InitLater {
+                            later_start_time: ts,
+                        }
                     }
                 }
             },
@@ -403,8 +408,7 @@ impl RegistrationManager {
             .unwrap_or_else(|| Path::new("/etc/anolisa"));
         fs::create_dir_all(dir)?;
 
-        let tmp_path =
-            dir.join(format!(".register.json.tmp.{}", std::process::id()));
+        let tmp_path = dir.join(format!(".register.json.tmp.{}", std::process::id()));
 
         let result = self.atomic_write_inner(&tmp_path, record);
         if result.is_err() {
@@ -414,8 +418,8 @@ impl RegistrationManager {
     }
 
     fn atomic_write_inner(&self, tmp_path: &Path, record: &RegisterRecord) -> io::Result<()> {
-        let content = serde_json::to_string_pretty(record)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let content =
+            serde_json::to_string_pretty(record).map_err(|e| io::Error::other(e.to_string()))?;
 
         {
             let mut file = OpenOptions::new()
@@ -617,7 +621,11 @@ mod tests {
             source: Some(RegisterSource::Cli),
             operator: Some("admin".into()),
         };
-        fs::write(&m.register_path, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+        fs::write(
+            &m.register_path,
+            serde_json::to_string_pretty(&rec).unwrap(),
+        )
+        .unwrap();
         assert_eq!(m.read_state(), ConsentState::InitFresh);
     }
 
@@ -636,7 +644,11 @@ mod tests {
             source: Some(RegisterSource::Cli),
             operator: Some("admin".into()),
         };
-        fs::write(&m.register_path, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+        fs::write(
+            &m.register_path,
+            serde_json::to_string_pretty(&rec).unwrap(),
+        )
+        .unwrap();
         assert_eq!(m.read_state(), ConsentState::InitFresh);
     }
 

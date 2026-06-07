@@ -131,11 +131,17 @@ impl RegionProbe {
     pub fn probe(&self) -> Result<RegionInfo, UploadError> {
         // 1. Instance metadata API (ECS / SWAS, direct internal access, fastest)
         if let Some(region) = self.query_metadata() {
-            return Ok(RegionInfo { region_id: region, use_internal: true });
+            return Ok(RegionInfo {
+                region_id: region,
+                use_internal: true,
+            });
         }
         // 2. cloud-init query ds (generic, supports EDS / Wuying / self-hosted)
         if let Some(region) = self.query_cloud_init() {
-            return Ok(RegionInfo { region_id: region, use_internal: true });
+            return Ok(RegionInfo {
+                region_id: region,
+                use_internal: true,
+            });
         }
         // 3. Self-hosted: fallback to cn-hangzhou, use public network
         Ok(RegionInfo {
@@ -148,8 +154,9 @@ impl RegionProbe {
     fn query_metadata(&self) -> Option<String> {
         let output = Command::new("curl")
             .args([
-                "-sf",             // -s: silent, -f: fail on HTTP error
-                "--max-time", "2", // 2s timeout to avoid long blocks on non-ECS environments
+                "-sf", // -s: silent, -f: fail on HTTP error
+                "--max-time",
+                "2", // 2s timeout to avoid long blocks on non-ECS environments
                 &self.metadata_url,
             ])
             .output()
@@ -195,10 +202,13 @@ impl RegionProbe {
             .trim()
             .to_string();
 
-        if region.is_empty() { None } else { Some(region) }
+        if region.is_empty() {
+            None
+        } else {
+            Some(region)
+        }
     }
 }
-
 
 // ── IlogtailInstaller ─────────────────────────────────────────────────
 
@@ -270,9 +280,12 @@ impl<'a> IlogtailInstaller<'a> {
         let dl = Command::new("curl")
             .args([
                 "-fsSL",
-                "--connect-timeout", "5",
-                "--max-time", "10",
-                "-o", &tmp_script,
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "10",
+                "-o",
+                &tmp_script,
                 &url,
             ])
             .status()
@@ -282,9 +295,7 @@ impl<'a> IlogtailInstaller<'a> {
             let _ = fs::remove_file(&tmp_script);
             return Err(UploadError::InstallFailed {
                 code: dl.code().unwrap_or(-1),
-                stderr: format!(
-                    "curl download failed via {network} network: {url}"
-                ),
+                stderr: format!("curl download failed via {network} network: {url}"),
             });
         }
 
@@ -307,7 +318,8 @@ impl<'a> IlogtailInstaller<'a> {
                 .output()
         };
         let _ = fs::remove_file(&tmp_script);
-        let install = install.map_err(|e| UploadError::Command(format!("logtail install failed: {e}")))?;
+        let install =
+            install.map_err(|e| UploadError::Command(format!("logtail install failed: {e}")))?;
 
         if !install.status.success() {
             let stdout = String::from_utf8_lossy(&install.stdout);
@@ -424,7 +436,10 @@ impl UploadStarter {
         // 1. Remove SLS account file (validate ID to prevent path traversal)
         if !self.config.sls_account_id.is_empty() {
             validate_sls_account_id(&self.config.sls_account_id)?;
-            let account_file = self.config.ilogtail_users_dir.join(&self.config.sls_account_id);
+            let account_file = self
+                .config
+                .ilogtail_users_dir
+                .join(&self.config.sls_account_id);
             if account_file.exists() {
                 fs::remove_file(&account_file)?;
             }
@@ -596,6 +611,9 @@ mod tests {
         let mut cfg = test_config(&dir);
         cfg.sls_account_id = String::new();
         let starter = UploadStarter::new(cfg);
-        assert!(matches!(starter.start(), Err(UploadError::MissingAccountId)));
+        assert!(matches!(
+            starter.start(),
+            Err(UploadError::MissingAccountId)
+        ));
     }
 }
