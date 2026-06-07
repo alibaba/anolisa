@@ -251,7 +251,7 @@ impl RegistrationManager {
                 Some(ts) => {
                     let elapsed = (Utc::now() - ts).num_seconds();
                     // elapsed < 0: clock skew / tampering — treat as expired, show prompt immediately
-                    if elapsed < 0 || elapsed >= LATER_EXPIRE_SECS {
+                    if !(0..LATER_EXPIRE_SECS).contains(&elapsed) {
                         ConsentState::InitFresh
                     } else {
                         ConsentState::InitLater { later_start_time: ts }
@@ -279,7 +279,7 @@ impl RegistrationManager {
             .truncate(true)
             .open(&lock_path)?;
         nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, e)| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(|(_, e)| io::Error::other(e))
     }
 
     #[cfg(not(unix))]
@@ -300,8 +300,17 @@ impl RegistrationManager {
     // ── State transition operations ──────────────────────────────────
 
     /// Perform registration: state → `registered`, writes register.json.
+    ///
+    /// Only allowed when not already registered (idempotent for re-registration
+    /// from init/unregistered states). Returns an error if already registered,
+    /// serving as a defensive guard against non-CLI callers bypassing validation.
     pub fn do_register(&self, operator: &str) -> Result<(), SubscriptionError> {
         let _lock = self.acquire_lock()?;
+        let (current, _) = self.read_state_and_record();
+        if current == ConsentState::Registered {
+            return Err(SubscriptionError::AlreadyRegistered);
+        }
+
         let product_type = self.detect_product_type();
 
         let record = RegisterRecord {
@@ -319,14 +328,22 @@ impl RegistrationManager {
 
     /// Perform unregistration: state → `unregistered`, writes register.json.
     /// Preserves the historical `registration_time` as an audit record.
+    ///
+    /// Only allowed when currently registered. Returns an error if already
+    /// unregistered or managed by sysom, serving as a defensive guard against
+    /// non-CLI callers bypassing validation.
     pub fn do_unregister(&self, operator: &str) -> Result<(), SubscriptionError> {
+        let _lock = self.acquire_lock()?;
+        // Check sysom inside the lock to prevent TOCTOU races
         if self.is_sysom_registered() {
             return Err(SubscriptionError::SysomManaged);
         }
-        let _lock = self.acquire_lock()?;
+        let (current, existing) = self.read_state_and_record();
+        if current == ConsentState::Unregistered {
+            return Err(SubscriptionError::NotRegistered);
+        }
 
         let product_type = self.detect_product_type();
-        let existing = self.read_record();
         let registration_time = existing.as_ref().and_then(|r| r.registration_time);
 
         let record = RegisterRecord {
@@ -398,7 +415,7 @@ impl RegistrationManager {
 
     fn atomic_write_inner(&self, tmp_path: &Path, record: &RegisterRecord) -> io::Result<()> {
         let content = serde_json::to_string_pretty(record)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         {
             let mut file = OpenOptions::new()

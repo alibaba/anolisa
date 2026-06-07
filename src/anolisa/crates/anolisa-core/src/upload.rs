@@ -7,11 +7,16 @@
 //! 4. Provide start() / stop() for register / unregister calls
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 /// agentsight SLS log enablement marker file
 const SLS_LOG_MARKER: &str = "/etc/anolisa/enable_sls_log";
+
+/// Default SLS account ID
+const DEFAULT_SLS_ACCOUNT_ID_B64: &str = "MTgwODA3ODk1MDc3MDI2NA==";
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -28,14 +33,22 @@ pub struct UploadConfig {
     pub ilogtail_users_dir: PathBuf,
     /// user_defined_id file path
     pub user_defined_id_path: PathBuf,
+    /// SLS log enablement marker file path
+    pub sls_log_marker: PathBuf,
     /// Instance metadata URL (ECS internal network)
     pub metadata_url: String,
 }
 
 impl Default for UploadConfig {
     fn default() -> Self {
+        // Decode the embedded base64 default; panic at startup if constant is corrupted
+        let default_id = BASE64
+            .decode(DEFAULT_SLS_ACCOUNT_ID_B64)
+            .map(|b| String::from_utf8(b).expect("DEFAULT_SLS_ACCOUNT_ID_B64 is not valid UTF-8"))
+            .expect("DEFAULT_SLS_ACCOUNT_ID_B64 is not valid base64");
+
         Self {
-            sls_account_id: String::new(),
+            sls_account_id: default_id,
             user_defined_ids: vec![
                 "sysom_unity_metrics".into(),
                 "sysom_livetrace_oncpu".into(),
@@ -44,6 +57,7 @@ impl Default for UploadConfig {
             ilogtaild_init: PathBuf::from("/etc/init.d/ilogtaild"),
             ilogtail_users_dir: PathBuf::from("/etc/ilogtail/users"),
             user_defined_id_path: PathBuf::from("/etc/ilogtail/user_defined_id"),
+            sls_log_marker: PathBuf::from(SLS_LOG_MARKER),
             metadata_url: "http://100.100.100.200/latest/meta-data/region-id".into(),
         }
     }
@@ -76,8 +90,7 @@ pub fn validate_sls_account_id(id: &str) -> Result<(), UploadError> {
     }
     if !id.chars().all(|c| c.is_ascii_digit()) {
         return Err(UploadError::InvalidAccountId(format!(
-            "expected digits only, got {:?}",
-            id
+            "expected digits only, got {id:?}"
         )));
     }
     Ok(())
@@ -117,11 +130,11 @@ impl RegionProbe {
     /// Detect region-id and infer network environment to decide internal vs public network.
     pub fn probe(&self) -> Result<RegionInfo, UploadError> {
         // 1. Instance metadata API (ECS / SWAS, direct internal access, fastest)
-        if let Some(region) = self.from_metadata() {
+        if let Some(region) = self.query_metadata() {
             return Ok(RegionInfo { region_id: region, use_internal: true });
         }
         // 2. cloud-init query ds (generic, supports EDS / Wuying / self-hosted)
-        if let Some(region) = self.from_cloud_init_query() {
+        if let Some(region) = self.query_cloud_init() {
             return Ok(RegionInfo { region_id: region, use_internal: true });
         }
         // 3. Self-hosted: fallback to cn-hangzhou, use public network
@@ -132,7 +145,7 @@ impl RegionProbe {
     }
 
     /// Request instance metadata API via curl, 2-second timeout
-    fn from_metadata(&self) -> Option<String> {
+    fn query_metadata(&self) -> Option<String> {
         let output = Command::new("curl")
             .args([
                 "-sf",             // -s: silent, -f: fail on HTTP error
@@ -162,7 +175,7 @@ impl RegionProbe {
     ///   }
     /// }
     /// ```
-    fn from_cloud_init_query(&self) -> Option<String> {
+    fn query_cloud_init(&self) -> Option<String> {
         let output = Command::new("cloud-init")
             .args(["query", "ds"])
             .output()
@@ -224,23 +237,30 @@ impl<'a> IlogtailInstaller<'a> {
     /// Based on `RegionInfo::use_internal`, directly selects internal or public URL,
     /// no need for internal-first-then-fallback to avoid unnecessary timeout waits.
     fn install(&self, region_info: &RegionInfo) -> Result<(), UploadError> {
-        let tmp_script = format!("/tmp/logtail.{}.sh", std::process::id());
+        // Use tempfile to create a secure temporary file, preventing symlink attacks
+        // on predictable paths (e.g., /tmp/logtail.<pid>.sh).
+        let tmp_file = tempfile::Builder::new()
+            .prefix("logtail-")
+            .suffix(".sh")
+            .tempfile()
+            .map_err(UploadError::Io)?;
+        let tmp_script = tmp_file.path().to_string_lossy().to_string();
+        // Keep the file open (prevents reuse of the name) until we're done
+        let _tmp_guard = tmp_file;
         let region_id = &region_info.region_id;
 
         // Select URL directly based on detection result
         let (url, network) = if region_info.use_internal {
             (
                 format!(
-                    "https://logtail-release-{region}.oss-{region}-internal.aliyuncs.com/linux64/logtail.sh",
-                    region = region_id
+                    "https://logtail-release-{region_id}.oss-{region_id}-internal.aliyuncs.com/linux64/logtail.sh"
                 ),
                 "internal",
             )
         } else {
             (
                 format!(
-                    "https://logtail-release-{region}.oss-{region}.aliyuncs.com/linux64/logtail.sh",
-                    region = region_id
+                    "https://logtail-release-{region_id}.oss-{region_id}.aliyuncs.com/linux64/logtail.sh"
                 ),
                 "public",
             )
@@ -281,7 +301,7 @@ impl<'a> IlogtailInstaller<'a> {
                 .args([&tmp_script, "install", region_id.as_str()])
                 .output()
         } else {
-            let public_region = format!("{}-internet", region_id);
+            let public_region = format!("{region_id}-internet");
             Command::new("sh")
                 .args([tmp_script.as_str(), "install", &public_region])
                 .output()
@@ -381,7 +401,7 @@ impl UploadStarter {
         installer.configure_user_defined_ids()?;
 
         // 5. Enable agentsight logging
-        let marker = Path::new(SLS_LOG_MARKER);
+        let marker = &self.config.sls_log_marker;
         if let Some(parent) = marker.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -396,7 +416,7 @@ impl UploadStarter {
     /// Note: does not uninstall ilogtail itself, only revokes upload configuration.
     pub fn stop(&self) -> Result<(), UploadError> {
         // 0. Remove agentsight SLS log marker file
-        let marker = Path::new(SLS_LOG_MARKER);
+        let marker = &self.config.sls_log_marker;
         if marker.exists() {
             fs::remove_file(marker)?;
         }
@@ -451,6 +471,7 @@ mod tests {
             ilogtaild_init: dir.path().join("ilogtaild"),
             ilogtail_users_dir: dir.path().join("users"),
             user_defined_id_path: dir.path().join("user_defined_id"),
+            sls_log_marker: dir.path().join("enable_sls_log"),
             metadata_url: "http://127.0.0.1:19999/no-such-endpoint".into(),
         }
     }

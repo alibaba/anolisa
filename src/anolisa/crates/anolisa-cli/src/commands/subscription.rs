@@ -137,45 +137,54 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
         reason: e.to_string(),
     })?;
 
-    if mgr.read_state() == ConsentState::Unregistered {
+    let already_unregistered = mgr.read_state() == ConsentState::Unregistered;
+
+    if already_unregistered && !force {
+        // State is already UNREGISTERED; nothing to do unless --force is used to
+        // retry a previously failed upload teardown.
         println!("Not currently registered.");
+        println!("  If upload teardown previously failed, run with --force to retry cleanup.");
         return Ok(());
     }
 
-    if !force {
-        if !std::io::stdin().is_terminal() {
-            return Err(CliError::Runtime {
-                command: "subscription unregister".to_string(),
-                reason: "non-interactive session detected; pass --force to confirm unregistration".to_string(),
-            });
+    if !already_unregistered {
+        // Only prompt when we're actually changing state
+        if !force {
+            if !std::io::stdin().is_terminal() {
+                return Err(CliError::Runtime {
+                    command: "subscription unregister".to_string(),
+                    reason: "non-interactive session detected; pass --force to confirm unregistration".to_string(),
+                });
+            }
+            if !prompt_yn("Stop subscription? [y/N]: ", false) {
+                println!("Cancelled.");
+                return Err(CliError::Runtime {
+                    command: "subscription unregister".to_string(),
+                    reason: "user cancelled".to_string(),
+                });
+            }
         }
-        if !prompt_yn("Stop subscription? [y/N]: ", false) {
-            println!("Cancelled.");
-            return Err(CliError::Runtime {
-                command: "subscription unregister".to_string(),
-                reason: "user cancelled".to_string(),
-            });
-        }
+
+        // Write consent state FIRST — user intent takes priority over cleanup.
+        // Even if stop() fails below, the consent record must reflect "no".
+        let operator = current_operator();
+        mgr.do_unregister(&operator).map_err(|e| CliError::Runtime {
+            command: "subscription unregister".to_string(),
+            reason: e.to_string(),
+        })?;
     }
 
-    let operator = current_operator();
-    mgr.do_unregister(&operator).map_err(|e| CliError::Runtime {
-        command: "subscription unregister".to_string(),
-        reason: e.to_string(),
-    })?;
-
+    // Attempt to tear down upload infrastructure.
+    // Consent is already recorded above; this is best-effort cleanup.
     let upload_cfg = build_upload_config();
     if let Err(e) = UploadStarter::new(upload_cfg).stop() {
-        // Upload teardown failed — attempt to restore registration state
-        eprintln!("error: failed to stop data upload: {e}");
-        eprintln!("  Attempting to restore registration state...");
-        if let Err(restore_err) = mgr.do_register(&operator) {
-            eprintln!("  warn: state restore also failed: {restore_err}");
-            eprintln!("  System may be in inconsistent state. Run 'sudo anolisa subscription unregister --force' to retry.");
-        }
+        eprintln!("error: consent recorded as UNREGISTERED, but upload teardown failed: {e}");
+        eprintln!("  The system will NOT upload new data (consent denied),");
+        eprintln!("  but residual ilogtail configuration may remain.");
+        eprintln!("  Retry with: sudo anolisa subscription unregister --force");
         return Err(CliError::Runtime {
             command: "subscription unregister".to_string(),
-            reason: format!("failed to stop data upload: {e}. Registration state has been restored."),
+            reason: format!("upload teardown failed: {e}. Consent is UNREGISTERED; retry with --force."),
         });
     }
 
@@ -234,10 +243,6 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
             println!();
             println!("  You haven't decided whether to enable Token collection.");
             println!("  Run 'sudo anolisa subscription register' to enable.");
-            return Err(CliError::Runtime {
-                command: "subscription status".to_string(),
-                reason: "not registered".to_string(),
-            });
         }
         ConsentState::InitLater { later_start_time } => {
             let remaining = format_remaining(*later_start_time);
@@ -246,10 +251,6 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
             println!();
             println!("  Reminder in {remaining}.");
             println!("  Run 'sudo anolisa subscription register' to enable now.");
-            return Err(CliError::Runtime {
-                command: "subscription status".to_string(),
-                reason: "not registered (deferred)".to_string(),
-            });
         }
         ConsentState::Unregistered => {
             println!("  Consent State: UNREGISTERED");
