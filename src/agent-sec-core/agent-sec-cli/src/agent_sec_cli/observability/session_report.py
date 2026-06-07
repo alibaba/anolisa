@@ -107,9 +107,7 @@ def build_session_report(
                     security[cat] = {}
                 security[cat][result] = security[cat].get(result, 0) + 1
             if not security:
-                security_hint = (
-                    "security hooks may not pass session_id yet (see finding A6)"
-                )
+                security_hint = "security hooks may not pass session_id yet"
         except Exception:
             security_hint = "failed to query security events"
 
