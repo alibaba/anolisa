@@ -288,8 +288,8 @@ int trace_write_enter(struct syscall_trace_enter *ctx)
     
     // Calculate actual payload size (limit to MAX_STDOUT_PAYLOAD)
     u32 payload_len = count;
-    if (payload_len > MAX_STDOUT_PAYLOAD)
-        payload_len = MAX_STDOUT_PAYLOAD;
+    if (payload_len >= MAX_STDOUT_PAYLOAD)
+        payload_len = MAX_STDOUT_PAYLOAD - 1;
     
     // Use fixed maximum size for ringbuffer reservation (BPF verifier requirement)
     // The actual data length is recorded in data_len field
