@@ -103,9 +103,14 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     }
 
     if let Err(e) = mgr.do_register(&operator) {
-        // Compensate: rollback the upload we just started
-        if let Err(rollback_err) = starter.stop() {
-            eprintln!("warn: rollback of upload start also failed: {rollback_err}");
+        // Compensate: rollback the upload we just started, but only if the
+        // system is NOT in Registered state.  Another process may have raced
+        // us and successfully registered; in that case its upload config is
+        // valid and we must NOT tear it down.
+        if mgr.read_state() != ConsentState::Registered {
+            if let Err(rollback_err) = starter.stop() {
+                eprintln!("warn: rollback of upload start also failed: {rollback_err}");
+            }
         }
         return Err(CliError::Runtime {
             command: "subscription register".to_string(),
