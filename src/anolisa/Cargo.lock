@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "anolisa-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anolisa-core",
  "anolisa-env",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "anolisa-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anolisa-build",
  "anolisa-core",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "anolisa-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anolisa-env",
  "anolisa-platform",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "anolisa-env"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "anolisa-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "nix",

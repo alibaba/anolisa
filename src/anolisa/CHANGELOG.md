@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-07
+
+### Added
+
+- **Sandbox install pipeline**: 5-phase orchestrator for sandbox
+  provisioning with firecracker standard and e2b backend variants,
+  including pre-flight checks, package installation, OS primitives,
+  service setup, and post-verify phases
+- **Subscription consent management**: Token collection state machine
+  (register/unregister/later) with atomic-write persistence, 30-day
+  later expiry, and sysom co-registration detection
+- **Upload enablement**: ilogtail install/configure/teardown with
+  region-id probing (metadata API → cloud-init → public fallback),
+  SLS account management, and enable_sls_log marker
+- **Self-update**: `anolisa update self` with release-manifest based
+  updater, tar.gz artifact download, checksum verification, extraction,
+  exclusive locking, and replacement rollback
+- **Package manager backends**: Real dnf/apt implementations replacing
+  placeholder stubs
+- **CI integration**: GitHub Actions automation for anolisa workspace
+
+### Fixed
+
+- Replace `sed` with bash parameter expansion in install script for
+  improved portability and correctness
+
 ## [0.1.0] - 2026-06-04
 
 Initial alpha release of the ANOLISA CLI.
@@ -61,6 +87,25 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.1] - 2026-06-07
+
+### 新增
+
+- **沙箱安装流水线**：5 阶段编排器，支持 firecracker 标准和 e2b 后端变体，
+  包含预检、包安装、OS 原语、服务配置和安装后验证阶段
+- **订阅同意管理**：令牌采集状态机（register/unregister/later），支持原子写入
+  持久化、30 天 later 过期、sysom 联合注册检测
+- **上传使能**：ilogtail 安装/配置/拆卸，支持 region-id 探测（metadata API →
+  cloud-init → 公网回退）、SLS 账号管理及 enable_sls_log 标记文件
+- **自更新**：`anolisa update self` 基于发布清单的更新器，支持 tar.gz
+  产物下载、校验和验证、解压、排他锁及替换回滚
+- **包管理器后端**：dnf/apt 真实实现，替换占位符 stub
+- **CI 集成**：anolisa 工作区的 GitHub Actions 自动化
+
+### 修复
+
+- 安装脚本中用 bash 参数展开替代 `sed`，提升可移植性和正确性
 
 ## [0.1.0] - 2026-06-04
 
