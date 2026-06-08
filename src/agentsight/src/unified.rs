@@ -33,7 +33,7 @@ use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
-use crate::interruption::{DetectorConfig, InterruptionDetector};
+use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_events};
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
@@ -432,6 +432,12 @@ impl AgentSight {
                 }
             }
         };
+
+        // Run OOM recovery: scan dmesg for OOM kill events that occurred while
+        // AgentSight was down (e.g. if AgentSight itself was OOM-killed).
+        if let Some(ref istore) = interruption_store {
+            recover_oom_events(istore, genai_sqlite_store.as_ref(), 0);
+        }
 
         log::info!(
             "AgentSight initialized: {} existing agent(s), {} GenAI exporter(s)",
@@ -1190,6 +1196,9 @@ impl AgentSight {
         use crate::aggregator::ConnectionState;
         use crate::genai::GenAIBuilder;
 
+        // Track persisted pending calls: (pid, call_id, session_id, agent_name, conversation_id)
+        let mut persisted_pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = Vec::new();
+
         for (conn_id, state) in drained {
             // Destructure to capture both request AND sse_events
             let (_state_name, request, sse_events) = match state {
@@ -1215,6 +1224,14 @@ impl AgentSight {
                         log::warn!("[DrainCheck] FAIL persist: {}", e);
                         continue;
                     }
+                    // Track for OOM detection below
+                    persisted_pending.push((
+                        conn_id.pid,
+                        pending.call_id.clone(),
+                        pending.session_id.clone(),
+                        pending.agent_name.clone(),
+                        pending.conversation_id.clone(),
+                    ));
                     // ── Session ID reconciliation ──────────────────────────
                     // The drain path computes session_id via SHA256 hash fallback,
                     // but normal flow uses ResponseSessionMapper (agent .jsonl UUID).
@@ -1382,6 +1399,67 @@ impl AgentSight {
                     request.path,
                     request.body_len
                 );
+            }
+        }
+
+        // ── OOM detection for dead PIDs ──────────────────────────────────────
+        // After persisting pending calls for dead PIDs, check if any were OOM-killed.
+        // This runs in the trace process (every 1s) and catches OOM events much faster
+        // than the HealthChecker (30s cycle in serve process).
+        if !persisted_pending.is_empty() {
+            if let Some(ref istore) = self.interruption_store {
+                use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+
+                let mut checked_pids: HashSet<u32> = HashSet::new();
+                for (pid, _call_id, session_id, agent_name, conversation_id) in &persisted_pending {
+                    if !checked_pids.insert(*pid) {
+                        continue; // already checked this PID
+                    }
+                    if was_pid_oom_killed(*pid as i32) {
+                        let call_ids: Vec<&str> = persisted_pending.iter()
+                            .filter(|(p, _, _, _, _)| *p == *pid)
+                            .map(|(_, c, _, _, _)| c.as_str())
+                            .collect();
+                        log::info!(
+                            "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
+                            pid, agent_name.as_deref().unwrap_or("unknown"), call_ids
+                        );
+                        let detail = serde_json::json!({
+                            "pid": pid,
+                            "agent_name": agent_name,
+                            "call_ids": call_ids,
+                            "oom": true,
+                            "source": "drain+dmesg",
+                        });
+                        let event = InterruptionEvent::new(
+                            InterruptionType::AgentCrash,
+                            session_id.clone(),
+                            None,
+                            conversation_id.clone(),
+                            None,
+                            Some(*pid as i32),
+                            agent_name.clone(),
+                            now_ns,
+                            Some(detail),
+                        );
+                        if let Err(e) = istore.insert(&event) {
+                            log::warn!("[DrainCheck] Failed to record OOM agent_crash for pid={}: {}", pid, e);
+                        } else {
+                            log::info!("[DrainCheck] Recorded OOM agent_crash for pid={}", pid);
+                        }
+                        // Mark all pending calls for this PID as interrupted
+                        if let Some(ref store) = self.genai_sqlite_store {
+                            if let Err(e) = store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash") {
+                                log::warn!("[DrainCheck] Failed to mark pending interrupted for pid={}: {}", pid, e);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

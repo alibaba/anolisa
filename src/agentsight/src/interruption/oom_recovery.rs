@@ -278,3 +278,46 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
         None
     }
 }
+
+/// Check if a specific PID was OOM-killed recently by scanning dmesg.
+///
+/// This is used by the HealthChecker for real-time OOM attribution:
+/// when an agent process disappears, we check dmesg to determine if it
+/// was killed by the OOM killer (vs normal exit, SIGKILL, segfault, etc.).
+///
+/// Returns `true` if the PID appears in a "Killed process" OOM line in dmesg.
+pub fn was_pid_oom_killed(pid: i32) -> bool {
+    let output = match Command::new("dmesg")
+        .arg("-T")
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(_) => {
+            // Fallback without -T
+            match Command::new("dmesg").output() {
+                Ok(o) => o,
+                Err(_) => return false,
+            }
+        }
+        Err(_) => return false,
+    };
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    let pid_str = pid.to_string();
+
+    for line in content.lines() {
+        if !line.contains("Killed process") {
+            continue;
+        }
+        // Check if this line contains "Killed process <our_pid> "
+        if let Some(after) = line.split("Killed process ").nth(1) {
+            if let Some(line_pid_str) = after.split_whitespace().next() {
+                if line_pid_str == pid_str {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}

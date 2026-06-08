@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use super::port_detector::detect_listening_ports;
 use super::store::{AgentHealthState, AgentHealthStatus, HealthStore, now_ms};
 use crate::discovery::AgentScanner;
-use crate::interruption::{InterruptionEvent, InterruptionType};
+use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 
 /// Background health checker that periodically probes discovered agents
@@ -131,6 +131,15 @@ impl HealthChecker {
                     // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
                     let pending_calls = self.get_pending_calls_for_pids(&pids);
                     if !pending_calls.is_empty() {
+                        // Check if any of the crashed PIDs were OOM-killed
+                        let is_oom = pids.iter().any(|&p| was_pid_oom_killed(p));
+                        if is_oom {
+                            log::info!(
+                                "Agent {} (pids={:?}) was OOM-killed (confirmed via dmesg)",
+                                agent_name, pids
+                            );
+                        }
+
                         let mut by_conv: HashMap<
                             (Option<String>, Option<String>),
                             Vec<(String, Option<String>)>,
@@ -158,12 +167,16 @@ impl HealthChecker {
                             }
                             let call_ids: Vec<&str> =
                                 calls.iter().map(|(c, _)| c.as_str()).collect();
-                            let detail = serde_json::json!({
+                            let mut detail = serde_json::json!({
                                 "pid": rep.pid,
                                 "agent_name": agent_name,
                                 "exe_path": rep.exe_path.clone(),
                                 "call_ids": call_ids,
                             });
+                            if is_oom {
+                                detail["oom"] = serde_json::json!(true);
+                                detail["source"] = serde_json::json!("healthchecker+dmesg");
+                            }
                             let event = InterruptionEvent::new(
                                 InterruptionType::AgentCrash,
                                 session_id.clone(),
@@ -183,12 +196,13 @@ impl HealthChecker {
                                 );
                             } else {
                                 log::info!(
-                                    "Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s))",
+                                    "Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s), oom={})",
                                     agent_name,
                                     rep.pid,
                                     session_id,
                                     conversation_id,
-                                    calls.len()
+                                    calls.len(),
+                                    is_oom
                                 );
                             }
                         }
