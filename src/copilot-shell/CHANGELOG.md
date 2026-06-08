@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.0
+
+- Fixed missing esc hint in tool confirmation footer status bar (#732)
+- Fixed invisible cursor in provider/auth config inputs (#683)
+
 ## 2.4.1
 
 - Fixed HookSystemMessage rendering as info and resolved Content/Thought duplication (#636)
