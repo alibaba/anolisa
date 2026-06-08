@@ -445,7 +445,7 @@ impl Analyzer {
             return results;
         }
 
-        // 2. Token analysis - extract from SSE events
+        // 2. Token analysis - extract from SSE events or non-streaming JSON body
         let mut token_result = match result {
             AggregatedResult::SseComplete(pair) => {
                 let pid = pair.request.source_event.pid;
@@ -456,6 +456,20 @@ impl Analyzer {
                 let pid = response.pid();
                 let comm = response.parsed.source_event.comm_str();
                 self.extract_token_from_sse(&response.sse_events, pid, &comm)
+            }
+            AggregatedResult::HttpComplete(pair) => {
+                let pid = pair.request.source_event.pid;
+                let comm = pair.request.source_event.comm_str();
+                self.extract_token_from_json_body(
+                    pair.response.parsed.json_body().as_ref(),
+                    pid,
+                    &comm,
+                )
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let pid = stream.pid();
+                let comm = stream.comm();
+                self.extract_token_from_json_body(stream.response_json_body().as_ref(), pid, &comm)
             }
             _ => None,
         };
@@ -609,22 +623,72 @@ impl Analyzer {
         Some(record)
     }
 
+    fn extract_token_from_json_body(
+        &self,
+        json: Option<&serde_json::Value>,
+        pid: u32,
+        comm: &str,
+    ) -> Option<TokenRecord> {
+        let json = json?;
+        let usage = self.token.parse_json(json)?;
+        let record = TokenRecord::new(
+            pid,
+            comm.to_string(),
+            usage.provider.to_string(),
+            usage.input_tokens,
+            usage.output_tokens,
+        )
+        .with_model(usage.model.unwrap_or_default())
+        .with_cache_tokens(
+            usage.cache_creation_input_tokens.unwrap_or(0),
+            usage.cache_read_input_tokens.unwrap_or(0),
+        );
+        if record.total_tokens() > 0 {
+            Some(record)
+        } else {
+            None
+        }
+    }
+
     /// Manually compute token counts using get_global_tokenizer
     ///
     /// This method is called when token extraction from SSE events fails.
     /// It uses the global tokenizer to compute input and output tokens
     /// from the request messages and response content.
     fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
-        // Extract context from the aggregated result (only SseComplete has request info)
-        let (pid, comm, request_json, sse_events, path) = match result {
-            AggregatedResult::SseComplete(pair) => (
-                pair.request.source_event.pid,
-                pair.request.source_event.comm_str(),
-                pair.request.json_body(),
-                &pair.response.sse_events,
-                pair.request.path.as_str(),
-            ),
-            // ResponseOnly doesn't have request info, cannot compute tokens
+        // Extract context from the aggregated result.
+        // Both SseComplete and Http2StreamComplete are unified into
+        // Vec<serde_json::Value> chunks to avoid a method-local enum
+        // (which cbindgen 0.27 cannot parse).
+        let (pid, comm, request_json, sse_chunks, path) = match result {
+            AggregatedResult::SseComplete(pair) => {
+                let chunks: Vec<serde_json::Value> = pair
+                    .response
+                    .sse_events
+                    .iter()
+                    .filter_map(|e| e.json_body())
+                    .collect();
+                (
+                    pair.request.source_event.pid,
+                    pair.request.source_event.comm_str(),
+                    pair.request.json_body(),
+                    chunks,
+                    pair.request.path.clone(),
+                )
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let chunks = stream
+                    .response_sse_json_array()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                (
+                    stream.pid(),
+                    stream.comm(),
+                    stream.request_json_body(),
+                    chunks,
+                    stream.path(),
+                )
+            }
             _ => return None,
         };
 
@@ -718,23 +782,21 @@ impl Analyzer {
             let mut all_reasoning = String::new();
             let mut all_tool_calls = Vec::new();
 
-            for event in sse_events {
-                if let Some(chunk) = event.json_body() {
-                    if let Some((content, reasoning, tool_calls)) =
-                        extract_response_content(Some(&chunk))
-                    {
-                        if !content.is_empty() {
-                            all_content.push_str(&content);
+            for chunk in &sse_chunks {
+                if let Some((content, reasoning, tool_calls)) =
+                    extract_response_content(Some(chunk))
+                {
+                    if !content.is_empty() {
+                        all_content.push_str(&content);
+                    }
+                    if let Some(r) = reasoning {
+                        if !r.is_empty() {
+                            all_reasoning.push_str(&r);
                         }
-                        if let Some(r) = reasoning {
-                            if !r.is_empty() {
-                                all_reasoning.push_str(&r);
-                            }
-                        }
-                        for tc in tool_calls {
-                            if !tc.is_empty() {
-                                all_tool_calls.push(tc);
-                            }
+                    }
+                    for tc in tool_calls {
+                        if !tc.is_empty() {
+                            all_tool_calls.push(tc);
                         }
                     }
                 }
