@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-08
+
+### Added
+
+- **Bug report command**: `anolisa bug` generates local diagnostic Markdown
+  and JSON payloads with environment facts, enabled capability state, and
+  recent warn/error central-log records
+- **Self-update alias**: `anolisa self update` now delegates to the existing
+  `anolisa update self` flow
+
+### Fixed
+
+- Restored and simplified the bug report issue template
+
 ## [0.1.1] - 2026-06-07
 
 ### Added
@@ -87,6 +101,18 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.2] - 2026-06-08
+
+### 新增
+
+- **Bug report 命令**：`anolisa bug` 生成本地诊断 Markdown 和 JSON
+  payload，包含环境事实、已启用能力状态、近期 warn/error central-log 记录
+- **自更新别名**：`anolisa self update` 复用现有 `anolisa update self` 流程
+
+### 修复
+
+- 恢复并简化 bug report issue template
 
 ## [0.1.1] - 2026-06-07
 
