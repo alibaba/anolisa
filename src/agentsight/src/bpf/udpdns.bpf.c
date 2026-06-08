@@ -102,9 +102,11 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         return 0;
 
     // Clamp read size to payload buffer capacity
+    // Use >= (not >) so read_len never equals DNS_PAYLOAD_MAX (256),
+    // because the subsequent mask (read_len & 0xFF) would zero it.
     __u32 read_len = buf.len;
-    if (read_len > DNS_PAYLOAD_MAX)
-        read_len = DNS_PAYLOAD_MAX;
+    if (read_len >= DNS_PAYLOAD_MAX)
+        read_len = DNS_PAYLOAD_MAX - 1;
 
     // Read user-space DNS buffer into event payload
     int ret = bpf_probe_read_user(event->payload, read_len & PAYLOAD_MASK, buf.buf);

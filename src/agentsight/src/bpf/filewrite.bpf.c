@@ -109,12 +109,13 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     // Copy filename we already read into the event
     __builtin_memcpy(event->filename, fname, MAX_FILENAME_LEN);
 
-    // Copy write content (up to 16KB)
-    // Explicit bounds clamping to satisfy eBPF verifier:
-    // bitmask first to ensure value range, then clamp to actual max
-    u32 copy_size = (u32)count & 0x3FFF;  // Mask to 14 bits (16383)
-    if (copy_size > MAX_FILEWRITE_BUF)
-        copy_size = MAX_FILEWRITE_BUF;
+    // Copy write content (up to MAX_FILEWRITE_BUF - 1 bytes)
+    // Pre-clamp before masking to avoid zeroing at power-of-two boundaries:
+    // e.g. 16384 & 0x3FFF = 0, which would silently lose all content.
+    u32 copy_size = (u32)count;
+    if (copy_size >= MAX_FILEWRITE_BUF)
+        copy_size = MAX_FILEWRITE_BUF - 1;
+    copy_size &= (MAX_FILEWRITE_BUF - 1);
 
     ret = bpf_probe_read_user(event->buf, copy_size, buf);
     if (ret != 0) {

@@ -27,7 +27,7 @@ struct filewrite_event {
     u32 tid;
     u32 uid;
     u32 write_size;                     // original count passed to vfs_write
-    u32 buf_size;                       // actual bytes copied (min(count, MAX_FILEWRITE_BUF))
+    u32 buf_size;                       // actual bytes copied (up to MAX_FILEWRITE_BUF - 1)
     char comm[TASK_COMM_LEN];           // process name (16 bytes)
     char filename[MAX_FILENAME_LEN];    // basename from dentry (256 bytes)
     u64 cgroup_id;                      // cgroup inode from get_cgroup_id_compat()
