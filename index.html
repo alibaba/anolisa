@@ -27,7 +27,7 @@
   --sans: 'Inter', -apple-system, system-ui, sans-serif;
 }
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-html{overflow-x:clip;scroll-behavior:smooth;scroll-snap-type:y mandatory}
+html{overflow-x:clip;scroll-behavior:smooth}
 body{
   background:var(--bg);color:var(--text);font-family:var(--sans);
   font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;
@@ -285,8 +285,8 @@ h1 span{color:var(--accent-light)}
 
 /* ── changelog ── */
 #anolisa-cli-changelog{
-  min-height:100vh;padding:96px 0 88px;
-  scroll-snap-align:start;scroll-snap-stop:always;
+  min-height:100vh;padding:44px 0 128px;
+  scroll-snap-align:none;
   scroll-margin-top:64px;position:relative;z-index:1;
 }
 .changelog-head{
@@ -326,6 +326,21 @@ h1 span{color:var(--accent-light)}
   background:rgba(10,110,92,0.1);border:1px solid var(--border);
   border-radius:4px;padding:1px 4px;
 }
+#anolisa-cli-changelog .cap-footer{margin-top:72px;padding-top:18px}
+
+/* ── top button ── */
+.top-btn{
+  position:fixed;right:24px;bottom:24px;z-index:120;
+  width:48px;height:36px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--border);border-radius:6px;
+  background:rgba(10,20,27,0.58);backdrop-filter:blur(12px);
+  color:var(--text-2);font-family:var(--mono);font-size:0.6875rem;
+  letter-spacing:0.06em;cursor:pointer;opacity:0;pointer-events:none;
+  transform:translateY(8px);transition:opacity .18s,transform .18s,color .15s,border-color .15s;
+}
+.top-btn.visible{opacity:0.82;pointer-events:auto;transform:translateY(0)}
+.top-btn:hover{opacity:1;color:var(--accent-light);border-color:var(--border-hover)}
+.top-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 
 /* ── footer ── */
 .foot-left{color:var(--text-3)}
@@ -339,7 +354,6 @@ h1 span{color:var(--accent-light)}
 
 /* ── responsive ── */
 @media(max-width:768px){
-  html{scroll-snap-type:none}
   .nav-links{display:none}
   .hero{padding-top:100px;min-height:auto;padding-bottom:48px}
   .scroll-cue{display:none}
@@ -349,10 +363,11 @@ h1 span{color:var(--accent-light)}
   #capabilities{height:auto;min-height:100vh}
   .cap-inner{height:auto;min-height:100vh}
   .cap-header{margin-bottom:24px}
-  #anolisa-cli-changelog{padding:72px 0}
+  #anolisa-cli-changelog{padding:56px 0 104px}
   .changelog-head{display:block}
   .source-link{display:inline-flex;margin-top:18px}
   .release{grid-template-columns:1fr;gap:14px;padding:18px}
+  .top-btn{right:16px;bottom:16px}
   .cap-footer{flex-direction:column;gap:12px;text-align:center}
 }
 @media(max-width:414px){
@@ -444,13 +459,6 @@ h1 span{color:var(--accent-light)}
         </div>
       </div>
 
-      <footer class="cap-footer">
-        <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
-        <ul class="foot-links">
-          <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">Source</a></li>
-          <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0 License</a></li>
-        </ul>
-      </footer>
     </div>
   </section>
 
@@ -519,25 +527,42 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
       </div>
+
+      <footer class="cap-footer">
+        <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
+        <ul class="foot-links">
+          <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">Source</a></li>
+          <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0 License</a></li>
+        </ul>
+      </footer>
     </div>
   </section>
 </main>
+
+<button class="top-btn" id="top-btn" type="button" aria-label="Back to top">TOP</button>
 
 <script>
 const CMD='curl -fsSL https://agentic-os.sh/install.sh | bash';
 const btn=document.getElementById('copy-btn');
 const block=document.getElementById('cmd-block');
 const toast=document.getElementById('copy-toast');
+const hero=document.querySelector('.hero');
 const capabilities=document.getElementById('capabilities');
+const changelog=document.getElementById('anolisa-cli-changelog');
+const topBtn=document.getElementById('top-btn');
 let toastTimer;
 let scrollLock=false;
 
 function fallbackCopy(t){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a)}
 
-function scrollToCapabilities(){
+function scrollToSection(section){
   scrollLock=true;
-  capabilities.scrollIntoView({behavior:'smooth',block:'start'});
+  section.scrollIntoView({behavior:'smooth',block:'start'});
   setTimeout(()=>{scrollLock=false},900);
+}
+
+function updateTopButton(){
+  topBtn.classList.toggle('visible',window.scrollY>window.innerHeight*0.45);
 }
 
 async function doCopy(){
@@ -552,19 +577,26 @@ btn.addEventListener('click',e=>{e.stopPropagation();doCopy()});
 block.addEventListener('click',doCopy);
 block.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doCopy()}});
 
-document.getElementById('scroll-cue').addEventListener('click',scrollToCapabilities);
+document.getElementById('scroll-cue').addEventListener('click',()=>scrollToSection(capabilities));
 document.getElementById('scroll-cue').addEventListener('keydown',e=>{
-  if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToCapabilities()}
+  if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToSection(capabilities)}
 });
+topBtn.addEventListener('click',()=>scrollToSection(hero));
 
 window.addEventListener('wheel',e=>{
-  if(e.deltaY<=0)return;
-  const beforeCapabilities=capabilities.getBoundingClientRect().top>24;
-  if(scrollLock||beforeCapabilities){
+  if(e.deltaY<=0||window.matchMedia('(max-width:768px)').matches)return;
+  const nextSection=capabilities.getBoundingClientRect().top>24
+    ? capabilities
+    : changelog.getBoundingClientRect().top>96
+      ? changelog
+      : null;
+  if(scrollLock||nextSection){
     e.preventDefault();
-    if(!scrollLock&&beforeCapabilities)scrollToCapabilities();
+    if(!scrollLock&&nextSection)scrollToSection(nextSection);
   }
 },{passive:false});
+window.addEventListener('scroll',updateTopButton,{passive:true});
+updateTopButton();
 
 const io=new IntersectionObserver(entries=>{
   entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');io.unobserve(e.target)}})
