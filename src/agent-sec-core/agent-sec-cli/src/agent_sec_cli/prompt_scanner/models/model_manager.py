@@ -170,6 +170,18 @@ class ModelManager:
 
     # ------------------------------------------------------------------
 
+    def is_model_downloaded(self, model_name: str) -> bool:
+        """Return True if *model_name* is present in the local cache.
+
+        Checks the same on-disk condition as ``_resolve_local_model_path``
+        (cache dir exists and contains ``config.json``) but returns a bool
+        instead of raising, so callers like ``MLClassifier.is_available()``
+        can probe availability without exception handling.
+        """
+        cache_dir = Path(self._cache_dir).expanduser()
+        candidate = cache_dir / Path(model_name)
+        return candidate.is_dir() and (candidate / "config.json").exists()
+
     def _resolve_local_model_path(self, model_name: str) -> str:
         """Return the local cache path for *model_name* without triggering a download.
 
@@ -177,11 +189,9 @@ class ModelManager:
             ModelLoadError: if the model has not been downloaded yet, with a
                 user-friendly message pointing to ``scan-prompt warmup``.
         """
-        cache_dir = Path(self._cache_dir).expanduser()
-        candidate = cache_dir / Path(model_name)
-
-        if candidate.is_dir() and (candidate / "config.json").exists():
-            return str(candidate)
+        if self.is_model_downloaded(model_name):
+            cache_dir = Path(self._cache_dir).expanduser()
+            return str(cache_dir / Path(model_name))
 
         raise ModelLoadError(
             f"Model '{model_name}' is not available locally.\n"

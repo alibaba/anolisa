@@ -39,15 +39,18 @@ _DETECTOR_REGISTRY: dict[str, type[DetectionLayer]] = {
 }
 
 # Detectors that can be skipped silently when unavailable.
-# L1 (rule_engine) and L2 (ml_classifier) are mandatory — their deps ship
-# with the package.  L4 (multi_turn_intent) is optional — it depends on an
-# external Ollama service.  When unavailable, MULTI_TURN mode returns a
-# pass-through verdict.  L4 is only invoked when the user explicitly
-# selects --mode multi_turn.
-_OPTIONAL_DETECTORS = frozenset({"semantic", "multi_turn_intent"})
+# L1 (rule_engine) is mandatory — its deps ship with the package.
+# L2 (ml_classifier) is skippable: torch/transformers ship with the package
+# but the model must be downloaded via `scan-prompt warmup`.  When the model
+# is absent, skip L2 and degrade to L1 rather than failing every scan.
+# L3 (semantic) is not yet implemented.
+# L4 (multi_turn_intent) is optional — it depends on an external Ollama
+# service.  When unavailable, MULTI_TURN mode returns a pass-through verdict.
+_OPTIONAL_DETECTORS = frozenset({"ml_classifier", "semantic", "multi_turn_intent"})
 
 # Human-readable skip reasons for optional detectors that are unavailable.
 _SKIP_REASONS: dict[str, str] = {
+    "ml_classifier": "L2 ML classifier model is not downloaded (run `scan-prompt warmup`)",
     "multi_turn_intent": "L4 multi-turn intent detection is not available",
     "semantic": "L3 semantic detection is not available",
 }
@@ -99,8 +102,20 @@ class PromptScanner:
 
             agent-sec-cli scan-prompt warmup
         """
-        log.info("Warming up %d detector(s)...", len(self._detectors))
-        for detector in self._detectors:
+        # Build detectors directly from config, bypassing the is_available()
+        # gate in _init_detectors: warmup's job is to MAKE detectors available
+        # (download the model), so it must not skip a detector merely because
+        # the model is not downloaded yet.
+        log.info("Warming up %d configured detector(s)...", len(self._config.layers))
+        for name in self._config.layers:
+            cls = _DETECTOR_REGISTRY.get(name)
+            if cls is None:
+                continue
+            detector = (
+                cls(model_name=self._config.model_name)
+                if name == "ml_classifier"
+                else cls()
+            )
             if hasattr(detector, "warmup"):
                 detector.warmup()
         log.info("Warmup complete.")
@@ -257,10 +272,11 @@ class PromptScanner:
     def _init_detectors(self) -> list[DetectionLayer]:
         """Instantiate detectors listed in config.layers.
 
-        Mandatory detectors (rule_engine, ml_classifier) raise immediately
-        if unavailable.  Optional detectors (semantic) log a warning and
-        are skipped — this allows the scanner to degrade gracefully when
-        future optional layers are not yet installed.
+        Mandatory detectors (rule_engine) raise immediately if unavailable.
+        Optional detectors (ml_classifier, semantic, multi_turn_intent) log
+        a warning and are skipped — this allows the scanner to degrade
+        gracefully (e.g. to L1 rules-only when the ML model is not yet
+        downloaded) instead of failing every scan.
         """
         detectors: list[DetectionLayer] = []
         for name in self._config.layers:

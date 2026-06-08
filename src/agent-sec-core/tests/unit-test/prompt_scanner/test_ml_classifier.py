@@ -449,17 +449,31 @@ class TestMLClassifierLayer(unittest.TestCase):
         layer = self.MLClassifier.__new__(self.MLClassifier)
         self.assertEqual(layer.name, "ml_classifier")
 
-    def test_is_available_false_without_deps(self) -> None:
-        # MLClassifier.is_available() is inherited from DetectionLayer and
-        # always returns True (deps are mandatory); this verifies it returns True.
+    def _make_layer_with_model(self, downloaded: bool):
         layer = self.MLClassifier.__new__(self.MLClassifier)
-        self.assertTrue(layer.is_available())
+        mock_clf = MagicMock()
+        mock_clf._model_name = "test-model"
+        mock_clf._manager.is_model_downloaded.return_value = downloaded
+        layer._classifier = mock_clf
+        return layer
 
-    def test_is_available_true_with_deps(self) -> None:
-        fake_torch = _make_fake_torch()
-        fake_tf = types.ModuleType("transformers")
-        layer = self.MLClassifier.__new__(self.MLClassifier)
-        with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_tf}):
+    def test_is_available_false_when_model_missing(self) -> None:
+        # Deps present but model NOT downloaded -> False, so the scanner skips
+        # L2 and degrades to L1 instead of failing every scan.
+        layer = self._make_layer_with_model(downloaded=False)
+        with patch("importlib.util.find_spec", return_value=object()):
+            self.assertFalse(layer.is_available())
+
+    def test_is_available_false_without_deps(self) -> None:
+        # torch/transformers missing -> False even if the model is present
+        # (deps are probed first, before the on-disk model check).
+        layer = self._make_layer_with_model(downloaded=True)
+        with patch("importlib.util.find_spec", return_value=None):
+            self.assertFalse(layer.is_available())
+
+    def test_is_available_true_with_deps_and_model(self) -> None:
+        layer = self._make_layer_with_model(downloaded=True)
+        with patch("importlib.util.find_spec", return_value=object()):
             self.assertTrue(layer.is_available())
 
     def test_detect_raises_when_deps_missing(self) -> None:

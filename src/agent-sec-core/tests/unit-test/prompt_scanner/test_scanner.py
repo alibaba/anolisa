@@ -54,6 +54,22 @@ class TestPromptScannerInit(unittest.TestCase):
         # present depending on the test environment; just check no exception raised
         self.assertGreaterEqual(len(scanner._detectors), 1)
 
+    def test_standard_mode_degrades_to_l1_when_ml_model_missing(self) -> None:
+        # When ml_classifier.is_available() is False (e.g. model not downloaded),
+        # STANDARD mode must degrade to L1 (rule_engine) only — NOT raise.
+        # This is the discriminating test for the fix: before adding
+        # ml_classifier to _OPTIONAL_DETECTORS, this raised LayerNotAvailableError.
+        from agent_sec_cli.prompt_scanner.detectors.ml_classifier import (
+            MLClassifier,
+        )
+
+        with patch.object(MLClassifier, "is_available", return_value=False):
+            scanner = PromptScanner(mode=ScanMode.STANDARD)
+        names = [d.name for d in scanner._detectors]
+        self.assertIn("rule_engine", names)
+        self.assertNotIn("ml_classifier", names)
+        self.assertEqual(len(scanner._detectors), 1)
+
     def test_custom_config_unknown_detector_raises(self) -> None:
         config = ScanConfig(layers=["nonexistent_layer"])
         with self.assertRaises(ValueError):

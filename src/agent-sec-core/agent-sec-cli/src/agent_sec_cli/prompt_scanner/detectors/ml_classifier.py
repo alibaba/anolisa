@@ -51,6 +51,27 @@ class MLClassifier(DetectionLayer):
     def name(self) -> str:
         return "ml_classifier"
 
+    def is_available(self) -> bool:
+        """Return True only if torch/transformers are importable AND the
+        model is downloaded locally.
+
+        Returns False (instead of raising) when dependencies are missing or
+        the model has not been fetched yet (e.g. ``scan-prompt warmup`` never
+        ran), so the scanner can skip L2 and degrade to L1 rather than
+        failing every scan.
+        """
+        import importlib.util
+
+        if (
+            importlib.util.find_spec("torch") is None
+            or importlib.util.find_spec("transformers") is None
+        ):
+            return False
+
+        return self._classifier._manager.is_model_downloaded(
+            self._classifier._model_name
+        )
+
     def warmup(self) -> None:
         """Eagerly download and load the ML model.
 
