@@ -23,7 +23,6 @@ body:
         - tokenless
         - ckpt
         - memory
-        - anolisa
         - other
     validations:
       required: true
