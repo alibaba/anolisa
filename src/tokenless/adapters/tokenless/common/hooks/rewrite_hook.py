@@ -111,7 +111,6 @@ def main() -> None:
             timeout=5,
             env=env,
         )
-        forward_stderr(proc)
     except Exception as e:
         warn(f"rtk rewrite subprocess failed: {e}")
         skip()
@@ -124,6 +123,7 @@ def main() -> None:
     #       user confirmation; in non-interactive hook context, treat as valid
     #       rewrite since the intent is token optimization, not permission gating)
     if proc.returncode not in (0, 1, 2, 3):
+        forward_stderr(proc)
         warn(f"rtk rewrite exited with unexpected code {proc.returncode}")
         skip()
     if proc.returncode in (1, 2):

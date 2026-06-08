@@ -22,7 +22,6 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
-    forward_stderr,
     resolve_binary,
     skip,
     warn,
@@ -50,7 +49,10 @@ def _is_json_array(data: str) -> bool:
 def main() -> None:
     # 1. Check tokenless binary
     tokenless_bin = resolve_binary(
-        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+        "tokenless",
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
     )
     if not tokenless_bin:
         warn(
@@ -75,7 +77,9 @@ def main() -> None:
 
     # 4. Extract caller context
     session_id = input_data.get("session_id", "")
-    tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
+    tool_use_id = input_data.get("tool_use_id") or input_data.get(
+        "toolCallId", ""
+    )
 
     # 5. Compress schemas via tokenless compress-schema --batch
     cmd = [tokenless_bin, "compress-schema", "--batch", "--agent-id", _AGENT_ID]
@@ -92,20 +96,24 @@ def main() -> None:
             text=True,
             timeout=10,
         )
-        forward_stderr(proc)
     except Exception:
         warn("Schema compression subprocess failed. Passing through unchanged.")
         skip()
 
     if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()[:200]
         warn(
-            f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged."
+            f"Schema compression failed with exit code {proc.returncode}: {detail}"
+            if detail
+            else f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged."
         )
         skip()
 
     compressed = proc.stdout.strip()
     if not compressed or not _is_json_array(compressed):
-        warn("Schema compression returned invalid JSON. Passing through unchanged.")
+        warn(
+            "Schema compression returned invalid JSON. Passing through unchanged."
+        )
         skip()
 
     # 6. Build response

@@ -27,7 +27,6 @@ from hook_utils import (
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
     SKIP_TOOLS,
-    forward_stderr,
     is_skill_file,
     resolve_binary,
     skip,
@@ -48,7 +47,10 @@ _MIN_RESPONSE_CHARS = 200
 def main() -> None:
     # 1. Resolve binaries
     tokenless_bin = resolve_binary(
-        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
+        "tokenless",
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
     )
     if not tokenless_bin:
         warn("tokenless is not installed. TOON compression hook disabled.")
@@ -99,7 +101,9 @@ def main() -> None:
 
     # 9. Extract caller context
     session_id = input_data.get("session_id", "")
-    tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
+    tool_use_id = input_data.get("tool_use_id") or input_data.get(
+        "toolCallId", ""
+    )
 
     # 10. Encode to TOON via tokenless compress-toon
     cmd = [tokenless_bin, "compress-toon", "--agent-id", _AGENT_ID]
@@ -116,14 +120,16 @@ def main() -> None:
             text=True,
             timeout=10,
         )
-        forward_stderr(proc)
     except Exception as e:
         warn(f"TOON encoding failed: {e}. Passing through unchanged.")
         skip()
 
     if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()[:200]
         warn(
-            f"TOON encoding exited with code {proc.returncode}. Passing through unchanged."
+            f"TOON encoding exited with code {proc.returncode}: {detail}"
+            if detail
+            else f"TOON encoding exited with code {proc.returncode}. Passing through unchanged."
         )
         skip()
 
