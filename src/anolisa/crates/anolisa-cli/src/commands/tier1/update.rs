@@ -8,9 +8,9 @@
 //!   adapter object.
 //!
 //! Explicit invariant (spec §7.3, decision §11.2): `update all` does
-//! **not** include `self`. CLI self-update lives only behind `update
-//! self` so the CLI binary swap never shares a transaction with
-//! component updates.
+//! **not** include CLI self-update. The binary swap never shares a
+//! transaction with component updates. Self-update is reachable via
+//! both `anolisa update self` and `anolisa self update`.
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -68,7 +68,16 @@ pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
     }
 }
 
-fn handle_self_update(ctx: &CliContext) -> Result<(), CliError> {
+/// Execute CLI self-update: fetch release manifest, compare versions,
+/// download and atomically replace the running binary.
+///
+/// Also called from `anolisa self update` as a convenience alias.
+///
+/// # Errors
+///
+/// Returns [`CliError::Runtime`] when the manifest fetch, version check,
+/// download, or binary replacement fails.
+pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), CliError> {
     let url = self_update::update_url();
     let current_version = env!("CARGO_PKG_VERSION");
 

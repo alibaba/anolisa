@@ -1,11 +1,12 @@
 //! Tier 2 surface — `anolisa self`: management of the anolisa CLI itself.
 //!
-//! Self-update lives under `anolisa update self`. A compatibility entry
-//! `anolisa self update` is kept here but returns a hint directing users
-//! to the canonical path. Other subcommands: adopt, completions.
+//! `anolisa self update` delegates to the same self-update logic as
+//! `anolisa update self` — both paths are supported as a user convenience.
+//! Other subcommands: adopt, completions.
 
 use clap::{Parser, Subcommand};
 
+use crate::commands::tier1::update::handle_self_update;
 use crate::context::CliContext;
 use crate::response::CliError;
 
@@ -34,7 +35,7 @@ pub enum SelfCommands {
         /// Target shell (bash, zsh, fish)
         shell: String,
     },
-    /// Self-update the CLI binary (redirects to `anolisa update self`)
+    /// Self-update the CLI binary (same as `anolisa update self`)
     #[command(name = "update")]
     Update,
 }
@@ -43,17 +44,14 @@ pub enum SelfCommands {
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] for subcommands that are intentionally not implemented
-/// yet, including the compatibility `self update` redirect.
-pub fn handle(args: SelfArgs, _ctx: &CliContext) -> Result<(), CliError> {
+/// Returns [`CliError`] for subcommands that are not yet implemented, or
+/// propagates errors from [`handle_self_update`].
+pub fn handle(args: SelfArgs, ctx: &CliContext) -> Result<(), CliError> {
     match args.command {
         SelfCommands::Adopt { .. } => Err(CliError::not_implemented("self adopt")),
         SelfCommands::Completions { shell } => Err(CliError::not_implemented(format!(
             "self completions {shell}"
         ))),
-        SelfCommands::Update => Err(CliError::not_implemented_with_hint(
-            "self update",
-            "`anolisa self update` has moved — use `anolisa update self` instead",
-        )),
+        SelfCommands::Update => handle_self_update(ctx),
     }
 }
