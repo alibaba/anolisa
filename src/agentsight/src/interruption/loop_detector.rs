@@ -279,12 +279,34 @@ impl LoopDetector {
 
 // ─── Utility functions ───────────────────────────────────────────────────────
 
-/// Compute Jaccard similarity between two text strings based on whitespace-split tokens.
+fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+fn tokenize(text: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    for word in text.split_whitespace() {
+        let cjk_chars: Vec<char> = word.chars().filter(|c| is_cjk(*c)).collect();
+        if cjk_chars.len() >= 2 {
+            for pair in cjk_chars.windows(2) {
+                tokens.insert(format!("{}{}", pair[0], pair[1]));
+            }
+        } else if cjk_chars.len() == 1 {
+            tokens.insert(cjk_chars[0].to_string());
+        } else {
+            tokens.insert(word.to_string());
+        }
+    }
+    tokens
+}
+
+/// Compute Jaccard similarity between two text strings.
 ///
-/// Returns a value in [0.0, 1.0] where 1.0 means identical token sets.
+/// Uses whitespace-split tokens for ASCII/Latin text and character bigrams
+/// for CJK text, so deadloop detection works for both English and Chinese.
 fn jaccard_similarity(a: &str, b: &str) -> f64 {
-    let set_a: HashSet<&str> = a.split_whitespace().collect();
-    let set_b: HashSet<&str> = b.split_whitespace().collect();
+    let set_a = tokenize(a);
+    let set_b = tokenize(b);
 
     if set_a.is_empty() && set_b.is_empty() {
         return 1.0;
@@ -526,5 +548,30 @@ mod tests {
     #[test]
     fn test_jaccard_similarity_empty() {
         assert_eq!(jaccard_similarity("", ""), 1.0);
+    }
+
+    #[test]
+    fn test_jaccard_cjk_near_identical() {
+        let a = "根据分析，该数据集包含1000条记录，其中异常值占比约3.2%，建议进一步清洗后重新统计。";
+        let b = "根据分析，该数据集包含1000条记录，其中异常值占比约3.5%，建议进一步清洗后重新统计。";
+        let sim = jaccard_similarity(a, b);
+        assert!(sim > 0.8, "CJK near-identical text should score >0.8, got {sim:.4}");
+    }
+
+    #[test]
+    fn test_jaccard_cjk_different() {
+        let a = "今天天气非常好适合出门散步";
+        let b = "量子计算机可以解决复杂问题";
+        let sim = jaccard_similarity(a, b);
+        assert!(sim < 0.2, "Different CJK text should score <0.2, got {sim:.4}");
+    }
+
+    #[test]
+    fn test_jaccard_english_still_works() {
+        let sim = jaccard_similarity(
+            "analyze the key statistics of this dataset",
+            "analyze the main statistics of this dataset",
+        );
+        assert!(sim > 0.7, "English similarity should still work, got {sim:.4}");
     }
 }

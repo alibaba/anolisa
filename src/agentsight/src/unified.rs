@@ -1086,7 +1086,7 @@ impl AgentSight {
                             &crate::interruption::InterruptionType::DeadLoop,
                         );
                         let should_detect = if self.deadloop_kill_enabled {
-                            existing_count < self.deadloop_kill_after_count
+                            existing_count <= self.deadloop_kill_after_count
                         } else {
                             existing_count == 0
                         };
@@ -1114,18 +1114,30 @@ impl AgentSight {
                                     );
 
                                     // ── Auto-kill 止血 ──
-                                    // Kill when detection count reaches threshold.
-                                    // count_for_conversation now includes the event we just inserted.
                                     if self.deadloop_kill_enabled {
                                         let new_count = existing_count + 1;
-                                        if new_count >= self.deadloop_kill_after_count {
+                                        if new_count > self.deadloop_kill_after_count {
+                                            if let Some(pid) = loop_event.pid {
+                                                log::error!(
+                                                    "DeadLoop auto-kill: escalating to SIGKILL for pid {} (conversation={}, detections={})",
+                                                    pid, cid, new_count
+                                                );
+                                                let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
+                                                if ret != 0 {
+                                                    let err = std::io::Error::last_os_error();
+                                                    log::error!("DeadLoop auto-kill: SIGKILL failed for pid {}: {}", pid, err);
+                                                }
+                                            }
+                                        } else if new_count == self.deadloop_kill_after_count {
                                             if let Some(pid) = loop_event.pid {
                                                 log::error!(
                                                     "DeadLoop auto-kill: sending SIGTERM to pid {} (conversation={}, detections={})",
                                                     pid, cid, new_count
                                                 );
-                                                unsafe {
-                                                    libc::kill(pid, libc::SIGTERM);
+                                                let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+                                                if ret != 0 {
+                                                    let err = std::io::Error::last_os_error();
+                                                    log::error!("DeadLoop auto-kill: SIGTERM failed for pid {}: {}", pid, err);
                                                 }
                                             }
                                         } else {
