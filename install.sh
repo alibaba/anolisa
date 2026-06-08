@@ -5,13 +5,13 @@
 #   curl -fsSL https://anolisa.oss-cn-hangzhou.aliyuncs.com/install.sh | bash
 #
 # Environment overrides:
-#   ANOLISA_VERSION      version to install      (default: 0.1.0)
+#   ANOLISA_VERSION      version to install      (default: stable)
 #   ANOLISA_MIRROR       OSS mirror base URL     (default: https://anolisa.oss-cn-hangzhou.aliyuncs.com)
 #   ANOLISA_INSTALL_DIR  binary install directory (default: ~/.local/bin)
 
 set -euo pipefail
 
-VERSION="${ANOLISA_VERSION:-0.1.0}"
+VERSION="${ANOLISA_VERSION:-stable}"
 MIRROR="${ANOLISA_MIRROR:-https://anolisa.oss-cn-hangzhou.aliyuncs.com}"
 INSTALL_DIR="${ANOLISA_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -65,16 +65,25 @@ sha256_verify() {
 
 main() {
   detect_platform
+  command -v curl >/dev/null 2>&1 || err "curl is required but not found"
+  command -v tar  >/dev/null 2>&1 || err "tar is required but not found"
 
-  local artifact="anolisa-cli-${VERSION}-${TARGET}.tar.gz"
-  local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${VERSION}/artifacts/${OS}/${ARCH_SHORT}"
+  local artifact release_dir label
+  if [ "$VERSION" = "stable" ]; then
+    artifact="anolisa-cli-${TARGET}.tar.gz"
+    release_dir="stable"
+    label="stable"
+  else
+    artifact="anolisa-cli-${VERSION}-${TARGET}.tar.gz"
+    release_dir="$VERSION"
+    label="$VERSION"
+  fi
+
+  local base_url="${MIRROR}/anolisa-releases/anolisa/v1/cli/releases/${release_dir}/artifacts/${OS}/${ARCH_SHORT}"
   local tar_url="${base_url}/${artifact}"
   local sha_url="${tar_url}.sha256.txt"
 
-  log "installing anolisa ${VERSION} (${TARGET})"
-
-  command -v curl >/dev/null 2>&1 || err "curl is required but not found"
-  command -v tar  >/dev/null 2>&1 || err "tar is required but not found"
+  log "installing anolisa ${label} (${TARGET})"
 
   TMPDIR_INSTALL="$(mktemp -d)"
   trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
