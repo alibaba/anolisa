@@ -65,6 +65,8 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     // ── Tier 1 — Capability commands ────────────────────────────────
+    /// Generate a bug report with diagnostic information
+    Bug(tier1::bug::BugArgs),
     /// List capabilities and their availability / enable status
     List(tier1::list::ListArgs),
     /// Enable one or more capabilities
@@ -112,6 +114,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     validate_global_args(ctx)?;
     match cli.command {
         // Tier 1
+        Commands::Bug(args) => tier1::bug::handle(args, ctx),
         Commands::List(args) => tier1::list::handle(args, ctx),
         Commands::Enable(args) => tier1::enable::handle(args, ctx),
         Commands::Disable(args) => tier1::disable::handle(args, ctx),

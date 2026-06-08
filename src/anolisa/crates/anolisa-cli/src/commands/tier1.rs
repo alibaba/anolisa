@@ -5,6 +5,7 @@
 //! names must not leak out to the user-facing surface (see Layer Discipline in
 //! the design doc).
 
+pub mod bug;
 pub mod disable;
 pub mod doctor;
 pub mod enable;
