@@ -283,6 +283,50 @@ h1 span{color:var(--accent-light)}
   box-shadow:0 0 16px var(--accent-glow);
 }
 
+/* ── changelog ── */
+#anolisa-cli-changelog{
+  min-height:100vh;padding:96px 0 88px;
+  scroll-snap-align:start;scroll-snap-stop:always;
+  scroll-margin-top:64px;position:relative;z-index:1;
+}
+.changelog-head{
+  display:flex;align-items:flex-end;justify-content:space-between;
+  gap:24px;margin-bottom:28px;
+}
+.changelog-copy{max-width:600px}
+.changelog-sub{
+  margin-top:10px;color:var(--text-2);font-size:0.875rem;line-height:1.7;
+}
+.source-link{
+  flex-shrink:0;font-family:var(--mono);font-size:0.6875rem;
+  color:var(--text-3);text-decoration:none;border:1px solid var(--border);
+  border-radius:6px;padding:7px 10px;transition:all .15s;
+}
+.source-link:hover{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
+.source-link:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.release-list{display:grid;gap:14px}
+.release{
+  display:grid;grid-template-columns:150px 1fr;gap:24px;
+  background:rgba(10,20,27,0.46);border:1px solid rgba(255,255,255,0.05);
+  border-radius:12px;padding:22px;backdrop-filter:blur(8px);
+}
+.release-meta{font-family:var(--mono)}
+.release-version{font-size:0.875rem;color:var(--accent-light);font-weight:600}
+.release-date{font-size:0.6875rem;color:var(--text-3);margin-top:6px}
+.release-body h3{
+  font-size:0.75rem;letter-spacing:0.08em;text-transform:uppercase;
+  color:var(--text);margin:0 0 8px;font-family:var(--mono);
+}
+.release-body h3:not(:first-child){margin-top:18px}
+.release-body ul{display:grid;gap:8px;margin:0;padding-left:18px;color:var(--text-2)}
+.release-body li{font-size:0.8125rem;line-height:1.6}
+.release-body strong{color:var(--text);font-weight:600}
+.release-body code{
+  font-family:var(--mono);font-size:0.75rem;color:var(--accent-light);
+  background:rgba(10,110,92,0.1);border:1px solid var(--border);
+  border-radius:4px;padding:1px 4px;
+}
+
 /* ── footer ── */
 .foot-left{color:var(--text-3)}
 .foot-links{display:flex;gap:20px;list-style:none}
@@ -295,6 +339,7 @@ h1 span{color:var(--accent-light)}
 
 /* ── responsive ── */
 @media(max-width:768px){
+  html{scroll-snap-type:none}
   .nav-links{display:none}
   .hero{padding-top:100px;min-height:auto;padding-bottom:48px}
   .scroll-cue{display:none}
@@ -304,6 +349,10 @@ h1 span{color:var(--accent-light)}
   #capabilities{height:auto;min-height:100vh}
   .cap-inner{height:auto;min-height:100vh}
   .cap-header{margin-bottom:24px}
+  #anolisa-cli-changelog{padding:72px 0}
+  .changelog-head{display:block}
+  .source-link{display:inline-flex;margin-top:18px}
+  .release{grid-template-columns:1fr;gap:14px;padding:18px}
   .cap-footer{flex-direction:column;gap:12px;text-align:center}
 }
 @media(max-width:414px){
@@ -322,6 +371,7 @@ h1 span{color:var(--accent-light)}
   <div class="wrap">
     <a href="/" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
     <ul class="nav-links">
+      <li><a href="#anolisa-cli-changelog">Changelog</a></li>
       <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a></li>
       <li><a href="https://github.com/alibaba/anolisa/tree/main/docs" target="_blank" rel="noopener">Docs</a></li>
     </ul>
@@ -330,7 +380,7 @@ h1 span{color:var(--accent-light)}
 
 <section class="hero">
   <div class="wrap">
-    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.0</div>
+    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.2</div>
     <h1><span>&gt;_</span> ANOLISA</h1>
     <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
     <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
@@ -401,6 +451,74 @@ h1 span{color:var(--accent-light)}
           <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
         </ul>
       </footer>
+    </div>
+  </section>
+
+  <section id="anolisa-cli-changelog">
+    <div class="wrap">
+      <div class="changelog-head reveal">
+        <div class="changelog-copy">
+          <div class="cap-label">Changelog</div>
+          <h2 class="cap-title">ANOLISA CLI release notes.</h2>
+          <p class="changelog-sub">Stable updates for the command-line runtime, installer, and agent operating layer.</p>
+        </div>
+        <a class="source-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">Source changelog</a>
+      </div>
+
+      <div class="release-list">
+        <article class="release reveal reveal-d1">
+          <div class="release-meta">
+            <div class="release-version">0.1.2</div>
+            <div class="release-date">2026-06-08</div>
+          </div>
+          <div class="release-body">
+            <h3>Added</h3>
+            <ul>
+              <li><strong>Bug report command:</strong> <code>anolisa bug</code> generates local diagnostic Markdown and JSON payloads with environment facts, enabled capability state, and recent warn/error central-log records.</li>
+              <li><strong>Self-update alias:</strong> <code>anolisa self update</code> now delegates to the existing <code>anolisa update self</code> flow.</li>
+            </ul>
+            <h3>Fixed</h3>
+            <ul>
+              <li>Restored and simplified the bug report issue template.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2">
+          <div class="release-meta">
+            <div class="release-version">0.1.1</div>
+            <div class="release-date">2026-06-07</div>
+          </div>
+          <div class="release-body">
+            <h3>Added</h3>
+            <ul>
+              <li><strong>Sandbox install pipeline:</strong> 5-phase orchestrator for sandbox provisioning with firecracker standard and e2b backend variants.</li>
+              <li><strong>Subscription consent management:</strong> token collection state machine with persistent register, unregister, and later states.</li>
+              <li><strong>Upload enablement:</strong> ilogtail install, configure, and teardown with region-id probing and SLS account management.</li>
+              <li><strong>Self-update:</strong> <code>anolisa update self</code> with manifest-based downloads, checksum verification, exclusive locking, and rollback.</li>
+              <li><strong>Package manager backends:</strong> real dnf and apt implementations replacing placeholder stubs.</li>
+              <li><strong>CI integration:</strong> GitHub Actions automation for the anolisa workspace.</li>
+            </ul>
+            <h3>Fixed</h3>
+            <ul>
+              <li>Replaced <code>sed</code> with bash parameter expansion in the install script for improved portability and correctness.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d3">
+          <div class="release-meta">
+            <div class="release-version">0.1.0</div>
+            <div class="release-date">2026-06-04</div>
+          </div>
+          <div class="release-body">
+            <h3>Initial alpha release</h3>
+            <ul>
+              <li>Introduced the Cargo workspace, CLI command surface, environment detection, capability lifecycle engine, execution policy, manifests, installer, demo scripts, and schema templates.</li>
+            </ul>
+          </div>
+        </article>
+      </div>
     </div>
   </section>
 </main>
