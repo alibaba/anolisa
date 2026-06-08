@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Added auto-install tokenless plugin support for agent install skills. (#731)
+- Added OpenClaw dependency precheck. (#719)
+- Improved OpenClaw non-interactive setup. (#687)
+- Added Hermes adapter runner. (#617)
+- Added standalone ANOLISA adapter entry. (#549)
+- Fixed OpenClaw state dir handling normalization. (#641)
+- Improved Makefile install paths and contract. (#541)
+
 ## 0.3.0
 
 - Added `hermes-agent-install` skill. (#353)
