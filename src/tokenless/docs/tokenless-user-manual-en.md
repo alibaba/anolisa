@@ -2,7 +2,7 @@
 
 > LLM token optimization toolkit — Schema/Response Compression + Command Rewriting + TOON Format
 
-**Version**: 0.4.1  
+**Version**: 0.5.0  
 **Source**: https://code.alibaba-inc.com/Agentic-OS/Token-Less  
 **RPM Source**: https://code.alibaba-inc.com/alinux/tokenless  
 **System Requirements**: Rust 1.89+ (edition 2024), Linux (Alinux 4 recommended), just (build runner)

@@ -1,4 +1,4 @@
-%define anolis_release 4
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -401,6 +401,41 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jun 08 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.5.0-1
+- feat(tokenless): add Claude Code adapter plugin
+- feat(tokenless): add codex adapter plugin
+- feat(tokenless): add qoder CLI adapter
+- feat(tokenless): add selective-claw context engine plugin
+- feat(tokenless): add Hermes adapter runner
+- fix(tokenless): add input size limit and validate db path
+- fix(tokenless): address review findings for selective-claw plugin
+- fix(tokenless): address review findings — trailing newline, chmod guard, rate-limited log
+- fix(tokenless): add subprocess returncode checks and extract shared hook utilities
+- fix(tokenless): anchor home lookup on getpwuid_r and trust-check candidate binaries
+- fix(tokenless): bound SchemaCompressor recursion to prevent stack overflow
+- fix(tokenless): compress-schema on array input
+- fix(tokenless): dedup rewrite_hook, import from hook_utils
+- fix(tokenless): drop TOON wrapper prefix and slim diagnostic tags
+- fix(tokenless): error on TTY stdin instead of hang
+- fix(tokenless): fix compression pipeline output inflation, truncation and hook timeouts
+- fix(tokenless): harden env-fix install paths with uid trust check and divert stderr to log
+- fix(tokenless): harden env-fix, version extraction, file trust, schema, permissions
+- fix(tokenless): harden hook exit-code handling + trust model consistency
+- fix(tokenless): make env attribution reachable for skip-tools entries
+- fix(tokenless): only warn on truly unexpected rtk exit codes
+- fix(tokenless): propagate env-fix subprocess failures instead of returning stdout
+- fix(tokenless): recover from poisoned mutex in stats recorder instead of failing
+- fix(tokenless): remove invalid "2" dependency from selective-claw
+- fix(tokenless): reserve truncation marker length in response compressor
+- fix(tokenless): restore indentation in compress_response_hook.py
+- fix(tokenless): secure resolveBinaryPath and improve binary cache invalidation
+- fix(tokenless): secure shell variable interpolation in env-fix and hooks
+- fix(tokenless): stats command syntax
+- fix(tokenless): unify rtk rewrite exit code 3 handling across adapters
+- fix(tokenless): use mktemp in tests and safe home expansion
+- fix(tokenless): warn when compression is skipped
+- refactor(tokenless): rename openclaw plugin Name to Tokenless and ID to tokenless
+
 * Thu Jun 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.4.1-4
 - feat(tokenless): add codex adapter plugin with response compression and RTK rewriting
 

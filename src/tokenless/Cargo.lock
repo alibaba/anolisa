@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-stats"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "dirs",

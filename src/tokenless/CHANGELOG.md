@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.0
+
+- add Hermes adapter runner
+- drop TOON wrapper prefix and slim diagnostic tags
+- unify rtk rewrite exit code 3 handling across adapters
+- secure shell variable interpolation in env-fix and hooks
+- add subprocess returncode checks and extract shared hook utilities
+- secure resolveBinaryPath and improve binary cache invalidation
+- use mktemp in tests and safe home expansion
+- bound SchemaCompressor recursion to prevent stack overflow
+- propagate env-fix subprocess failures instead of returning stdout
+- anchor home lookup on getpwuid_r and trust-check candidate binaries
+- harden env-fix install paths with uid trust check and divert stderr to log
+- recover from poisoned mutex in stats recorder instead of failing
+- add input size limit and validate db path
+- reserve truncation marker length in response compressor
+- rename openclaw plugin Name to Tokenless and ID to tokenless
+- add qoder CLI adapter
+- compress-schema on array input
+- warn when compression is skipped
+- stats command syntax
+- add Claude Code adapter plugin
+- error on TTY stdin instead of hang
+- add codex adapter plugin
+- fix compression pipeline output inflation, truncation and hook timeouts
+- harden env-fix, version extraction, file trust, schema, permissions
+- address review findings — trailing newline, chmod guard, rate-limited log, comment
+- make env attribution reachable for skip-tools entries
+- add selective-claw context engine plugin
+- address review findings for selective-claw plugin
+- remove invalid "2" dependency from selective-claw
+- restore indentation in compress_response_hook.py
+- harden hook exit-code handling + trust model consistency
+- only warn on truly unexpected rtk exit codes
+- dedup rewrite_hook, import from hook_utils
+
 ## 0.4.1
 
 - fix version_ge 3-segment truncation in env_check.rs (compare all segments)
