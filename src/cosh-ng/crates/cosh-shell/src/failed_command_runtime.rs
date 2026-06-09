@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FailedCommandAnalysisTrigger {
+    Auto,
+    UserConfirmed,
+}
+
 pub(super) fn render_post_failure_actions<W: Write>(
     events: &[ShellEvent],
     blocks: &[CommandBlock],
@@ -44,7 +50,16 @@ pub(super) fn render_post_failure_actions<W: Write>(
         };
 
         state.handled_confirmations.insert(key);
-        start_agent_for_block(block, blocks, findings, adapter, state, output, Some(idx))?;
+        start_agent_for_block(
+            block,
+            blocks,
+            findings,
+            adapter,
+            state,
+            output,
+            Some(idx),
+            FailedCommandAnalysisTrigger::UserConfirmed,
+        )?;
         output.flush()?;
     }
 
@@ -111,6 +126,7 @@ pub(super) fn start_agent_for_block<W: Write>(
     state: &mut InlineState,
     output: &mut W,
     selectable_after_event_index: Option<usize>,
+    trigger: FailedCommandAnalysisTrigger,
 ) -> std::io::Result<()> {
     if !should_analyze_failed_block(block, state.analysis_mode) {
         return Ok(());
@@ -120,9 +136,15 @@ pub(super) fn start_agent_for_block<W: Write>(
         return Ok(());
     }
 
+    if !state.analyzed_blocks.insert(block.id.clone()) {
+        return Ok(());
+    }
+
     if state.analysis_throttle.should_throttle(&block.command) {
-        state.analyzed_blocks.insert(block.id.clone());
-        let throttle_key = format!("throttle:{}", cosh_shell::first_program_token(&block.command));
+        let throttle_key = format!(
+            "throttle:{}",
+            cosh_shell::first_program_token(&block.command)
+        );
         if state.queued_analysis_notices.insert(throttle_key) {
             RatatuiInlineRenderer::for_terminal().write_notice(
                 output,
@@ -138,26 +160,6 @@ pub(super) fn start_agent_for_block<W: Write>(
         return Ok(());
     }
 
-    if !state.analyzed_blocks.insert(block.id.clone()) {
-        return Ok(());
-    }
-
-    if state.active_run.is_some() {
-        state.analyzed_blocks.remove(&block.id);
-        if state.queued_analysis_notices.insert(block.id.clone()) {
-            RatatuiInlineRenderer::for_terminal().write_notice(
-                output,
-                "Agent queued",
-                vec![
-                    format!("Captured failed command: {}", block.command),
-                    "Current Agent run is still streaming.".to_string(),
-                ],
-                Some("This failure will be analyzed after the current Agent run finishes."),
-            )?;
-        }
-        return Ok(());
-    }
-
     match agent_request_after_confirmation(&block.session_id, block, findings, true) {
         Some(mut request) => {
             let ctx_config = cosh_shell::ContextWindowConfig::default();
@@ -165,6 +167,33 @@ pub(super) fn start_agent_for_block<W: Write>(
                 cosh_shell::build_context_window(blocks, block.ended_at_ms, &ctx_config);
             request.context_blocks = cosh_shell::context_blocks_from_entries(&ctx_entries);
             request.context_hints = command_hook_hints_for_block(state, block);
+            if trigger == FailedCommandAnalysisTrigger::Auto
+                && !request.context_hints.is_empty()
+                && state.active_run.is_none()
+            {
+                RatatuiInlineRenderer::for_terminal().write_notice(
+                    output,
+                    "Hook auto-analyzed",
+                    vec![format!(
+                        "`{}` exited with code {}",
+                        block.command, block.exit_code
+                    )],
+                    Some("Agent analysis is starting."),
+                )?;
+            }
+            if state.active_run.is_some() && state.queued_analysis_notices.insert(block.id.clone())
+            {
+                RatatuiInlineRenderer::for_terminal().write_notice(
+                    output,
+                    "Agent queued",
+                    vec![
+                        format!("Captured failed command: {}", block.command),
+                        "Current Agent run is still streaming.".to_string(),
+                    ],
+                    Some("This failure will be analyzed after the current Agent run finishes."),
+                )?;
+            }
+            state.needs_prompt_after_agent_run = true;
             start_agent_run(
                 &request,
                 adapter,

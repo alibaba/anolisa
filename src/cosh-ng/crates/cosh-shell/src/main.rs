@@ -41,7 +41,7 @@ use command_hook_runtime::{
 use details_runtime::render_runtime_details;
 use failed_command_runtime::{
     block_end_event_index, latest_pending_failed_block_before_event, render_post_failure_actions,
-    should_analyze_failed_block, start_agent_for_block,
+    should_analyze_failed_block, start_agent_for_block, FailedCommandAnalysisTrigger,
 };
 use intercept_runtime::render_intercept_agent_guidance;
 use question_runtime::{
@@ -54,9 +54,8 @@ use recommendation_runtime::{
     record_selectable_recommendations, render_selectable_recommendations, render_selection_actions,
 };
 use runtime_state::{
-    AnalysisMode, ApprovalMode, ApprovalRequestKind, ApprovalRequestStatus, InlineState,
-    PendingConsultation, RuntimeApprovalJournalEntry, RuntimeApprovalRequest,
-    RuntimeCommandHookHint,
+    AnalysisMode, ApprovalRequestKind, ApprovalRequestStatus, CoshApprovalMode, InlineState,
+    RuntimeApprovalJournalEntry, RuntimeApprovalRequest, RuntimeCommandHookHint,
 };
 use slash_runtime::render_slash_actions;
 use startup_runtime::render_startup_banner;
@@ -75,10 +74,10 @@ use cosh_shell::{
     govern_agent_events, interventions_from_findings, render_transcript, run_line_interactive_bash,
     run_raw_interactive_bash_with_output_control, run_raw_interactive_zsh_with_output_control,
     run_scripted_bash, AdapterInstance, AdapterKind, AgentAdapter, AgentEvent, AgentMode,
-    AgentRequest, ApprovalCommandKind, CommandBlock, CommandStatus, FakeAgentAdapter, Finding,
-    GovernedEvent, OutputRefs, Policy, RatatuiInlineRenderer, RawInputCapture, RawObserverAction,
-    ScriptedInput, ShellEvent, ShellEventKind, ShellHostConfig, ToolExecutionResult,
-    ToolExecutionStatus,
+    AgentRequest, ApprovalCommandKind, ApprovalDecision, ApprovalResponse, CommandBlock,
+    CommandStatus, FakeAgentAdapter, Finding, GovernedEvent, OutputRefs, Policy,
+    RatatuiInlineRenderer, RawInputCapture, RawObserverAction, ScriptedInput, ShellEvent,
+    ShellEventKind, ShellHostConfig, ToolExecutionResult, ToolExecutionStatus,
 };
 
 static mut ORIGINAL_TERMIOS: Option<libc::termios> = None;
@@ -101,9 +100,18 @@ fn install_terminal_recovery() {
     }));
 
     unsafe {
-        libc::signal(libc::SIGTERM, restore_and_exit as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, restore_and_exit as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGQUIT, restore_and_exit as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            restore_and_exit as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            restore_and_exit as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGQUIT,
+            restore_and_exit as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -126,11 +134,11 @@ extern "C" fn restore_and_exit(sig: libc::c_int) {
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
 
-    if args.iter().any(|a| a == "--version") {
+    if args.get(1).map(String::as_str) == Some("--version") {
         println!("cosh-shell {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
-    if args.iter().any(|a| a == "--help") {
+    if args.get(1).map(String::as_str) == Some("--help") {
         print_usage_help();
         std::process::exit(0);
     }
@@ -145,6 +153,14 @@ fn main() {
         if let Some(status) = passthrough_non_interactive(&args) {
             std::process::exit(status);
         }
+        if should_start_default_raw(&args[1..]) {
+            let config = cosh_shell::load_config();
+            let status = run_raw(
+                &config.adapter_default,
+                raw_shell_from_args_or_env(&args[1..]),
+            );
+            std::process::exit(status);
+        }
     }
 
     let status = match args.get(1).map(String::as_str) {
@@ -152,24 +168,16 @@ fn main() {
         Some("host-demo") => run_host_demo(),
         Some("raw") => run_raw(
             adapter_name_from_args(&args[2..]).unwrap_or("fake"),
-            args.iter().any(|arg| arg == "--run"),
             raw_shell_from_args_or_env(&args[2..]),
         ),
-        Some("interactive") => run_interactive(
-            args.get(2).map(String::as_str).unwrap_or("fake"),
-            args.iter().any(|arg| arg == "--run"),
-        ),
-        Some("interactive-demo") => run_interactive_demo(
-            args.get(2).map(String::as_str).unwrap_or("fake"),
-            args.iter().any(|arg| arg == "--run"),
-        ),
-        Some("adapter-demo") => run_adapter_demo(
-            args.get(2).map(String::as_str).unwrap_or("fake"),
-            args.iter().any(|arg| arg == "--run"),
-        ),
+        Some("interactive") => run_interactive(args.get(2).map(String::as_str).unwrap_or("fake")),
+        Some("interactive-demo") => {
+            run_interactive_demo(args.get(2).map(String::as_str).unwrap_or("fake"))
+        }
+        Some("adapter-demo") => run_adapter_demo(args.get(2).map(String::as_str).unwrap_or("fake")),
         _ => {
             eprintln!(
-                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|qwen] [--run] [--shell bash|zsh]>"
+                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|qwen] [--shell bash|zsh]>"
             );
             2
         }
@@ -216,7 +224,6 @@ fn adapter_name_from_args(args: &[String]) -> Option<&str> {
     let mut idx = 0;
     while idx < args.len() {
         match args[idx].as_str() {
-            "--run" => idx += 1,
             "--shell" => idx += 2,
             arg if arg.starts_with("--shell=") => idx += 1,
             arg if arg.starts_with("--") => idx += 1,
@@ -259,6 +266,25 @@ fn raw_shell_from_args(args: &[String]) -> Option<RawShellKind> {
     None
 }
 
+fn should_start_default_raw(args: &[String]) -> bool {
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell" => {
+                if !matches!(args.get(idx + 1), Some(value) if !value.starts_with("--")) {
+                    return false;
+                }
+                idx += 2;
+            }
+            "--isolated" | "--login" | "-l" => idx += 1,
+            arg if arg.starts_with("--shell=") => idx += 1,
+            _ => return false,
+        }
+    }
+
+    true
+}
+
 fn parse_raw_shell(value: &str) -> RawShellKind {
     let name = value.rsplit('/').next().unwrap_or(value);
     match name {
@@ -268,7 +294,7 @@ fn parse_raw_shell(value: &str) -> RawShellKind {
     }
 }
 
-fn run_raw(adapter_name: &str, run_model: bool, shell_kind: RawShellKind) -> i32 {
+fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     let args = std::env::args().collect::<Vec<_>>();
 
     let Some(kind) = AdapterKind::parse(adapter_name) else {
@@ -289,27 +315,31 @@ fn run_raw(adapter_name: &str, run_model: bool, shell_kind: RawShellKind) -> i32
         config.input_classifier = config.input_classifier.with_conservative(true);
     }
 
-    let login = args
-        .first()
-        .map_or(false, |a| a.starts_with('-'))
+    let login = args.first().is_some_and(|a| a.starts_with('-'))
         || args.iter().any(|a| a == "--login" || a == "-l");
     config.login_shell = login;
 
     let cosh_config = cosh_shell::load_config();
+    config.input_classifier = config
+        .input_classifier
+        .with_ai_enabled(cosh_config.ai_enabled);
     if cosh_config.analysis_mode == "auto" {
         // will be applied below
     }
 
-    let adapter = build_adapter(kind, run_model);
+    let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     match cosh_config.analysis_mode.as_str() {
         "auto" => inline_state.analysis_mode = AnalysisMode::Auto,
         "manual" => inline_state.analysis_mode = AnalysisMode::Manual,
         _ => {}
     }
-    if cosh_config.approval_mode == "auto" {
-        inline_state.approval_mode = ApprovalMode::Auto;
-    }
+    inline_state.approval_mode = match cosh_config.approval_mode.as_str() {
+        "suggest" => CoshApprovalMode::Suggest,
+        "ask" => CoshApprovalMode::Ask,
+        "trust" => CoshApprovalMode::Trust,
+        _ => CoshApprovalMode::Auto,
+    };
     let mut hook_engine = cosh_shell::HookEngine::new();
     for hook in cosh_shell::default_builtin_hooks() {
         hook_engine.register(hook);
@@ -365,7 +395,7 @@ fn render_raw_inline_events<W: Write>(
     )?;
     if inline_state.trigger_pty_prompt {
         inline_state.trigger_pty_prompt = false;
-        return Ok(RawObserverAction::EmitToPty(b"\n".to_vec()));
+        return Ok(RawObserverAction::RestorePrompt);
     }
     if let Some(capture) = pending_card_capture(inline_state) {
         Ok(RawObserverAction::CaptureInput(capture))
@@ -383,13 +413,16 @@ fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
         return Some(RawInputCapture::Mode {
             id: mode_panel.id.clone(),
             option_count: 2,
+            selected: mode_panel.selected_option,
         });
     }
 
-    if let Some(consultation) = state.pending_consultation.as_ref() {
-        return Some(RawInputCapture::Consultation {
-            id: consultation.card_id.clone(),
-        });
+    if state.active_run.is_none() {
+        if let Some(consultation) = state.pending_consultation.as_ref() {
+            return Some(RawInputCapture::Consultation {
+                id: consultation.card_id.clone(),
+            });
+        }
     }
 
     if let Some(capture) = pending_question_capture(state) {
@@ -405,19 +438,18 @@ fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
         })
 }
 
-fn run_interactive(adapter_name: &str, run_model: bool) -> i32 {
+fn run_interactive(adapter_name: &str) -> i32 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     run_interactive_from_reader(
         "interactive-session",
         adapter_name,
-        run_model,
         stdin.lock(),
         &mut stdout,
     )
 }
 
-fn run_interactive_demo(adapter_name: &str, run_model: bool) -> i32 {
+fn run_interactive_demo(adapter_name: &str) -> i32 {
     let input = std::io::Cursor::new(
         "/explain last error\n\
          echo ok\n\
@@ -425,19 +457,12 @@ fn run_interactive_demo(adapter_name: &str, run_model: bool) -> i32 {
          ls /path/that/does/not/exist\n",
     );
     let mut output = Vec::new();
-    run_interactive_from_reader(
-        "interactive-demo-session",
-        adapter_name,
-        run_model,
-        input,
-        &mut output,
-    )
+    run_interactive_from_reader("interactive-demo-session", adapter_name, input, &mut output)
 }
 
 fn run_interactive_from_reader<R, W>(
     session_id: &str,
     adapter_name: &str,
-    run_model: bool,
     input: R,
     output: &mut W,
 ) -> i32
@@ -461,30 +486,25 @@ where
         }
     };
 
-    render_loop_from_events_with_adapter(
-        &shell_output.shell.events,
-        &build_adapter(kind, run_model),
-    )
+    render_loop_from_events_with_adapter(&shell_output.shell.events, &build_adapter(kind))
 }
 
-fn run_adapter_demo(adapter_name: &str, run_model: bool) -> i32 {
+fn run_adapter_demo(adapter_name: &str) -> i32 {
     let Some(kind) = AdapterKind::parse(adapter_name) else {
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
     let events = demo_events();
-    render_loop_from_events_with_adapter(&events, &build_adapter(kind, run_model))
+    render_loop_from_events_with_adapter(&events, &build_adapter(kind))
 }
 
-fn build_adapter(kind: AdapterKind, run_model: bool) -> cosh_shell::AdapterInstance {
-    let adapter = adapter_for_kind(kind);
-    if !run_model {
-        return adapter;
-    }
-
-    match adapter {
+fn build_adapter(kind: AdapterKind) -> cosh_shell::AdapterInstance {
+    match adapter_for_kind(kind) {
         cosh_shell::AdapterInstance::ClaudeCode(adapter) => {
             cosh_shell::AdapterInstance::ClaudeCode(adapter.with_model_call(true))
+        }
+        cosh_shell::AdapterInstance::QwenCli(adapter) => {
+            cosh_shell::AdapterInstance::QwenCli(adapter.with_model_call(true))
         }
         other => other,
     }
@@ -555,6 +575,7 @@ fn render_inline_guidance<W: Write>(
             state,
             output,
             block_end_event_index(events, block),
+            FailedCommandAnalysisTrigger::Auto,
         )?;
         output.flush()?;
     }
@@ -774,9 +795,25 @@ fn demo_events() -> Vec<ShellEvent> {
 }
 
 fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
+    if args.get(1).map(String::as_str) == Some("--") {
+        let Some(command) = args.get(2) else {
+            eprintln!("cosh-shell: missing command after --");
+            return Some(2);
+        };
+        let status = std::process::Command::new(command)
+            .args(&args[3..])
+            .status()
+            .map(|s| s.code().unwrap_or(1))
+            .unwrap_or_else(|err| {
+                eprintln!("cosh-shell: exec {command} failed: {err}");
+                126
+            });
+        return Some(status);
+    }
+
     if args.iter().any(|a| a == "-c") {
         let shell = detect_passthrough_shell(args);
-        let pass_args: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        let pass_args = passthrough_shell_args(args);
         let status = std::process::Command::new(&shell)
             .args(&pass_args)
             .status()
@@ -790,7 +827,9 @@ fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let shell = detect_passthrough_shell(args);
+        let pass_args = passthrough_shell_args(args);
         let status = std::process::Command::new(&shell)
+            .args(&pass_args)
             .stdin(std::process::Stdio::inherit())
             .status()
             .map(|s| s.code().unwrap_or(1))
@@ -818,6 +857,23 @@ fn detect_passthrough_shell(args: &[String]) -> String {
     std::env::var("COSH_SHELL_DEFAULT_SHELL").unwrap_or_else(|_| "bash".to_string())
 }
 
+fn passthrough_shell_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = args.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--shell" => {
+                let _ = iter.next();
+            }
+            "--isolated" => {}
+            "--login" => out.push("-l".to_string()),
+            _ if arg.starts_with("--shell=") => {}
+            _ => out.push(arg.clone()),
+        }
+    }
+    out
+}
+
 fn print_usage_help() {
     eprintln!(
         "Usage: cosh-shell [OPTIONS]\n\
@@ -830,6 +886,7 @@ fn print_usage_help() {
          \n\
          Options:\n\
            -c <command>            Execute command and exit (passthrough to bash/zsh)\n\
+           -- <command> [args...]   Execute command directly and exit\n\
            --shell <shell>         Use specified shell (bash, zsh) [default: bash]\n\
            --isolated              Isolated mode: skip user rcfiles\n\
            --login, -l             Treat as login shell\n\
@@ -854,8 +911,8 @@ mod tests {
 
     use super::{
         adapter_name_from_args, parse_raw_shell, raw_shell_from_args, render_inline_guidance,
-        shell_has_active_foreground_command, AdapterInstance, FakeAgentAdapter, InlineState,
-        RawShellKind, ShellEvent, ShellEventKind,
+        shell_has_active_foreground_command, should_start_default_raw, AdapterInstance,
+        FakeAgentAdapter, InlineState, RawShellKind, ShellEvent, ShellEventKind,
     };
 
     #[test]
@@ -898,6 +955,27 @@ mod tests {
             adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "qwen".to_string()]),
             Some("qwen")
         );
+    }
+
+    #[test]
+    fn no_subcommand_interactive_raw_accepts_only_shell_entry_options() {
+        assert!(should_start_default_raw(&[]));
+        assert!(should_start_default_raw(&["--login".to_string()]));
+        assert!(should_start_default_raw(&["-l".to_string()]));
+        assert!(should_start_default_raw(&[
+            "--shell".to_string(),
+            "zsh".to_string(),
+            "--isolated".to_string()
+        ]));
+        assert!(should_start_default_raw(&["--shell=bash".to_string()]));
+
+        assert!(!should_start_default_raw(&["fake".to_string()]));
+        assert!(!should_start_default_raw(&["--shell".to_string()]));
+        assert!(!should_start_default_raw(&[
+            "--shell".to_string(),
+            "--isolated".to_string()
+        ]));
+        assert!(!should_start_default_raw(&["--unknown".to_string()]));
     }
 
     #[test]

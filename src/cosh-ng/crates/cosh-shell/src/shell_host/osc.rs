@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -39,6 +39,7 @@ pub(super) struct OscParser {
     command_seq: usize,
     intervention_cuts: Vec<usize>,
     intervention_display_cuts: Vec<usize>,
+    last_prompt_display_start: Option<usize>,
 }
 
 impl OscParser {
@@ -55,6 +56,7 @@ impl OscParser {
             command_seq: 0,
             intervention_cuts: Vec::new(),
             intervention_display_cuts: Vec::new(),
+            last_prompt_display_start: None,
         }
     }
 
@@ -147,6 +149,7 @@ impl OscParser {
                 let Some(current) = self.current.take() else {
                     self.intervention_cuts.push(self.clean.len());
                     self.intervention_display_cuts.push(self.display.len());
+                    self.last_prompt_display_start = Some(self.display.len());
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
                         session_id,
@@ -167,11 +170,16 @@ impl OscParser {
                     return Ok(());
                 };
 
-                let status = marker.status.unwrap_or(0);
+                let status = if is_shell_exit_command(&current.command) {
+                    0
+                } else {
+                    marker.status.unwrap_or(0)
+                };
                 let output = self.clean[current.output_start..].to_vec();
                 let output_ref = write_output_ref(&self.output_ref_dir, &current.id, &output)?;
                 self.intervention_cuts.push(self.clean.len());
                 self.intervention_display_cuts.push(self.display.len());
+                self.last_prompt_display_start = Some(self.display.len());
                 let kind = if status == 0 {
                     ShellEventKind::CommandCompleted
                 } else {
@@ -295,23 +303,31 @@ impl OscParser {
     }
 
     pub(super) fn precmd_count(&self) -> usize {
-        self.events.iter().filter(|e| {
-            matches!(e.kind, ShellEventKind::CommandCompleted
-                | ShellEventKind::CommandFailed
-                | ShellEventKind::ShellReady)
-        }).count()
-    }
-
-    pub(super) fn display_last_line_bytes(&self) -> usize {
-        if let Some(last_newline) = self.display.iter().rposition(|&b| b == b'\n') {
-            self.display.len() - last_newline - 1
-        } else {
-            self.display.len()
-        }
+        self.events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    ShellEventKind::CommandCompleted
+                        | ShellEventKind::CommandFailed
+                        | ShellEventKind::ShellReady
+                )
+            })
+            .count()
     }
 
     pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    pub(super) fn last_prompt_display(&self) -> &[u8] {
+        let Some(start) = self.last_prompt_display_start else {
+            return &[];
+        };
+        if start >= self.display.len() {
+            return &[];
+        }
+        &self.display[start..]
     }
 
     pub(super) fn push_intercept_event(
@@ -397,7 +413,7 @@ struct Marker {
     status: Option<i32>,
 }
 
-fn write_output_ref(dir: &PathBuf, command_id: &str, output: &[u8]) -> io::Result<PathBuf> {
+fn write_output_ref(dir: &Path, command_id: &str, output: &[u8]) -> io::Result<PathBuf> {
     let path = dir.join(format!("{command_id}.txt"));
     fs::write(&path, output)?;
     Ok(path)

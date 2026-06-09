@@ -133,7 +133,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/mode|/select|/shell|/skill)
+    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -169,24 +169,13 @@ _cosh_should_intercept_unknown() {
 _cosh_is_slash_control_candidate() {
   local command="$1"
 
-  if [[ "$command" == "/" ]]; then
-    return 0
-  fi
+  case "$command" in
+    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+      return 0
+      ;;
+  esac
 
-  if [[ "$command" != /* ]]; then
-    return 1
-  fi
-
-  local rest="${command#/}"
-  if [[ "$rest" == */* ]]; then
-    return 1
-  fi
-
-  if [[ -e "$command" ]]; then
-    return 1
-  fi
-
-  return 0
+  return 1
 }
 
 command_not_found_handle() {
@@ -382,7 +371,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/mode|/select|/shell|/skill)
+    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -418,27 +407,21 @@ _cosh_should_intercept_unknown() {
 _cosh_is_slash_control_candidate() {
   local command="$1"
 
-  if [[ "$command" == "/" ]]; then
-    return 0
-  fi
+  case "$command" in
+    /agent|/approval-mode|/audit|/cancel|/clear|/config|/copy|/details|/explain|/help|/hooks|/mode|/select|/shell|/skill)
+      return 0
+      ;;
+  esac
 
-  if [[ "$command" != /* ]]; then
-    return 1
-  fi
-
-  local rest="${command#/}"
-  if [[ "$rest" == */* ]]; then
-    return 1
-  fi
-
-  if [[ -e "$command" ]]; then
-    return 1
-  fi
-
-  return 0
+  return 1
 }
 
 command_not_found_handler() {
+  if [[ "${_COSH_PREEXEC_INTERCEPTED:-0}" == 1 ]]; then
+    _COSH_PREEXEC_INTERCEPTED=0
+    return 0
+  fi
+
   local command="$1"
   shift || true
   local original="$command"
@@ -457,6 +440,7 @@ command_not_found_handler() {
 }
 
 _cosh_preexec_marker() {
+  _COSH_PREEXEC_INTERCEPTED=0
   local command="$1"
   local first_word="$command"
   local argc=1
@@ -467,6 +451,7 @@ _cosh_preexec_marker() {
   local reason
   if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
     _cosh_emit_intercept_marker "$command" "$reason"
+    _COSH_PREEXEC_INTERCEPTED=1
     return 1
   fi
   _cosh_emit_marker "preexec" "$command" 0
@@ -474,6 +459,8 @@ _cosh_preexec_marker() {
 
 _cosh_precmd_marker() {
   local exit_status=$?
+  setopt NO_PROMPT_CR 2>/dev/null || true
+  setopt NO_PROMPT_SP 2>/dev/null || true
   _cosh_emit_marker "precmd" "" "$exit_status"
 }
 

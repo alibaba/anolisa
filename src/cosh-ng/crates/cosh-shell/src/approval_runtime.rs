@@ -18,12 +18,11 @@ pub(super) fn record_approval_requests(
         let request = approval_request_from_event(state, event, &session_id, &cwd);
 
         if let Some(request) = request {
-            if state.approval_requests.iter().any(|existing| {
-                existing.run_id == request.run_id
-                    && existing.kind == request.kind
-                    && existing.subject == request.subject
-                    && existing.preview == request.preview
-            }) {
+            if state
+                .approval_requests
+                .iter()
+                .any(|existing| same_approval_request_identity(existing, &request))
+            {
                 continue;
             }
             ids.push(request.id.clone());
@@ -31,6 +30,23 @@ pub(super) fn record_approval_requests(
         }
     }
     ids
+}
+
+fn same_approval_request_identity(
+    existing: &RuntimeApprovalRequest,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    if existing.run_id != request.run_id {
+        return false;
+    }
+    match (&existing.request_id, &request.request_id) {
+        (Some(existing_id), Some(request_id)) => existing_id == request_id,
+        _ => {
+            existing.kind == request.kind
+                && existing.subject == request.subject
+                && existing.preview == request.preview
+        }
+    }
 }
 
 pub(super) fn approval_request_from_governed_event(
@@ -74,6 +90,8 @@ fn approval_request_from_event(
                 subject: info.label,
                 preview: info.preview,
                 risk,
+                request_id: None,
+                tool_use_id: None,
                 status: ApprovalRequestStatus::Pending,
             })
         }
@@ -87,8 +105,35 @@ fn approval_request_from_event(
             subject: "shell command".to_string(),
             preview: command.clone(),
             risk: risk_for_command(command),
+            request_id: None,
+            tool_use_id: None,
             status: ApprovalRequestStatus::Pending,
         }),
+        AgentEvent::ToolPermissionRequest {
+            run_id,
+            request_id,
+            tool_name,
+            tool_input,
+            tool_use_id,
+            ..
+        } => {
+            let input_str = serde_json::to_string(tool_input).unwrap_or_default();
+            let info = display_for_tool(tool_name, &input_str);
+            Some(RuntimeApprovalRequest {
+                id: next_approval_id(state),
+                run_id: run_id.clone(),
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+                source: "control-protocol",
+                kind: ApprovalRequestKind::Tool,
+                subject: info.label,
+                preview: info.preview,
+                risk: "medium",
+                request_id: Some(request_id.clone()),
+                tool_use_id: Some(tool_use_id.clone()),
+                status: ApprovalRequestStatus::Pending,
+            })
+        }
         _ => None,
     }
 }
@@ -300,16 +345,48 @@ pub(super) fn render_approval_actions<W: Write>(
         }
 
         if let Some(decision) = apply_approval_decision(state, request_index, command.kind) {
-            render_approval_resolution(state, &decision.request, decision.title, output)?;
-            if decision.run_approved_tool {
-                stop_active_agent_run_without_rendering(state, output)?;
-                render_approved_tool_result(state, &decision.request, adapter, output)?;
-            } else if should_send_approval_resolution_to_agent(state, &decision.request) {
-                stop_active_agent_run_without_rendering(state, output)?;
-                let request = approval_resolution_agent_request(&decision.request);
-                start_agent_run(&request, adapter, state, output, Some(idx))?;
+            if let Some(ref ctrl_request_id) = decision.request.request_id {
+                let response = match decision.request.status {
+                    ApprovalRequestStatus::Approved => ApprovalResponse {
+                        request_id: ctrl_request_id.clone(),
+                        tool_use_id: decision.request.tool_use_id.clone(),
+                        decision: ApprovalDecision::Allow,
+                    },
+                    ApprovalRequestStatus::Blocked => ApprovalResponse {
+                        request_id: ctrl_request_id.clone(),
+                        tool_use_id: decision.request.tool_use_id.clone(),
+                        decision: ApprovalDecision::Deny {
+                            message: "cosh-shell blocked this Bash tool request before execution"
+                                .to_string(),
+                        },
+                    },
+                    _ => ApprovalResponse {
+                        request_id: ctrl_request_id.clone(),
+                        tool_use_id: decision.request.tool_use_id.clone(),
+                        decision: ApprovalDecision::Deny {
+                            message: "User denied this operation".to_string(),
+                        },
+                    },
+                };
+                if let Some(active_run) = state.active_run.as_ref() {
+                    let _ = active_run.handle.respond_approval(response);
+                }
+                clear_active_approval_panel(state, output)?;
+                render_approval_resolution(state, &decision.request, decision.title, output)?;
+                render_current_approval_request(state, output)?;
+                flush_held_agent_events(state, output)?;
+            } else {
+                render_approval_resolution(state, &decision.request, decision.title, output)?;
+                if decision.run_approved_tool {
+                    stop_active_agent_run_without_rendering(state, output)?;
+                    render_approved_tool_result(state, &decision.request, adapter, output)?;
+                } else if should_send_approval_resolution_to_agent(state, &decision.request) {
+                    stop_active_agent_run_without_rendering(state, output)?;
+                    let request = approval_resolution_agent_request(&decision.request);
+                    start_agent_run(&request, adapter, state, output, Some(idx))?;
+                }
+                render_current_approval_request(state, output)?;
             }
-            render_current_approval_request(state, output)?;
         }
         output.flush()?;
     }
@@ -329,7 +406,9 @@ fn apply_approval_decision(
     kind: ApprovalCommandKind,
 ) -> Option<AppliedApprovalDecision> {
     let (status, title) = match kind {
-        ApprovalCommandKind::Approve => (ApprovalRequestStatus::Approved, "Approved"),
+        ApprovalCommandKind::Approve => {
+            approval_status_for_allowed_request(&state.approval_requests[request_index])
+        }
         ApprovalCommandKind::Deny => (ApprovalRequestStatus::Denied, "Denied"),
         ApprovalCommandKind::Cancel => (ApprovalRequestStatus::Cancelled, "Cancelled"),
         ApprovalCommandKind::Details => return None,
@@ -340,14 +419,32 @@ fn apply_approval_decision(
     state
         .approval_journal
         .push(approval_journal_entry(&request));
-    let run_approved_tool =
-        status == ApprovalRequestStatus::Approved && request_is_executable_bash_tool(&request);
+    let run_approved_tool = matches!(
+        status,
+        ApprovalRequestStatus::Approved | ApprovalRequestStatus::Blocked
+    ) && request_is_executable_bash_tool(&request);
 
     Some(AppliedApprovalDecision {
         request,
         title,
         run_approved_tool,
     })
+}
+
+fn approval_status_for_allowed_request(
+    request: &RuntimeApprovalRequest,
+) -> (ApprovalRequestStatus, &'static str) {
+    if request_is_executable_bash_tool(request) {
+        let command = request
+            .preview
+            .strip_prefix("$ ")
+            .unwrap_or(&request.preview);
+        if cosh_shell::can_run_user_approved_bash_tool(command).is_err() {
+            return (ApprovalRequestStatus::Blocked, "Blocked");
+        }
+    }
+
+    (ApprovalRequestStatus::Approved, "Approved")
 }
 
 fn should_send_approval_resolution_to_agent(
@@ -367,6 +464,7 @@ fn approval_resolution_agent_request(request: &RuntimeApprovalRequest) -> AgentR
     let decision = match request.status {
         ApprovalRequestStatus::Denied => "denied by user",
         ApprovalRequestStatus::Cancelled => "cancelled by user",
+        ApprovalRequestStatus::Blocked => "blocked by cosh-shell",
         ApprovalRequestStatus::Pending => "pending",
         ApprovalRequestStatus::Approved => "approved",
     };
@@ -489,6 +587,7 @@ pub(super) fn render_approval_resolution<W: Write>(
         }
         ApprovalRequestStatus::Denied => "denied",
         ApprovalRequestStatus::Cancelled => "cancelled by user",
+        ApprovalRequestStatus::Blocked => "blocked by cosh-shell",
     };
 
     let executable_bash = request.status == ApprovalRequestStatus::Approved

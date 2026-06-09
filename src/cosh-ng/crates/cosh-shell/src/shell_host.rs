@@ -231,6 +231,7 @@ fn run_scripted_shell(
                         reason.as_str(),
                     );
                 }
+                InputDecision::Consume => {}
             },
             ScriptedInput::Intercept { input, reason } => {
                 session.parser.push_intercept_event(
@@ -307,6 +308,7 @@ where
                     reason.as_str(),
                 );
             }
+            InputDecision::Consume => {}
         }
     }
 
@@ -552,7 +554,11 @@ where
         Arc::clone(&input_mode),
     );
     let mut last_winsize = config.winsize;
-    let relay_prompt = if config.native_mode { "" } else { &config.prompt };
+    let relay_prompt = if config.native_mode {
+        ""
+    } else {
+        &config.prompt
+    };
     read_raw_until_exit(
         &mut session.master,
         &mut session.child,
@@ -804,14 +810,6 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-fn shell_ready_count(parser: &OscParser, config: &ShellHostConfig) -> usize {
-    if config.native_mode {
-        parser.precmd_count()
-    } else {
-        parser.prompt_count(config.prompt.as_bytes())
-    }
 }
 
 fn nix_to_io(err: nix::Error) -> io::Error {

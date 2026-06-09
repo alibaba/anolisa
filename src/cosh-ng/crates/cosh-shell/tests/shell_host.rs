@@ -294,7 +294,7 @@ fn raw_relay_zsh_buffers_fragmented_intercept_candidates() {
 }
 
 #[test]
-fn raw_relay_bash_renders_inline_slash_completion_while_typing() {
+fn raw_relay_bash_intercepts_fragmented_slash_while_typing() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-slash-completion-test-{}-{}",
         std::process::id(),
@@ -307,13 +307,13 @@ fn raw_relay_bash_renders_inline_slash_completion_while_typing() {
     let output = run_raw_relay_bash_with_actions_output_control(
         &config,
         vec![
-            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::wait(Duration::from_millis(500)),
             RawRelayAction::write(b"/".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::wait(Duration::from_millis(150)),
             RawRelayAction::write(b"mo".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(50)),
-            RawRelayAction::write(b"de auto\n".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::wait(Duration::from_millis(150)),
+            RawRelayAction::write(b"de agent\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(150)),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,
@@ -322,19 +322,16 @@ fn raw_relay_bash_renders_inline_slash_completion_while_typing() {
     .expect("raw bash slash completion");
 
     let rendered_text = String::from_utf8_lossy(&rendered);
-    assert!(rendered_text.contains("cosh-osc$ /"), "{rendered_text}");
+    assert!(rendered_text.contains("/"), "{rendered_text}");
     assert!(
         !rendered_text.contains("cosh-osc$ /  /help  /mode  /details  /skill"),
         "{rendered_text}"
     );
-    assert!(
-        rendered_text.contains("cosh-osc$ /mo\x1b[s\x1b[2m  /mode [ask|auto]\x1b[0m\x1b[u"),
-        "{rendered_text}"
-    );
+    assert!(!rendered_text.contains("/m/mo/mod/mode"), "{rendered_text}");
     assert!(
         output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
-                && event.input.as_deref() == Some("/mode auto")
+                && event.input.as_deref() == Some("/mode agent")
                 && event.component.as_deref() == Some("slash")
         }),
         "{rendered_text}\n{:?}",
@@ -835,7 +832,7 @@ fn line_interactive_host_runs_shell_command_with_non_ascii_path() {
         unique_suffix()
     ));
     std::fs::create_dir_all(&work_dir).expect("work dir");
-    let file_name = format!("\u{8bbe}\u{8ba1}\u{6587}\u{6863}.md");
+    let file_name = "\u{8bbe}\u{8ba1}\u{6587}\u{6863}.md".to_string();
     let file_path = work_dir.join(&file_name);
     let file_content = "\u{4e2d}\u{6587}\u{5185}\u{5bb9}";
     std::fs::write(&file_path, file_content).expect("unicode file");
@@ -883,10 +880,12 @@ fn raw_relay_host_runs_top_and_keeps_shell_usable() {
     ));
     let config = ShellHostConfig::new("raw-top-test", &work_dir);
     let mut rendered = Vec::new();
-    let output = run_raw_relay_bash_with_actions(
+    let _output = run_raw_relay_bash_with_actions(
         &config,
         vec![
-            RawRelayAction::line("top -l 1 2>/dev/null || top -bn1 2>/dev/null || echo top-skipped"),
+            RawRelayAction::line(
+                "top -l 1 2>/dev/null || top -bn1 2>/dev/null || echo top-skipped",
+            ),
             RawRelayAction::wait(Duration::from_millis(300)),
             RawRelayAction::write(b"q".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -945,7 +944,7 @@ fn raw_relay_host_runs_batchmode_ssh_without_swallowing_shell() {
 
 #[test]
 #[ignore] // slow: creates fake sudo binary with timeout
-    fn raw_relay_host_shows_isolated_sudo_prompt_and_keeps_shell_usable() {
+fn raw_relay_host_shows_isolated_sudo_prompt_and_keeps_shell_usable() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }

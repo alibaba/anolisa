@@ -9,14 +9,17 @@ mod claude;
 mod claude_stream;
 #[cfg(test)]
 mod claude_stream_tests;
+mod control_protocol;
 mod fake;
 mod prompt;
 mod qwen;
+mod qwen_stream;
 
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
+pub use control_protocol::*;
 pub use fake::FakeAgentAdapter;
-pub use prompt::prompt_from_request;
+pub use prompt::{prompt_from_request, provider_prompt_contract};
 pub use qwen::QwenCliAdapter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,7 @@ pub struct AgentBackendCapabilities {
     pub tool_intent: bool,
     pub user_question: bool,
     pub cancellable: bool,
+    pub control_protocol: bool,
 }
 
 pub trait AgentAdapter {
@@ -57,6 +61,7 @@ pub trait AgentAdapter {
 pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
+    pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
 }
 
 pub enum AgentRunPoll {
@@ -77,6 +82,18 @@ impl AgentRunHandle {
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(AgentRunPoll::Timeout),
             Err(mpsc::RecvTimeoutError::Disconnected) => Ok(AgentRunPoll::Finished),
         }
+    }
+
+    pub fn respond_approval(&self, response: ApprovalResponse) -> Result<(), AdapterError> {
+        self.approval_sender
+            .as_ref()
+            .ok_or_else(|| AdapterError {
+                message: "no approval channel (not in control protocol mode)".to_string(),
+            })?
+            .send(response)
+            .map_err(|_| AdapterError {
+                message: "approval channel closed".to_string(),
+            })
     }
 
     pub fn next_event_timeout(
@@ -154,9 +171,14 @@ impl AgentAdapter for AdapterInstance {
 }
 
 impl AdapterInstance {
-    pub fn start_cancellable(&self, request: AgentRequest) -> AgentRunHandle {
+    pub fn start_cancellable(
+        &self,
+        request: AgentRequest,
+        mode: crate::types::CoshApprovalMode,
+    ) -> AgentRunHandle {
         match self {
-            Self::ClaudeCode(adapter) => adapter.start_cancellable(request),
+            Self::ClaudeCode(adapter) => adapter.start_cancellable(request, mode),
+            Self::QwenCli(adapter) => adapter.start_cancellable(request, mode),
             _ => start_threaded_adapter_run(self.clone(), request),
         }
     }
@@ -202,7 +224,11 @@ fn start_threaded_adapter_run(adapter: AdapterInstance, request: AgentRequest) -
         }
     });
 
-    AgentRunHandle { receiver, cancel }
+    AgentRunHandle {
+        receiver,
+        cancel,
+        approval_sender: None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

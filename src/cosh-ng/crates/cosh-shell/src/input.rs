@@ -2,11 +2,17 @@
 pub struct InputClassifier {
     slash_commands: Vec<String>,
     conservative: bool,
+    ai_enabled: bool,
 }
 
 impl InputClassifier {
     pub fn with_conservative(mut self, conservative: bool) -> Self {
         self.conservative = conservative;
+        self
+    }
+
+    pub fn with_ai_enabled(mut self, ai_enabled: bool) -> Self {
+        self.ai_enabled = ai_enabled;
         self
     }
 }
@@ -34,6 +40,7 @@ impl Default for InputClassifier {
             .map(|command| command.to_string())
             .collect(),
             conservative: false,
+            ai_enabled: true,
         }
     }
 }
@@ -50,17 +57,14 @@ impl InputClassifier {
         self.conservative
     }
 
+    pub(crate) fn is_slash_control_candidate(&self, token: &str) -> bool {
+        self.is_slash_control_input(token)
+    }
+
     pub fn classify(&self, input: &str) -> InputDecision {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return InputDecision::SendToShell(input.to_string());
-        }
-
-        if trimmed.starts_with("??") {
-            return InputDecision::Intercept {
-                input: input.to_string(),
-                reason: InterceptReason::AgentMarker,
-            };
         }
 
         let first_token = trimmed.split_whitespace().next().unwrap_or_default();
@@ -71,8 +75,21 @@ impl InputClassifier {
             };
         }
 
+        if trimmed.starts_with("??") {
+            if !self.ai_enabled {
+                return InputDecision::Consume;
+            }
+            return InputDecision::Intercept {
+                input: input.to_string(),
+                reason: InterceptReason::AgentMarker,
+            };
+        }
+
         if self.conservative {
             if looks_like_pure_natural_language(trimmed) {
+                if !self.ai_enabled {
+                    return InputDecision::Consume;
+                }
                 return InputDecision::Intercept {
                     input: input.to_string(),
                     reason: InterceptReason::NaturalLanguage,
@@ -86,6 +103,9 @@ impl InputClassifier {
         }
 
         if looks_like_natural_language(trimmed) {
+            if !self.ai_enabled {
+                return InputDecision::Consume;
+            }
             return InputDecision::Intercept {
                 input: input.to_string(),
                 reason: InterceptReason::NaturalLanguage,
@@ -111,6 +131,7 @@ pub enum InputDecision {
         input: String,
         reason: InterceptReason,
     },
+    Consume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +197,6 @@ fn is_slash_hint_candidate(token: &str, slash_commands: &[String]) -> bool {
     slash_commands
         .iter()
         .any(|command| command.starts_with(token))
-        || token.len() > 1
 }
 
 fn is_known_shell_command(token: &str) -> bool {
@@ -267,7 +287,10 @@ fn looks_like_pure_natural_language(input: &str) -> bool {
     }
 
     let first_token = input.split_whitespace().next().unwrap_or_default();
-    if first_token.chars().any(|ch| !ch.is_ascii() && ch.is_alphabetic()) {
+    if first_token
+        .chars()
+        .any(|ch| !ch.is_ascii() && ch.is_alphabetic())
+    {
         return true;
     }
 
@@ -304,10 +327,7 @@ mod tests {
         );
         assert_eq!(
             classifier.classify("/allow 1"),
-            InputDecision::Intercept {
-                input: "/allow 1".to_string(),
-                reason: InterceptReason::Slash
-            }
+            InputDecision::SendToShell("/allow 1".to_string())
         );
         assert_eq!(
             classifier.classify("/approval-mode auto"),
@@ -339,10 +359,7 @@ mod tests {
         );
         assert_eq!(
             classifier.classify("/modd"),
-            InputDecision::Intercept {
-                input: "/modd".to_string(),
-                reason: InterceptReason::Slash
-            }
+            InputDecision::SendToShell("/modd".to_string())
         );
         assert_eq!(
             classifier.classify("/tmp/tool --help"),
@@ -597,6 +614,28 @@ mod tests {
                 input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
                 reason: InterceptReason::NaturalLanguage,
             }
+        );
+    }
+
+    #[test]
+    fn ai_disabled_consumes_agent_inputs_but_keeps_shell_and_slash() {
+        let d = InputClassifier::default().with_ai_enabled(false);
+        assert_eq!(d.classify("?? last command"), InputDecision::Consume);
+        assert_eq!(d.classify("why is this failing"), InputDecision::Consume);
+        assert_eq!(
+            d.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
+            InputDecision::Consume
+        );
+        assert_eq!(
+            d.classify("/help"),
+            InputDecision::Intercept {
+                input: "/help".to_string(),
+                reason: InterceptReason::Slash,
+            }
+        );
+        assert_eq!(
+            d.classify("echo ok"),
+            InputDecision::SendToShell("echo ok".to_string())
         );
     }
 }

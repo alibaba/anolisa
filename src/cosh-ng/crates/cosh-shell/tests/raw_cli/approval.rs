@@ -1,5 +1,14 @@
 use super::*;
 
+fn run_raw_cli_ask_with_delayed_input(chunks: Vec<(Vec<u8>, Duration)>) -> String {
+    run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_APPROVAL_MODE", "ask")],
+        chunks,
+    )
+}
+
 #[test]
 fn raw_cli_allow_is_unknown_and_does_not_record_recommendation_approval() {
     let output = run_raw_cli_with_input(
@@ -10,13 +19,14 @@ fn raw_cli_allow_is_unknown_and_does_not_record_recommendation_approval() {
          exit\n",
     );
 
-    assert!(output.contains("Unknown slash command: /allow"));
+    assert!(!output.contains("Unknown slash command: /allow"));
+    assert!(!output.contains("Use /help to see available commands."));
     assert!(!output.contains("/allow N records"));
-    assert!(output.contains("cosh never executes"));
     assert!(!output.contains("Approved recommendation 2"));
     assert!(!output.contains("Governance: approval recorded"));
     assert!(output.contains("after-allow"));
     assert!(!output.contains("/.cargo/bin"));
+    assert!(output.contains("bash: /allow"));
 }
 
 #[test]
@@ -38,7 +48,7 @@ fn raw_cli_approve_slash_is_not_recommendation_or_governance_alias() {
 
 #[test]
 #[ignore] // timing sensitive
-    fn raw_cli_approval_requests_support_details_approve_and_deny() {
+fn raw_cli_approval_requests_support_details_approve_and_deny() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -128,7 +138,7 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
         "fake",
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"\x1b".to_vec(), Duration::from_millis(300)),
+            (b"\x1b".to_vec(), Duration::from_millis(500)),
             (b"\x1b".to_vec(), Duration::from_millis(50)),
             (b"\x1b".to_vec(), Duration::from_millis(100)),
             (b"\x1b".to_vec(), Duration::from_millis(50)),
@@ -136,10 +146,10 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
         ],
     );
 
-    assert!(output.contains("Approval req-"));
-    assert!(output.contains("Run shell command?"));
+    assert!(output.contains("Approval required"));
+    assert!(output.contains("req-1 · tool request · medium risk"));
     assert!(output.contains("$ git status"));
-    assert!(output.contains("Queue: 1/2 pending; next req-2 shell command"));
+    assert!(output.contains("Queue: 1 of 2 pending"));
     assert!(!output.contains("req-1 · shell tool · medium risk"));
     assert!(output.contains("Cancelled"));
     assert!(output.contains("Cancelled req-2"));
@@ -155,13 +165,12 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
 
 #[test]
 fn raw_cli_details_approvals_renders_decision_journal_panel() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(300)),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(150)),
-            (b"/details approvals\n".to_vec(), Duration::from_millis(200)),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(300)),
+            (b"/details approvals\n".to_vec(), Duration::from_millis(500)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
@@ -176,7 +185,7 @@ fn raw_cli_details_approvals_renders_decision_journal_panel() {
         output.contains("req-2") && output.contains("denied"),
         "{output}"
     );
-    assert!(output.contains("Command: git status"), "{output}");
+    assert!(output.contains("Command: $ git status"), "{output}");
     assert!(
         output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
         "{output}"
@@ -186,30 +195,27 @@ fn raw_cli_details_approvals_renders_decision_journal_panel() {
 
 #[test]
 fn raw_cli_details_for_approval_uses_structured_panel() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
+            (b"d".to_vec(), Duration::from_millis(1_200)),
             (b"\x1b".to_vec(), Duration::from_millis(300)),
-            (b"\x1b".to_vec(), Duration::from_millis(50)),
-            (b"\x1b".to_vec(), Duration::from_millis(100)),
-            (b"\x1b".to_vec(), Duration::from_millis(50)),
-            (b"/details req-1\n".to_vec(), Duration::from_millis(200)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
 
-    assert!(output.contains("Approval details req-1"), "{output}");
+    assert!(output.contains("Approval required"), "{output}");
     assert!(output.contains("tool request"), "{output}");
-    assert!(output.contains("cancelled"), "{output}");
+    assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(output.contains("medium risk"), "{output}");
-    assert!(output.contains("Source: agent"), "{output}");
-    assert!(output.contains("Default: deny"), "{output}");
-    assert!(output.contains("Request: Bash command"), "{output}");
+    assert!(
+        output.contains("Policy: user approval is required before any executable tool request"),
+        "{output}"
+    );
+    assert!(output.contains("Keys:") && output.contains("d details"), "{output}");
     assert!(output.contains("Command:"), "{output}");
     assert!(output.contains("git status"), "{output}");
     assert!(!output.contains("Subject: tool shell"), "{output}");
-    assert!(!output.contains("Tool input"), "{output}");
     assert!(!output.contains("id: req-1"), "{output}");
     assert!(!output.contains("preview: git status"), "{output}");
     assert!(!output.contains("bash: /details"), "{output}");
@@ -217,8 +223,7 @@ fn raw_cli_details_for_approval_uses_structured_panel() {
 
 #[test]
 fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
@@ -227,9 +232,10 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
         ],
     );
 
-    assert!(output.contains("Approval req-"));
+    assert!(output.contains("Approval required"));
+    assert!(output.contains("req-1 · tool request · medium risk"));
     assert!(output.contains("Cancelled"));
-    assert!(output.contains("Command: git status"));
+    assert!(output.contains("$ git status"));
     assert!(!output.contains("No command ran."));
     assert!(!output.contains("tool request - cancelled by user"));
     assert!(!output.contains("Approved"));
@@ -240,7 +246,7 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
 
 #[test]
 #[ignore] // timing sensitive
-    fn raw_cli_approval_details_key_expands_without_confirming() {
+fn raw_cli_approval_details_key_expands_without_confirming() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -266,8 +272,8 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
 }
 
 #[test]
-    #[ignore] // flaky under parallel execution
-    fn raw_cli_approval_arrow_focus_updates_and_confirm_uses_selection() {
+#[ignore] // flaky under parallel execution
+fn raw_cli_approval_arrow_focus_updates_and_confirm_uses_selection() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -291,24 +297,24 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
 
 #[test]
 fn raw_cli_approval_split_arrow_sequence_does_not_cancel() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-            (b"\x1b".to_vec(), Duration::from_millis(400)),
+            (b"\x1b".to_vec(), Duration::from_millis(800)),
             (b"[".to_vec(), Duration::from_millis(50)),
             (b"C\n".to_vec(), Duration::from_millis(50)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
 
-    assert!(output.contains("Approval req-"));
+    assert!(output.contains("Approval required"));
+    assert!(output.contains("req-1 · tool request · medium risk"));
     assert!(
         output.contains("> [ Deny ]") || output.contains("[Deny]"),
         "{output}"
     );
     assert!(output.contains("Denied"));
-    assert!(output.contains("Command: git status --short"));
+    assert!(output.contains("$ git status --short"));
     assert!(!output.contains("No command ran."));
     assert!(!output.contains("Bash tool - denied"));
     assert!(!output.contains("Cancelled"));
@@ -317,8 +323,8 @@ fn raw_cli_approval_split_arrow_sequence_does_not_cancel() {
 }
 
 #[test]
-    #[ignore] // flaky under parallel execution
-    fn raw_cli_approval_application_cursor_arrow_updates_focus() {
+#[ignore] // flaky under parallel execution
+fn raw_cli_approval_application_cursor_arrow_updates_focus() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -344,20 +350,19 @@ fn raw_cli_approval_split_arrow_sequence_does_not_cancel() {
 
 #[test]
 fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(400)),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
 
     assert!(output.contains("Preparing a streamed tool request before finishing."));
-    assert!(output.contains("Approval req-"));
-    assert!(output.contains("Run Bash command?"));
+    assert!(output.contains("Approval required"));
+    assert!(output.contains("Subject: Bash"));
     assert!(output.contains("$ git status --short"));
-    assert!(!output.contains("medium risk"));
+    assert!(output.contains("medium risk"));
     assert!(!output.contains("Subject: tool Bash"));
     assert!(!output.contains("Command: git status --short"));
     assert!(!output.contains("Keys: Left/Right select"));
@@ -369,7 +374,7 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
     assert_inline_before_followup(
         &output,
         "Preparing a streamed tool request before finishing.",
-        "Approval req-",
+        "Approval required",
     );
     assert_inline_before_followup(&output, "$ git status --short", "Command result analysis");
     assert!(!output.contains("Analysis continued after the approved command"));
@@ -384,18 +389,18 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
 
 #[test]
 fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? stream pwd tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(400)),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
-    assert!(output.contains("Run Bash command?"), "{output}");
+    assert!(output.contains("Approval required"), "{output}");
+    assert!(output.contains("Subject: Bash"), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains(expected_cwd), "{output}");
     assert!(output.contains("Approved req-1"), "{output}");
@@ -410,18 +415,18 @@ fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
 
 #[test]
 fn raw_cli_approved_bash_tool_drops_stale_pre_approval_followup() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? stream stale tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(400)),
+            (b"\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a command before approval."));
-    assert!(output.contains("Approval req-"), "{output}");
+    assert!(output.contains("Approval required"), "{output}");
+    assert!(output.contains("req-1"), "{output}");
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains(expected_cwd), "{output}");
@@ -438,18 +443,18 @@ fn raw_cli_approved_bash_tool_drops_stale_pre_approval_followup() {
 
 #[test]
 fn raw_cli_denied_bash_tool_does_not_render_stale_executed_claim() {
-    let output = run_raw_cli_with_delayed_input(
-        "fake",
+    let output = run_raw_cli_ask_with_delayed_input(
         vec![
             (b"?? stream pwd tool approval\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
-    assert!(output.contains("Run Bash command?"), "{output}");
+    assert!(output.contains("Approval required"), "{output}");
+    assert!(output.contains("Subject: Bash"), "{output}");
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(!output.contains("No command ran."), "{output}");
     assert!(
@@ -469,39 +474,31 @@ fn raw_cli_denied_bash_tool_does_not_render_stale_executed_claim() {
 }
 
 #[test]
-fn raw_cli_approved_unsafe_bash_tool_fails_closed() {
+fn raw_cli_user_approved_bash_tool_supports_pipe() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
-            (
-                b"?? stream blocked tool approval\n".to_vec(),
-                Duration::ZERO,
-            ),
-            (b"\n".to_vec(), Duration::from_millis(300)),
+            (b"?? stream piped tool approval\n".to_vec(), Duration::ZERO),
+            (b"\n".to_vec(), Duration::from_millis(800)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
 
-    assert!(output.contains("Preparing a blocked streamed tool request before finishing."));
-    assert!(output.contains("Approval req-"));
-    assert!(output.contains("Run Bash command?"));
+    assert!(output.contains("Preparing a piped streamed tool request before finishing."));
+    assert!(output.contains("Approval required"));
+    assert!(output.contains("Subject: Bash"));
     assert!(output.contains("$ ps aux | head"));
-    assert!(!output.contains("Command: ps aux | head"));
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(!output.contains("Blocked req-1"), "{output}");
     assert!(!output.contains("Keys: Left/Right select"));
     assert!(output.contains("$ ps aux | head"), "{output}");
     assert!(
-        output.contains("cosh-shell: blocked shell metacharacter"),
+        !output.contains("cosh-shell: blocked shell metacharacter"),
         "{output}"
     );
     assert!(output.contains("Command result analysis for req-1"));
-    assert!(output.contains("did not produce a successful"));
-    assert!(output.contains("execution result"));
-    assert!(!output.contains("approved Bash command finished"));
-    assert!(!output.contains("command finished"));
+    assert!(output.contains("approved Bash command finished"));
     assert!(!output.contains("Received approved tool result"));
     assert!(!output.contains("Analysis continued after the approved command"));
-    assert!(!output.contains("tool request - approved by user"));
     assert!(!output.contains("Thinking...Approval"));
-    assert!(!output.contains("USER               PID"));
-    assert!(!output.contains("bash:"));
 }

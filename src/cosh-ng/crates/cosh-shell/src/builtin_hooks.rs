@@ -6,6 +6,12 @@ pub struct FailedCommandHook {
     matcher: HookMatcher,
 }
 
+impl Default for FailedCommandHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FailedCommandHook {
     pub fn new() -> Self {
         Self {
@@ -13,7 +19,8 @@ impl FailedCommandHook {
                 id: "failed-command".into(),
                 commands: vec![],
                 command_patterns: vec![],
-                command_regex: None, min_output_bytes: None,
+                command_regex: None,
+                min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnFail,
             },
@@ -46,7 +53,8 @@ impl BuiltinHook for FailedCommandHook {
                 description: format!("Command failed in {}", input.cwd),
                 suggestion: "Use /explain to analyze the failure".into(),
                 skill: None,
-                cli_hint: None, context_refs: Vec::new(),
+                cli_hint: None,
+                context_refs: Vec::new(),
             }),
         }
     }
@@ -54,6 +62,12 @@ impl BuiltinHook for FailedCommandHook {
 
 pub struct TestFailureHook {
     matcher: HookMatcher,
+}
+
+impl Default for TestFailureHook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestFailureHook {
@@ -113,7 +127,8 @@ impl BuiltinHook for TestFailureHook {
             description: format!("Test failure in {}", input.cwd),
             suggestion: format!("Use /{skill} to diagnose test failures"),
             skill: Some(skill.to_string()),
-            cli_hint: None, context_refs: Vec::new(),
+            cli_hint: None,
+            context_refs: Vec::new(),
         })
     }
 }

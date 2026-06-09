@@ -21,6 +21,7 @@ impl AgentAdapter for FakeAgentAdapter {
             tool_intent: true,
             user_question: true,
             cancellable: true,
+            control_protocol: false,
         }
     }
 
@@ -91,6 +92,24 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::AgentCompleted {
                         run_id,
                         summary: "approval result handled without executing commands".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("adapter crash") {
+                return Err(AdapterError {
+                    message: "fake adapter crashed".to_string(),
+                });
+            }
+            if input.contains("backend unavailable") || input.contains("adapter failure") {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "failed".to_string(),
+                        message: "simulating fake backend failure".to_string(),
+                    },
+                    AgentEvent::AgentFailed {
+                        run_id,
+                        error: "fake backend unavailable".to_string(),
                     },
                 ]);
             }
@@ -313,6 +332,28 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::AgentCompleted {
                         run_id,
                         summary: "unsafe tool request requires approval".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("long tool") {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "routing".to_string(),
+                        message: "matching long-running fake tool workflow".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: format!("Received shell prompt request: {input}"),
+                    },
+                    AgentEvent::ToolCall {
+                        run_id: run_id.clone(),
+                        name: "Bash".to_string(),
+                        input: "sleep 4; printf done".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "long-running tool request requires approval".to_string(),
                     },
                 ]);
             }
@@ -590,16 +631,44 @@ impl AgentAdapter for FakeAgentAdapter {
             return Ok(());
         }
 
-        if input.contains("stream blocked tool approval") {
+        if input.contains("stream long tool approval") {
             let run_id = format!("fake-run-{}", request.command_block.id);
             sink(AgentEvent::StatusChanged {
                 run_id: run_id.clone(),
                 phase: "streaming".to_string(),
-                message: "streaming fake blocked approval request".to_string(),
+                message: "streaming fake long approval request".to_string(),
             })?;
             sink(AgentEvent::TextDelta {
                 run_id: run_id.clone(),
-                text: "Preparing a blocked streamed tool request before finishing.".to_string(),
+                text: "Preparing a long-running streamed tool request before finishing."
+                    .to_string(),
+            })?;
+            thread::sleep(Duration::from_millis(100));
+            sink(AgentEvent::ToolCall {
+                run_id: run_id.clone(),
+                name: "Bash".to_string(),
+                input: "sleep 4; printf done".to_string(),
+            })?;
+            thread::sleep(Duration::from_millis(800));
+            sink(AgentEvent::AgentCompleted {
+                run_id,
+                summary: "long stream approval fake analysis completed".to_string(),
+            })?;
+            return Ok(());
+        }
+
+        if input.contains("stream piped tool approval")
+            || input.contains("stream blocked tool approval")
+        {
+            let run_id = format!("fake-run-{}", request.command_block.id);
+            sink(AgentEvent::StatusChanged {
+                run_id: run_id.clone(),
+                phase: "streaming".to_string(),
+                message: "streaming fake piped approval request".to_string(),
+            })?;
+            sink(AgentEvent::TextDelta {
+                run_id: run_id.clone(),
+                text: "Preparing a piped streamed tool request before finishing.".to_string(),
             })?;
             thread::sleep(Duration::from_millis(100));
             sink(AgentEvent::ToolCall {
@@ -610,7 +679,7 @@ impl AgentAdapter for FakeAgentAdapter {
             thread::sleep(Duration::from_millis(800));
             sink(AgentEvent::AgentCompleted {
                 run_id,
-                summary: "blocked stream approval fake analysis completed".to_string(),
+                summary: "piped stream approval fake analysis completed".to_string(),
             })?;
             return Ok(());
         }
@@ -696,13 +765,17 @@ struct FakeToolResult {
 }
 
 fn extract_fake_tool_result(input: &str) -> Option<FakeToolResult> {
-    if !input.starts_with("Tool result for approved request ") {
+    let prefix = if input.starts_with("Tool result for request ") {
+        "Tool result for request "
+    } else if input.starts_with("Tool result for approved request ") {
+        "Tool result for approved request "
+    } else {
         return None;
-    }
+    };
     let request = input
         .lines()
         .next()
-        .and_then(|line| line.strip_prefix("Tool result for approved request "))
+        .and_then(|line| line.strip_prefix(prefix))
         .map(str::trim)
         .filter(|request| !request.is_empty())
         .map(ToString::to_string)?;

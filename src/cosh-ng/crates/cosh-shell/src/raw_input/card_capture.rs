@@ -26,9 +26,6 @@ enum CardInputKind {
         id: String,
         option_count: usize,
     },
-    Consultation {
-        id: String,
-    },
 }
 
 impl CardInputState {
@@ -48,14 +45,24 @@ impl CardInputState {
             RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
                 CardInputKind::Approval { id: id.clone() }
             }
-            RawInputCapture::Mode { id, option_count } => CardInputKind::Mode {
+            RawInputCapture::Mode {
+                id, option_count, ..
+            } => CardInputKind::Mode {
                 id: id.clone(),
                 option_count: *option_count,
-            }
+            },
         };
         if self.active_kind.as_ref() != Some(&kind) {
+            let selected = match capture {
+                RawInputCapture::Mode {
+                    selected,
+                    option_count,
+                    ..
+                } => (*selected).min(option_count.saturating_sub(1)),
+                _ => 0,
+            };
             self.active_kind = Some(kind);
-            self.selected = 0;
+            self.selected = selected;
             self.free_text.clear();
             self.selected_options.clear();
             self.pending_escape.clear();
@@ -152,10 +159,12 @@ impl CardInputState {
                 0x1b => {
                     match capture {
                         RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
-                            events.push(RawInputEvent::CardCancel(id.clone()))
+                            events.push(RawInputEvent::CardCancel(id.clone()));
+                            break;
                         }
                         RawInputCapture::Mode { id, .. } => {
-                            events.push(RawInputEvent::ModeCancel(id.clone()))
+                            events.push(RawInputEvent::ModeCancel(id.clone()));
+                            break;
                         }
                         RawInputCapture::Question { .. } => {}
                     }
@@ -267,7 +276,9 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Mode { id, option_count } => {
+            RawInputCapture::Mode {
+                id, option_count, ..
+            } => {
                 if *option_count == 0 {
                     return None;
                 }
@@ -306,7 +317,9 @@ impl CardInputState {
                 self.selected = (self.selected + 1).min(approval_action_max_index());
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }
-            RawInputCapture::Mode { id, option_count } => {
+            RawInputCapture::Mode {
+                id, option_count, ..
+            } => {
                 if *option_count == 0 {
                     return None;
                 }
@@ -383,7 +396,9 @@ impl CardInputState {
                 approval_action_at(self.selected)
                     .map(|action| approval_event_for_action(id, action))
             }
-            RawInputCapture::Mode { id, option_count } => {
+            RawInputCapture::Mode {
+                id, option_count, ..
+            } => {
                 if *option_count == 0 || self.selected >= *option_count {
                     return None;
                 }
@@ -544,6 +559,7 @@ mod tests {
         let capture = RawInputCapture::Mode {
             id: "mode".to_string(),
             option_count: 2,
+            selected: 0,
         };
         let mut state = CardInputState::default();
         state.apply_capture(&capture);
@@ -554,6 +570,56 @@ mod tests {
                 RawInputEvent::ModeFocus("mode".to_string(), 1),
                 RawInputEvent::ModeSet("mode".to_string(), 1)
             ]
+        );
+    }
+
+    #[test]
+    fn mode_capture_uses_initial_selected_option() {
+        let capture = RawInputCapture::Mode {
+            id: "mode".to_string(),
+            option_count: 2,
+            selected: 1,
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+
+        assert_eq!(
+            state.consume(&capture, b"\n"),
+            vec![RawInputEvent::ModeSet("mode".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn approval_capture_handles_split_escape_arrow_sequence() {
+        let capture = RawInputCapture::Approval {
+            id: "req-1".to_string(),
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+
+        assert!(state.consume(&capture, b"\x1b").is_empty());
+        assert!(state.consume(&capture, b"[").is_empty());
+        assert_eq!(
+            state.consume(&capture, b"C\n"),
+            vec![
+                RawInputEvent::CardFocus("req-1".to_string(), 1),
+                RawInputEvent::CardDeny("req-1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn approval_capture_escape_then_enter_cancels_without_submit() {
+        let capture = RawInputCapture::Approval {
+            id: "req-1".to_string(),
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+
+        assert!(state.consume(&capture, b"\x1b").is_empty());
+        assert_eq!(
+            state.consume(&capture, b"\n"),
+            vec![RawInputEvent::CardCancel("req-1".to_string())]
         );
     }
 }

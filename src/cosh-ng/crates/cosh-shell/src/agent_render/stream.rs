@@ -77,11 +77,7 @@ impl StreamingAgentBlock {
             }
 
             if ch == '*' {
-                if self.pending_star {
-                    self.pending_star = false;
-                } else {
-                    self.pending_star = true;
-                }
+                self.pending_star = !self.pending_star;
                 continue;
             }
 

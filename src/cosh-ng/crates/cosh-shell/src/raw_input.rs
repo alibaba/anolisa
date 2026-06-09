@@ -80,6 +80,7 @@ pub enum RawObserverAction {
     DelayShellOutput,
     CaptureInput(RawInputCapture),
     EmitToPty(Vec<u8>),
+    RestorePrompt,
 }
 
 impl RawObserverAction {
@@ -114,6 +115,7 @@ pub enum RawInputCapture {
     Mode {
         id: String,
         option_count: usize,
+        selected: usize,
     },
     Consultation {
         id: String,
@@ -129,7 +131,9 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
         RawObserverAction::HoldShellOutput => RawInputMode::Hold,
         RawObserverAction::DelayShellOutput => RawInputMode::Delay,
         RawObserverAction::RawPassthrough => RawInputMode::RawPassthrough,
-        RawObserverAction::Continue | RawObserverAction::EmitToPty(_) => RawInputMode::Passthrough,
+        RawObserverAction::Continue
+        | RawObserverAction::EmitToPty(_)
+        | RawObserverAction::RestorePrompt => RawInputMode::Passthrough,
     };
 }
 
@@ -147,11 +151,15 @@ where
         let mut buffer = [0_u8; 8192];
         let mut card_state = CardInputState::default();
         let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
         loop {
             match input.read(&mut buffer) {
                 Ok(0) => {
-                    master.write_all(b"exit\n")?;
-                    master.flush()?;
+                    if !exit_tracker.saw_explicit_exit() {
+                        master.write_all(b"exit\n")?;
+                        master.flush()?;
+                    }
                     return Ok(());
                 }
                 Ok(n) => match current_raw_input_mode(&input_mode) {
@@ -181,6 +189,8 @@ where
                             &input_events,
                             &input_mode,
                             &mut line_buffer,
+                            &mut native_line_state,
+                            &mut exit_tracker,
                         )?;
                     }
                     RawInputMode::Passthrough => {
@@ -192,6 +202,8 @@ where
                             &input_events,
                             &input_mode,
                             &mut line_buffer,
+                            &mut native_line_state,
+                            &mut exit_tracker,
                         )? {
                             continue;
                         }
@@ -200,6 +212,8 @@ where
                         card_state.reset();
                         line_buffer.clear();
                         send_raw_input_events(&buffer[..n], &input_events);
+                        native_line_state.observe_shell_bytes(&buffer[..n]);
+                        exit_tracker.observe_shell_bytes(&buffer[..n]);
                         master.write_all(&buffer[..n])?;
                         master.flush()?;
                     }
@@ -304,6 +318,68 @@ enum CandidateLineStatus {
     Unsafe,
 }
 
+#[derive(Debug, Default)]
+struct NativeLineState {
+    visible: Vec<u8>,
+}
+
+impl NativeLineState {
+    fn is_at_line_start(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    fn observe_shell_bytes(&mut self, bytes: &[u8]) {
+        let mut idx = 0;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                CTRL_C | b'\n' | b'\r' => {
+                    self.clear();
+                    idx += 1;
+                }
+                0x7f | 0x08 => {
+                    self.pop_visible_char();
+                    idx += 1;
+                }
+                0x1b if bytes.get(idx + 1) == Some(&b'[')
+                    && bytes.get(idx + 2) == Some(&b'3')
+                    && bytes.get(idx + 3) == Some(&b'~') =>
+                {
+                    self.pop_visible_char();
+                    idx += 4;
+                }
+                b'\t' => {
+                    idx += 1;
+                }
+                byte if byte < 0x20 || byte == 0x1b => {
+                    idx += 1;
+                }
+                byte => {
+                    self.visible.push(byte);
+                    idx += 1;
+                }
+            }
+        }
+        if self.visible.len() > 4096 {
+            self.clear();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.visible.clear();
+    }
+
+    fn pop_visible_char(&mut self) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let mut start = self.visible.len() - 1;
+        while start > 0 && (self.visible[start] & 0b1100_0000) == 0b1000_0000 {
+            start -= 1;
+        }
+        self.visible.drain(start..);
+    }
+}
+
 fn relay_passthrough_input(
     bytes: &[u8],
     master: &mut File,
@@ -311,9 +387,20 @@ fn relay_passthrough_input(
     input_events: &Sender<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     line_buffer: &mut CandidateLineBuffer,
+    native_line_state: &mut NativeLineState,
+    exit_tracker: &mut ExplicitExitTracker,
 ) -> io::Result<bool> {
     if input_classifier.is_conservative() {
-        return relay_native_passthrough(bytes, master, input_classifier, input_events, input_mode, line_buffer);
+        return relay_native_passthrough(
+            bytes,
+            master,
+            input_classifier,
+            input_events,
+            input_mode,
+            line_buffer,
+            native_line_state,
+            exit_tracker,
+        );
     }
     if line_buffer.is_active() || starts_intercept_candidate(bytes) {
         line_buffer.push(bytes);
@@ -324,10 +411,14 @@ fn relay_passthrough_input(
             input_events,
             input_mode,
             line_buffer,
+            native_line_state,
+            exit_tracker,
         );
     }
 
     send_raw_input_events(bytes, input_events);
+    native_line_state.observe_shell_bytes(bytes);
+    exit_tracker.observe_shell_bytes(bytes);
     master.write_all(bytes)?;
     master.flush()?;
     Ok(false)
@@ -340,21 +431,36 @@ fn relay_native_passthrough(
     input_events: &Sender<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     line_buffer: &mut CandidateLineBuffer,
+    native_line_state: &mut NativeLineState,
+    exit_tracker: &mut ExplicitExitTracker,
 ) -> io::Result<bool> {
-    let starts_slash = bytes.first() == Some(&b'/') || bytes.starts_with(b"??");
-    if line_buffer.is_active() || starts_slash {
+    if line_buffer.is_active() || starts_native_intercept_candidate(bytes, native_line_state) {
         line_buffer.push(bytes);
+        redraw_candidate_line(input_events, line_buffer);
+        if native_candidate_should_return_to_shell(input_classifier, line_buffer) {
+            return flush_candidate_line_to_shell(
+                master,
+                input_events,
+                line_buffer,
+                native_line_state,
+                exit_tracker,
+            );
+        }
         return relay_candidate_line(
             master,
             input_classifier,
             input_events,
             input_mode,
             line_buffer,
+            native_line_state,
+            exit_tracker,
         );
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
     // command_not_found hooks handle NL/CJK intercept on the shell side.
     send_raw_input_events(bytes, input_events);
+    native_line_state.observe_shell_bytes(bytes);
+    exit_tracker.observe_shell_bytes(bytes);
     master.write_all(bytes)?;
     master.flush()?;
     Ok(false)
@@ -366,17 +472,18 @@ fn relay_candidate_line(
     input_events: &Sender<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     line_buffer: &mut CandidateLineBuffer,
+    native_line_state: &mut NativeLineState,
+    exit_tracker: &mut ExplicitExitTracker,
 ) -> io::Result<bool> {
     match candidate_line_status(&line_buffer.bytes) {
         CandidateLineStatus::Pending => Ok(true),
-        CandidateLineStatus::Unsafe => {
-            let bytes = line_buffer.take();
-            let _ = input_events.send(RawInputEvent::CandidateClearLine);
-            send_raw_input_events(&bytes, input_events);
-            master.write_all(&bytes)?;
-            master.flush()?;
-            Ok(false)
-        }
+        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(
+            master,
+            input_events,
+            line_buffer,
+            native_line_state,
+            exit_tracker,
+        ),
         CandidateLineStatus::Complete { line, line_len } => {
             let mut bytes = line_buffer.take();
             let remainder = bytes.split_off(line_len);
@@ -396,6 +503,8 @@ fn relay_candidate_line(
                             input_events,
                             input_mode,
                             line_buffer,
+                            native_line_state,
+                            exit_tracker,
                         )?;
                     }
                     Ok(true)
@@ -403,6 +512,8 @@ fn relay_candidate_line(
                 InputDecision::SendToShell(_) => {
                     let _ = input_events.send(RawInputEvent::CandidateClearLine);
                     send_raw_input_events(&bytes, input_events);
+                    native_line_state.observe_shell_bytes(&bytes);
+                    exit_tracker.observe_shell_bytes(&bytes);
                     master.write_all(&bytes)?;
                     master.flush()?;
                     if !remainder.is_empty() {
@@ -413,6 +524,24 @@ fn relay_candidate_line(
                             input_events,
                             input_mode,
                             line_buffer,
+                            native_line_state,
+                            exit_tracker,
+                        )?;
+                    }
+                    Ok(false)
+                }
+                InputDecision::Consume => {
+                    let _ = input_events.send(RawInputEvent::CandidateClearLine);
+                    if !remainder.is_empty() {
+                        relay_passthrough_input(
+                            &remainder,
+                            master,
+                            input_classifier,
+                            input_events,
+                            input_mode,
+                            line_buffer,
+                            native_line_state,
+                            exit_tracker,
                         )?;
                     }
                     Ok(false)
@@ -420,6 +549,23 @@ fn relay_candidate_line(
             }
         }
     }
+}
+
+fn flush_candidate_line_to_shell(
+    master: &mut File,
+    input_events: &Sender<RawInputEvent>,
+    line_buffer: &mut CandidateLineBuffer,
+    native_line_state: &mut NativeLineState,
+    exit_tracker: &mut ExplicitExitTracker,
+) -> io::Result<bool> {
+    let bytes = line_buffer.take();
+    let _ = input_events.send(RawInputEvent::CandidateClearLine);
+    send_raw_input_events(&bytes, input_events);
+    native_line_state.observe_shell_bytes(&bytes);
+    exit_tracker.observe_shell_bytes(&bytes);
+    master.write_all(&bytes)?;
+    master.flush()?;
+    Ok(false)
 }
 
 fn redraw_candidate_line(
@@ -447,8 +593,10 @@ fn candidate_inline_hint(line: &str) -> Option<String> {
     let token = parts.next().unwrap_or_default();
     match token {
         "/" => None,
-        "/m" | "/mo" | "/mod" => Some("/mode [ask|auto]".to_string()),
-        "/mode" | "/approval-mode" if parts.next().is_none() => Some("[ask|auto]".to_string()),
+        "/m" | "/mo" | "/mod" => Some("/mode [recommend|agent]".to_string()),
+        "/mode" | "/approval-mode" if parts.next().is_none() => {
+            Some("[recommend|agent]".to_string())
+        }
         "/d" | "/de" | "/det" | "/deta" | "/detai" | "/detail" => Some("/details <id>".to_string()),
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
         "/h" | "/he" | "/hel" => Some("/help".to_string()),
@@ -461,6 +609,26 @@ fn candidate_inline_hint(line: &str) -> Option<String> {
 
 fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     matches!(bytes.first(), Some(b'/' | b'?')) || bytes.first().is_some_and(|byte| *byte >= 0x80)
+}
+
+fn starts_native_intercept_candidate(bytes: &[u8], native_line_state: &NativeLineState) -> bool {
+    native_line_state.is_at_line_start()
+        && (bytes.first() == Some(&b'/') || bytes.starts_with(b"??"))
+}
+
+fn native_candidate_should_return_to_shell(
+    input_classifier: &InputClassifier,
+    line_buffer: &CandidateLineBuffer,
+) -> bool {
+    let visible = line_buffer.visible_line_bytes();
+    if visible.contains(&b'\t') {
+        return true;
+    }
+    let Ok(line) = std::str::from_utf8(visible) else {
+        return false;
+    };
+    let token = line.split_whitespace().next().unwrap_or_default();
+    token.starts_with('/') && !input_classifier.is_slash_control_candidate(token)
 }
 
 fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
@@ -516,10 +684,13 @@ fn relay_delayed_input(
     input_events: &Sender<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     line_buffer: &mut CandidateLineBuffer,
+    native_line_state: &mut NativeLineState,
+    exit_tracker: &mut ExplicitExitTracker,
 ) -> io::Result<()> {
     if bytes.contains(&CTRL_C) {
         let _ = input_events.send(RawInputEvent::CtrlC);
         line_buffer.clear();
+        native_line_state.clear();
         return Ok(());
     }
     if relay_passthrough_input(
@@ -529,6 +700,8 @@ fn relay_delayed_input(
         input_events,
         input_mode,
         line_buffer,
+        native_line_state,
+        exit_tracker,
     )? {
         return Ok(());
     }
@@ -547,6 +720,8 @@ pub(crate) fn spawn_raw_action_relay(
         let result = (|| {
             let mut card_state = CardInputState::default();
             let mut line_buffer = CandidateLineBuffer::default();
+            let mut native_line_state = NativeLineState::default();
+            let mut exit_tracker = ExplicitExitTracker::default();
             for action in actions {
                 match action {
                     RawRelayAction::Write(bytes) => match current_raw_input_mode(&input_mode) {
@@ -576,6 +751,8 @@ pub(crate) fn spawn_raw_action_relay(
                                 &input_events,
                                 &input_mode,
                                 &mut line_buffer,
+                                &mut native_line_state,
+                                &mut exit_tracker,
                             )?;
                         }
                         RawInputMode::Passthrough => {
@@ -587,6 +764,8 @@ pub(crate) fn spawn_raw_action_relay(
                                 &input_events,
                                 &input_mode,
                                 &mut line_buffer,
+                                &mut native_line_state,
+                                &mut exit_tracker,
                             )? {
                                 continue;
                             }
@@ -595,6 +774,8 @@ pub(crate) fn spawn_raw_action_relay(
                             card_state.reset();
                             line_buffer.clear();
                             send_raw_input_events(&bytes, &input_events);
+                            native_line_state.observe_shell_bytes(&bytes);
+                            exit_tracker.observe_shell_bytes(&bytes);
                             master.write_all(&bytes)?;
                             master.flush()?;
                         }
@@ -607,11 +788,12 @@ pub(crate) fn spawn_raw_action_relay(
                 }
             }
 
+            if !exit_tracker.saw_explicit_exit() {
+                master.write_all(b"exit\n")?;
+                master.flush()?;
+            }
             Ok(())
         })();
-
-        let _ = master.write_all(b"exit\n");
-        let _ = master.flush();
         result
     })
 }
@@ -621,6 +803,46 @@ fn releases_mode_capture(event: &RawInputEvent) -> bool {
         event,
         RawInputEvent::ModeSet(_, _) | RawInputEvent::ModeCancel(_)
     )
+}
+
+#[derive(Debug, Default)]
+struct ExplicitExitTracker {
+    pending_line: Vec<u8>,
+    saw_explicit_exit: bool,
+}
+
+impl ExplicitExitTracker {
+    fn observe_shell_bytes(&mut self, bytes: &[u8]) {
+        if self.saw_explicit_exit {
+            return;
+        }
+        self.pending_line.extend_from_slice(bytes);
+        while let Some(idx) = self
+            .pending_line
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            let line = self.pending_line.drain(..=idx).collect::<Vec<_>>();
+            if is_explicit_exit_line(&line) {
+                self.saw_explicit_exit = true;
+                self.pending_line.clear();
+                return;
+            }
+        }
+        if self.pending_line.len() > 4096 {
+            self.pending_line.clear();
+        }
+    }
+
+    fn saw_explicit_exit(&self) -> bool {
+        self.saw_explicit_exit
+    }
+}
+
+fn is_explicit_exit_line(line: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    let trimmed = text.trim();
+    trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
 }
 
 pub(crate) fn set_pty_winsize(fd: i32, winsize: Winsize) -> io::Result<()> {
@@ -645,7 +867,12 @@ pub(crate) fn signal_process_group(child_pid: u32, signal: i32) -> io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::candidate_inline_hint;
+    use super::{
+        candidate_inline_hint, native_candidate_should_return_to_shell,
+        starts_native_intercept_candidate, CandidateLineBuffer, ExplicitExitTracker,
+        NativeLineState,
+    };
+    use crate::input::InputClassifier;
 
     #[test]
     fn bare_slash_has_no_inline_hint() {
@@ -653,7 +880,67 @@ mod tests {
         assert_eq!(candidate_inline_hint("  /"), None);
         assert_eq!(
             candidate_inline_hint("/mo"),
-            Some("/mode [ask|auto]".to_string())
+            Some("/mode [recommend|agent]".to_string())
         );
+    }
+
+    #[test]
+    fn native_slash_candidate_only_starts_at_line_start() {
+        let mut state = NativeLineState::default();
+
+        assert!(starts_native_intercept_candidate(b"/", &state));
+        assert!(starts_native_intercept_candidate(b"?? hello", &state));
+
+        state.observe_shell_bytes(b"vim .");
+        assert!(!starts_native_intercept_candidate(b"/", &state));
+        assert!(!starts_native_intercept_candidate(b"?? hello", &state));
+
+        state.observe_shell_bytes(b"\n");
+        assert!(starts_native_intercept_candidate(b"/mode", &state));
+    }
+
+    #[test]
+    fn native_slash_candidate_returns_paths_and_tab_to_shell() {
+        let classifier = InputClassifier::conservative();
+        let mut line = CandidateLineBuffer::default();
+
+        line.push(b"/m");
+        assert!(!native_candidate_should_return_to_shell(&classifier, &line));
+
+        line.push(b"ode agent");
+        assert!(!native_candidate_should_return_to_shell(&classifier, &line));
+
+        line.clear();
+        line.push(b"/Users");
+        assert!(native_candidate_should_return_to_shell(&classifier, &line));
+
+        line.clear();
+        line.push(b"/tmp/");
+        assert!(native_candidate_should_return_to_shell(&classifier, &line));
+
+        line.clear();
+        line.push(b"/\t");
+        assert!(native_candidate_should_return_to_shell(&classifier, &line));
+    }
+
+    #[test]
+    fn explicit_exit_tracker_detects_split_exit_zero() {
+        let mut tracker = ExplicitExitTracker::default();
+
+        tracker.observe_shell_bytes(b"ex");
+        assert!(!tracker.saw_explicit_exit());
+        tracker.observe_shell_bytes(b"it 0\n");
+
+        assert!(tracker.saw_explicit_exit());
+    }
+
+    #[test]
+    fn explicit_exit_tracker_ignores_non_exit_lines() {
+        let mut tracker = ExplicitExitTracker::default();
+
+        tracker.observe_shell_bytes(b"echo exit\n");
+        tracker.observe_shell_bytes(b"printf logout\n");
+
+        assert!(!tracker.saw_explicit_exit());
     }
 }

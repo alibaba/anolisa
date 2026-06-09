@@ -47,7 +47,7 @@ pub(super) fn render_slash_actions<W: Write>(
             }
         };
         if restore_prompt {
-            write_shell_prompt(output)?;
+            write_shell_prompt(state, output)?;
         }
         output.flush()?;
     }
@@ -65,9 +65,17 @@ fn slash_input(event: &ShellEvent) -> Option<&str> {
     event.input.as_deref()
 }
 
-pub(super) fn write_shell_prompt<W: Write>(output: &mut W) -> std::io::Result<()> {
-    writeln!(output)?;
-    write!(output, "cosh-osc$ ")
+pub(super) fn write_shell_prompt<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
+        writeln!(output)?;
+        write!(output, "cosh-osc$ ")
+    } else {
+        state.trigger_pty_prompt = true;
+        Ok(())
+    }
 }
 
 fn clear_shell_prompt_line<W: Write>(output: &mut W) -> std::io::Result<()> {
@@ -136,8 +144,8 @@ fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result
         "Slash commands",
         body,
         Some(&format!(
-            "Approval: {}. Analysis: {}.",
-            state.approval_mode.label(),
+            "Mode: {}. Strategy: {}.",
+            state.approval_mode.user_mode_label(),
             state.analysis_mode.label()
         )),
     )
@@ -209,7 +217,7 @@ fn render_hooks_command<W: Write>(
 fn render_hint<W: Write>(prefix: &str, state: &InlineState, output: &mut W) -> std::io::Result<()> {
     let mut body = vec![
         format!("Prefix: {prefix}"),
-        format!("Current mode: {}", state.approval_mode.label()),
+        format!("Current mode: {}", state.approval_mode.user_mode_label()),
     ];
     body.extend(
         slash_command_hints(prefix)
@@ -238,7 +246,10 @@ fn render_info<W: Write>(command: SlashInfoCommand, output: &mut W) -> std::io::
         SlashInfoCommand::Config => (
             "Config",
             vec![
-                "Session-local controls: /mode ask|auto.".to_string(),
+                "Session-local controls: /mode recommend|agent."
+                    .to_string(),
+                "Advanced legacy controls: /approval-mode suggest|ask|auto|trust; /mode analysis smart|auto|manual."
+                    .to_string(),
                 "Render fallback: set COSH_SHELL_RENDER=plain before starting cosh-shell."
                     .to_string(),
             ],
@@ -285,8 +296,8 @@ fn all_slash_command_hints() -> &'static [SlashCommandHint] {
     &[
         SlashCommandHint {
             name: "/approval-mode",
-            usage: "/approval-mode [ask|auto]",
-            summary: "alias for /mode",
+            usage: "/approval-mode [suggest|ask|auto|trust]",
+            summary: "advanced legacy governance strategy",
         },
         SlashCommandHint {
             name: "/audit",
@@ -315,13 +326,13 @@ fn all_slash_command_hints() -> &'static [SlashCommandHint] {
         },
         SlashCommandHint {
             name: "/mode",
-            usage: "/mode [ask|auto]",
-            summary: "show or change approval mode",
+            usage: "/mode [recommend|agent]",
+            summary: "show or change user mode",
         },
         SlashCommandHint {
             name: "/mode",
             usage: "/mode analysis [smart|auto|manual]",
-            summary: "show or change analysis mode",
+            summary: "advanced legacy analysis strategy",
         },
         SlashCommandHint {
             name: "/skill",

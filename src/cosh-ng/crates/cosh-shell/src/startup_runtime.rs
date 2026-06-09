@@ -3,6 +3,27 @@ use std::path::Path;
 
 use super::*;
 
+const LOGO_LINES: &[&str] = &[
+    "  ██████╗  ██████╗  ███████╗ ██╗  ██╗",
+    " ██╔════╝ ██╔═══██╗ ██╔════╝ ██║  ██║",
+    " ██║      ██║   ██║ ███████╗ ███████║",
+    " ██║      ██║   ██║ ╚════██║ ██╔══██║",
+    " ╚██████╗ ╚██████╔╝ ███████║ ██║  ██║",
+    "  ╚═════╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═╝",
+];
+
+const LOGO_COLORS: &[&str] = &[
+    "\x1b[1;38;5;33m",
+    "\x1b[1;38;5;33m",
+    "\x1b[1;38;5;39m",
+    "\x1b[1;38;5;39m",
+    "\x1b[1;38;5;117m",
+    "\x1b[1;38;5;117m",
+];
+
+const RESET: &str = "\x1b[0m";
+const LOGO_MIN_WIDTH: u16 = 42;
+
 pub(super) fn render_startup_banner<W: Write>(
     events: &[ShellEvent],
     adapter: &AdapterInstance,
@@ -24,47 +45,29 @@ pub(super) fn render_startup_banner<W: Write>(
     state.rendered_startup_banner = true;
     let cwd = event.cwd.as_deref().unwrap_or("<unknown>");
     let startup_hook = evaluate_startup_hooks(cwd);
-    let ai_disabled = std::env::var("COSH_SHELL_AI")
-        .ok()
-        .is_some_and(|v| v.eq_ignore_ascii_case("off"));
-    let ai_line = if ai_disabled {
-        "AI: disabled".to_string()
-    } else {
-        let backend_url = if adapter.name().contains("claude") {
-            " (api.anthropic.com)"
-        } else if adapter.name().contains("qwen") {
-            " (dashscope.aliyuncs.com)"
-        } else {
-            ""
-        };
-        format!(
-            "AI context may be sent to the {} backend{}.",
-            adapter.name(),
-            backend_url
-        )
-    };
+
     write!(output, "\r\x1b[2K")?;
     let renderer = RatatuiInlineRenderer::for_terminal();
 
-    let logo = [
-        "\x1b[36m",
-        "    ╔═══╗  ╔═══╗  ╔═══╗  ╗  ╗",
-        "    ║      ║   ║  ╚═══╗  ╠══╣",
-        "    ╚═══╝  ╚═══╝  ═══╝╝  ╝  ╝",
-        "\x1b[0m",
-    ];
-    for line in &logo {
-        writeln!(output, "{line}")?;
+    let term_width = ratatui::crossterm::terminal::size()
+        .map(|(cols, _)| cols)
+        .unwrap_or(80);
+
+    if term_width >= LOGO_MIN_WIDTH {
+        writeln!(output)?;
+        for (i, line) in LOGO_LINES.iter().enumerate() {
+            writeln!(output, "{}{}{}", LOGO_COLORS[i], line, RESET)?;
+        }
+        writeln!(output)?;
     }
 
     let mut body = vec![
         format!(
             "Adapter: {} \u{00b7} Shell: {shell_label} \u{00b7} Mode: {}",
             adapter.name(),
-            state.approval_mode.label()
+            state.approval_mode.user_mode_label()
         ),
         format!("cwd: {cwd}"),
-        ai_line,
         "/help \u{00b7} /mode \u{00b7} /explain".to_string(),
     ];
     if let Some(markdown) = startup_hook.markdown {

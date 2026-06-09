@@ -418,7 +418,7 @@ fn extract_claude_tool_uses(value: &serde_json::Value) -> Vec<ClaudeToolUse> {
     parts
         .iter()
         .filter(|part| part.get("type").and_then(|value| value.as_str()) == Some("tool_use"))
-        .filter_map(|part| {
+        .map(|part| {
             let id = part
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -441,13 +441,13 @@ fn extract_claude_tool_uses(value: &serde_json::Value) -> Vec<ClaudeToolUse> {
                 serde_json::to_string(&input_value).unwrap_or_else(|_| "{}".to_string())
             };
 
-            Some(ClaudeToolUse {
+            ClaudeToolUse {
                 id,
                 name,
                 input,
                 input_value,
                 context_text: context_text.clone(),
-            })
+            }
         })
         .collect()
 }

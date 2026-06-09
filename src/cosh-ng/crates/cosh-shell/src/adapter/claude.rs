@@ -7,11 +7,12 @@ use std::thread;
 
 use nix::libc;
 
-use crate::types::{AgentEvent, AgentRequest};
+use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
 use super::{
-    prompt_from_request, start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, PreparedInvocation,
+    prompt_from_request, provider_prompt_contract, start_threaded_adapter_run, AdapterError,
+    AdapterInstance, AgentAdapter, AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser,
+    PreparedInvocation,
 };
 
 #[derive(Debug, Clone)]
@@ -20,7 +21,7 @@ pub struct ClaudeCodeAdapter {
     pub model: String,
     pub max_budget_usd: String,
     pub allow_model_call: bool,
-    session_id: Arc<Mutex<Option<String>>>,
+    pub session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for ClaudeCodeAdapter {
@@ -42,33 +43,77 @@ impl ClaudeCodeAdapter {
         self
     }
 
-    pub fn start_cancellable(&self, request: AgentRequest) -> AgentRunHandle {
-        let prepared = self.prepare_invocation(&request);
+    pub fn start_cancellable(
+        &self,
+        request: AgentRequest,
+        mode: CoshApprovalMode,
+    ) -> AgentRunHandle {
+        let prepared = self.prepare_invocation(&request, mode);
         if !self.allow_model_call {
             let adapter = AdapterInstance::ClaudeCode(self.clone());
             return start_threaded_adapter_run(adapter, request);
         }
 
+        if mode.uses_control_protocol() {
+            return start_control_protocol_claude_process(
+                request.id,
+                prepared,
+                Arc::clone(&self.session_id),
+            );
+        }
+
         start_cancellable_claude_process(request.id, prepared, Arc::clone(&self.session_id))
     }
 
-    pub fn prepare_invocation(&self, request: &AgentRequest) -> PreparedInvocation {
+    pub fn prepare_invocation(
+        &self,
+        request: &AgentRequest,
+        mode: CoshApprovalMode,
+    ) -> PreparedInvocation {
         let resume_session = self.session_id.lock().ok().and_then(|guard| guard.clone());
         let mut args = vec![
-            "--print".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
-            "--verbose".to_string(),
             "--include-partial-messages".to_string(),
-            "--model".to_string(),
-            self.model.clone(),
-            "--permission-mode".to_string(),
-            "plan".to_string(),
-            "--tools".to_string(),
-            "default".to_string(),
-            "--max-budget-usd".to_string(),
-            self.max_budget_usd.clone(),
         ];
+
+        match mode {
+            CoshApprovalMode::Suggest => {
+                args.extend(["--print".to_string(), "--verbose".to_string()]);
+                args.extend(["--model".to_string(), self.model.clone()]);
+                args.extend(["--permission-mode".to_string(), "plan".to_string()]);
+                args.extend(["--tools".to_string(), "default".to_string()]);
+                args.extend(["--max-budget-usd".to_string(), self.max_budget_usd.clone()]);
+            }
+            CoshApprovalMode::Ask => {
+                args.extend(["--print".to_string(), "--verbose".to_string()]);
+                args.extend(["--model".to_string(), self.model.clone()]);
+                args.extend(["--input-format".to_string(), "stream-json".to_string()]);
+                args.extend(["--permission-mode".to_string(), "default".to_string()]);
+                args.extend(["--max-budget-usd".to_string(), self.max_budget_usd.clone()]);
+            }
+            CoshApprovalMode::Auto => {
+                args.extend(["--print".to_string(), "--verbose".to_string()]);
+                args.extend(["--model".to_string(), self.model.clone()]);
+                args.extend(["--input-format".to_string(), "stream-json".to_string()]);
+                args.extend(["--permission-mode".to_string(), "default".to_string()]);
+                args.extend([
+                    "--allowedTools".to_string(),
+                    "Read,Grep,Glob,LS".to_string(),
+                ]);
+                args.extend(["--max-budget-usd".to_string(), self.max_budget_usd.clone()]);
+            }
+            CoshApprovalMode::Trust => {
+                args.extend(["--print".to_string(), "--verbose".to_string()]);
+                args.extend(["--model".to_string(), self.model.clone()]);
+                args.extend([
+                    "--permission-mode".to_string(),
+                    "bypassPermissions".to_string(),
+                ]);
+                args.extend(["--max-budget-usd".to_string(), self.max_budget_usd.clone()]);
+            }
+        }
+
         if let Some(session_id) = resume_session {
             args.push("--resume".to_string());
             args.push(session_id);
@@ -77,9 +122,21 @@ impl ClaudeCodeAdapter {
         PreparedInvocation {
             program: self.program.clone(),
             args,
-            prompt: prompt_from_request(request),
+            prompt: claude_prompt_from_request(request, mode),
         }
     }
+}
+
+fn claude_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> String {
+    format!(
+        "{}{}\
+         \n\n\
+         Claude adapter compatibility:\n\
+         - When the cosh-shell Agent contract asks for shell evidence, use Claude Code's `Bash` tool.\n\
+         - Do not answer only with a suggested shell command in agent mode when `Bash` can gather the evidence.",
+        prompt_from_request(request),
+        provider_prompt_contract(mode, "Bash")
+    )
 }
 
 impl AgentAdapter for ClaudeCodeAdapter {
@@ -95,6 +152,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             tool_intent: true,
             user_question: true,
             cancellable: true,
+            control_protocol: true,
         }
     }
 
@@ -112,7 +170,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         request: &AgentRequest,
         sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
     ) -> Result<(), AdapterError> {
-        let prepared = self.prepare_invocation(request);
+        let prepared = self.prepare_invocation(request, CoshApprovalMode::Suggest);
         if !self.allow_model_call {
             for event in claude_dry_run_events(request, &prepared) {
                 sink(event)?;
@@ -315,14 +373,248 @@ fn start_cancellable_claude_process(
         });
     });
 
-    AgentRunHandle { receiver, cancel }
+    AgentRunHandle {
+        receiver,
+        cancel,
+        approval_sender: None,
+    }
 }
 
-fn send_agent_event(sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>, event: AgentEvent) {
+fn start_control_protocol_claude_process(
+    run_id: String,
+    prepared: PreparedInvocation,
+    session_state: Arc<Mutex<Option<String>>>,
+) -> AgentRunHandle {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (approval_tx, approval_rx) = mpsc::channel::<super::ApprovalResponse>();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let child_pid = Arc::new(Mutex::new(None::<u32>));
+
+    let cancel_flag = Arc::clone(&cancelled);
+    let cancel_pid = Arc::clone(&child_pid);
+    let cancel = Arc::new(move || {
+        cancel_flag.store(true, Ordering::SeqCst);
+        if let Some(pid) = cancel_pid.lock().ok().and_then(|guard| *guard) {
+            terminate_process(pid);
+        }
+    });
+
+    let prompt = prepared.prompt.clone();
+
+    thread::spawn(move || {
+        send_agent_event(
+            &event_tx,
+            AgentEvent::StatusChanged {
+                run_id: run_id.clone(),
+                phase: "starting".to_string(),
+                message: "starting claude-code control protocol backend".to_string(),
+            },
+        );
+
+        let mut command = Command::new(&prepared.program);
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = event_tx.send(Err(AdapterError {
+                    message: format!("failed to run claude code: {err}"),
+                }));
+                return;
+            }
+        };
+
+        if let Ok(mut pid) = child_pid.lock() {
+            *pid = Some(child.id());
+        }
+        if cancelled.load(Ordering::SeqCst) {
+            terminate_process(child.id());
+        }
+
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = event_tx.send(Err(AdapterError {
+                    message: "failed to capture stdin".to_string(),
+                }));
+                return;
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = event_tx.send(Err(AdapterError {
+                    message: "failed to capture stdout".to_string(),
+                }));
+                return;
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                let _ = event_tx.send(Err(AdapterError {
+                    message: "failed to capture stderr".to_string(),
+                }));
+                return;
+            }
+        };
+
+        // stderr reader thread
+        let stderr_handle = thread::spawn(move || read_lossy(stderr));
+
+        // stdin writer thread
+        thread::spawn(move || {
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(stdin);
+
+            let init_msg = super::control_protocol::serialize_initialize("init-1");
+            let _ = writeln!(writer, "{init_msg}");
+            let _ = writer.flush();
+
+            if !prompt.is_empty() {
+                let user_msg = super::control_protocol::serialize_user_message(&prompt, None);
+                let _ = writeln!(writer, "{user_msg}");
+                let _ = writer.flush();
+            }
+
+            while let Ok(response) = approval_rx.recv() {
+                let msg = match &response.decision {
+                    super::ApprovalDecision::Allow => match response.tool_use_id.as_deref() {
+                        Some(tool_use_id) => super::control_protocol::serialize_allow(
+                            &response.request_id,
+                            tool_use_id,
+                        ),
+                        None => super::control_protocol::serialize_deny(
+                            &response.request_id,
+                            "Missing provider tool_use_id",
+                        ),
+                    },
+                    super::ApprovalDecision::Deny { message } => {
+                        super::control_protocol::serialize_deny(&response.request_id, message)
+                    }
+                };
+                if writeln!(writer, "{msg}").is_err() {
+                    break;
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+
+        // stdout reader — parse events + control requests
+        let mut parser = ClaudeStreamParser::new(run_id.clone(), Some(session_state));
+        for line in BufReader::new(stdout).lines() {
+            if cancelled.load(Ordering::SeqCst) {
+                terminate_process(child.id());
+                break;
+            }
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    let _ = event_tx.send(Err(AdapterError {
+                        message: format!("failed to read stream: {err}"),
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(ctrl) = super::control_protocol::parse_control_request(&line) {
+                match ctrl {
+                    super::control_protocol::ControlRequest::CanUseTool {
+                        request_id,
+                        tool_name,
+                        tool_input,
+                        tool_use_id,
+                    } => {
+                        send_agent_event(
+                            &event_tx,
+                            AgentEvent::ToolPermissionRequest {
+                                run_id: run_id.clone(),
+                                request_id,
+                                tool_name,
+                                tool_input,
+                                tool_use_id,
+                            },
+                        );
+                    }
+                    super::control_protocol::ControlRequest::Initialize { .. } => {}
+                }
+                continue;
+            }
+
+            for event in parser.parse_line(&line) {
+                send_agent_event(&event_tx, event);
+            }
+        }
+
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = event_tx.send(Err(AdapterError {
+                    message: format!("failed to wait for claude code: {err}"),
+                }));
+                return;
+            }
+        };
+        if let Ok(mut pid) = child_pid.lock() {
+            *pid = None;
+        }
+
+        if cancelled.load(Ordering::SeqCst) {
+            let _stderr = join_reader_thread(stderr_handle, "stderr");
+            send_agent_event(
+                &event_tx,
+                AgentEvent::AgentCancelled {
+                    run_id,
+                    reason: "user requested cancellation".to_string(),
+                },
+            );
+            return;
+        }
+
+        if !status.success() {
+            let error = join_reader_thread(stderr_handle, "stderr")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|e| e.message);
+            send_agent_event(&event_tx, AgentEvent::AgentFailed { run_id, error });
+            return;
+        }
+
+        let _stderr = join_reader_thread(stderr_handle, "stderr");
+        let _ = parser.finish(&mut |event| {
+            send_agent_event(&event_tx, event);
+            Ok(())
+        });
+    });
+
+    AgentRunHandle {
+        receiver: event_rx,
+        cancel,
+        approval_sender: Some(approval_tx),
+    }
+}
+
+pub(super) fn send_agent_event(
+    sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
+    event: AgentEvent,
+) {
     let _ = sender.send(Ok(event));
 }
 
-fn terminate_process(pid: u32) {
+pub(super) fn terminate_process(pid: u32) {
     let pid = pid as i32;
     unsafe {
         if libc::kill(-pid, libc::SIGKILL) < 0 {
@@ -331,13 +623,13 @@ fn terminate_process(pid: u32) {
     }
 }
 
-fn read_lossy(mut reader: impl Read) -> std::io::Result<String> {
+pub(super) fn read_lossy(mut reader: impl Read) -> std::io::Result<String> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-fn join_reader_thread(
+pub(super) fn join_reader_thread(
     handle: thread::JoinHandle<std::io::Result<String>>,
     stream_name: &str,
 ) -> Result<String, AdapterError> {
@@ -378,8 +670,125 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{start_cancellable_claude_process, PreparedInvocation};
-    use crate::types::AgentEvent;
+    use super::{start_cancellable_claude_process, ClaudeCodeAdapter, PreparedInvocation};
+    use crate::types::{
+        AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode,
+        OutputRefs,
+    };
+
+    fn test_request() -> AgentRequest {
+        AgentRequest {
+            id: "test".to_string(),
+            session_id: "sess".to_string(),
+            command_block: CommandBlock {
+                id: "blk".to_string(),
+                session_id: "sess".to_string(),
+                command: "echo test".to_string(),
+                cwd: "/tmp".to_string(),
+                end_cwd: "/tmp".to_string(),
+                started_at_ms: 0,
+                ended_at_ms: 0,
+                duration_ms: 0,
+                exit_code: 1,
+                status: CommandStatus::Failed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+            },
+            context_blocks: vec![],
+            context_hints: vec![],
+            user_input: Some("test".to_string()),
+            findings: vec![],
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        }
+    }
+
+    fn test_adapter() -> ClaudeCodeAdapter {
+        ClaudeCodeAdapter {
+            program: "claude".to_string(),
+            model: "sonnet".to_string(),
+            max_budget_usd: "1".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn mode_flags_claude_suggest() {
+        let adapter = test_adapter();
+        let req = test_request();
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Suggest);
+        assert!(inv.args.contains(&"--permission-mode".to_string()));
+        assert!(inv.args.contains(&"plan".to_string()));
+        assert!(inv.args.contains(&"--print".to_string()));
+        assert!(inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+        assert!(
+            inv.prompt.contains("do not emit tool calls"),
+            "{}",
+            inv.prompt
+        );
+        assert!(inv.prompt.contains("Bash"), "{}", inv.prompt);
+        assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
+    }
+
+    #[test]
+    fn mode_flags_claude_ask() {
+        let adapter = test_adapter();
+        let req = test_request();
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Ask);
+        assert!(inv.args.contains(&"--permission-mode".to_string()));
+        assert!(inv.args.contains(&"default".to_string()));
+        assert!(inv.args.contains(&"--print".to_string()));
+        assert!(inv.args.contains(&"--input-format".to_string()));
+        assert!(inv.args.contains(&"stream-json".to_string()));
+        assert!(inv.prompt.contains("agent mode"), "{}", inv.prompt);
+        assert!(inv
+            .prompt
+            .contains("approval system is handled by cosh-shell"));
+        assert!(inv.prompt.contains("Bash"), "{}", inv.prompt);
+        assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
+    }
+
+    #[test]
+    fn mode_flags_claude_auto() {
+        let adapter = test_adapter();
+        let req = test_request();
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Auto);
+        assert!(inv.args.contains(&"--print".to_string()));
+        assert!(inv.args.contains(&"--allowedTools".to_string()));
+        assert!(inv.args.contains(&"--input-format".to_string()));
+        assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
+    }
+
+    #[test]
+    fn mode_flags_claude_trust() {
+        let adapter = test_adapter();
+        let req = test_request();
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Trust);
+        assert!(inv.args.contains(&"--permission-mode".to_string()));
+        assert!(inv.args.contains(&"bypassPermissions".to_string()));
+        assert!(inv.args.contains(&"--print".to_string()));
+        assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
+    }
+
+    #[test]
+    fn mode_flags_claude_session_resume() {
+        let adapter = ClaudeCodeAdapter {
+            program: "claude".to_string(),
+            model: "sonnet".to_string(),
+            max_budget_usd: "1".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("prev-session".to_string()))),
+        };
+        let req = test_request();
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Ask);
+        assert!(inv.args.contains(&"--resume".to_string()));
+        assert!(inv.args.contains(&"prev-session".to_string()));
+    }
 
     #[test]
     fn cancellable_claude_process_emits_cancelled_event() {

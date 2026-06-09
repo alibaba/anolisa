@@ -4,8 +4,8 @@ use cosh_shell::{
     adapter_for_kind, agent_request_after_confirmation, agent_request_confirmed_by_events,
     build_command_blocks, findings_from_blocks, govern_agent_events, interventions_from_findings,
     render_transcript, AdapterKind, AgentAdapter, AgentEvent, ClaudeCodeAdapter, CommandStatus,
-    FakeAgentAdapter, FindingKind, GovernanceDecision, InterventionDecision, Policy,
-    QuestionSelectionMode, QwenCliAdapter, ShellEvent, ShellEventKind,
+    CoshApprovalMode, FakeAgentAdapter, FindingKind, GovernanceDecision, InterventionDecision,
+    Policy, QuestionSelectionMode, QwenCliAdapter, ShellEvent, ShellEventKind,
 };
 
 fn failed_command_events() -> Vec<ShellEvent> {
@@ -243,7 +243,8 @@ fn cli_adapters_prepare_safe_non_intrusive_invocations() {
     let request = agent_request_after_confirmation("session-1", &ledger.blocks[0], &findings, true)
         .expect("confirmed request");
 
-    let claude = ClaudeCodeAdapter::default().prepare_invocation(&request);
+    let claude =
+        ClaudeCodeAdapter::default().prepare_invocation(&request, CoshApprovalMode::Suggest);
     assert_eq!(claude.program, "claude");
     assert!(claude.args.contains(&"--print".to_string()));
     assert!(claude.args.contains(&"--output-format".to_string()));
@@ -263,11 +264,14 @@ fn cli_adapters_prepare_safe_non_intrusive_invocations() {
     assert!(!claude
         .args
         .contains(&"--dangerously-skip-permissions".to_string()));
-    assert!(claude.prompt.contains("approval system that reviews every tool request"));
-    let qwen = QwenCliAdapter::default().prepare_invocation(&request);
-    assert_eq!(qwen.program, "qwen");
+    assert!(claude
+        .prompt
+        .contains("approval system that reviews every tool request"));
+    let qwen = QwenCliAdapter::default().prepare_invocation(&request, CoshApprovalMode::Suggest);
+    assert_eq!(qwen.program, "co");
     assert!(qwen.args.contains(&"--approval-mode".to_string()));
     assert!(qwen.args.contains(&"plan".to_string()));
+    assert!(qwen.args.contains(&"--input-format".to_string()));
 }
 
 #[test]
@@ -279,7 +283,8 @@ fn natural_language_prompt_guides_tool_and_question_intents() {
             .expect("confirmed request");
     request.user_input = Some("执行 ps aux 看一下".to_string());
 
-    let claude = ClaudeCodeAdapter::default().prepare_invocation(&request);
+    let claude =
+        ClaudeCodeAdapter::default().prepare_invocation(&request, CoshApprovalMode::default());
 
     assert!(claude.prompt.contains("use the Bash tool directly"));
     assert!(claude.prompt.contains("request AskUserQuestion"));
@@ -297,7 +302,7 @@ fn continuation_prompts_do_not_reenter_generic_shell_request_mode() {
     request.user_input =
         Some("Answer to pending Agent question: 你喜欢什么颜色？\nUser answer: 白色".to_string());
     let question_prompt = ClaudeCodeAdapter::default()
-        .prepare_invocation(&request)
+        .prepare_invocation(&request, CoshApprovalMode::default())
         .prompt;
     assert!(question_prompt.contains("Continue the same Shell-first Agent session"));
     assert!(question_prompt.contains("Do not ask the same question again"));
@@ -307,7 +312,7 @@ fn continuation_prompts_do_not_reenter_generic_shell_request_mode() {
         "Tool result for approved request req-1\nTool: tool Bash\nCommand: pwd\nStatus: executed\nExit code: 0\nReason: ok\nStdout:\n/work\nStderr:\n".to_string(),
     );
     let tool_prompt = ClaudeCodeAdapter::default()
-        .prepare_invocation(&request)
+        .prepare_invocation(&request, CoshApprovalMode::default())
         .prompt;
     assert!(tool_prompt.contains("approved tool result"));
     assert!(tool_prompt.contains("Analyze only the result below"));
@@ -319,7 +324,7 @@ fn continuation_prompts_do_not_reenter_generic_shell_request_mode() {
         "Approval result for request req-1\nTool: tool Bash\nCommand: pwd\nDecision: denied by user\nNo command ran.".to_string(),
     );
     let approval_prompt = ClaudeCodeAdapter::default()
-        .prepare_invocation(&request)
+        .prepare_invocation(&request, CoshApprovalMode::default())
         .prompt;
     assert!(approval_prompt.contains("approval decision"));
     assert!(approval_prompt.contains("No shell command ran"));
@@ -350,7 +355,7 @@ fn fake_and_qwen_use_same_agent_adapter_boundary() {
     assert!(qwen_events.iter().any(|event| matches!(
         event,
         AgentEvent::TextDelta { text, .. }
-            if text.contains("qwen --approval-mode plan <prompt>")
+            if text.contains("--approval-mode plan") && text.contains("Qwen")
     )));
 
     let governed = govern_agent_events(&qwen_events, &Policy::default());
@@ -377,9 +382,9 @@ fn adapter_capabilities_are_provider_neutral() {
     assert!(claude.user_question);
     assert!(claude.cancellable);
 
-    assert!(!qwen.session_resume);
-    assert!(!qwen.tool_intent);
-    assert!(!qwen.user_question);
+    assert!(qwen.session_resume);
+    assert!(qwen.tool_intent);
+    assert!(qwen.user_question);
 }
 
 #[test]
@@ -396,7 +401,7 @@ fn claude_code_adapter_is_dry_run_by_default_and_governed() {
     assert!(claude_events.iter().any(|event| matches!(
         event,
         AgentEvent::TextDelta { text, .. }
-            if text.contains("claude --print") && text.contains("--permission-mode plan")
+            if text.contains("--print") && text.contains("--permission-mode plan") && text.contains("claude")
     )));
     assert!(claude_events.iter().any(|event| matches!(
         event,
@@ -575,7 +580,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
     let _ = std::fs::remove_file(&script);
     result.expect("stream fake claude adapter");
 
-    let next_invocation = adapter.prepare_invocation(&request);
+    let next_invocation = adapter.prepare_invocation(&request, CoshApprovalMode::default());
     let resume_at = next_invocation
         .args
         .iter()

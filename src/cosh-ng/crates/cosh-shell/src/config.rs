@@ -16,7 +16,7 @@ impl Default for CoshConfig {
         Self {
             shell_default: "bash".into(),
             analysis_mode: "smart".into(),
-            approval_mode: "ask".into(),
+            approval_mode: "auto".into(),
             adapter_default: "claude".into(),
             startup_banner: true,
             startup_hooks: false,
@@ -36,6 +36,9 @@ pub fn load_config() -> CoshConfig {
 
     if let Ok(v) = std::env::var("COSH_SHELL_ANALYSIS_MODE") {
         config.analysis_mode = v;
+    }
+    if let Ok(v) = std::env::var("COSH_SHELL_APPROVAL_MODE") {
+        config.approval_mode = v;
     }
     if let Ok(v) = std::env::var("COSH_SHELL_AI") {
         config.ai_enabled = v != "off";
@@ -83,7 +86,7 @@ mod tests {
         let cfg = CoshConfig::default();
         assert_eq!(cfg.shell_default, "bash");
         assert_eq!(cfg.analysis_mode, "smart");
-        assert_eq!(cfg.approval_mode, "ask");
+        assert_eq!(cfg.approval_mode, "auto");
         assert_eq!(cfg.adapter_default, "claude");
         assert!(cfg.startup_banner);
         assert!(!cfg.startup_hooks);

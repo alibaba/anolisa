@@ -17,8 +17,19 @@ pub(super) fn render_approved_tool_result<W: Write>(
 }
 
 pub(super) fn request_is_executable_bash_tool(request: &RuntimeApprovalRequest) -> bool {
-    request.kind == ApprovalRequestKind::Tool
-        && matches!(request.subject.as_str(), "Bash" | "tool Bash" | "tool shell")
+    request.kind == ApprovalRequestKind::Tool && is_bash_tool_subject(&request.subject)
+}
+
+fn is_bash_tool_subject(subject: &str) -> bool {
+    matches!(
+        subject,
+        "Bash"
+            | "shell"
+            | "run_shell_command"
+            | "tool Bash"
+            | "tool shell"
+            | "tool run_shell_command"
+    )
 }
 
 pub(super) fn request_is_readonly_builtin_tool(request: &RuntimeApprovalRequest) -> bool {
@@ -28,7 +39,24 @@ pub(super) fn request_is_readonly_builtin_tool(request: &RuntimeApprovalRequest)
 
     matches!(
         request.subject.as_str(),
-        "Read" | "Grep" | "Glob" | "tool Read" | "tool Grep" | "tool Glob" | "tool LS"
+        "Read"
+            | "Grep"
+            | "Glob"
+            | "LS"
+            | "read_file"
+            | "grep_search"
+            | "glob"
+            | "list_directory"
+            | "read_many_files"
+            | "tool Read"
+            | "tool Grep"
+            | "tool Glob"
+            | "tool LS"
+            | "tool read_file"
+            | "tool grep_search"
+            | "tool glob"
+            | "tool list_directory"
+            | "tool read_many_files"
     )
 }
 
@@ -39,7 +67,7 @@ struct ApprovedToolRun {
 
 fn approved_bash_tool_run(request: &RuntimeApprovalRequest) -> ApprovedToolRun {
     let command = raw_bash_command(&request.preview);
-    let result = cosh_shell::run_approved_bash_tool(command);
+    let result = cosh_shell::run_user_approved_bash_tool(command);
     let continuation = tool_result_agent_request(request, &result);
     ApprovedToolRun {
         result,
@@ -159,9 +187,9 @@ fn tool_execution_summary(result: &ToolExecutionResult) -> String {
                 .unwrap_or_else(|| "unknown".to_string());
             format!("exit {exit}")
         }
-        ToolExecutionStatus::Blocked => "approved tool blocked by read-only broker".to_string(),
-        ToolExecutionStatus::TimedOut => "approved read-only tool timed out".to_string(),
-        ToolExecutionStatus::Failed => "approved read-only tool failed".to_string(),
+        ToolExecutionStatus::Blocked => "tool request blocked by shell broker guard".to_string(),
+        ToolExecutionStatus::TimedOut => "tool request timed out".to_string(),
+        ToolExecutionStatus::Failed => "tool request failed".to_string(),
     }
 }
 
@@ -215,12 +243,12 @@ fn tool_result_agent_request(
         } else {
             CommandStatus::Failed
         };
-    let exit_code = result.exit_code.unwrap_or_else(|| match status {
+    let exit_code = result.exit_code.unwrap_or(match status {
         CommandStatus::Completed => 0,
         CommandStatus::Failed => 1,
     });
     let user_input = format!(
-        "Tool result for approved request {id}\n\
+        "Tool result for request {id}\n\
          Tool: {subject}\n\
          Command: {command}\n\
          Status: {status}\n\
@@ -232,8 +260,9 @@ fn tool_result_agent_request(
          If Status is executed, analyze only the native command output already printed above. \
          Do not repeat that approval was needed, do not list commands for the user to run manually, \
          and do not describe pre-approval recommendation steps. \
-         If Status is blocked, timed_out, or failed, say the command did not successfully run; \
-         do not claim output exists, do not say it executed, and request one simpler read-only Bash tool command without pipes or shell syntax if more evidence is required. \
+         If Status is blocked, timed_out, or failed, say the tool request did not successfully run; \
+         do not diagnose it as a user shell failure, do not claim output exists, do not say it executed, \
+         and issue one simpler bounded read-only shell tool call if more evidence is required. \
          Do not ask the user to run the command manually.",
         id = request.id,
         subject = request.subject,
@@ -275,5 +304,138 @@ fn tool_result_agent_request(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn tool_request(subject: &str) -> RuntimeApprovalRequest {
+        RuntimeApprovalRequest {
+            id: "req-1".to_string(),
+            run_id: "run-1".to_string(),
+            session_id: "session-1".to_string(),
+            cwd: "/tmp".to_string(),
+            source: "test",
+            kind: ApprovalRequestKind::Tool,
+            subject: subject.to_string(),
+            preview: "$ pwd".to_string(),
+            risk: "medium",
+            request_id: None,
+            tool_use_id: None,
+            status: ApprovalRequestStatus::Pending,
+        }
+    }
+
+    fn drain_agent_run(state: &mut InlineState, adapter: &AdapterInstance, output: &mut Vec<u8>) {
+        for _ in 0..50 {
+            poll_active_agent_run(state, output, adapter).expect("poll active agent run");
+            if state.active_run.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("agent run did not finish");
+    }
+
+    #[test]
+    fn executable_bash_tool_accepts_provider_aliases() {
+        for subject in [
+            "Bash",
+            "shell",
+            "run_shell_command",
+            "tool Bash",
+            "tool shell",
+            "tool run_shell_command",
+        ] {
+            assert!(
+                request_is_executable_bash_tool(&tool_request(subject)),
+                "{subject}"
+            );
+        }
+    }
+
+    #[test]
+    fn executable_bash_tool_rejects_non_shell_tools() {
+        assert!(!request_is_executable_bash_tool(&tool_request("Read")));
+    }
+
+    #[test]
+    fn readonly_builtin_tool_accepts_qwen_aliases() {
+        for subject in [
+            "Read",
+            "Grep",
+            "Glob",
+            "LS",
+            "read_file",
+            "grep_search",
+            "glob",
+            "list_directory",
+            "read_many_files",
+        ] {
+            assert!(
+                request_is_readonly_builtin_tool(&tool_request(subject)),
+                "{subject}"
+            );
+        }
+    }
+
+    #[test]
+    fn approved_tool_result_continues_claude_session() {
+        let adapter = AdapterInstance::ClaudeCode(cosh_shell::ClaudeCodeAdapter {
+            program: "claude".to_string(),
+            model: "sonnet".to_string(),
+            max_budget_usd: "1".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("provider-session-claude".to_string()))),
+        });
+        let mut state = InlineState::default();
+        let mut output = Vec::new();
+
+        render_approved_tool_result(&mut state, &tool_request("Bash"), &adapter, &mut output)
+            .expect("render approved tool result");
+        drain_agent_run(&mut state, &adapter, &mut output);
+
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("Prepared invocation"), "{output}");
+        assert!(output.contains("--resume"), "{output}");
+        assert!(output.contains("provider-session-claude"), "{output}");
+        assert!(
+            state
+                .activity_rows
+                .iter()
+                .any(|row| row.summary == "exit 0"),
+            "expected native Bash tool result activity row"
+        );
+    }
+
+    #[test]
+    fn approved_tool_result_continues_qwen_session() {
+        let adapter = AdapterInstance::QwenCli(cosh_shell::QwenCliAdapter {
+            program: "co".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("provider-session-qwen".to_string()))),
+        });
+        let mut state = InlineState::default();
+        let mut output = Vec::new();
+
+        render_approved_tool_result(&mut state, &tool_request("Bash"), &adapter, &mut output)
+            .expect("render approved tool result");
+        drain_agent_run(&mut state, &adapter, &mut output);
+
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("Prepared invocation"), "{output}");
+        assert!(output.contains("--resume"), "{output}");
+        assert!(output.contains("provider-session-qwen"), "{output}");
+        assert!(
+            state
+                .activity_rows
+                .iter()
+                .any(|row| row.summary == "exit 0"),
+            "expected native Bash tool result activity row"
+        );
     }
 }

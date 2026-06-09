@@ -9,9 +9,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Widget, Wrap},
 };
 
-use super::{
-    buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer,
-};
+use super::{buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer};
 
 #[derive(Debug, Clone)]
 pub struct ConsultationCardModel {
@@ -66,11 +64,11 @@ impl RatatuiInlineRenderer {
 
     fn plain_consultation_card_lines(&self, model: &ConsultationCardModel) -> Vec<String> {
         let content_width = self.content_width();
-        let mut lines = vec![format!(
-            "Hook: {} [{}]:",
-            model.hook_id, model.severity
-        )];
-        lines.extend(wrap_plain_line(&format!("  {}", model.title), content_width));
+        let mut lines = vec![format!("Hook: {} [{}]:", model.hook_id, model.severity)];
+        lines.extend(wrap_plain_line(
+            &format!("  {}", model.title),
+            content_width,
+        ));
         lines.extend(wrap_plain_line(
             &format!("  {}", model.suggestion),
             content_width,
@@ -94,10 +92,7 @@ fn render_consultation_card(model: &ConsultationCardModel, area: Rect, buffer: &
 
     let block = Block::bordered()
         .title(Line::from(vec![
-            Span::styled(
-                title_text,
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(title_text, Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("─── {} ", severity_text.trim()),
                 Style::default()
@@ -138,10 +133,7 @@ fn render_consultation_card(model: &ConsultationCardModel, area: Rect, buffer: &
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            "[Ignore]",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("[Ignore]", Style::default().fg(Color::DarkGray)),
     ]))
     .render(chunks[2], buffer);
 }

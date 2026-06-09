@@ -52,8 +52,20 @@ pub fn first_program_token(command: &str) -> &str {
 
 fn is_normal_exit_one(command: &str) -> bool {
     const NORMAL_EXIT_ONE: &[&str] = &[
-        "grep", "egrep", "fgrep", "rg", "ag", "diff", "colordiff", "vimdiff", "test", "[", "cmp",
-        "which", "whence", "false",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "ag",
+        "diff",
+        "colordiff",
+        "vimdiff",
+        "test",
+        "[",
+        "cmp",
+        "which",
+        "whence",
+        "false",
     ];
     let prog = first_program_token(command);
     NORMAL_EXIT_ONE.contains(&prog)
@@ -65,8 +77,7 @@ fn is_env_assignment(token: &str) -> bool {
         _ => return false,
     };
     let name = &token[..eq_pos];
-    name.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !name.bytes().next().unwrap_or(0).is_ascii_digit()
 }
 
@@ -81,94 +92,154 @@ mod tests {
 
     #[test]
     fn permission_denied() {
-        assert_eq!(classify_exit(126, "./script.sh"), ExitCodeCategory::PermissionDenied);
+        assert_eq!(
+            classify_exit(126, "./script.sh"),
+            ExitCodeCategory::PermissionDenied
+        );
     }
 
     #[test]
     fn command_not_found() {
-        assert_eq!(classify_exit(127, "nonexistent"), ExitCodeCategory::CommandNotFound);
+        assert_eq!(
+            classify_exit(127, "nonexistent"),
+            ExitCodeCategory::CommandNotFound
+        );
     }
 
     #[test]
     fn user_interrupt_sigint() {
-        assert_eq!(classify_exit(130, "sleep 100"), ExitCodeCategory::UserInterrupt);
+        assert_eq!(
+            classify_exit(130, "sleep 100"),
+            ExitCodeCategory::UserInterrupt
+        );
     }
 
     #[test]
     fn user_interrupt_sigterm() {
-        assert_eq!(classify_exit(143, "tail -f /var/log/syslog"), ExitCodeCategory::UserInterrupt);
+        assert_eq!(
+            classify_exit(143, "tail -f /var/log/syslog"),
+            ExitCodeCategory::UserInterrupt
+        );
     }
 
     #[test]
     fn pipeline_normal() {
-        assert_eq!(classify_exit(141, "yes | head -1"), ExitCodeCategory::PipelineNormal);
+        assert_eq!(
+            classify_exit(141, "yes | head -1"),
+            ExitCodeCategory::PipelineNormal
+        );
     }
 
     #[test]
     fn abnormal_sigkill() {
-        assert_eq!(classify_exit(137, "oom-process"), ExitCodeCategory::AbnormalSignal);
+        assert_eq!(
+            classify_exit(137, "oom-process"),
+            ExitCodeCategory::AbnormalSignal
+        );
     }
 
     #[test]
     fn abnormal_sigsegv() {
-        assert_eq!(classify_exit(139, "buggy"), ExitCodeCategory::AbnormalSignal);
+        assert_eq!(
+            classify_exit(139, "buggy"),
+            ExitCodeCategory::AbnormalSignal
+        );
     }
 
     #[test]
     fn abnormal_sigabrt() {
-        assert_eq!(classify_exit(134, "assert-fail"), ExitCodeCategory::AbnormalSignal);
+        assert_eq!(
+            classify_exit(134, "assert-fail"),
+            ExitCodeCategory::AbnormalSignal
+        );
     }
 
     #[test]
     fn abnormal_sigfpe() {
-        assert_eq!(classify_exit(136, "divzero"), ExitCodeCategory::AbnormalSignal);
+        assert_eq!(
+            classify_exit(136, "divzero"),
+            ExitCodeCategory::AbnormalSignal
+        );
     }
 
     #[test]
     fn unknown_signal_conservative() {
-        assert_eq!(classify_exit(142, "something"), ExitCodeCategory::UserInterrupt);
-        assert_eq!(classify_exit(200, "something"), ExitCodeCategory::UserInterrupt);
+        assert_eq!(
+            classify_exit(142, "something"),
+            ExitCodeCategory::UserInterrupt
+        );
+        assert_eq!(
+            classify_exit(200, "something"),
+            ExitCodeCategory::UserInterrupt
+        );
     }
 
     #[test]
     fn grep_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "grep pattern file.txt"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "grep pattern file.txt"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn diff_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "diff a.txt b.txt"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "diff a.txt b.txt"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn test_builtin_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "test -f missing.txt"), ExitCodeCategory::CommandSpecificNormal);
-        assert_eq!(classify_exit(1, "[ -f missing.txt ]"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "test -f missing.txt"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
+        assert_eq!(
+            classify_exit(1, "[ -f missing.txt ]"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn false_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "false"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "false"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn rg_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "rg pattern"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "rg pattern"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn which_exit_one_is_normal() {
-        assert_eq!(classify_exit(1, "which nonexistent"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "which nonexistent"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn generic_error_exit_one_unknown_command() {
-        assert_eq!(classify_exit(1, "make build"), ExitCodeCategory::GenericError);
+        assert_eq!(
+            classify_exit(1, "make build"),
+            ExitCodeCategory::GenericError
+        );
     }
 
     #[test]
     fn generic_error_exit_two() {
-        assert_eq!(classify_exit(2, "ls --bad-flag"), ExitCodeCategory::GenericError);
+        assert_eq!(
+            classify_exit(2, "ls --bad-flag"),
+            ExitCodeCategory::GenericError
+        );
     }
 
     #[test]
@@ -224,17 +295,29 @@ mod tests {
 
     #[test]
     fn grep_variants_exit_one() {
-        assert_eq!(classify_exit(1, "egrep pattern file"), ExitCodeCategory::CommandSpecificNormal);
-        assert_eq!(classify_exit(1, "fgrep pattern file"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "egrep pattern file"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
+        assert_eq!(
+            classify_exit(1, "fgrep pattern file"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 
     #[test]
     fn grep_exit_two_is_generic_error() {
-        assert_eq!(classify_exit(2, "grep --bad-flag"), ExitCodeCategory::GenericError);
+        assert_eq!(
+            classify_exit(2, "grep --bad-flag"),
+            ExitCodeCategory::GenericError
+        );
     }
 
     #[test]
     fn env_prefix_with_path_command() {
-        assert_eq!(classify_exit(1, "LC_ALL=C /usr/local/bin/rg needle"), ExitCodeCategory::CommandSpecificNormal);
+        assert_eq!(
+            classify_exit(1, "LC_ALL=C /usr/local/bin/rg needle"),
+            ExitCodeCategory::CommandSpecificNormal
+        );
     }
 }

@@ -714,6 +714,41 @@ fn renderer_snapshot_matrix_keeps_box_output_within_width() {
 }
 
 #[test]
+fn notice_card_keeps_mode_footer_and_bottom_border() {
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut output = Vec::new();
+    renderer
+        .write_notice(
+            &mut output,
+            "Approval mode",
+            vec!["Mode set to auto.".to_string()],
+            Some("Only low-risk read-only Bash tools can skip approval; risky requests still ask."),
+        )
+        .unwrap();
+    let text = String::from_utf8(output).unwrap();
+
+    let footer_line = text
+        .lines()
+        .position(|line| line.contains("still ask."))
+        .unwrap_or_else(|| panic!("mode footer should be visible:\n{text}"));
+    let bottom_line = text
+        .lines()
+        .position(|line| line.starts_with('╰'))
+        .unwrap_or_else(|| panic!("bottom border should be visible:\n{text}"));
+
+    assert!(text.contains("Mode set to auto."), "{text}");
+    assert!(
+        text.contains("Only low-risk read-only Bash tools"),
+        "{text}"
+    );
+    assert!(
+        footer_line < bottom_line,
+        "footer must render before bottom border:\n{text}"
+    );
+    assert_box_lines_aligned(&text, 40);
+}
+
+#[test]
 fn renderer_snapshot_matrix_keeps_plain_output_within_width() {
     let body = vec![
         "Phase: requesting".to_string(),

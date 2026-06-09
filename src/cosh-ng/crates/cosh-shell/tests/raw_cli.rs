@@ -1,7 +1,10 @@
+use std::fs;
 use std::io::Write;
+use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[path = "raw_cli/approval.rs"]
 mod approval;
@@ -33,10 +36,13 @@ fn raw_cli_startup_banner_renders_when_enabled() {
     assert!(output.contains("cosh-shell"), "{output}");
     assert!(output.contains("Adapter: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
-    assert!(output.contains("Mode: ask"), "{output}");
+    assert!(output.contains("Mode: agent"), "{output}");
     assert!(output.contains("/help"), "{output}");
     assert!(output.contains("/explain"), "{output}");
-    assert!(!output.contains("┌─┐┌─┐┌─┐┬ ┬"), "logo should be removed: {output}");
+    assert!(
+        !output.contains("┌─┐┌─┐┌─┐┬ ┬"),
+        "logo should be removed: {output}"
+    );
     assert!(
         !output.contains("Agent actions still require approval"),
         "footer should be removed: {output}"
@@ -47,8 +53,26 @@ fn raw_cli_startup_banner_renders_when_enabled() {
     );
     assert!(!output.contains("no command ran"), "{output}");
     assert!(!output.contains("cosh-osc$ ╭ cosh-shell"), "{output}");
-    assert_inline_before_followup(&output, "╭ cosh-shell", "cosh-osc$ exit");
+    assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
     assert!(!output.contains("Thinking..."), "{output}");
+}
+
+#[test]
+fn raw_cli_default_agent_mode_auto_approves_safe_tool() {
+    let home = temp_shell_home("default-agent-auto");
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_env(
+        "fake",
+        "?? request tool approval\nexit\n",
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "1")],
+    );
+
+    assert!(output.contains("Mode: agent"), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("$ git status"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
+    assert!(!output.contains("[ Allow once ]"), "{output}");
+    assert!(!output.contains("Approved req-1"), "{output}");
 }
 
 #[test]
@@ -138,6 +162,401 @@ fn raw_cli_unsupported_shell_reports_error_without_starting_bash() {
         &["raw", "fake", "--shell", "fish"],
         "unsupported raw shell: fish; supported shells: bash, zsh",
     );
+}
+
+#[test]
+fn raw_cli_double_dash_passthrough_executes_command_directly() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--", "echo", "ok"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run double dash passthrough");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert_eq!(stdout.trim(), "ok", "stdout={stdout}\nstderr={stderr}");
+    assert!(stderr.is_empty(), "stdout={stdout}\nstderr={stderr}");
+}
+
+#[test]
+fn raw_cli_double_dash_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--", "sh", "-c", "exit 43"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run direct command with nonzero exit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(43),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_double_dash_passthrough_does_not_capture_child_help_arg() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--", "echo", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run direct command with child help arg");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert_eq!(stdout.trim(), "--help", "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        !stderr.contains("Usage: cosh-shell"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_double_dash_passthrough_requires_command() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg("--")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run missing direct command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("missing command after --"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_dash_c_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["-c", "exit 42"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run dash-c passthrough with nonzero exit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_dash_c_passthrough_filters_wrapper_shell_option() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--shell", "bash", "-c", "echo shell-filter-ok"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run dash-c passthrough with shell option");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("shell-filter-ok"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("invalid option"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("--shell"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_stdin_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdin passthrough");
+
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        stdin
+            .write_all(b"exit 44\n")
+            .expect("write stdin passthrough command");
+    }
+
+    let output = child.wait_with_output().expect("wait stdin passthrough");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(44),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_login_dash_c_passthrough_executes_without_agent_ui() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--login", "-c", "echo login-c-ok"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run login dash-c passthrough");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("login-c-ok"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cosh-osc$"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_login_dash_c_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["--login", "-c", "exit 45"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run login dash-c passthrough with nonzero exit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(45),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cosh-osc$"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_login_argv0_dash_c_passthrough_executes_without_agent_ui() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg0("-cosh-shell")
+        .args(["-c", "echo argv0-login-c-ok"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run login argv0 dash-c passthrough");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("argv0-login-c-ok"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cosh-osc$"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_login_argv0_dash_c_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg0("-cosh-shell")
+        .args(["-c", "exit 46"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run login argv0 dash-c passthrough with nonzero exit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(46),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cosh-osc$"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_login_argv0_stdin_passthrough_preserves_exit_status_without_agent_ui() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let mut child = Command::new(binary)
+        .arg0("-cosh-shell")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn login argv0 stdin passthrough");
+
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        stdin
+            .write_all(b"echo argv0-stdin-ok\nexit 47\n")
+            .expect("write login argv0 stdin passthrough commands");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("wait login argv0 stdin passthrough");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(47),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("argv0-stdin-ok"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cosh-osc$"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_ai_off_consumes_agent_marker_without_adapter_or_shell_error() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "?? should not trigger\necho after-ai-off\nexit\n",
+        &[("COSH_SHELL_AI", "off"), ("COSH_SHELL_ISOLATED", "1")],
+    );
+
+    assert!(output.contains("after-ai-off"), "{output}");
+    assert!(!output.contains("Agent:"), "{output}");
+    assert!(!output.contains("Thinking..."), "{output}");
+    assert!(!output.contains("command not found: ??"), "{output}");
+    assert!(!output.contains("bash: ??"), "{output}");
+}
+
+#[test]
+fn raw_cli_adapter_failure_keeps_shell_usable() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "?? backend unavailable\n\
+         echo after-backend-unavailable\n\
+         exit 0\n",
+    );
+
+    assert!(output.contains("fake backend unavailable"), "{output}");
+    assert!(output.contains("after-backend-unavailable"), "{output}");
+    assert!(!output.contains("bash: ??"), "{output}");
+    assert!(
+        !output.contains("The command ?? backend unavailable failed"),
+        "{output}"
+    );
+    assert!(!output.contains("Command failed:"), "{output}");
+}
+
+#[test]
+fn raw_cli_adapter_error_keeps_shell_usable() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "?? adapter crash\n\
+         echo after-adapter-crash\n\
+         exit 0\n",
+    );
+
+    assert!(output.contains("fake adapter crashed"), "{output}");
+    assert!(output.contains("after-adapter-crash"), "{output}");
+    assert!(!output.contains("bash: ??"), "{output}");
+    assert!(
+        !output.contains("The command ?? adapter crash failed"),
+        "{output}"
+    );
+    assert!(!output.contains("Command failed:"), "{output}");
 }
 
 #[test]
@@ -231,12 +650,104 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_slash() {
     );
 
     assert!(output.contains("Slash commands"), "{output}");
-    assert!(output.contains("/mode [ask|auto]"), "{output}");
+    assert!(output.contains("/mode [recommend|agent]"), "{output}");
     assert!(output.contains("after-zsh-slash"), "{output}");
     assert!(
         !output.contains("zsh: no such file or directory: /help"),
         "{output}"
     );
+}
+
+#[test]
+fn raw_cli_zsh_fragmented_mode_slash_does_not_accumulate_redraws() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        vec![
+            (b"/m".to_vec(), Duration::ZERO),
+            (b"o".to_vec(), Duration::from_millis(50)),
+            (b"d".to_vec(), Duration::from_millis(50)),
+            (b"e agent\n".to_vec(), Duration::from_millis(50)),
+            (b"exit\n".to_vec(), Duration::from_millis(150)),
+        ],
+    );
+
+    assert!(output.contains("User mode"), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
+    assert!(
+        output.contains("Agent can use tools; cosh-shell handles safe auto-approval"),
+        "{output}"
+    );
+    assert!(!output.contains("/m/mo"), "{output}");
+    assert!(!output.contains("/mo/mod"), "{output}");
+    assert!(!output.contains("/mod/mode"), "{output}");
+    assert!(
+        !output.contains("zsh: no such file or directory: /mode"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_zsh_native_known_slash_does_not_reach_shell() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        vec![
+            (b"/mode agent\n".to_vec(), Duration::ZERO),
+            (
+                b"echo after-native-mode\n".to_vec(),
+                Duration::from_millis(150),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(output.contains("User mode"), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
+    assert!(output.contains("after-native-mode"), "{output}");
+    assert!(
+        !output.contains("zsh: no such file or directory: /mode"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_zsh_native_path_slash_and_tab_stay_in_shell() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        vec![
+            (b"/Users".to_vec(), Duration::ZERO),
+            (vec![0x03], Duration::from_millis(100)),
+            (b"vim .".to_vec(), Duration::from_millis(100)),
+            (b"/".to_vec(), Duration::from_millis(50)),
+            (b"\t".to_vec(), Duration::from_millis(50)),
+            (vec![0x03], Duration::from_millis(100)),
+            (
+                b"echo after-native-tab\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(output.contains("after-native-tab"), "{output}");
+    assert!(!output.contains("Slash command hint"), "{output}");
+    assert!(!output.contains("Slash commands"), "{output}");
+    assert!(!output.contains("User mode"), "{output}");
+    assert!(!output.contains("/mode [recommend|agent]"), "{output}");
 }
 
 #[test]
@@ -276,12 +787,12 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_natural_language() {
 fn raw_cli_slash_after_failed_command_invokes_adapter() {
     let output = run_raw_cli_with_input(
         "fake",
-        "ls /path/that/does/not/exist\n/explain last error\necho after-explain\nexit\n",
+        "ls /path/that/does/not/exist\n/explain last error\necho after-explain\nexit 0\n",
     );
 
     assert!(output.contains("Thinking..."));
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(!output.contains("Command failed"));
+    assert!(!output.contains("Command failed:"), "{output}");
     assert_inline_before_followup(&output, "Thinking...", "The command");
     assert_inline_before_followup(&output, "The command", "after-explain");
 }
@@ -294,7 +805,7 @@ fn raw_cli_selects_recommendation_without_executing_it() {
          /explain last error\n\
          /select 2\n\
          echo after-select\n\
-         exit\n",
+         exit 0\n",
     );
 
     assert!(output.contains("Recommendations"));
@@ -315,7 +826,7 @@ fn raw_cli_copy_alias_selects_recommendation_without_executing_it() {
          ls /path/that/does/not/exist\n\
          /copy 1\n\
          echo after-copy\n\
-         exit\n",
+         exit 0\n",
     );
 
     assert!(output.contains("Selected recommendation 1"));
@@ -412,19 +923,20 @@ fn raw_cli_help_renders_slash_command_reference() {
     let output = run_raw_cli_with_input("fake", "/help\necho after-help\nexit\n");
 
     assert!(output.contains("Slash commands"), "{output}");
-    assert!(output.contains("/mode [ask|auto]"), "{output}");
+    assert!(output.contains("/mode [recommend|agent]"), "{output}");
     assert!(output.contains("/details <id>"), "{output}");
     assert!(output.contains("/skill"), "{output}");
     assert!(output.contains("/config"), "{output}");
     assert!(output.contains("/audit"), "{output}");
     assert!(
-        output.contains("/approval-mode [ask|auto] - alias for /mode"),
+        output.contains("/approval-mode [suggest|ask|auto|trust]"),
         "{output}"
     );
+    assert!(output.contains("advanced legacy governance"), "{output}");
     assert!(!output.contains("/allow <n>"), "{output}");
     assert!(!output.contains("[ask|auto]alias"), "{output}");
     assert!(!output.contains("cosh-osc$ ╭ Slash commands"), "{output}");
-    assert!(output.contains("Mode: ask."), "{output}");
+    assert!(output.contains("Mode: agent."), "{output}");
     assert!(output.contains("after-help"), "{output}");
     assert!(!output.contains("bash: /help"), "{output}");
 }
@@ -447,7 +959,7 @@ fn raw_cli_informational_slash_commands_render_feedback() {
     );
     assert!(output.contains("Config"), "{output}");
     assert!(
-        output.contains("Session-local controls: /mode ask|auto"),
+        output.contains("Session-local controls: /mode recommend|agent"),
         "{output}"
     );
     assert!(output.contains("Audit"), "{output}");
@@ -481,36 +993,25 @@ fn raw_cli_bare_slash_is_noop_without_hint_card() {
 }
 
 #[test]
-fn raw_cli_slash_prefix_renders_hint_and_unknown_feedback() {
+fn raw_cli_slash_prefix_renders_hint_without_leaking_to_shell() {
     let output = run_raw_cli_with_input(
         "fake",
         "/mo\n\
-         /modd\n\
          echo after-slash-hint\n\
          exit\n",
     );
 
     assert!(output.contains("Slash command hint"), "{output}");
     assert!(
-        output.contains("/mode [ask|auto] - show or change approval mode"),
+        output.contains("/mode [recommend|agent] - show or change user mode"),
         "{output}"
     );
     assert!(!output.contains("/allow <n>"), "{output}");
     assert!(output.contains("Prefix: /mo"), "{output}");
-    assert!(output.contains("Unknown slash command: /modd"), "{output}");
-    assert!(
-        output.contains("Use /help to see available commands."),
-        "{output}"
-    );
-    assert!(
-        output.contains("cosh-osc$ echo after-slash-hint"),
-        "{output}"
-    );
     assert!(output.contains("after-slash-hint"), "{output}");
     assert!(!output.contains("cosh-osc$ ╭ Slash command"), "{output}");
     assert!(!output.contains("bash: /:"), "{output}");
     assert!(!output.contains("bash: /mo"), "{output}");
-    assert!(!output.contains("bash: /modd"), "{output}");
 }
 
 #[test]
@@ -527,13 +1028,10 @@ fn raw_cli_slash_cards_wrap_long_text_and_restore_prompt() {
     assert!(output.contains("Unknown slash command"), "{output}");
     assert!(output.contains("Slash commands"), "{output}");
     assert!(
-        output.contains("/approval-mode [ask|auto] - alias for /mode"),
+        output.contains("/approval-mode [suggest|ask|auto|trust]"),
         "{output}"
     );
-    assert!(
-        output.contains("cosh-osc$ echo after-long-slash"),
-        "{output}"
-    );
+    assert!(output.contains("advanced legacy governance"), "{output}");
     assert!(output.contains("after-long-slash"), "{output}");
     assert_agent_block_width(&output, 72);
     assert!(!output.contains("[ask|auto]alias"), "{output}");
@@ -545,7 +1043,7 @@ fn raw_cli_slash_cards_wrap_long_text_and_restore_prompt() {
 fn raw_cli_mode_slash_updates_approval_mode_with_feedback() {
     let output = run_raw_cli_with_input(
         "fake",
-        "/mode auto\n\
+        "/mode agent\n\
          /help\n\
          /approval-mode ask\n\
          /mode invalid\n\
@@ -553,48 +1051,69 @@ fn raw_cli_mode_slash_updates_approval_mode_with_feedback() {
          exit\n",
     );
 
-    assert!(output.contains("Approval mode"), "{output}");
-    assert!(output.contains("Mode set to auto."), "{output}");
-    assert!(output.contains("Mode: auto."), "{output}");
-    assert!(output.contains("Mode set to ask."), "{output}");
+    assert!(output.contains("User mode"), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
+    assert!(output.contains("Mode: agent. Strategy: smart."), "{output}");
+    assert!(output.contains("Strategy set to ask."), "{output}");
     assert!(output.contains("Unknown mode: invalid"), "{output}");
-    assert!(output.contains("Use /mode ask or /mode auto."), "{output}");
+    assert!(
+        output
+            .contains("Use /mode recommend|agent. Legacy: /approval-mode suggest|ask|auto|trust."),
+        "{output}"
+    );
     assert!(output.contains("after-mode"), "{output}");
     assert!(!output.contains("bash: /mode"), "{output}");
     assert!(!output.contains("bash: /approval-mode"), "{output}");
 }
 
 #[test]
-fn raw_cli_mode_slash_panel_selects_auto_with_card_input() {
+fn raw_cli_mode_slash_panel_selects_recommend_with_card_input() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
-            (b"/mode\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(300)),
-            (b"/help\n".to_vec(), Duration::from_millis(300)),
+            (b"/mode\n".to_vec(), Duration::from_millis(500)),
+            (b"\x1b[D\n".to_vec(), Duration::from_millis(1_000)),
             (b"exit\n".to_vec(), Duration::from_millis(200)),
         ],
     );
 
-    assert!(output.contains("Approval mode"), "{output}");
-    assert!(output.contains("Current: ask"), "{output}");
-    assert!(output.contains("> [ auto ] Auto-allow"), "{output}");
-    assert!(output.contains("Mode set to auto."), "{output}");
-    assert!(output.contains("Mode: auto."), "{output}");
+    assert!(output.contains("User mode"), "{output}");
+    assert!(output.contains("Current: agent"), "{output}");
+    assert!(output.contains("> [ agent"), "{output}");
+    assert!(output.contains("Mode set to recommend."), "{output}");
     assert!(!output.contains("bash: /mode"), "{output}");
     assert!(!output.contains("bash: \u{1b}"), "{output}");
+}
+
+#[test]
+fn raw_cli_suggest_mode_keeps_tool_requests_display_only() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "/mode recommend\n\
+         ?? request tool approval\n\
+         exit\n",
+    );
+
+    assert!(output.contains("Mode set to recommend."), "{output}");
+    assert!(output.contains("Received shell prompt request"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
+    assert!(!output.contains("Auto-approved"), "{output}");
+    assert!(
+        !output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
+        "{output}"
+    );
 }
 
 #[test]
 fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
     let output = run_raw_cli_with_input(
         "fake",
-        "/mode auto\n\
+        "/mode agent\n\
          ?? request tool approval\n\
          exit\n",
     );
 
-    assert!(output.contains("Mode set to auto."), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("$ git status"), "{output}");
     assert!(!output.contains("Approval required"), "{output}");
@@ -606,20 +1125,44 @@ fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
 }
 
 #[test]
+fn raw_cli_trust_mode_runs_bash_tool_without_approval_panel() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"/mode trust\n".to_vec(), Duration::ZERO),
+            (
+                b"?? stream pwd tool approval\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(2_000)),
+        ],
+    );
+
+    assert!(output.contains("Strategy set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(
+        output.contains("Command result analysis for req-1"),
+        "{output}"
+    );
+    assert!(!output.contains("Approval req-"), "{output}");
+    assert!(!output.contains("[ Allow once ]"), "{output}");
+}
+
+#[test]
 fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
     let output = run_raw_cli_with_input(
         "fake",
-        "/mode auto\n\
+        "/mode agent\n\
          ?? request readonly builtin tool\n\
          exit\n",
     );
 
-    assert!(output.contains("Mode set to auto."), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Auto-approved req-2"), "{output}");
-    assert!(output.contains(r#"{"file_path":"Cargo.toml"}"#), "{output}");
+    assert!(output.contains("Preview: Cargo.toml"), "{output}");
     assert!(
-        output.contains(r#"{"pattern":"cosh","path":"crates/cosh-shell"}"#),
+        output.contains("Preview: /cosh/ in crates/cosh-shell"),
         "{output}"
     );
     assert!(!output.contains("Approval required"), "{output}");
@@ -628,12 +1171,11 @@ fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
 }
 
 #[test]
-#[ignore] // timing sensitive
-    fn raw_cli_auto_mode_still_asks_for_unsafe_bash_tool() {
+fn raw_cli_auto_mode_still_asks_for_unsafe_bash_tool() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
-            (b"/mode auto\n".to_vec(), Duration::ZERO),
+            (b"/mode agent\n".to_vec(), Duration::ZERO),
             (
                 b"?? request unsafe tool approval\n".to_vec(),
                 Duration::from_millis(150),
@@ -643,15 +1185,16 @@ fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
         ],
     );
 
-    assert!(output.contains("Mode set to auto."), "{output}");
-    assert!(output.contains("Approval req-"), "{output}");
+    assert!(output.contains("Mode set to agent."), "{output}");
+    assert!(output.contains("Approval required"), "{output}");
+    assert!(output.contains("req-1"), "{output}");
     assert!(
         output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
         "{output}"
     );
-    assert!(output.contains("Cancelled"), "{output}");
-    assert!(output.contains("No command ran."), "{output}");
+    assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(!output.contains("Auto-approved"), "{output}");
+    assert!(!output.contains("Approved req-1"), "{output}");
 }
 
 #[test]
@@ -717,7 +1260,7 @@ fn raw_cli_slash_confirmation_is_consumed_once() {
         "/explain last error\n\
          ls /path/that/does/not/exist\n\
          ls /another/path/that/does/not/exist\n\
-         exit\n",
+         exit 0\n",
     );
 
     assert_eq!(count_occurrences(&output, "The command ls "), 2);
@@ -729,11 +1272,16 @@ fn raw_cli_slash_confirmation_is_consumed_once() {
 fn raw_cli_clear_cancels_pending_failed_command_analysis() {
     let output = run_raw_cli_with_input(
         "fake",
-        "ls /path/that/does/not/exist\n/clear\n/explain last error\necho after-clear\nexit\n",
+        "ls /path/that/does/not/exist\n/clear\n/explain last error\necho after-clear\nexit 0\n",
     );
 
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(!output.contains("Command failed"));
+    assert_eq!(
+        count_occurrences(&output, "The command ls /path/that/does/not/exist failed"),
+        1,
+        "{output}"
+    );
+    assert!(!output.contains("Command failed:"), "{output}");
     assert!(output.contains("after-clear"));
 }
 
@@ -741,11 +1289,16 @@ fn raw_cli_clear_cancels_pending_failed_command_analysis() {
 fn raw_cli_shell_cancels_pending_failed_command_analysis() {
     let output = run_raw_cli_with_input(
         "fake",
-        "ls /path/that/does/not/exist\n/shell\n/explain last error\necho after-shell\nexit\n",
+        "ls /path/that/does/not/exist\n/shell\n/explain last error\necho after-shell\nexit 0\n",
     );
 
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(!output.contains("Command failed"));
+    assert_eq!(
+        count_occurrences(&output, "The command ls /path/that/does/not/exist failed"),
+        1,
+        "{output}"
+    );
+    assert!(!output.contains("Command failed:"), "{output}");
     assert!(output.contains("after-shell"));
 }
 
@@ -764,18 +1317,17 @@ fn raw_cli_natural_language_invokes_claude_adapter_without_failed_command() {
 
 #[test]
 fn raw_cli_natural_language_keeps_later_failed_command_auto_analysis() {
-    let input = "\u{4f60}\u{597d}\nls /path/that/does/not/exist\nexit\n";
+    let input = "\u{4f60}\u{597d}\nls /path/that/does/not/exist\nexit 0\n";
     let output = run_raw_cli_with_input("fake", input);
 
     assert!(output.contains("Thinking..."));
     assert!(output.contains("Received shell prompt request"));
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(!output.contains("Command failed"));
+    assert!(!output.contains("Command failed:"), "{output}");
 }
 
 #[test]
-#[ignore] // card wrap breaks substring
-    fn raw_cli_natural_language_includes_recent_shell_context() {
+fn raw_cli_natural_language_includes_recent_shell_context() {
     let output = run_raw_cli_with_input(
         "fake",
         "echo shell-context-ok\n\
@@ -789,7 +1341,10 @@ fn raw_cli_natural_language_keeps_later_failed_command_auto_analysis() {
         "{output}"
     );
     let no_wrap: String = output.replace('│', "");
-    assert!(no_wrap.contains("command=echo shell-context-ok"), "{output}");
+    assert!(
+        no_wrap.contains("command=echo shell-context-ok"),
+        "{output}"
+    );
     assert!(output.contains("ref="), "{output}");
     assert!(!output.contains("command=exit"), "{output}");
 }
@@ -798,7 +1353,7 @@ fn raw_cli_natural_language_keeps_later_failed_command_auto_analysis() {
 fn raw_cli_natural_language_includes_command_hook_hints() {
     let output = run_raw_cli_with_input(
         "fake",
-        "false\n\
+        "ls /path/that/does/not/exist\n\
          please show context\n\
          exit\n",
     );
@@ -807,16 +1362,17 @@ fn raw_cli_natural_language_includes_command_hook_hints() {
         output.contains("Recent context visible to Agent"),
         "{output}"
     );
-    assert!(output.contains("Command hook"), "{output}");
-    assert!(output.contains("Command result finding"), "{output}");
-    assert!(output.contains("false exited with code 1"), "{output}");
-    assert!(output.contains("command=false"), "{output}");
-    assert!(output.contains("Hook hints"), "{output}");
-    assert!(output.contains("command failed; exit=1"), "{output}");
+    assert!(output.contains("Hook hints visible to Agent"), "{output}");
+    assert!(output.contains("hook-cmd-"), "{output}");
     assert!(
-        output.contains("Inspect output_ref before suggesting fixes"),
+        output.contains("ls /path/that/does/not/exist exited with code 1"),
         "{output}"
     );
+    assert!(
+        output.contains("command=ls /path/that/does/not/exist"),
+        "{output}"
+    );
+    assert!(output.contains("ref="), "{output}");
     assert!(
         !output.contains("No command ran; Agent actions still require governance."),
         "{output}"
@@ -825,31 +1381,171 @@ fn raw_cli_natural_language_includes_command_hook_hints() {
 
 #[test]
 fn raw_cli_natural_language_after_failure_keeps_failed_command_analysis() {
-    let input = "ls /path/that/does/not/exist\n\u{4f60}\u{597d}\nexit\n";
+    let input = "ls /path/that/does/not/exist\n\u{4f60}\u{597d}\nexit 0\n";
     let output = run_raw_cli_with_input("fake", input);
 
     assert!(output.contains("Thinking..."));
     assert!(output.contains("Received shell prompt request: \u{4f60}\u{597d}"));
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(!output.contains("Command failed"));
+    assert!(!output.contains("Command failed:"), "{output}");
 }
 
 #[test]
 fn raw_cli_failed_command_guidance_appears_before_next_prompt() {
-    let output = run_raw_cli_with_input("fake", "ls ccc\nexit\n");
+    let output = run_raw_cli_with_input("fake", "ls ccc\nexit 0\n");
 
     assert!(output.contains("ls: ccc: No such file or directory"));
     assert!(output.contains("The command ls ccc failed with exit code 1."));
     assert_inline_before_followup(
         &output,
         "The command ls ccc failed with exit code 1.",
-        "cosh-osc$ exit",
+        "exit 0",
     );
-    assert!(!output.contains("Command failed"));
+    assert!(!output.contains("Command failed:"), "{output}");
     assert!(!output.contains("Agent not called"));
     assert!(!output.contains("suggestion: show a short explanation"));
     assert!(!output.contains("`exit` exited with code"));
     assert!(!output.contains("The command exit failed"));
+    assert!(!output.contains("Approval not found"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_failed_command_auto_hook_restores_prompt_without_consultation_card() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("failed-hook-prompt");
+    fs::write(home.join(".zshrc"), "PROMPT='ZPROMPT> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            (b"ls ccc\n".to_vec(), Duration::ZERO),
+            (
+                b"echo after-hook\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Hook auto-analyzed"), "{output}");
+    assert!(!output.contains("[Analyze] [Ignore]"), "{output}");
+    assert!(output.contains("The command ls ccc failed with exit code 1."));
+    assert!(output.contains("after-hook"), "{output}");
+    assert_eq!(
+        count_occurrences_between(
+            &output,
+            "The command ls ccc failed with exit code 1.",
+            "echo after-hook",
+            "ZPROMPT> "
+        ),
+        1,
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_repeated_failed_command_skips_without_auto_analyzed_notice() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"ls ccc\n".to_vec(), Duration::ZERO),
+            (b"ls ccc\n".to_vec(), Duration::from_millis(1200)),
+            (
+                b"echo after-repeat\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        count_occurrences(&output, "Hook auto-analyzed"),
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&output, "Analysis skipped"),
+        1,
+        "{output}"
+    );
+    assert!(
+        output.contains("skipped repeated failure analysis for `ls ccc`"),
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&output, "The command ls ccc failed with exit code 1."),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("after-repeat"), "{output}");
+    assert!(!output.contains("[Analyze] [Ignore]"), "{output}");
+}
+
+#[test]
+fn raw_cli_repeated_ps_dash_aux_failure_is_stable_and_keeps_prompt() {
+    let fixture = temp_shell_home("ps-dash-aux");
+    let bin_dir = fixture.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let ps_path = bin_dir.join("ps");
+    fs::write(
+        &ps_path,
+        "#!/bin/sh\nif [ \"$1\" = \"-aux\" ]; then\n  echo \"ps: No user named 'x'\" >&2\n  exit 1\nfi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ps_path, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.to_string_lossy(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("PATH", path.as_str())],
+        vec![
+            (b"ps -aux\n".to_vec(), Duration::ZERO),
+            (b"ps -aux\n".to_vec(), Duration::from_millis(1200)),
+            (b"ps -aux\n".to_vec(), Duration::from_millis(1200)),
+            (b"ps -aux\n".to_vec(), Duration::from_millis(1200)),
+            (
+                b"echo after-ps-repeat\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&fixture);
+
+    assert_eq!(
+        count_occurrences(&output, "Hook auto-analyzed"),
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&output, "Analysis skipped"),
+        1,
+        "{output}"
+    );
+    assert!(
+        output.contains("skipped repeated failure analysis for `ps -aux`"),
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&output, "The command ps -aux failed with exit code 1."),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("after-ps-repeat"), "{output}");
+    assert_inline_before_followup(
+        &output,
+        "The command ps -aux failed with exit code 1.",
+        "after-ps-repeat",
+    );
+    assert!(!output.contains("[Analyze] [Ignore]"), "{output}");
+    assert!(!output.contains("Approval not found"), "{output}");
 }
 
 #[test]
@@ -863,11 +1559,8 @@ fn raw_cli_failed_command_invokes_claude_adapter() {
 
 #[test]
 #[ignore] // timing sensitive
-    fn raw_cli_failed_command_waits_for_active_agent_then_analyzes() {
-    let output = run_raw_cli_with_input(
-        "fake",
-        "?? slow agent\nls ccc\necho after-queued\nexit\n",
-    );
+fn raw_cli_failed_command_waits_for_active_agent_then_analyzes() {
+    let output = run_raw_cli_with_input("fake", "?? slow agent\nls ccc\necho after-queued\nexit\n");
 
     assert!(output.contains("Agent queued"));
     assert!(output.contains("Captured failed command: ls ccc"));
@@ -877,8 +1570,7 @@ fn raw_cli_failed_command_invokes_claude_adapter() {
 }
 
 #[test]
-#[ignore] // needs PTY signal fix
-    fn raw_cli_tail_follow_ctrl_c_does_not_start_agent_analysis() {
+fn raw_cli_tail_follow_ctrl_c_does_not_start_agent_analysis() {
     let output = run_raw_cli_with_input(
         "fake",
         "bash -c 'tail -f /dev/null & BGPID=$!; sleep 0.2; kill $BGPID; wait $BGPID 2>/dev/null'\necho after-tail-follow\nexit\n",
@@ -942,20 +1634,217 @@ fn raw_cli_agent_marker_invokes_adapter_without_failed_command() {
 }
 
 #[test]
+fn raw_cli_zsh_agent_response_restores_prompt_without_empty_command() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("agent-prompt");
+    fs::write(home.join(".zshrc"), "PROMPT='ZPROMPT> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            (b"?? zsh prompt smoke\n".to_vec(), Duration::ZERO),
+            (
+                b"echo after-agent\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("Received shell prompt request: ?? zsh prompt smoke"),
+        "{output}"
+    );
+    assert!(output.contains("after-agent"), "{output}");
+    assert_eq!(count_occurrences(&output, "ZPROMPT> "), 3, "{output}");
+    assert_eq!(
+        count_occurrences_between(
+            &output,
+            "Received shell prompt request: ?? zsh prompt smoke",
+            "echo after-agent",
+            "ZPROMPT> "
+        ),
+        1,
+        "{output}"
+    );
+    assert_no_standalone_percent_line(&output);
+}
+
+#[test]
+fn raw_cli_bash_agent_prompt_restore_does_not_duplicate_prompt() {
+    let home = temp_shell_home("agent-prompt-bash");
+    fs::write(home.join(".bashrc"), "PS1='BPROMPT> '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            (b"?? bash prompt smoke\n".to_vec(), Duration::ZERO),
+            (
+                b"echo after-agent\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("Received shell prompt request: ?? bash prompt smoke"),
+        "{output}"
+    );
+    assert!(output.contains("after-agent"), "{output}");
+    assert_eq!(
+        count_occurrences_between(
+            &output,
+            "Received shell prompt request: ?? bash prompt smoke",
+            "echo after-agent",
+            "BPROMPT> "
+        ),
+        1,
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_zsh_agent_prompt_restore_suppresses_partial_line_marker() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("agent-prompt-sp");
+    fs::write(
+        home.join(".zshrc"),
+        "PROMPT='ZPROMPT> '\n\
+         RPROMPT=''\n\
+         autoload -Uz add-zsh-hook\n\
+         _cosh_test_force_prompt_sp() { setopt PROMPT_SP PROMPT_CR; }\n\
+         add-zsh-hook precmd _cosh_test_force_prompt_sp\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            (b"?? zsh prompt sp smoke\n".to_vec(), Duration::ZERO),
+            (
+                b"echo after-agent\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("Received shell prompt request: ?? zsh prompt sp smoke"),
+        "{output}"
+    );
+    assert!(output.contains("after-agent"), "{output}");
+    assert_eq!(count_occurrences(&output, "ZPROMPT> "), 3, "{output}");
+    assert_no_standalone_percent_line(&output);
+}
+
+#[test]
+fn raw_cli_zsh_shell_marker_agent_response_does_not_duplicate_prompt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_shell_home("agent-shell-marker-zsh");
+    fs::write(home.join(".zshrc"), "PROMPT='ZPROMPT> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            ("\u{4f60}\u{597d}\n".as_bytes().to_vec(), Duration::ZERO),
+            (
+                b"echo after-agent\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("Received shell prompt request: \u{4f60}\u{597d}"),
+        "{output}"
+    );
+    assert!(output.contains("after-agent"), "{output}");
+    assert_eq!(count_occurrences(&output, "ZPROMPT> "), 3, "{output}");
+    assert_eq!(
+        count_occurrences_between(
+            &output,
+            "Received shell prompt request: \u{4f60}\u{597d}",
+            "echo after-agent",
+            "ZPROMPT> "
+        ),
+        1,
+        "{output}"
+    );
+    assert_no_standalone_percent_line(&output);
+}
+
+#[test]
+fn raw_cli_bash_shell_marker_agent_response_does_not_duplicate_prompt() {
+    let home = temp_shell_home("agent-shell-marker-bash");
+    fs::write(home.join(".bashrc"), "PS1='BPROMPT> '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[("HOME", &home_str), ("COSH_SHELL_STARTUP_BANNER", "0")],
+        vec![
+            ("\u{4f60}\u{597d}\n".as_bytes().to_vec(), Duration::ZERO),
+            (
+                b"echo after-agent\nexit\n".to_vec(),
+                Duration::from_millis(1200),
+            ),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("Received shell prompt request: \u{4f60}\u{597d}"),
+        "{output}"
+    );
+    assert!(output.contains("after-agent"), "{output}");
+    assert_eq!(count_occurrences(&output, "BPROMPT> "), 3, "{output}");
+    assert_eq!(
+        count_occurrences_between(
+            &output,
+            "Received shell prompt request: \u{4f60}\u{597d}",
+            "echo after-agent",
+            "BPROMPT> "
+        ),
+        1,
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_empty_enter_and_ctrl_c_do_not_start_agent() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
             (b"\n".to_vec(), Duration::ZERO),
             (vec![0x03], Duration::from_millis(50)),
-            (b"\nexit\n".to_vec(), Duration::from_millis(50)),
+            (b"\nexit 0\n".to_vec(), Duration::from_millis(50)),
         ],
     );
 
     assert!(!output.contains("Thinking..."), "{output}");
     assert!(!output.contains("Command failed:"), "{output}");
     assert!(!output.contains("Agent status"), "{output}");
-    assert!(output.contains("cosh-osc$"));
+    assert!(output.contains("exit 0"), "{output}");
 }
 
 #[test]
@@ -1039,7 +1928,7 @@ fn raw_cli_non_ascii_candidate_input_supports_backspace() {
 fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
     let output = run_raw_cli_with_env(
         "fake",
-        "ls /path/that/does/not/exist\nexit\n",
+        "ls /path/that/does/not/exist\nexit 0\n",
         &[("NO_COLOR", "1"), ("TERM", "xterm-256color")],
     );
 
@@ -1320,7 +2209,7 @@ fn raw_cli_agent_response_renders_markdown_in_plain_mode() {
 fn raw_cli_dumb_terminal_uses_plain_blocks() {
     let output = run_raw_cli_with_env(
         "fake",
-        "ls /path/that/does/not/exist\nexit\n",
+        "ls /path/that/does/not/exist\nexit 0\n",
         &[("NO_COLOR", "1"), ("TERM", "dumb")],
     );
 
@@ -1331,7 +2220,7 @@ fn raw_cli_dumb_terminal_uses_plain_blocks() {
 fn raw_cli_explicit_plain_render_mode_uses_plain_blocks() {
     let output = run_raw_cli_with_env(
         "fake",
-        "ls /path/that/does/not/exist\nexit\n",
+        "ls /path/that/does/not/exist\nexit 0\n",
         &[("COSH_SHELL_RENDER", "plain"), ("TERM", "xterm-256color")],
     );
 
@@ -1411,15 +2300,27 @@ fn run_raw_cli_with_args_and_delayed_input(
     extra_args: &[&str],
     chunks: Vec<(Vec<u8>, Duration)>,
 ) -> String {
+    run_raw_cli_with_args_env_and_delayed_input(adapter, extra_args, &[], chunks)
+}
+
+fn run_raw_cli_with_args_env_and_delayed_input(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    chunks: Vec<(Vec<u8>, Duration)>,
+) -> String {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["raw", adapter])
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cosh-shell raw");
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("spawn cosh-shell raw");
 
     {
         let mut stdin = child.stdin.take().expect("child stdin");
@@ -1444,6 +2345,24 @@ fn run_raw_cli_with_args_and_delayed_input(
     text
 }
 
+fn temp_zsh_home(label: &str) -> PathBuf {
+    temp_shell_home(label)
+}
+
+fn temp_shell_home(label: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    path.push(format!(
+        "cosh-raw-cli-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&path).unwrap();
+    path
+}
+
 fn assert_inline_before_followup(output: &str, inline_marker: &str, followup_output: &str) {
     let inline_pos = output.find(inline_marker).expect("inline guidance marker");
     let followup_pos = output
@@ -1463,6 +2382,23 @@ fn assert_no_prompt_between(output: &str, start_marker: &str, end_marker: &str) 
 
 fn count_occurrences(output: &str, needle: &str) -> usize {
     output.match_indices(needle).count()
+}
+
+fn count_occurrences_between(output: &str, start: &str, end: &str, needle: &str) -> usize {
+    let start_idx = output.find(start).expect("start marker") + start.len();
+    let end_idx = output[start_idx..]
+        .find(end)
+        .map(|idx| start_idx + idx)
+        .expect("end marker");
+    count_occurrences(&output[start_idx..end_idx], needle)
+}
+
+fn assert_no_standalone_percent_line(output: &str) {
+    let clean = strip_ansi_escape(output).replace('\r', "\n");
+    assert!(
+        !clean.lines().any(|line| line.trim_end() == "%"),
+        "{output}"
+    );
 }
 
 fn assert_agent_block_width(output: &str, max_width: usize) {

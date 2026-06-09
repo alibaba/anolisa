@@ -65,6 +65,19 @@ pub fn govern_agent_events(events: &[AgentEvent], policy: &Policy) -> Governance
                 render_blocked_shell_command(command),
                 false,
             ),
+            AgentEvent::ToolPermissionRequest {
+                tool_name,
+                tool_input,
+                ..
+            } => {
+                let input_str = serde_json::to_string(tool_input).unwrap_or_default();
+                (
+                    GovernanceDecision::Display,
+                    "tool permission request via control protocol".to_string(),
+                    render_blocked_tool_request(tool_name, &input_str),
+                    false,
+                )
+            }
             AgentEvent::SkillLoadStarted { skill, reason, .. } => (
                 GovernanceDecision::Display,
                 "skill activity is display-only".to_string(),

@@ -51,22 +51,7 @@ pub(super) fn render_command_hook_findings<W: Write>(
         };
 
         match state.analysis_mode {
-            AnalysisMode::Smart => {
-                let card_id = format!("consultation-{}", hint.id);
-                let model = cosh_shell::agent_render::ConsultationCardModel {
-                    hook_id: card_id.clone(),
-                    severity: "warning".into(),
-                    title: hint.prompt_hint.clone(),
-                    suggestion: markdown.lines().next().unwrap_or("").to_string(),
-                };
-                renderer.write_consultation_card(output, &model)?;
-                state.pending_consultation = Some(PendingConsultation {
-                    card_id,
-                    block_id: hint.command_block_id.clone(),
-                    prompt_hint: hint.prompt_hint.clone(),
-                });
-                break;
-            }
+            AnalysisMode::Smart => {}
             AnalysisMode::Auto => {
                 renderer.write_notice(
                     output,
@@ -205,7 +190,16 @@ pub(super) fn handle_consultation_events<W: Write>(
             let block = blocks.iter().find(|b| b.id == consultation.block_id);
             if let Some(block) = block {
                 let findings = findings_from_blocks(blocks);
-                start_agent_for_block(block, blocks, &findings, adapter, state, output, None)?;
+                start_agent_for_block(
+                    block,
+                    blocks,
+                    &findings,
+                    adapter,
+                    state,
+                    output,
+                    None,
+                    FailedCommandAnalysisTrigger::UserConfirmed,
+                )?;
             }
             return Ok(());
         } else if action == "cancel" || action == "deny" {

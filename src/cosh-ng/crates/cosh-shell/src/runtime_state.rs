@@ -7,11 +7,11 @@ use cosh_shell::{agent_render::ApprovalPanelAction, GovernedEvent, HookEngine};
 use super::activity_runtime::RuntimeActivityRow;
 use super::agent_run_runtime::{ActiveAgentRun, PendingAgentRequest};
 use super::question_runtime::RuntimeUserQuestion;
+pub(super) use cosh_shell::types::CoshApprovalMode;
 
 pub(super) struct AnalysisThrottle {
     recent: HashMap<String, (Instant, usize)>,
     cooldown_secs: u64,
-    max_consecutive: usize,
 }
 
 impl Default for AnalysisThrottle {
@@ -19,34 +19,25 @@ impl Default for AnalysisThrottle {
         Self {
             recent: HashMap::new(),
             cooldown_secs: 30,
-            max_consecutive: 3,
         }
     }
 }
 
 impl AnalysisThrottle {
     pub(super) fn should_throttle(&mut self, command: &str) -> bool {
+        self.should_throttle_at(command, Instant::now())
+    }
+
+    fn should_throttle_at(&mut self, command: &str, now: Instant) -> bool {
         let key = normalize_command(command);
-        let now = Instant::now();
-        if let Some((last, count)) = self.recent.get_mut(&key) {
-            if now.duration_since(*last).as_secs() < self.cooldown_secs {
+        if let Some((window_started, count)) = self.recent.get_mut(&key) {
+            if now.duration_since(*window_started).as_secs() < self.cooldown_secs {
                 *count += 1;
-                *last = now;
-                // Allow first (count=1) and skip middle; the "last" will be
-                // analyzed when the cooldown resets or a different command runs.
-                return *count > 1 && *count <= self.max_consecutive;
+                return true;
             }
         }
         self.recent.insert(key, (now, 1));
         false
-    }
-
-    pub(super) fn skipped_count(&self, command: &str) -> usize {
-        let key = normalize_command(command);
-        self.recent
-            .get(&key)
-            .map(|(_, count)| count.saturating_sub(1))
-            .unwrap_or(0)
     }
 }
 
@@ -94,7 +85,7 @@ pub(super) struct InlineState {
     pub(super) active_run: Option<ActiveAgentRun>,
     pub(super) queued_agent_requests: VecDeque<PendingAgentRequest>,
     pub(super) shell_exited: bool,
-    pub(super) approval_mode: ApprovalMode,
+    pub(super) approval_mode: CoshApprovalMode,
     pub(super) analysis_mode: AnalysisMode,
     pub(super) analysis_throttle: AnalysisThrottle,
     pub(super) needs_prompt_after_agent_run: bool,
@@ -108,6 +99,7 @@ pub(super) struct InlineState {
 pub(super) struct PendingConsultation {
     pub(super) card_id: String,
     pub(super) block_id: String,
+    #[allow(dead_code)]
     pub(super) prompt_hint: String,
 }
 
@@ -128,13 +120,6 @@ pub(super) enum AnalysisMode {
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum ApprovalMode {
-    #[default]
-    Ask,
-    Auto,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct RuntimeCommandHookHint {
     pub(super) id: String,
@@ -142,6 +127,32 @@ pub(super) struct RuntimeCommandHookHint {
     pub(super) ended_at_ms: u64,
     pub(super) prompt_hint: String,
     pub(super) finding_markdown: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AnalysisThrottle;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    fn throttle(cooldown_secs: u64) -> AnalysisThrottle {
+        AnalysisThrottle {
+            recent: HashMap::new(),
+            cooldown_secs,
+        }
+    }
+
+    #[test]
+    fn analysis_throttle_uses_fixed_window_instead_of_sliding_forever() {
+        let start = Instant::now();
+        let mut throttle = throttle(30);
+
+        assert!(!throttle.should_throttle_at("ps -aux", start));
+        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(1)));
+        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(29)));
+        assert!(!throttle.should_throttle_at("ps -aux", start + Duration::from_secs(30)));
+        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(31)));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,15 +171,6 @@ impl AnalysisMode {
     }
 }
 
-impl ApprovalMode {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Ask => "ask",
-            Self::Auto => "auto",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct RuntimeApprovalRequest {
     pub(super) id: String,
@@ -180,6 +182,8 @@ pub(super) struct RuntimeApprovalRequest {
     pub(super) subject: String,
     pub(super) preview: String,
     pub(super) risk: &'static str,
+    pub(super) request_id: Option<String>,
+    pub(super) tool_use_id: Option<String>,
     pub(super) status: ApprovalRequestStatus,
 }
 
@@ -214,6 +218,7 @@ impl ApprovalRequestKind {
 pub(super) enum ApprovalRequestStatus {
     Pending,
     Approved,
+    Blocked,
     Denied,
     Cancelled,
 }
@@ -223,6 +228,7 @@ impl ApprovalRequestStatus {
         match self {
             Self::Pending => "pending",
             Self::Approved => "approved",
+            Self::Blocked => "blocked",
             Self::Denied => "denied",
             Self::Cancelled => "cancelled",
         }

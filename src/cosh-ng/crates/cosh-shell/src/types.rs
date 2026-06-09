@@ -240,6 +240,13 @@ pub enum AgentEvent {
         run_id: String,
         command: String,
     },
+    ToolPermissionRequest {
+        run_id: String,
+        request_id: String,
+        tool_name: String,
+        tool_input: serde_json::Value,
+        tool_use_id: String,
+    },
     SkillLoadStarted {
         run_id: String,
         skill: String,
@@ -278,6 +285,37 @@ pub enum AgentEvent {
         run_id: String,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CoshApprovalMode {
+    Suggest,
+    #[default]
+    Ask,
+    Auto,
+    Trust,
+}
+
+impl CoshApprovalMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Suggest => "suggest",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::Trust => "trust",
+        }
+    }
+
+    pub fn user_mode_label(self) -> &'static str {
+        match self {
+            Self::Suggest => "recommend",
+            Self::Ask | Self::Auto | Self::Trust => "agent",
+        }
+    }
+
+    pub fn uses_control_protocol(self) -> bool {
+        matches!(self, Self::Ask | Self::Auto)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

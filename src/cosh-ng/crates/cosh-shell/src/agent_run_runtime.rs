@@ -100,7 +100,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     }
     output.flush()?;
 
-    let handle = adapter.start_cancellable(request.clone());
+    let handle = adapter.start_cancellable(request.clone(), state.approval_mode);
     let now = Instant::now();
     state.active_run = Some(ActiveAgentRun {
         request: request.clone(),
@@ -153,10 +153,9 @@ pub(super) fn poll_active_agent_run<W: Write>(
         let event = match active_run
             .handle
             .poll_event_timeout(Duration::from_millis(0))
-            .map_err(adapter_error_to_io)?
         {
-            AgentRunPoll::Event(event) => event,
-            AgentRunPoll::Timeout => {
+            Ok(AgentRunPoll::Event(event)) => event,
+            Ok(AgentRunPoll::Timeout) => {
                 if pending_interaction_before_poll
                     || queued_before_held_text
                     || active_run_has_unrendered_interaction(active_run)
@@ -169,10 +168,14 @@ pub(super) fn poll_active_agent_run<W: Write>(
                 output.flush()?;
                 break;
             }
-            AgentRunPoll::Finished => {
+            Ok(AgentRunPoll::Finished) => {
                 should_finish = true;
                 break;
             }
+            Err(err) => AgentEvent::AgentFailed {
+                run_id: active_run.request.id.clone(),
+                error: err.message,
+            },
         };
 
         let terminal_event = matches!(
@@ -240,12 +243,48 @@ fn render_agent_structured_events<W: Write>(
     render_activity_rows(state, &activity_ids, output)?;
     let question_ids = record_user_questions(state, governed_events);
     render_user_questions(state, &question_ids, output)?;
+    if render_trusted_tool(state, governed_events, run_request, output, adapter)? {
+        return Ok(());
+    }
     if render_auto_approved_tool(state, governed_events, run_request, output, adapter)? {
+        return Ok(());
+    }
+    if state.approval_mode == CoshApprovalMode::Suggest {
         return Ok(());
     }
     let approval_ids = record_approval_requests(state, governed_events, run_request);
     render_approval_requests(state, &approval_ids, output)?;
     Ok(())
+}
+
+fn render_trusted_tool<W: Write>(
+    state: &mut InlineState,
+    governed_events: &[GovernedEvent],
+    run_request: Option<&AgentRequest>,
+    output: &mut W,
+    adapter: &AdapterInstance,
+) -> std::io::Result<bool> {
+    if state.approval_mode != CoshApprovalMode::Trust {
+        return Ok(false);
+    }
+
+    for event in governed_events {
+        let Some(request) = approval_request_from_governed_event(state, event, run_request) else {
+            continue;
+        };
+        let request = record_auto_approved_request(state, request);
+        render_approval_resolution(state, &request, "Auto-approved", output)?;
+        if respond_auto_approval_to_provider(state, &request) {
+            continue;
+        }
+        if request_is_executable_bash_tool(&request) {
+            stop_active_agent_run_without_rendering(state, output)?;
+            render_approved_tool_result(state, &request, adapter, output)?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn render_auto_approved_tool<W: Write>(
@@ -255,7 +294,7 @@ fn render_auto_approved_tool<W: Write>(
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
-    if state.approval_mode != ApprovalMode::Auto {
+    if state.approval_mode != CoshApprovalMode::Auto {
         return Ok(false);
     }
 
@@ -266,10 +305,14 @@ fn render_auto_approved_tool<W: Write>(
         if request_is_readonly_builtin_tool(&request) {
             let request = record_auto_approved_request(state, request);
             render_approval_resolution(state, &request, "Auto-approved", output)?;
+            respond_auto_approval_to_provider(state, &request);
             continue;
         }
 
-        let raw_cmd = request.preview.strip_prefix("$ ").unwrap_or(&request.preview);
+        let raw_cmd = request
+            .preview
+            .strip_prefix("$ ")
+            .unwrap_or(&request.preview);
         if !request_is_executable_bash_tool(&request)
             || can_run_approved_bash_tool(raw_cmd).is_err()
         {
@@ -278,12 +321,43 @@ fn render_auto_approved_tool<W: Write>(
 
         let request = record_auto_approved_request(state, request);
         render_approval_resolution(state, &request, "Auto-approved", output)?;
+        if respond_auto_approval_to_provider(state, &request) {
+            continue;
+        }
         stop_active_agent_run_without_rendering(state, output)?;
         render_approved_tool_result(state, &request, adapter, output)?;
         return Ok(true);
     }
 
     Ok(false)
+}
+
+fn respond_auto_approval_to_provider(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    let Some(request_id) = request.request_id.as_ref() else {
+        return false;
+    };
+    let Some(active_run) = state.active_run.as_ref() else {
+        return true;
+    };
+    let response = match request.tool_use_id.as_ref() {
+        Some(tool_use_id) => ApprovalResponse {
+            request_id: request_id.clone(),
+            tool_use_id: Some(tool_use_id.clone()),
+            decision: ApprovalDecision::Allow,
+        },
+        None => ApprovalResponse {
+            request_id: request_id.clone(),
+            tool_use_id: None,
+            decision: ApprovalDecision::Deny {
+                message: "Missing provider tool_use_id".to_string(),
+            },
+        },
+    };
+    let _ = active_run.handle.respond_approval(response);
+    true
 }
 
 fn render_agent_heartbeat<W: Write>(
@@ -367,7 +441,10 @@ fn active_run_has_unrendered_interaction(active_run: &ActiveAgentRun) -> bool {
 fn is_interaction_governed_event(event: &GovernedEvent) -> bool {
     matches!(
         event.event,
-        AgentEvent::ToolCall { .. } | AgentEvent::UserQuestion { .. } | AgentEvent::Action { .. }
+        AgentEvent::ToolCall { .. }
+            | AgentEvent::UserQuestion { .. }
+            | AgentEvent::Action { .. }
+            | AgentEvent::ToolPermissionRequest { .. }
     )
 }
 
@@ -477,6 +554,10 @@ fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed: &[Governed
                 active_run.current_phase = "approval".to_string();
                 active_run.current_message = format!("waiting for approval: {command}");
             }
+            AgentEvent::ToolPermissionRequest { tool_name, .. } => {
+                active_run.current_phase = "approval".to_string();
+                active_run.current_message = format!("waiting for approval: tool {tool_name}");
+            }
             AgentEvent::ToolOutputDelta { tool_id, .. } => {
                 active_run.current_phase = "tool".to_string();
                 active_run.current_message = format!("capturing output from {tool_id}");
@@ -523,9 +604,7 @@ fn finish_active_agent_run<W: Write>(
     active_run.status_animation.clear(output)?;
     if !active_run.held_events.is_empty() {
         if state_has_pending_interaction(state) || has_queued_run_before_held_text(state) {
-            state
-                .held_agent_events
-                .extend(active_run.held_events.drain(..));
+            state.held_agent_events.append(&mut active_run.held_events);
         } else {
             let held_events = std::mem::take(&mut active_run.held_events);
             render_held_events_into_active_run(&mut active_run, &held_events, output)?;
@@ -581,7 +660,8 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         AgentEvent::Recommendation { .. } => false,
         AgentEvent::ToolCall { .. }
         | AgentEvent::UserQuestion { .. }
-        | AgentEvent::Action { .. } => false,
+        | AgentEvent::Action { .. }
+        | AgentEvent::ToolPermissionRequest { .. } => false,
         AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => true,
         AgentEvent::SkillLoadStarted { .. }
         | AgentEvent::SkillLoadCompleted { .. }
@@ -590,8 +670,4 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
     }
-}
-
-fn adapter_error_to_io(err: cosh_shell::AdapterError) -> std::io::Error {
-    std::io::Error::other(err.message)
 }

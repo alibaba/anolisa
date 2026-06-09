@@ -168,7 +168,11 @@ fn hook_input_from_block(block: &CommandBlock) -> HookInput {
 
 fn read_preview(path: &str, max_lines: usize) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
-    let preview: String = content.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    let preview: String = content
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
     if preview.is_empty() {
         None
     } else {
@@ -207,7 +211,8 @@ fn parse_hook_header(path: &Path) -> Option<ExternalHookConfig> {
             id,
             commands: match_commands,
             command_patterns: Vec::new(),
-                command_regex: None, min_output_bytes: None,
+            command_regex: None,
+            min_output_bytes: None,
             exit_codes: None,
             trigger,
         },
@@ -324,16 +329,13 @@ mod tests {
         }
     }
 
-    fn make_matcher(
-        commands: Vec<&str>,
-        patterns: Vec<&str>,
-        trigger: HookTrigger,
-    ) -> HookMatcher {
+    fn make_matcher(commands: Vec<&str>, patterns: Vec<&str>, trigger: HookTrigger) -> HookMatcher {
         HookMatcher {
             id: "test".to_string(),
             commands: commands.into_iter().map(String::from).collect(),
             command_patterns: patterns.into_iter().map(String::from).collect(),
-                command_regex: None, min_output_bytes: None,
+            command_regex: None,
+            min_output_bytes: None,
             exit_codes: None,
             trigger,
         }
@@ -401,7 +403,8 @@ mod tests {
                 description: "desc".to_string(),
                 suggestion: "fix it".to_string(),
                 skill: None,
-                cli_hint: None, context_refs: Vec::new(),
+                cli_hint: None,
+                context_refs: Vec::new(),
             })
         }
     }
@@ -570,7 +573,8 @@ mod tests {
                 id: "info-hook".to_string(),
                 commands: vec![],
                 command_patterns: vec![],
-                command_regex: None, min_output_bytes: None,
+                command_regex: None,
+                min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnComplete,
             },
@@ -581,7 +585,8 @@ mod tests {
                 id: "critical-hook".to_string(),
                 commands: vec![],
                 command_patterns: vec![],
-                command_regex: None, min_output_bytes: None,
+                command_regex: None,
+                min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnComplete,
             },
@@ -592,7 +597,8 @@ mod tests {
                 id: "warning-hook".to_string(),
                 commands: vec![],
                 command_patterns: vec![],
-                command_regex: None, min_output_bytes: None,
+                command_regex: None,
+                min_output_bytes: None,
                 exit_codes: None,
                 trigger: HookTrigger::OnComplete,
             },

@@ -229,6 +229,9 @@ pub fn approval_command_from_event(event: &ShellEvent) -> Option<ApprovalCommand
         if id.is_empty() {
             return None;
         }
+        if id.starts_with("consultation-") {
+            return None;
+        }
         return match event.message.as_deref() {
             Some("approve") => Some(ApprovalCommand {
                 kind: ApprovalCommandKind::Approve,
@@ -432,6 +435,16 @@ mod tests {
             })
         );
         assert_eq!(approval_command_from_event(&recommendation), None);
+    }
+
+    #[test]
+    fn consultation_card_events_are_not_approval_commands() {
+        let mut analyze =
+            ShellEvent::user_input_intercepted("session-1", "consultation-hook-cmd-3");
+        analyze.component = Some("card".to_string());
+        analyze.message = Some("approve".to_string());
+
+        assert_eq!(approval_command_from_event(&analyze), None);
     }
 
     #[test]

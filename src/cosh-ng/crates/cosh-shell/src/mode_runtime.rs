@@ -1,3 +1,4 @@
+use super::runtime_state::RuntimeModePanel;
 use super::slash_runtime::write_shell_prompt;
 use super::*;
 
@@ -12,37 +13,74 @@ pub(super) fn render_mode_command<W: Write>(
     }
     match arg {
         None => {
-            let body = vec![
-                format!("Approval mode: {}", state.approval_mode.label()),
-                format!("Analysis mode: {}", state.analysis_mode.label()),
-            ];
+            state.pending_mode_panel = Some(RuntimeModePanel {
+                id: format!("mode-{}", state.handled_mode_actions.len() + 1),
+                selected_option: if state.approval_mode == CoshApprovalMode::Suggest {
+                    0
+                } else {
+                    1
+                },
+            });
+            render_current_mode_panel(state, output)?;
+            Ok(false)
+        }
+        Some("recommend") => {
+            state.approval_mode = CoshApprovalMode::Suggest;
             RatatuiInlineRenderer::for_terminal().write_notice(
                 output,
-                "Current modes",
-                body,
-                Some("Use /mode ask|auto or /mode analysis smart|auto|manual."),
+                "User mode",
+                vec!["Mode set to recommend.".to_string()],
+                Some(user_mode_footer(CoshApprovalMode::Suggest)),
+            )?;
+            Ok(true)
+        }
+        Some("agent") => {
+            state.approval_mode = CoshApprovalMode::Auto;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "User mode",
+                vec!["Mode set to agent.".to_string()],
+                Some(user_mode_footer(CoshApprovalMode::Auto)),
+            )?;
+            Ok(true)
+        }
+        Some("suggest") => {
+            state.approval_mode = CoshApprovalMode::Suggest;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Legacy approval strategy",
+                vec!["Strategy set to suggest.".to_string()],
+                Some(mode_footer(CoshApprovalMode::Suggest)),
             )?;
             Ok(true)
         }
         Some("ask") => {
-            state.approval_mode = ApprovalMode::Ask;
+            state.approval_mode = CoshApprovalMode::Ask;
             RatatuiInlineRenderer::for_terminal().write_notice(
                 output,
-                "Approval mode",
-                vec!["Mode set to ask.".to_string()],
-                Some("Every Agent action/tool request requires confirmation."),
+                "Legacy approval strategy",
+                vec!["Strategy set to ask.".to_string()],
+                Some(mode_footer(CoshApprovalMode::Ask)),
             )?;
             Ok(true)
         }
         Some("auto") => {
-            state.approval_mode = ApprovalMode::Auto;
+            state.approval_mode = CoshApprovalMode::Auto;
             RatatuiInlineRenderer::for_terminal().write_notice(
                 output,
-                "Approval mode",
-                vec!["Mode set to auto.".to_string()],
-                Some(
-                    "Only low-risk read-only Bash tools can skip approval; risky requests still ask.",
-                ),
+                "Legacy approval strategy",
+                vec!["Strategy set to auto.".to_string()],
+                Some(mode_footer(CoshApprovalMode::Auto)),
+            )?;
+            Ok(true)
+        }
+        Some("trust") => {
+            state.approval_mode = CoshApprovalMode::Trust;
+            RatatuiInlineRenderer::for_terminal().write_notice(
+                output,
+                "Legacy approval strategy",
+                vec!["Strategy set to trust.".to_string()],
+                Some(mode_footer(CoshApprovalMode::Trust)),
             )?;
             Ok(true)
         }
@@ -51,7 +89,7 @@ pub(super) fn render_mode_command<W: Write>(
                 output,
                 "Mode",
                 vec![format!("Unknown mode: {other}")],
-                Some("Use /mode ask|auto or /mode analysis smart|auto|manual."),
+                Some("Use /mode recommend|agent. Legacy: /approval-mode suggest|ask|auto|trust."),
             )
             .map(|_| true),
     }
@@ -152,9 +190,9 @@ pub(super) fn render_mode_card_actions<W: Write>(
                     continue;
                 };
                 let mode = mode_from_index(selected.min(1));
-                let unchanged = mode == state.approval_mode;
+                let unchanged = mode.user_mode_label() == state.approval_mode.user_mode_label();
                 state.approval_mode = mode;
-                let label = state.approval_mode.label();
+                let label = state.approval_mode.user_mode_label();
                 let _ = panel;
                 clear_active_mode_panel(state, output)?;
                 state.pending_mode_panel = None;
@@ -165,30 +203,30 @@ pub(super) fn render_mode_card_actions<W: Write>(
                 };
                 RatatuiInlineRenderer::for_terminal().write_notice(
                     output,
-                    "Approval mode",
+                    "User mode",
                     body,
-                    Some(mode_footer(state.approval_mode)),
+                    Some(user_mode_footer(state.approval_mode)),
                 )?;
-                write_shell_prompt(output)?;
+                write_shell_prompt(state, output)?;
             }
             ModeCardAction::Cancel { id } => {
-                if !state
+                let Some(_panel) = state
                     .pending_mode_panel
                     .as_ref()
-                    .is_some_and(|panel| panel.id == id)
-                {
+                    .filter(|panel| panel.id == id)
+                else {
                     continue;
-                }
-                let label = state.approval_mode.label();
+                };
+                let label = state.approval_mode.user_mode_label();
                 clear_active_mode_panel(state, output)?;
                 state.pending_mode_panel = None;
                 RatatuiInlineRenderer::for_terminal().write_notice(
                     output,
-                    "Approval mode",
+                    "User mode",
                     vec![format!("Mode unchanged: {label}.")],
                     Some("No shell command ran."),
                 )?;
-                write_shell_prompt(output)?;
+                write_shell_prompt(state, output)?;
             }
         }
         output.flush()?;
@@ -207,25 +245,25 @@ fn render_current_mode_panel<W: Write>(
         return Ok(());
     }
 
-    let ask_marker = if panel.selected_option == 0 {
-        "> "
-    } else {
-        "  "
-    };
-    let auto_marker = if panel.selected_option == 1 {
-        "> "
-    } else {
-        "  "
+    let marker = |i: usize| {
+        if panel.selected_option == i {
+            "> "
+        } else {
+            "  "
+        }
     };
     let body = vec![
-        format!("Current: {}", state.approval_mode.label()),
-        format!("{ask_marker}[ ask  ] Confirm every Agent action/tool request"),
-        format!("{auto_marker}[ auto ] Auto-allow low-risk read-only Bash tools"),
+        format!("Current: {}", state.approval_mode.user_mode_label()),
+        format!("{}[ recommend ] Explain and suggest only", marker(0)),
+        format!(
+            "{}[ agent     ] Use tools with cosh-shell governance",
+            marker(1)
+        ),
     ];
     let footer = "Keys: Left/Right select | Enter apply | Esc cancel";
     RatatuiInlineRenderer::for_terminal().write_notice(
         output,
-        "Approval mode",
+        "User mode",
         body.clone(),
         Some(footer),
     )?;
@@ -302,19 +340,29 @@ fn split_mode_value(value: &str) -> Option<(String, usize)> {
     Some((id.to_string(), selected.parse().ok()?))
 }
 
-fn mode_from_index(index: usize) -> ApprovalMode {
+fn mode_from_index(index: usize) -> CoshApprovalMode {
     match index {
-        1 => ApprovalMode::Auto,
-        _ => ApprovalMode::Ask,
+        0 => CoshApprovalMode::Suggest,
+        1 => CoshApprovalMode::Auto,
+        _ => CoshApprovalMode::Auto,
     }
 }
 
-fn mode_footer(mode: ApprovalMode) -> &'static str {
+fn user_mode_footer(mode: CoshApprovalMode) -> &'static str {
+    match mode.user_mode_label() {
+        "recommend" => "Agent explains and suggests; no tool calls are emitted.",
+        _ => "Agent can use tools; cosh-shell handles safe auto-approval and approval cards.",
+    }
+}
+
+fn mode_footer(mode: CoshApprovalMode) -> &'static str {
     match mode {
-        ApprovalMode::Ask => "Every Agent action/tool request requires confirmation.",
-        ApprovalMode::Auto => {
+        CoshApprovalMode::Suggest => "Agent suggests actions; no execution occurs.",
+        CoshApprovalMode::Ask => "Every Agent action/tool request requires confirmation.",
+        CoshApprovalMode::Auto => {
             "Only low-risk read-only Bash tools can skip approval; risky requests still ask."
         }
+        CoshApprovalMode::Trust => "All Agent actions are auto-approved without confirmation.",
     }
 }
 

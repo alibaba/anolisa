@@ -9,9 +9,7 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
-use super::{
-    buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer,
-};
+use super::{buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer};
 
 #[derive(Debug, Clone)]
 pub struct ActivityRowModel<'a> {

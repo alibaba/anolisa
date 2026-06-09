@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
+const AUTO_TOOL_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,58 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
         Err(reason) => return blocked_result(command, reason),
     };
 
-    let mut child = match Command::new(&tokens[0])
+    run_tokenized_tool(
+        command,
+        &tokens,
+        "approved read-only tool",
+        AUTO_TOOL_TIMEOUT,
+    )
+}
+
+pub fn run_user_approved_bash_tool(command: &str) -> ToolExecutionResult {
+    let command = command.trim();
+    if let Err(reason) = user_approved_shell_command(command) {
+        return blocked_result(command, reason);
+    }
+
+    run_shell_tool(
+        command,
+        "user-approved Bash tool",
+        user_approved_tool_timeout(),
+    )
+}
+
+fn run_shell_tool(command: &str, label: &str, timeout: Option<Duration>) -> ToolExecutionResult {
+    let child = match Command::new("bash")
+        .args(["-lc", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return ToolExecutionResult {
+                status: ToolExecutionStatus::Failed,
+                command: command.to_string(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                reason: format!("failed to start {label}: {err}"),
+            };
+        }
+    };
+
+    wait_for_tool(command, child, label, timeout, "executed through bash -lc")
+}
+
+fn run_tokenized_tool(
+    command: &str,
+    tokens: &[String],
+    label: &str,
+    timeout: Duration,
+) -> ToolExecutionResult {
+    let child = match Command::new(&tokens[0])
         .args(&tokens[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -55,16 +106,32 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
                 exit_code: None,
                 stdout: String::new(),
                 stderr: String::new(),
-                reason: format!("failed to start approved read-only tool: {err}"),
+                reason: format!("failed to start {label}: {err}"),
             };
         }
     };
 
-    let deadline = Instant::now() + TOOL_TIMEOUT;
+    wait_for_tool(
+        command,
+        child,
+        label,
+        Some(timeout),
+        "executed directly without a shell",
+    )
+}
+
+fn wait_for_tool(
+    command: &str,
+    mut child: std::process::Child,
+    label: &str,
+    timeout: Option<Duration>,
+    success_detail: &str,
+) -> ToolExecutionResult {
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
                 let _ = child.kill();
                 let output = child.wait_with_output();
                 let (stdout, stderr) = output
@@ -81,7 +148,7 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
                     exit_code: None,
                     stdout,
                     stderr,
-                    reason: "approved read-only tool timed out".to_string(),
+                    reason: format!("{label} timed out"),
                 };
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
@@ -92,7 +159,7 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
                     exit_code: None,
                     stdout: String::new(),
                     stderr: String::new(),
-                    reason: format!("failed while waiting for approved read-only tool: {err}"),
+                    reason: format!("failed while waiting for {label}: {err}"),
                 };
             }
         }
@@ -105,7 +172,7 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
             exit_code: output.status.code(),
             stdout: decode_limited(&output.stdout),
             stderr: decode_limited(&output.stderr),
-            reason: "approved read-only tool executed by broker".to_string(),
+            reason: format!("{label} {success_detail}"),
         },
         Err(err) => ToolExecutionResult {
             status: ToolExecutionStatus::Failed,
@@ -113,7 +180,7 @@ pub fn run_approved_bash_tool(command: &str) -> ToolExecutionResult {
             exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
-            reason: format!("failed to collect approved read-only tool output: {err}"),
+            reason: format!("failed to collect {label} output: {err}"),
         },
     }
 }
@@ -122,7 +189,47 @@ pub fn can_run_approved_bash_tool(command: &str) -> Result<(), String> {
     readonly_tokens(command).map(|_| ())
 }
 
+pub fn can_run_user_approved_bash_tool(command: &str) -> Result<(), String> {
+    user_approved_shell_command(command.trim()).map(|_| ())
+}
+
+fn user_approved_shell_command(command: &str) -> Result<(), String> {
+    if command.is_empty() {
+        return Err("empty tool command".to_string());
+    }
+    if command.contains('\0') {
+        return Err("blocked NUL byte in shell command".to_string());
+    }
+
+    Ok(())
+}
+
+fn user_approved_tool_timeout() -> Option<Duration> {
+    parse_user_approved_tool_timeout(
+        std::env::var("COSH_SHELL_USER_TOOL_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_user_approved_tool_timeout(value: Option<&str>) -> Option<Duration> {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
+
 fn readonly_tokens(command: &str) -> Result<Vec<String>, String> {
+    let tokens = direct_exec_tokens(command)?;
+
+    if is_readonly_command(&tokens) {
+        Ok(tokens)
+    } else {
+        Err("command is not in the read-only tool allowlist".to_string())
+    }
+}
+
+fn direct_exec_tokens(command: &str) -> Result<Vec<String>, String> {
     if command.is_empty() {
         return Err("empty tool command".to_string());
     }
@@ -138,11 +245,7 @@ fn readonly_tokens(command: &str) -> Result<Vec<String>, String> {
         return Err("empty tool command".to_string());
     }
 
-    if is_readonly_command(&tokens) {
-        Ok(tokens)
-    } else {
-        Err("command is not in the read-only tool allowlist".to_string())
-    }
+    Ok(tokens)
 }
 
 fn is_shell_meta(ch: char) -> bool {
@@ -178,6 +281,7 @@ fn is_readonly_command(tokens: &[String]) -> bool {
         Some("grep") => is_readonly_grep(tokens),
         Some("rg") => is_readonly_rg(tokens),
         Some("find") => is_readonly_find(tokens),
+        Some("df") => is_readonly_df(tokens),
         Some("vm_stat") => tokens.len() == 1,
         Some("sysctl") => is_readonly_sysctl(tokens),
         Some("top") => is_bounded_top_snapshot(tokens),
@@ -523,6 +627,20 @@ fn is_readonly_find(tokens: &[String]) -> bool {
     true
 }
 
+fn is_readonly_df(tokens: &[String]) -> bool {
+    tokens.iter().skip(1).all(|token| {
+        if token.starts_with('-') {
+            token.len() > 1
+                && token
+                    .chars()
+                    .skip(1)
+                    .all(|ch| matches!(ch, 'h' | 'H' | 'k' | 'm' | 'g' | 'P' | 'T' | 'i' | 'l'))
+        } else {
+            is_safe_readonly_path(token)
+        }
+    })
+}
+
 fn is_readonly_ps(tokens: &[String]) -> bool {
     let mut idx = 1;
     while idx < tokens.len() {
@@ -585,7 +703,7 @@ fn is_safe_ps_fields(fields: &str) -> bool {
 }
 
 fn is_readonly_git(tokens: &[String]) -> bool {
-    if tokens.len() < 2 || tokens.iter().skip(1).any(is_risky_git_arg) {
+    if tokens.len() < 2 || tokens.iter().skip(1).any(|a| is_risky_git_arg(a)) {
         return false;
     }
 
@@ -605,16 +723,17 @@ fn is_readonly_git(tokens: &[String]) -> bool {
                     | "--untracked-files=all"
             )
         }),
-        Some("diff") => tokens.iter().skip(2).all(is_safe_git_diff_arg),
-        Some("log") => tokens.iter().skip(2).all(is_safe_git_log_arg),
-        Some("show") => tokens.iter().skip(2).all(is_safe_git_show_arg),
-        Some("branch" | "remote" | "rev-parse") => tokens.iter().skip(2).all(is_plain_git_arg),
+        Some("diff") => tokens.iter().skip(2).all(|a| is_safe_git_diff_arg(a)),
+        Some("log") => tokens.iter().skip(2).all(|a| is_safe_git_log_arg(a)),
+        Some("show") => tokens.iter().skip(2).all(|a| is_safe_git_show_arg(a)),
+        Some("branch" | "remote" | "rev-parse") => {
+            tokens.iter().skip(2).all(|a| is_plain_git_arg(a))
+        }
         _ => false,
     }
 }
 
-fn is_risky_git_arg(arg: &String) -> bool {
-    let arg = arg.as_str();
+fn is_risky_git_arg(arg: &str) -> bool {
     arg == "-c"
         || arg.starts_with("-c")
         || arg == "--ext-diff"
@@ -623,9 +742,9 @@ fn is_risky_git_arg(arg: &String) -> bool {
         || arg.starts_with("--exec-path")
 }
 
-fn is_safe_git_diff_arg(arg: &String) -> bool {
+fn is_safe_git_diff_arg(arg: &str) -> bool {
     matches!(
-        arg.as_str(),
+        arg,
         "--stat"
             | "--shortstat"
             | "--numstat"
@@ -640,9 +759,9 @@ fn is_safe_git_diff_arg(arg: &String) -> bool {
     ) || is_plain_git_arg(arg)
 }
 
-fn is_safe_git_log_arg(arg: &String) -> bool {
+fn is_safe_git_log_arg(arg: &str) -> bool {
     matches!(
-        arg.as_str(),
+        arg,
         "--oneline"
             | "--decorate"
             | "--stat"
@@ -655,14 +774,14 @@ fn is_safe_git_log_arg(arg: &String) -> bool {
         || is_plain_git_arg(arg)
 }
 
-fn is_safe_git_show_arg(arg: &String) -> bool {
+fn is_safe_git_show_arg(arg: &str) -> bool {
     matches!(
-        arg.as_str(),
+        arg,
         "--stat" | "--shortstat" | "--name-only" | "--name-status" | "--no-ext-diff" | "--"
     ) || is_plain_git_arg(arg)
 }
 
-fn is_plain_git_arg(arg: &String) -> bool {
+fn is_plain_git_arg(arg: &str) -> bool {
     !arg.starts_with('-') && !is_blocked_special_path(arg)
 }
 
@@ -809,7 +928,10 @@ fn decode_limited(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{readonly_tokens, run_approved_bash_tool, ToolExecutionStatus};
+    use super::{
+        parse_user_approved_tool_timeout, readonly_tokens, run_approved_bash_tool,
+        run_user_approved_bash_tool, ToolExecutionStatus,
+    };
 
     #[test]
     fn readonly_broker_allows_simple_git_status() {
@@ -828,6 +950,54 @@ mod tests {
         assert!(piped.reason.contains("metacharacter"));
         assert_eq!(mutation.status, ToolExecutionStatus::Blocked);
         assert!(mutation.reason.contains("allowlist"));
+    }
+
+    #[test]
+    fn user_approved_broker_runs_non_allowlisted_command_through_shell() {
+        let result = run_user_approved_bash_tool("true");
+
+        assert_eq!(result.status, ToolExecutionStatus::Executed);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.reason.contains("bash -lc"));
+    }
+
+    #[test]
+    fn user_approved_broker_allows_shell_syntax_after_confirmation() {
+        for command in [
+            "printf 'alpha\\nbeta\\n' | grep beta",
+            "echo ok >/dev/null",
+            "git status&&pwd",
+        ] {
+            let result = run_user_approved_bash_tool(command);
+            assert_eq!(result.status, ToolExecutionStatus::Executed, "{command}");
+        }
+    }
+
+    #[test]
+    fn user_approved_broker_waits_longer_than_auto_tool_timeout() {
+        let result = run_user_approved_bash_tool("sleep 4; printf done");
+
+        assert_eq!(result.status, ToolExecutionStatus::Executed);
+        assert_eq!(result.stdout, "done");
+    }
+
+    #[test]
+    fn user_approved_broker_has_no_default_timeout() {
+        assert_eq!(parse_user_approved_tool_timeout(None), None);
+        assert_eq!(
+            parse_user_approved_tool_timeout(Some("2")),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(parse_user_approved_tool_timeout(Some("0")), None);
+        assert_eq!(parse_user_approved_tool_timeout(Some("invalid")), None);
+    }
+
+    #[test]
+    fn user_approved_broker_rejects_empty_or_nul_command() {
+        for command in ["", "printf ok\0printf bad"] {
+            let result = run_user_approved_bash_tool(command);
+            assert_eq!(result.status, ToolExecutionStatus::Blocked, "{command:?}");
+        }
     }
 
     #[test]
@@ -857,6 +1027,13 @@ mod tests {
             "sysctl -n hw.ncpu",
             "sysctl -n machdep.cpu.brand_string",
         ] {
+            assert!(readonly_tokens(command).is_ok(), "{command}");
+        }
+    }
+
+    #[test]
+    fn readonly_broker_allows_disk_usage_diagnostics() {
+        for command in ["df", "df -h", "df -hi", "df -h ."] {
             assert!(readonly_tokens(command).is_ok(), "{command}");
         }
     }
@@ -901,6 +1078,8 @@ mod tests {
             "rg --pre=cat cosh .",
             "rg -n cosh /dev",
             "ls /dev/zero",
+            "df --output=source",
+            "df /dev/zero",
         ] {
             let result = run_approved_bash_tool(command);
             assert_eq!(result.status, ToolExecutionStatus::Blocked, "{command}");
@@ -927,6 +1106,7 @@ mod tests {
             "rg -n cosh crates/cosh-shell",
             "rg --files crates/cosh-shell",
             "find . -maxdepth 2 -type f -name Cargo.toml -print",
+            "df -h .",
             "uname -a",
             "id -u",
         ] {

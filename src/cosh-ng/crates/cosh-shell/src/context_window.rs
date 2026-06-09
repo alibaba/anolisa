@@ -130,7 +130,10 @@ pub fn format_context_prompt(entries: &[ContextEntry]) -> String {
     for entry in entries {
         lines.push(format!(
             "[{}] {} | exit={} | cwd={} | {}",
-            entry.block.id, entry.block.command, entry.block.exit_code, entry.block.cwd,
+            entry.block.id,
+            entry.block.command,
+            entry.block.exit_code,
+            entry.block.cwd,
             entry.age_label
         ));
         lines.push(format!(
@@ -163,7 +166,12 @@ mod tests {
     use super::*;
     use crate::types::{CommandStatus, OutputRefs};
 
-    fn make_block(id: &str, exit_code: i32, ended_at_ms: u64, output_ref: Option<&str>) -> CommandBlock {
+    fn make_block(
+        id: &str,
+        exit_code: i32,
+        ended_at_ms: u64,
+        output_ref: Option<&str>,
+    ) -> CommandBlock {
         CommandBlock {
             id: id.to_string(),
             session_id: "s1".to_string(),
@@ -204,7 +212,7 @@ mod tests {
     fn filters_blocks_by_max_age() {
         let now = 50 * 60 * 1000; // 50 minutes
         let blocks = vec![
-            make_block("old", 0, 1000, None),         // 49+ min ago
+            make_block("old", 0, 1000, None),            // 49+ min ago
             make_block("recent", 0, now - 10_000, None), // 10s ago
         ];
         let config = ContextWindowConfig {
@@ -279,7 +287,10 @@ mod tests {
 
     #[test]
     fn context_blocks_from_entries_extracts_blocks() {
-        let blocks = vec![make_block("a", 0, 1000, None), make_block("b", 1, 2000, None)];
+        let blocks = vec![
+            make_block("a", 0, 1000, None),
+            make_block("b", 1, 2000, None),
+        ];
         let config = ContextWindowConfig::default();
         let entries = build_context_window(&blocks, 3000, &config);
         let extracted = context_blocks_from_entries(&entries);

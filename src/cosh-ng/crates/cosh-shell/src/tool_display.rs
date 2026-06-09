@@ -19,13 +19,18 @@ pub struct ToolDisplayInfo {
 pub fn display_for_tool(name: &str, input_json: &str) -> ToolDisplayInfo {
     let parsed = serde_json::from_str::<Value>(input_json).ok();
 
+    if is_bash_tool_name(name) {
+        return display_bash(&parsed, input_json);
+    }
+
     match name {
-        "Bash" => display_bash(&parsed, input_json),
-        "Read" => display_read(&parsed, input_json),
-        "Write" => display_write(&parsed, input_json),
+        "Read" | "read_file" => display_read(&parsed, input_json),
+        "Write" | "write_file" => display_write(&parsed, input_json),
         "Edit" => display_edit(&parsed, input_json),
-        "Grep" => display_grep(&parsed, input_json),
+        "Grep" | "grep_search" => display_grep(&parsed, input_json),
         "Glob" => display_glob(&parsed, input_json),
+        "LS" | "list_directory" => display_ls(&parsed, input_json),
+        "read_many_files" => display_many_files(&parsed, input_json),
         "LSP" => display_lsp(&parsed, input_json),
         "WebFetch" => display_web_fetch(&parsed, input_json),
         "WebSearch" => display_web_search(&parsed, input_json),
@@ -35,6 +40,18 @@ pub fn display_for_tool(name: &str, input_json: &str) -> ToolDisplayInfo {
             preview: compact_json(input_json),
         },
     }
+}
+
+fn is_bash_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Bash"
+            | "shell"
+            | "run_shell_command"
+            | "tool Bash"
+            | "tool shell"
+            | "tool run_shell_command"
+    )
 }
 
 fn display_bash(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
@@ -68,7 +85,11 @@ fn display_read(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
     let file_path = str_field(parsed, "file_path").unwrap_or(input_json);
 
     let mut preview = file_path.to_string();
-    if let Some(offset) = parsed.as_ref().and_then(|v| v.get("offset")).and_then(|v| v.as_u64()) {
+    if let Some(offset) = parsed
+        .as_ref()
+        .and_then(|v| v.get("offset"))
+        .and_then(|v| v.as_u64())
+    {
         let limit = parsed
             .as_ref()
             .and_then(|v| v.get("limit"))
@@ -134,6 +155,32 @@ fn display_glob(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
         label: "Glob".to_string(),
         color: ToolColor::ReadOnly,
         preview: pattern.to_string(),
+    }
+}
+
+fn display_ls(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+    let path = str_field(parsed, "path")
+        .or_else(|| str_field(parsed, "dir_path"))
+        .unwrap_or(input_json);
+
+    ToolDisplayInfo {
+        label: "LS".to_string(),
+        color: ToolColor::ReadOnly,
+        preview: path.to_string(),
+    }
+}
+
+fn display_many_files(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+    let preview = parsed
+        .as_ref()
+        .and_then(|v| v.get("paths"))
+        .map(Value::to_string)
+        .unwrap_or_else(|| compact_json(input_json));
+
+    ToolDisplayInfo {
+        label: "Read".to_string(),
+        color: ToolColor::ReadOnly,
+        preview,
     }
 }
 
@@ -220,6 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn bash_aliases_use_canonical_display() {
+        for alias in [
+            "shell",
+            "run_shell_command",
+            "tool shell",
+            "tool run_shell_command",
+        ] {
+            let info = display_for_tool(alias, r#"{"command":"pwd"}"#);
+            assert_eq!(info.label, "Bash", "{alias}");
+            assert_eq!(info.preview, "$ pwd", "{alias}");
+            assert_eq!(info.color, ToolColor::Execute, "{alias}");
+        }
+    }
+
+    #[test]
     fn bash_dangerous_sudo() {
         let info = display_for_tool("Bash", r#"{"command":"sudo apt install foo"}"#);
         assert_eq!(info.color, ToolColor::Dangerous);
@@ -247,9 +309,19 @@ mod tests {
     }
 
     #[test]
+    fn qwen_read_alias_uses_canonical_display() {
+        let info = display_for_tool("read_file", r#"{"file_path":"/tmp/foo.rs"}"#);
+        assert_eq!(info.label, "Read");
+        assert_eq!(info.preview, "/tmp/foo.rs");
+        assert_eq!(info.color, ToolColor::ReadOnly);
+    }
+
+    #[test]
     fn read_with_range() {
-        let info =
-            display_for_tool("Read", r#"{"file_path":"/tmp/foo.rs","offset":10,"limit":20}"#);
+        let info = display_for_tool(
+            "Read",
+            r#"{"file_path":"/tmp/foo.rs","offset":10,"limit":20}"#,
+        );
         assert_eq!(info.preview, "/tmp/foo.rs (lines 10..+20)");
     }
 
@@ -264,6 +336,17 @@ mod tests {
         let info = display_for_tool("Write", r#"{"file_path":"/tmp/new.rs","content":"hello"}"#);
         assert_eq!(info.label, "Write");
         assert_eq!(info.preview, "/tmp/new.rs (new file)");
+        assert_eq!(info.color, ToolColor::Write);
+    }
+
+    #[test]
+    fn qwen_write_file_alias_uses_canonical_display() {
+        let info = display_for_tool(
+            "write_file",
+            r#"{"file_path":"/tmp/new.html","content":"<html></html>"}"#,
+        );
+        assert_eq!(info.label, "Write");
+        assert_eq!(info.preview, "/tmp/new.html (new file)");
         assert_eq!(info.color, ToolColor::Write);
     }
 
@@ -287,10 +370,26 @@ mod tests {
     }
 
     #[test]
+    fn qwen_grep_alias_uses_canonical_display() {
+        let info = display_for_tool("grep_search", r#"{"pattern":"TODO","path":"src/"}"#);
+        assert_eq!(info.label, "Grep");
+        assert_eq!(info.preview, "/TODO/ in src/");
+        assert_eq!(info.color, ToolColor::ReadOnly);
+    }
+
+    #[test]
     fn glob_tool() {
         let info = display_for_tool("Glob", r#"{"pattern":"**/*.rs"}"#);
         assert_eq!(info.label, "Glob");
         assert_eq!(info.preview, "**/*.rs");
+        assert_eq!(info.color, ToolColor::ReadOnly);
+    }
+
+    #[test]
+    fn qwen_ls_alias_uses_canonical_display() {
+        let info = display_for_tool("list_directory", r#"{"path":"src"}"#);
+        assert_eq!(info.label, "LS");
+        assert_eq!(info.preview, "src");
         assert_eq!(info.color, ToolColor::ReadOnly);
     }
 

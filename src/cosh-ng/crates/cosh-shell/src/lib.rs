@@ -21,19 +21,19 @@ pub mod tool_broker;
 pub mod tool_display;
 pub mod types;
 
+pub use adapter::{
+    adapter_for_kind, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
+    AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
+    ClaudeCodeAdapter, FakeAgentAdapter, PreparedInvocation, QwenCliAdapter,
+};
+pub use agent_render::{ConsultationCardModel, RatatuiInlineRenderer};
 pub use builtin_hooks::*;
 pub use config::*;
 pub use context_window::*;
 pub use exit_classify::*;
+pub use governance::{govern_agent_events, GovernanceOutput};
 pub use hook_engine::*;
 pub use hook_types::*;
-pub use adapter::{
-    adapter_for_kind, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ClaudeCodeAdapter, FakeAgentAdapter,
-    PreparedInvocation, QwenCliAdapter,
-};
-pub use agent_render::{ConsultationCardModel, RatatuiInlineRenderer};
-pub use governance::{govern_agent_events, GovernanceOutput};
 pub use input::{InputClassifier, InputDecision, InterceptReason};
 pub use interactive::{run_line_interactive_bash, LineInteractiveOutput};
 pub use journal::{read_shell_events, write_shell_events};
@@ -61,7 +61,8 @@ pub use shell_host::{
     run_streaming_line_bash, ScriptedInput, ShellHostConfig, ShellHostOutput,
 };
 pub use tool_broker::{
-    can_run_approved_bash_tool, run_approved_bash_tool, ToolExecutionResult, ToolExecutionStatus,
+    can_run_approved_bash_tool, can_run_user_approved_bash_tool, run_approved_bash_tool,
+    run_user_approved_bash_tool, ToolExecutionResult, ToolExecutionStatus,
 };
 pub use tool_display::*;
 pub use types::*;
