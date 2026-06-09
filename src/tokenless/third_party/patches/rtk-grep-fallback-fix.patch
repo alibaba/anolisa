@@ -1,0 +1,13 @@
+diff --git a/src/cmds/system/grep_cmd.rs b/src/cmds/system/grep_cmd.rs
+index 3f7d9a3..57e59c4 100644
+--- a/src/cmds/system/grep_cmd.rs
++++ b/src/cmds/system/grep_cmd.rs
+@@ -54,7 +54,7 @@ pub fn run(
+         .or_else(|_| {
+             let mut grep_cmd = resolved_command("grep");
+             // When we fall back to grep, include all args, not just -rnHZ.
+-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
++            grep_cmd.args(["-rnHEZ", &rg_pattern, path]).args(extra_args);
+             exec_capture(&mut grep_cmd)
+         })
+         .context("grep/rg failed")?;
