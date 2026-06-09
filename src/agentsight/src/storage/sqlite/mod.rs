@@ -44,4 +44,4 @@ pub use interruption::{InterruptionRecord, InterruptionStore, InterruptionTypeSt
 pub use connection::{create_connection, default_base_path};
 
 // Re-export tokenless stats storage
-pub use tokenless::TokenlessStatsStore;
+pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};

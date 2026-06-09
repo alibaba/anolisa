@@ -14,6 +14,7 @@ pub mod metrics;
 #[cfg(feature = "server")]
 pub mod serve;
 pub mod skill_metrics;
+pub mod summary;
 pub mod token;
 pub mod trace;
 

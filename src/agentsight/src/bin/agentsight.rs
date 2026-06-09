@@ -14,8 +14,8 @@ mod cli;
 use cli::serve::ServeCommand;
 use cli::{
     audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
-    metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, token::TokenCommand,
-    trace::TraceCommand,
+    metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, summary::SummaryCommand,
+    token::TokenCommand, trace::TraceCommand,
 };
 
 #[derive(Debug, StructOpt)]
@@ -39,6 +39,8 @@ pub enum Command {
     /// Compute and display skill usage metrics
     #[structopt(name = "skill-metrics")]
     SkillMetrics(SkillMetricsCommand),
+    /// Print a unified summary of sessions, interruptions, and tokenless savings
+    Summary(SummaryCommand),
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
@@ -55,6 +57,7 @@ fn main() {
         Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
         Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
         Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
+        Command::Summary(summary_cmd) => summary_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
     }
