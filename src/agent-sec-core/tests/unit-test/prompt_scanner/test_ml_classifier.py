@@ -257,6 +257,37 @@ class TestModelManagerCache(unittest.TestCase):
         mgr = ModelManager(device="cpu")
         self.assertEqual(mgr.device, "cpu")
 
+    def test_is_model_downloaded_false_when_missing(self) -> None:
+        mgr = self._make_manager()
+        self.assertFalse(mgr.is_model_downloaded("nonexistent/model"))
+
+    def test_is_model_downloaded_true_when_present(self) -> None:
+        import os
+        import tempfile
+
+        mgr = self._make_manager()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr._cache_dir = tmpdir
+            model_dir = os.path.join(tmpdir, "test-model")
+            os.makedirs(model_dir)
+            with open(os.path.join(model_dir, "config.json"), "w") as f:
+                f.write("{}")
+            self.assertTrue(mgr.is_model_downloaded("test-model"))
+
+    def test_resolve_local_model_path_returns_path_when_downloaded(self) -> None:
+        import os
+        import tempfile
+
+        mgr = self._make_manager()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr._cache_dir = tmpdir
+            model_dir = os.path.join(tmpdir, "test-model")
+            os.makedirs(model_dir)
+            with open(os.path.join(model_dir, "config.json"), "w") as f:
+                f.write("{}")
+            path = mgr._resolve_local_model_path("test-model")
+            self.assertEqual(path, model_dir)
+
     def test_load_model_raises_without_deps(self) -> None:
         from agent_sec_cli.prompt_scanner.exceptions import ModelLoadError
         from agent_sec_cli.prompt_scanner.models.model_manager import (

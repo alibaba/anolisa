@@ -54,6 +54,18 @@ class TestPromptScannerInit(unittest.TestCase):
         # present depending on the test environment; just check no exception raised
         self.assertGreaterEqual(len(scanner._detectors), 1)
 
+    def test_warmup_bypasses_availability_gate(self) -> None:
+        from agent_sec_cli.prompt_scanner.detectors.ml_classifier import (
+            MLClassifier,
+        )
+
+        with patch.object(MLClassifier, "is_available", return_value=False):
+            scanner = PromptScanner(mode=ScanMode.STANDARD)
+            self.assertEqual(len(scanner._detectors), 1)
+            with patch.object(MLClassifier, "warmup", return_value=None) as mock_warmup:
+                scanner.warmup()
+                mock_warmup.assert_called_once()
+
     def test_standard_mode_degrades_to_l1_when_ml_model_missing(self) -> None:
         # When ml_classifier.is_available() is False (e.g. model not downloaded),
         # STANDARD mode must degrade to L1 (rule_engine) only — NOT raise.
