@@ -3,3 +3,5 @@
 !CNAME
 !index.html
 !install.sh
+!scripts/
+!scripts/sync-site-changelog.mjs

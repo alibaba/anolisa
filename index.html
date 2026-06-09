@@ -317,6 +317,7 @@ h1 span{color:var(--accent-light)}
   font-size:0.75rem;letter-spacing:0.08em;text-transform:uppercase;
   color:var(--text);margin:0 0 8px;font-family:var(--mono);
 }
+.release-body-section:not(:first-child){margin-top:18px}
 .release-body h3:not(:first-child){margin-top:18px}
 .release-body ul{display:grid;gap:8px;margin:0;padding-left:18px;color:var(--text-2)}
 .release-body li{font-size:0.8125rem;line-height:1.6}
@@ -326,6 +327,18 @@ h1 span{color:var(--accent-light)}
   background:rgba(10,110,92,0.1);border:1px solid var(--border);
   border-radius:4px;padding:1px 4px;
 }
+.changelog-more{
+  display:flex;justify-content:center;margin-top:28px;
+}
+.more-link{
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.06em;
+  color:var(--text-2);text-decoration:none;text-transform:uppercase;
+  border:1px solid var(--border);border-radius:6px;
+  background:rgba(10,20,27,0.46);padding:9px 14px;
+  transition:all .15s;
+}
+.more-link:hover{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
+.more-link:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
 #anolisa-cli-changelog .cap-footer{margin-top:72px;padding-top:18px}
 
 /* ── top button ── */
@@ -395,7 +408,7 @@ h1 span{color:var(--accent-light)}
 
 <section class="hero">
   <div class="wrap">
-    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.2</div>
+    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.3</div>
     <h1><span>&gt;_</span> ANOLISA</h1>
     <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
     <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
@@ -474,58 +487,120 @@ h1 span{color:var(--accent-light)}
       </div>
 
       <div class="release-list">
-        <article class="release reveal reveal-d1">
+        <!-- ANOLISA_CLI_CHANGELOG_START -->
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-3">
+          <div class="release-meta">
+            <div class="release-version">0.1.3</div>
+            <div class="release-date">2026-06-09</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><strong>Grouped CLI help</strong>: top-level <code>anolisa --help</code> now separates everyday capability commands from independent management surfaces, with sections generated from the clap command model so new subcommands appear in the correct group automatically</li>
+              <li><strong>Help alias display</strong>: the <code>list</code> command now exposes its <code>ls</code> alias in help output</li>
+              <li><strong>Self-update changelog link</strong>: successful <code>anolisa update self</code> runs now print the published CLI changelog URL</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li>Corrected workspace package license metadata to Apache-2.0</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-2">
           <div class="release-meta">
             <div class="release-version">0.1.2</div>
             <div class="release-date">2026-06-08</div>
           </div>
           <div class="release-body">
+          <div class="release-body-section">
             <h3>Added</h3>
             <ul>
-              <li><strong>Bug report command:</strong> <code>anolisa bug</code> generates local diagnostic Markdown and JSON payloads with environment facts, enabled capability state, and recent warn/error central-log records.</li>
-              <li><strong>Self-update alias:</strong> <code>anolisa self update</code> now delegates to the existing <code>anolisa update self</code> flow.</li>
+              <li><strong>Bug report command</strong>: <code>anolisa bug</code> generates local diagnostic Markdown and JSON payloads with environment facts, enabled capability state, and recent warn/error central-log records</li>
+              <li><strong>Self-update alias</strong>: <code>anolisa self update</code> now delegates to the existing <code>anolisa update self</code> flow</li>
             </ul>
+          </div>
+          <div class="release-body-section">
             <h3>Fixed</h3>
             <ul>
-              <li>Restored and simplified the bug report issue template.</li>
+              <li>Restored and simplified the bug report issue template</li>
             </ul>
+          </div>
           </div>
         </article>
 
-        <article class="release reveal reveal-d2">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-1">
           <div class="release-meta">
             <div class="release-version">0.1.1</div>
             <div class="release-date">2026-06-07</div>
           </div>
           <div class="release-body">
+          <div class="release-body-section">
             <h3>Added</h3>
             <ul>
-              <li><strong>Sandbox install pipeline:</strong> 5-phase orchestrator for sandbox provisioning with firecracker standard and e2b backend variants.</li>
-              <li><strong>Subscription consent management:</strong> token collection state machine with persistent register, unregister, and later states.</li>
-              <li><strong>Upload enablement:</strong> ilogtail install, configure, and teardown with region-id probing and SLS account management.</li>
-              <li><strong>Self-update:</strong> <code>anolisa update self</code> with manifest-based downloads, checksum verification, exclusive locking, and rollback.</li>
-              <li><strong>Package manager backends:</strong> real dnf and apt implementations replacing placeholder stubs.</li>
-              <li><strong>CI integration:</strong> GitHub Actions automation for the anolisa workspace.</li>
+              <li><strong>Sandbox install pipeline</strong>: 5-phase orchestrator for sandbox provisioning with firecracker standard and e2b backend variants, including pre-flight checks, package installation, OS primitives, service setup, and post-verify phases</li>
+              <li><strong>Subscription consent management</strong>: Token collection state machine (register/unregister/later) with atomic-write persistence, 30-day later expiry, and sysom co-registration detection</li>
+              <li><strong>Upload enablement</strong>: ilogtail install/configure/teardown with region-id probing (metadata API → cloud-init → public fallback), SLS account management, and enable_sls_log marker</li>
+              <li><strong>Self-update</strong>: <code>anolisa update self</code> with release-manifest based updater, tar.gz artifact download, checksum verification, extraction, exclusive locking, and replacement rollback</li>
+              <li><strong>Package manager backends</strong>: Real dnf/apt implementations replacing placeholder stubs</li>
+              <li><strong>CI integration</strong>: GitHub Actions automation for anolisa workspace</li>
             </ul>
+          </div>
+          <div class="release-body-section">
             <h3>Fixed</h3>
             <ul>
-              <li>Replaced <code>sed</code> with bash parameter expansion in the install script for improved portability and correctness.</li>
+              <li>Replace <code>sed</code> with bash parameter expansion in install script for improved portability and correctness</li>
             </ul>
+          </div>
           </div>
         </article>
 
-        <article class="release reveal reveal-d3">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-0">
           <div class="release-meta">
             <div class="release-version">0.1.0</div>
             <div class="release-date">2026-06-04</div>
           </div>
           <div class="release-body">
-            <h3>Initial alpha release</h3>
+          <div class="release-body-section">
+            <h3>Release</h3>
             <ul>
-              <li>Introduced the Cargo workspace, CLI command surface, environment detection, capability lifecycle engine, execution policy, manifests, installer, demo scripts, and schema templates.</li>
+              <li>Initial alpha release of the ANOLISA CLI.</li>
             </ul>
           </div>
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><strong>Workspace scaffold</strong>: Cargo workspace with five crates (anolisa-cli, anolisa-core, anolisa-env, anolisa-build, anolisa-platform)</li>
+              <li><strong>CLI command surface</strong>: <code>env</code>, <code>list</code>, <code>status</code>, <code>logs</code>, <code>enable</code>, <code>disable</code>, <code>uninstall</code>, <code>restart</code>, <code>update</code>, <code>info</code>, <code>doctor</code> commands via clap derive</li>
+              <li><strong>Environment detection</strong>: Stateless <code>EnvService</code> probing OS, arch, libc, kernel, distro family, BTF, CAP_BPF, container runtime, and user identity with graceful degradation</li>
+              <li><strong>Capability lifecycle engine</strong>: Plan-then-execute semantics for enable/disable/uninstall/purge with journaled transactions, sha256 verification, central audit log, and exclusive install lock</li>
+              <li><strong>Execution policy</strong>: TOML-driven capability graduation gate allowing new capabilities to ship without code changes</li>
+              <li><strong>Manifest system</strong>: Declarative TOML manifests for capabilities, components (runtime + osbase), and distribution index with multi-arch artifact resolution</li>
+              <li><strong>Installer</strong>: <code>install-anolisa.sh</code> supporting three modes (from-local, auto-checkout, URL-fetch) with staging-then-promote flow, checksum verification, <code>--strict</code> audit, and <code>--dry-run</code></li>
+              <li><strong>Demo scripts</strong>: End-to-end smoke tests for agent-observability (enable/disable/uninstall) and token-optimization lifecycle</li>
+              <li><strong>Schema templates</strong>: Seven TOML templates documenting canonical manifest schemas for all entity types</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Known limitations</h3>
+            <ul>
+              <li>Linux-only for real-execute paths (darwin hosts can <code>--dry-run</code> only)</li>
+              <li>Distribution index carries placeholder sha256 (P1-J operations pending)</li>
+              <li>No signature verification, no rpm/deb backend yet</li>
+              <li><code>update</code> command returns NOT_IMPLEMENTED</li>
+            </ul>
+          </div>
+          </div>
         </article>
+        <!-- ANOLISA_CLI_CHANGELOG_END -->
+      </div>
+
+      <div class="changelog-more">
+        <a class="more-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">More on GitHub</a>
       </div>
 
       <footer class="cap-footer">
