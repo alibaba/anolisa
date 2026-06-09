@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-09
+
+### Added
+
+- **Grouped CLI help**: top-level `anolisa --help` now separates everyday
+  capability commands from independent management surfaces, with sections
+  generated from the clap command model so new subcommands appear in the
+  correct group automatically
+- **Help alias display**: the `list` command now exposes its `ls` alias in
+  help output
+- **Self-update changelog link**: successful `anolisa update self` runs now
+  print the published CLI changelog URL
+
+### Changed
+
+- Corrected workspace package license metadata to Apache-2.0
+
 ## [0.1.2] - 2026-06-08
 
 ### Added
@@ -101,6 +118,20 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.3] - 2026-06-09
+
+### 新增
+
+- **分组 CLI 帮助**：顶层 `anolisa --help` 现在区分日常 capability 命令和独立
+  management 管理面，分组内容由 clap 命令模型生成，新子命令会自动出现在对应分组
+- **帮助中的别名展示**：`list` 命令现在会在帮助输出中展示 `ls` 别名
+- **自更新 changelog 链接**：`anolisa update self` 成功更新后会输出已发布的 CLI
+  changelog URL
+
+### 变更
+
+- 将 workspace package license 元数据修正为 Apache-2.0
 
 ## [0.1.2] - 2026-06-08
 
