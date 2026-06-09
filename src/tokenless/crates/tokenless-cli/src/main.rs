@@ -111,6 +111,9 @@ enum StatsCommands {
     Summary {
         #[arg(long)]
         limit: Option<usize>,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List recent records
     List {
@@ -386,14 +389,18 @@ fn run() -> Result<(), (String, i32)> {
             let recorder = open_recorder()?;
 
             match stats_cmd {
-                StatsCommands::Summary { limit } => {
+                StatsCommands::Summary { limit, json } => {
                     let records = recorder
                         .all_records(limit)
                         .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
-                    println!(
-                        "{}",
-                        format_summary(&records, Some("Tokenless Statistics Summary"))
-                    );
+                    if json {
+                        println!("{}", tokenless_stats::format_summary_json(&records));
+                    } else {
+                        println!(
+                            "{}",
+                            format_summary(&records, Some("Tokenless Statistics Summary"))
+                        );
+                    }
                 }
                 StatsCommands::List { limit } => {
                     let records = recorder

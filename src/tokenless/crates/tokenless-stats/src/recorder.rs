@@ -275,12 +275,17 @@ impl StatsRecorder {
 }
 
 /// Summary statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct StatsSummary {
+    #[serde(rename = "records")]
     pub total_records: usize,
+    #[serde(rename = "before_chars")]
     pub total_before_chars: usize,
+    #[serde(rename = "after_chars")]
     pub total_after_chars: usize,
+    #[serde(rename = "before_tokens")]
     pub total_before_tokens: usize,
+    #[serde(rename = "after_tokens")]
     pub total_after_tokens: usize,
 }
 

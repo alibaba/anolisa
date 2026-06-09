@@ -15,7 +15,7 @@ pub use record::{OperationType, StatsRecord};
 
 pub use recorder::{StatsError, StatsRecorder, StatsResult, StatsSummary};
 
-pub use query::{format_list, format_show, format_summary};
+pub use query::{format_list, format_show, format_summary, format_summary_json};
 
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 
