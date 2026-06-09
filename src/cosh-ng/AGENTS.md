@@ -43,12 +43,13 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc c
 
 ## Architecture
 
-4-crate workspace with strict dependency direction: `cosh-cli` / `cosh-tui` → `cosh-platform` → `cosh-types`
+5-crate workspace with strict dependency direction: `cosh-cli` / `cosh-tui` / `cosh-shell` → `cosh-platform` → `cosh-types`
 
 - **cosh-types**: Pure types, zero side effects. Defines `CoshResponse<T>` envelope, `CoshError` (with error codes, recoverable flag, hint), and ws-ckpt IPC protocol types.
 - **cosh-platform**: Platform abstraction layer. Distro detection from `/etc/os-release`, package manager routing (dnf/apt/zypper/brew), systemd service adapter, ws-ckpt daemon Unix socket IPC client.
 - **cosh-cli**: CLI entry point (binary: `cosh`). 4 command domains: `pkg`, `svc`, `checkpoint`, `audit`. All output is JSON via `CoshResponse<T>`. Uses clap derive for argument parsing.
 - **cosh-tui**: Interactive TUI (binary: `cosh-tui`). Uses ratatui + crossterm. Has slash commands, optional LLM chat, theme system.
+- **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering, tool approval control protocol. See [`docs/cosh-shell-architecture.md`](docs/cosh-shell-architecture.md) for detailed architecture.
 
 ## Key Design Constraints
 

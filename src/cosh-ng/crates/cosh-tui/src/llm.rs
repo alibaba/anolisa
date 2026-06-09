@@ -497,8 +497,8 @@ impl StreamReader {
     pub fn take_tool_calls(&mut self) -> Vec<ToolCall> {
         let buffer = std::mem::take(&mut self.tool_calls_buffer);
         buffer
-            .into_iter()
-            .filter_map(|(_, b)| {
+            .into_values()
+            .filter_map(|b| {
                 if b.name.is_empty() {
                     None
                 } else {
