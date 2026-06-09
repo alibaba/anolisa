@@ -24,15 +24,34 @@ impl Default for ReactiveConfig {
     }
 }
 
+#[allow(dead_code)]
 enum Msg {
     Checkpoint {
         reason: String,
         conversation_id: Option<String>,
     },
+    InterruptionAlert {
+        interruption_type: String,
+        conversation_id: Option<String>,
+    },
+    TokenAccum {
+        agent_name: String,
+        input_tokens: u64,
+        has_cache: bool,
+    },
     Advisory {
         message: String,
     },
     Shutdown,
+}
+
+use std::collections::HashMap as StdHashMap;
+
+struct AgentTokenState {
+    cumulative: u64,
+    any_cache_hit: bool,
+    window_start: Instant,
+    last_advisory: Option<Instant>,
 }
 
 pub struct ReactiveExporter {
@@ -72,6 +91,8 @@ impl ReactiveExporter {
             .name("reactive-exporter".into())
             .spawn(move || {
                 let mut last_ckpt = Instant::now() - debounce;
+                let mut agent_tokens: StdHashMap<String, AgentTokenState> = StdHashMap::new();
+                let one_hour = Duration::from_secs(3600);
 
                 while !shutdown_clone.load(Ordering::Relaxed) {
                     let msg = match rx.recv_timeout(Duration::from_secs(1)) {
@@ -84,6 +105,93 @@ impl ReactiveExporter {
                         Msg::Shutdown => break,
                         Msg::Advisory { message } => {
                             log::info!("[reactive] advisory: {message}");
+                        }
+                        Msg::InterruptionAlert {
+                            interruption_type,
+                            conversation_id,
+                        } => {
+                            if last_ckpt.elapsed() < debounce {
+                                log::debug!("[reactive] debounced interruption alert ({interruption_type})");
+                                continue;
+                            }
+                            if !ws_ckpt_available {
+                                log::info!("[reactive] would checkpoint for {interruption_type} but ws-ckpt unavailable");
+                                continue;
+                            }
+                            let snapshot_id = format!(
+                                "auto-{}-{}",
+                                chrono::Utc::now().format("%Y%m%dT%H%M%S"),
+                                &interruption_type
+                            );
+                            let msg_text = format!(
+                                "reactive: {} (conv={})",
+                                interruption_type,
+                                conversation_id.as_deref().unwrap_or("unknown")
+                            );
+                            match Command::new("ws-ckpt")
+                                .args(["checkpoint", "-w", &workspace, "-i", &snapshot_id, "-m", &msg_text])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn()
+                            {
+                                Ok(mut child) => {
+                                    let deadline = Instant::now() + Duration::from_secs(10);
+                                    loop {
+                                        match child.try_wait() {
+                                            Ok(Some(s)) if s.success() => {
+                                                log::info!("[reactive] checkpoint created: {snapshot_id}");
+                                                last_ckpt = Instant::now();
+                                                break;
+                                            }
+                                            Ok(Some(s)) => { log::warn!("[reactive] ws-ckpt exited {s}"); break; }
+                                            Ok(None) if Instant::now() >= deadline => {
+                                                log::warn!("[reactive] ws-ckpt timed out, killing");
+                                                let _ = child.kill();
+                                                let _ = child.wait();
+                                                break;
+                                            }
+                                            Ok(None) => thread::sleep(Duration::from_millis(100)),
+                                            Err(e) => { log::warn!("[reactive] ws-ckpt wait error: {e}"); break; }
+                                        }
+                                    }
+                                }
+                                Err(e) => log::warn!("[reactive] ws-ckpt spawn failed: {e}"),
+                            }
+                        }
+                        Msg::TokenAccum {
+                            agent_name,
+                            input_tokens,
+                            has_cache,
+                        } => {
+                            let state = agent_tokens.entry(agent_name.clone()).or_insert_with(|| {
+                                AgentTokenState {
+                                    cumulative: 0,
+                                    any_cache_hit: false,
+                                    window_start: Instant::now(),
+                                    last_advisory: None,
+                                }
+                            });
+                            if state.window_start.elapsed() > one_hour {
+                                state.cumulative = 0;
+                                state.any_cache_hit = false;
+                                state.window_start = Instant::now();
+                            }
+                            state.cumulative += input_tokens;
+                            if has_cache {
+                                state.any_cache_hit = true;
+                            }
+                            if state.cumulative >= 200_000
+                                && !state.any_cache_hit
+                                && state
+                                    .last_advisory
+                                    .map_or(true, |t| t.elapsed() > one_hour)
+                            {
+                                log::info!(
+                                    "[reactive] advisory: agent '{}' consumed {} input tokens with no prompt caching",
+                                    agent_name, state.cumulative
+                                );
+                                state.last_advisory = Some(Instant::now());
+                            }
                         }
                         Msg::Checkpoint {
                             reason,
@@ -161,6 +269,15 @@ impl ReactiveExporter {
         })
     }
 
+    /// Send an interruption alert from the existing detection pipeline.
+    /// Called by unified.rs after detect_and_store_interruptions() for Critical events.
+    pub fn notify_interruption(&self, interruption_type: &str, conversation_id: Option<String>) {
+        let _ = self.tx.try_send(Msg::InterruptionAlert {
+            interruption_type: interruption_type.to_string(),
+            conversation_id,
+        });
+    }
+
     fn detect_critical(events: &[GenAISemanticEvent]) -> Option<(String, Option<String>)> {
         for event in events {
             if let GenAISemanticEvent::LLMCall(call) = event {
@@ -174,32 +291,18 @@ impl ReactiveExporter {
                     {
                         return Some(("agent_crash".into(), conv_id));
                     }
-                }
-            }
-        }
-        None
-    }
-
-    fn check_advisory(events: &[GenAISemanticEvent]) -> Option<String> {
-        for event in events {
-            if let GenAISemanticEvent::LLMCall(call) = event {
-                if let Some(ref usage) = call.token_usage {
-                    if usage.input_tokens > 50_000
-                        && usage.cache_read_input_tokens.unwrap_or(0) == 0
-                        && usage.cache_creation_input_tokens.unwrap_or(0) == 0
+                    if lower.contains("context_length_exceeded")
+                        || lower.contains("context_window")
+                        || lower.contains("maximum context length")
                     {
-                        return Some(format!(
-                            "agent={} model={} used {} input tokens with no prompt caching",
-                            call.agent_name.as_deref().unwrap_or(&call.process_name),
-                            call.model,
-                            usage.input_tokens,
-                        ));
+                        return Some(("context_overflow".into(), conv_id));
                     }
                 }
             }
         }
         None
     }
+
 }
 
 impl GenAIExporter for ReactiveExporter {
@@ -214,8 +317,22 @@ impl GenAIExporter for ReactiveExporter {
                 conversation_id: conv_id,
             });
         }
-        if let Some(message) = Self::check_advisory(events) {
-            let _ = self.tx.try_send(Msg::Advisory { message });
+        // Per-call token accumulation for cumulative advisory
+        for event in events {
+            if let GenAISemanticEvent::LLMCall(call) = event {
+                if let Some(ref usage) = call.token_usage {
+                    let has_cache = usage.cache_read_input_tokens.unwrap_or(0) > 0
+                        || usage.cache_creation_input_tokens.unwrap_or(0) > 0;
+                    let _ = self.tx.try_send(Msg::TokenAccum {
+                        agent_name: call
+                            .agent_name
+                            .clone()
+                            .unwrap_or_else(|| call.process_name.clone()),
+                        input_tokens: usage.input_tokens as u64,
+                        has_cache,
+                    });
+                }
+            }
         }
     }
 }
@@ -303,23 +420,41 @@ mod tests {
     }
 
     #[test]
-    fn advisory_fires_on_high_input_no_cache() {
-        let events = vec![make_call(None, 60_000, None)];
-        let result = ReactiveExporter::check_advisory(&events);
+    fn detect_critical_finds_context_overflow() {
+        let events = vec![make_call(
+            Some("This model's maximum context length is 128000 tokens"),
+            1000,
+            None,
+        )];
+        let result = ReactiveExporter::detect_critical(&events);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("60000 input tokens with no prompt caching"));
+        let (reason, _) = result.unwrap();
+        assert_eq!(reason, "context_overflow");
     }
 
     #[test]
-    fn advisory_does_not_fire_when_cache_active() {
-        let events = vec![make_call(None, 60_000, Some(50_000))];
-        assert!(ReactiveExporter::check_advisory(&events).is_none());
+    fn detect_critical_finds_context_length_exceeded() {
+        let events = vec![make_call(
+            Some("context_length_exceeded: input too long"),
+            1000,
+            None,
+        )];
+        let (reason, _) = ReactiveExporter::detect_critical(&events).unwrap();
+        assert_eq!(reason, "context_overflow");
     }
 
     #[test]
-    fn advisory_does_not_fire_on_low_input() {
-        let events = vec![make_call(None, 5_000, None)];
-        assert!(ReactiveExporter::check_advisory(&events).is_none());
+    fn notify_interruption_does_not_panic() {
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 1,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        if let Some(exporter) = ReactiveExporter::new(config) {
+            exporter.notify_interruption("retry_storm", Some("conv-99".into()));
+            std::thread::sleep(Duration::from_millis(100));
+            drop(exporter);
+        }
     }
 
     #[test]
