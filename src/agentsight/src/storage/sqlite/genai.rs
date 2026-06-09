@@ -2137,6 +2137,92 @@ fn parse_output_messages_for_loop_detection(json_str: Option<&str>) -> (Vec<Stri
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest};
+
+    /// Integration test: store_event (post-fix, no per-insert VACUUM) still
+    /// persists data correctly and the row is immediately readable.
+    /// Reverting the VACUUM removal does NOT make this test fail (it would just
+    /// be slower), but this proves the write path is functional — the
+    /// discriminating signal for the per-insert VACUUM removal is the latency
+    /// benchmark, not a correctness test.
+    #[test]
+    fn store_event_persists_without_per_insert_vacuum() {
+        let path = std::env::temp_dir().join(format!(
+            "test_genai_store_{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+        let call = LLMCall::new(
+            "test-call-001".to_string(),
+            1_700_000_000_000_000_000,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            LLMRequest {
+                messages: vec![],
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            1234,
+            "test-agent".to_string(),
+        );
+        let event = GenAISemanticEvent::LLMCall(call);
+
+        // Write via the exact code path that was modified (store_event).
+        store.store_event(&event).unwrap();
+
+        // The event has no session_id set, so list_sessions (which filters
+        // session_id IS NOT NULL) won't find it — use a raw count instead.
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM genai_events WHERE call_id = 'test-call-001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "store_event must persist the row");
+
+        drop(conn);
+        // Verify wal_checkpoint doesn't panic
+        store.wal_checkpoint().unwrap();
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// Verify busy_timeout is set on connections (create_connection is used by
+    /// GenAISqliteStore::new_with_path internally).
+    #[test]
+    fn connection_has_busy_timeout() {
+        let path = std::env::temp_dir().join(format!(
+            "test_bt_{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        let conn = store.conn.lock().unwrap();
+        // PRAGMA busy_timeout returns the current value in ms
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 500, "busy_timeout must be 500ms");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::parse_output_messages_for_loop_detection;
 
     #[test]
