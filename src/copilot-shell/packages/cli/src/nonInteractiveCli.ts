@@ -280,16 +280,14 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
-          ) {
+          if (event.type === GeminiEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
             process.stderr.write(`${errorText}\n`);
-            // Throw error to exit with non-zero code
+            // Throw to reach the catch block which correctly emits
+            // isError:true in all output formats (text/json/stream-json).
             throw new Error(errorText);
           }
         }

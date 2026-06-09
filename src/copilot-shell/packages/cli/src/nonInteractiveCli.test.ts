@@ -818,6 +818,87 @@ describe('runNonInteractive', () => {
     expect(errorOutput).toContain('Incorrect API key provided');
   });
 
+  it('should handle API errors in JSON mode with isError:true and stderr', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '401 invalid access token or token expired',
+          status: 401,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    let thrownError: Error | null = null;
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-json-error',
+      );
+      expect.fail('Expected error to be thrown');
+    } catch (error) {
+      thrownError = error as Error;
+    }
+
+    // Must throw (the error propagates through catch → handleError → process.exit(1),
+    // which is mocked to throw "process.exit(1) called")
+    expect(thrownError).toBeTruthy();
+
+    // Verify error was written to stderr (not silently swallowed)
+    expect(processStderrSpy).toHaveBeenCalled();
+    const stderrOutput = processStderrSpy.mock.calls
+      .map((call) => call[0])
+      .join('');
+    expect(stderrOutput).toContain('401');
+  });
+
+  it('should handle API errors in stream-json mode with isError:true and stderr', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '429 rate limit exceeded',
+          status: 429,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    let thrownError: Error | null = null;
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-error',
+      );
+      expect.fail('Expected error to be thrown');
+    } catch (error) {
+      thrownError = error as Error;
+    }
+
+    expect(thrownError).toBeTruthy();
+    expect(thrownError?.message).toContain('429');
+    expect(processStderrSpy).toHaveBeenCalled();
+  });
+
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();
