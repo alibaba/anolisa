@@ -3,8 +3,9 @@
 Combines multiple context-compression strategies into a single plugin:
 
   1. **Response compression** — ``transform_tool_result`` : compresses tool
-     results via ``tokenless compress-response``, stripping debug fields,
-     nulls, empty values, and truncating long strings/arrays.
+     results via ``tokenless compress-response`` with per-layer thresholds
+     (moderate for shell, zero-truncation for API tools), stripping debug
+     fields, nulls, empty values.
   2. **TOON encoding** — ``transform_tool_result`` : pipeline step after
      response compression; re-encodes JSON results to TOON format via
      ``tokenless compress-toon`` for additional token savings (15-40%)
@@ -35,8 +36,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import shutil
 import subprocess
 import sys
 from typing import Any
@@ -53,7 +52,7 @@ from hook_utils import (
     _RTK_FALLBACK,
     _RTK_LOCAL_SHARE,
     _RTK_LOCAL_LIB,
-    resolve_binary as _resolve_binary_shared,
+    resolve_binary,
     warn as _warn_shared,
     try_parse_json as _try_parse_json,
     is_skill_file as _is_skill_file,
@@ -61,6 +60,8 @@ from hook_utils import (
     run as _run,
     parse_version as _parse_version,
     SKIP_TOOLS as _SKIP_TOOLS_SHARED,
+    SHELL_TOOLS as _SHELL_TOOLS_SHARED,
+    get_thresholds,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,40 +75,28 @@ _MIN_RESPONSE_LEN = 200
 
 _SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
     "session_search", "list_sessions",
-    # Search tools — stdout may contain large file contents, must not truncate
-    "grep",
 }
 
+# Use shared SHELL_TOOLS directly - all tools (including "terminal") are now
+# defined in the unified tool_categories.json
+_SHELL_TOOLS: set[str] = _SHELL_TOOLS_SHARED
+
 _MIN_RTK_VERSION = (0, 35, 0)
-_SHELL_TOOLS: set[str] = {"terminal"}
 
-# Debian/Ubuntu install path (RPM uses /usr/libexec, Debian uses /usr/lib)
+# ---------------------------------------------------------------------------
+# Binary resolution (thin wrapper over shared cached resolve_binary)
+# ---------------------------------------------------------------------------
+
+# Hermes-specific fallback paths for the RTK binary.
 _RTK_LIB_FALLBACK = "/usr/lib/anolisa/tokenless/rtk"
-
-# ---------------------------------------------------------------------------
-# Binary resolution (with caching)
-# ---------------------------------------------------------------------------
-
-_resolved: dict[str, str | None] = {}
 
 
 def _resolve_binary(name: str, fallback: str) -> str | None:
-    if name in _resolved:
-        return _resolved[name]
-    path = shutil.which(name)
-    if path:
-        _resolved[name] = path
-        return path
-    # Try fallback paths in order (RPM uses /usr/libexec, Debian uses /usr/lib)
-    for fb in (fallback, _RTK_LIB_FALLBACK if name == "rtk" else "",
-               os.path.join(os.path.expanduser("~"), ".local", "bin", name),
-               _TOKENLESS_LOCAL_LIB if name != "rtk" else _RTK_LOCAL_LIB,
-               _TOKENLESS_LOCAL_SHARE if name != "rtk" else _RTK_LOCAL_SHARE):
-        if fb and os.path.isfile(fb) and os.access(fb, os.X_OK):
-            _resolved[name] = fb
-            return fb
-    _resolved[name] = None
-    return None
+    """Resolve binary with hermes-specific fallback paths (cached via shared)."""
+    local_bin = os.path.join(os.path.expanduser("~"), ".local", "bin", name)
+    if name == "rtk":
+        return resolve_binary(name, fallback, _RTK_LIB_FALLBACK, local_bin, _RTK_LOCAL_LIB, _RTK_LOCAL_SHARE)
+    return resolve_binary(name, fallback, local_bin, _TOKENLESS_LOCAL_LIB, _TOKENLESS_LOCAL_SHARE)
 
 
 def _have(name: str, fallback: str) -> bool:
@@ -138,7 +127,16 @@ def _compress_response(
     if not isinstance(parsed, (dict, list)):
         return None
 
-    cmd = [tokenless_bin, "compress-response", "--agent-id", AGENT_ID]
+    # 3-layer dispatch: shell tools use moderate truncation, API tools use zero-truncation
+    thresholds = get_thresholds(tool_name)
+
+    cmd = [
+        tokenless_bin, "compress-response",
+        "--agent-id", AGENT_ID,
+        "--truncate-strings-at", str(thresholds[0]),
+        "--truncate-arrays-at", str(thresholds[1]),
+        "--max-depth", str(thresholds[2]),
+    ]
     if session_id:
         cmd.extend(["--session-id", session_id])
     if tool_call_id:
@@ -371,11 +369,15 @@ def on_transform_tool_result(
 
     Replaces the tool result string with a compressed/TOON-encoded version.
     Runs after post_tool_call; first valid string return wins.
+
+    Content retrieval tools (Read/Glob/Grep) are skipped entirely.
+    Shell/exec tools (Bash/Shell) use moderate truncation (64K/128/8).
+    All other tools use zero-truncation compress-response + TOON.
     """
     if not _have("tokenless", _TOKENLESS_FALLBACK):
         return None
 
-    # Skip content-retrieval tools
+    # Content retrieval — skip entirely (preserve integrity)
     if tool_name in _SKIP_TOOLS:
         return None
 
@@ -399,7 +401,7 @@ def on_transform_tool_result(
     original = result
     original_len = len(original)
 
-    # Step 1: Response compression
+    # Step 1: Response compression (per-layer thresholds via get_thresholds)
     compressed = _compress_response(tool_name, result,
                                      str(session_id), str(tool_call_id))
     current = compressed if compressed else result

@@ -26,7 +26,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
-    SKIP_TOOLS,
+    CONTENT_RETRIEVAL_TOOLS,
     is_skill_file,
     resolve_binary,
     skip,
@@ -63,9 +63,9 @@ def main() -> None:
         warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
 
-    # 3. Skip content-retrieval tools
+    # 3. Skip content-retrieval tools (preserve integrity)
     tool_name = input_data.get("tool_name", "unknown")
-    if tool_name in SKIP_TOOLS:
+    if tool_name in CONTENT_RETRIEVAL_TOOLS:
         skip()
 
     # 4. Extract tool_response

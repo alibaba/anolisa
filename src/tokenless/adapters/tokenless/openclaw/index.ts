@@ -21,7 +21,8 @@
  */
 
 import { execSync, execFileSync, spawnSync } from "child_process";
-import { existsSync, statSync } from "fs";
+import { existsSync, statSync, readFileSync } from "fs";
+import { join } from "path";
 
 // ---- Session ID mapping --------------------------------------------------------
 // OpenClaw's tool_result_persist ctx provides sessionKey ("agent:main:main")
@@ -160,10 +161,19 @@ function tryRtkRewrite(command: string): string | null {
   }
 }
 
-function tryCompressResponse(response: any, sessionId?: string, toolCallId?: string): any | null {
+function tryCompressResponse(response: any, sessionId?: string, toolCallId?: string, thresholds?: [number, number, number]): any | null {
   try {
     const input = JSON.stringify(response);
-    const args = ["compress-response", "--agent-id", "openclaw"];
+    // 3-layer dispatch: thresholds vary by tool category.
+    //   Shell/exec tools: moderate truncation (64K/128/8) — preserves 95% of real output
+    //   API/structured tools: zero-truncation (1M/64K/32) — preserve content
+    const [truncateStringsAt, truncateArraysAt, maxDepth] = thresholds ?? [1048576, 65536, 32];
+    const args = [
+      "compress-response", "--agent-id", "openclaw",
+      "--truncate-strings-at", String(truncateStringsAt),
+      "--truncate-arrays-at", String(truncateArraysAt),
+      "--max-depth", String(maxDepth),
+    ];
     if (sessionId) args.push("--session-id", sessionId);
     if (toolCallId) args.push("--tool-use-id", toolCallId);
     const result = execFileSync(tokenlessPath, args, {
@@ -241,6 +251,95 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
   }
 }
 
+// ---- Unified tool categorization ---------------------------------------------
+// Load tool categories from tool_categories.json (single source of truth)
+// This ensures consistency with Python hooks and tool-ready-spec.json
+
+interface Thresholds {
+  truncate_strings_at: number;
+  truncate_arrays_at: number;
+  max_depth: number;
+}
+
+interface ToolCategories {
+  layer_1_skip: { tools: string[] };
+  layer_2_shell: { tools: string[]; thresholds?: Thresholds };
+  layer_3_api: { thresholds?: Thresholds };
+}
+
+// Hardcoded fallback tool sets — used only when tool_categories.json is missing
+// or invalid. Mirrors Python hook_utils._FALLBACK_SKIP_TOOLS/_FALLBACK_SHELL_TOOLS
+// to ensure consistent behavior across adapters even without the JSON file.
+const FALLBACK_SKIP_TOOLS: string[] = [
+  "Read", "read", "read_file", "read_many_files",
+  "Glob", "glob", "list_directory",
+  "Grep", "grep", "grep_search", "search_files",
+  "Lsp", "lsp",
+  "NotebookRead", "notebook_read", "notebookread",
+];
+const FALLBACK_SHELL_TOOLS: string[] = [
+  "Bash", "bash", "Shell", "shell", "exec", "terminal",
+  "run_shell_command", "execute_command", "process",
+];
+
+function loadToolCategories(): ToolCategories {
+  const fallback: ToolCategories = {
+    layer_1_skip: { tools: FALLBACK_SKIP_TOOLS },
+    layer_2_shell: { tools: FALLBACK_SHELL_TOOLS },
+    layer_3_api: {},
+  };
+
+  try {
+    // Try multiple possible locations for tool_categories.json
+    const possiblePaths = [
+      join(__dirname, "..", "..", "common", "hooks", "tool_categories.json"),
+      join(__dirname, "common", "hooks", "tool_categories.json"),
+      "/usr/share/anolisa/adapters/tokenless/common/hooks/tool_categories.json",
+      "/usr/local/share/anolisa/adapters/tokenless/common/hooks/tool_categories.json",
+    ];
+
+    let content: string | null = null;
+    for (const path of possiblePaths) {
+      if (existsSync(path)) {
+        content = readFileSync(path, "utf-8");
+        break;
+      }
+    }
+
+    if (!content) {
+      console.warn("[tokenless] Could not find tool_categories.json, using hardcoded fallback categories");
+      return fallback;
+    }
+
+    const data = JSON.parse(content);
+
+    // Validate required structure
+    const requiredLayers = ["layer_1_skip", "layer_2_shell", "layer_3_api"];
+    for (const layer of requiredLayers) {
+      if (!(layer in data)) {
+        throw new Error(`Missing required layer: ${layer}`);
+      }
+      if (typeof data[layer] !== "object" || data[layer] === null) {
+        throw new Error(`Layer ${layer} must be an object`);
+      }
+    }
+    // layer_1 and layer_2 require a "tools" list; layer_3 is implicit
+    for (const layer of ["layer_1_skip", "layer_2_shell"]) {
+      if (!("tools" in data[layer])) {
+        throw new Error(`Layer ${layer} missing 'tools' field`);
+      }
+      if (!Array.isArray(data[layer].tools)) {
+        throw new Error(`Layer ${layer}.tools must be an array`);
+      }
+    }
+
+    return data as ToolCategories;
+  } catch (error) {
+    console.error("[tokenless] Failed to load tool_categories.json:", error);
+    return fallback;
+  }
+}
+
 // ---- Plugin entry point -------------------------------------------------------
 
 export default {
@@ -254,7 +353,40 @@ export default {
   const responseCompressionEnabled = pluginConfig.response_compression_enabled !== false;
   const toonCompressionEnabled = pluginConfig.toon_compression_enabled === true;
   const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;
-  const skipTools: Set<string> = new Set((pluginConfig.skip_tools ?? ["Read", "read_file", "Glob", "list_directory", "NotebookRead", "Bash", "bash", "Grep", "grep", "Shell", "run_shell_command", "terminal", "execute_command"]).map((t: string) => t.toLowerCase()));
+
+  // Load unified tool categories from JSON (single source of truth)
+  const toolCategories = loadToolCategories();
+
+  // Layer 1: Skip all compression (preserve integrity for content retrieval)
+  // Use config override if provided and non-empty, otherwise use unified categories.
+  // NOTE: `??` alone is insufficient — openclaw may inject the schema default `[]`
+  // which is not nullish, so we also check `.length` to fall through to the JSON.
+  const skipTools: Set<string> = new Set(
+    (pluginConfig.skip_tools?.length ? pluginConfig.skip_tools : toolCategories.layer_1_skip.tools)
+      .map((t: string) => t.toLowerCase())
+  );
+
+  // Layer 2: Moderate truncation for shell/exec tools
+  // Use config override if provided and non-empty, otherwise use unified categories
+  const shellTools: Set<string> = new Set(
+    (pluginConfig.shell_tools?.length ? pluginConfig.shell_tools : toolCategories.layer_2_shell.tools)
+      .map((t: string) => t.toLowerCase())
+  );
+
+  // Thresholds are read from tool_categories.json (single source of truth).
+  // Hardcoded fallbacks match the JSON defaults.
+  // 64K strings: 95% of real shell output preserved (git diff ~63K, git log ~34K).
+  // 128 arrays: 95% of result sets preserved (test results, audit reports).
+  const shellThresholds: [number, number, number] = [
+    toolCategories.layer_2_shell.thresholds?.truncate_strings_at ?? 65536,
+    toolCategories.layer_2_shell.thresholds?.truncate_arrays_at ?? 128,
+    toolCategories.layer_2_shell.thresholds?.max_depth ?? 8,
+  ];
+  const apiThresholds: [number, number, number] = [
+    toolCategories.layer_3_api.thresholds?.truncate_strings_at ?? 1048576,
+    toolCategories.layer_3_api.thresholds?.truncate_arrays_at ?? 65536,
+    toolCategories.layer_3_api.thresholds?.max_depth ?? 32,
+  ];
   const verbose = pluginConfig.verbose !== false;
 
   // ---- 0. Session mapping (sessionKey → sessionId) ---------------------------
@@ -335,6 +467,10 @@ export default {
         // Skip content-retrieval tools — agent needs complete responses
         if (event.toolName && skipTools.has(event.toolName.toLowerCase())) return;
 
+        // 3-layer dispatch: determine thresholds based on tool category
+        const toolNameLower = (event.toolName ?? "").toLowerCase();
+        const thresholds = shellTools.has(toolNameLower) ? shellThresholds : apiThresholds;
+
         // Skip skill content to avoid breaking YAML frontmatter metadata.
         if (isSkillContent(event.message)) return;
 
@@ -355,7 +491,7 @@ export default {
         let usedResponseCompression = false;
 
         if (responseCompressionEnabled) {
-          const compressed = tryCompressResponse(currentMessage, sessionId, toolCallId);
+          const compressed = tryCompressResponse(currentMessage, sessionId, toolCallId, thresholds);
           if (compressed) {
             currentMessage = compressed;
             usedResponseCompression = true;

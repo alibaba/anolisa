@@ -498,6 +498,6 @@ mod tests {
 
         // Should not panic and should be valid UTF-8
         let s = result.as_str().unwrap();
-        assert!(s.len() > 0);
+        assert!(!s.is_empty());
     }
 }

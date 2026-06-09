@@ -72,7 +72,7 @@ copilot-shell 触发 PostToolUse 事件，stdin 传入 JSON
    ↓
 检查：是否为 skill 文件（YAML 头标记）→ 跳过
    ↓
-Step 1：echo "$TOOL_RESPONSE" | tokenless compress-response（有损压缩）
+Step 1：echo "$TOOL_RESPONSE" | tokenless compress-response（零截断语义清理）
    ↓
 Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
    ↓
@@ -83,7 +83,10 @@ Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
 
 **流水线说明**：copilot-shell 的 PostToolUse hook 中实现了一个**两阶段链式压缩流水线**：
 
-1. **第一阶段 — 响应压缩（有损）**：`ResponseCompressor` 移除 debug 字段、null 值、空值，截断过长字符串和数组。
+1. **第一阶段 — 响应压缩（3-layer 分流）**：
+   - Layer 1 — 内容检索工具（Read/Glob/Grep）：跳过全部压缩，保留完整性
+   - Layer 2 — Shell/exec 工具（Bash/Shell）：适度截断阈值（64K 字符/128 数组/8 深度），95% 真实 shell 输出完整保留，仅对极端输出截断
+   - Layer 3 — API/结构化工具（其他所有）：零截断阈值（1M 字符/64K 数组/max_depth=32），仅做语义清理（R3/R4/R5），从不截断有意义的内容
 2. **第二阶段 — TOON 编码（无损）**：将第一阶段输出的 JSON 通过 `toon_format::encode_default()` 编码为紧凑的二进制 TOON 格式，消除 JSON 语法开销（引号、逗号、冒号、花括号）。
 
 两个阶段各自独立，任一步骤失败都不影响原始结果的透传（fail-open）。
@@ -101,7 +104,7 @@ Hermes 触发 transform_tool_result 事件
    ↓
 检查：响应长度 < 200 字符 → 跳过
    ↓
-Step 1：tokenless compress-response（有损压缩）
+Step 1：tokenless compress-response（零截断语义清理）
    ↓
 Step 2：tokenless compress-toon（无损 TOON 编码）
    ↓

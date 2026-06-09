@@ -2,6 +2,9 @@
   "_meta": {
     "version": "2.0",
     "description": "Tool Ready dependency spec — defines per-tool system dependencies, detection methods, and install strategies. Edit this JSON to add new tool support without code changes.",
+    "related_files": {
+      "tool_categories.json": "Unified tool categorization for compression strategies. Tool names in 'aliases' must match those in tool_categories.json to ensure consistent behavior across tool-ready and compression."
+    },
     "schema": {
       "tool_entry": {
         "aliases": "Cross-framework tool name mapping. Cosh/openclaw/hermes use different tool names; aliases collect all variants for reverse lookup.",
@@ -46,7 +49,8 @@
 
   "Shell": {
     "_description": "Shell — base command execution environment for AI agents",
-    "aliases": ["Bash", "run_shell_command", "terminal", "Shell", "exec", "process"],
+    "_compression_layer": "layer_2_shell",
+    "aliases": ["Bash", "bash", "Shell", "shell", "run_shell_command", "terminal", "exec", "execute_command", "process"],
     "required": [
       { "binary": "bash", "package": "bash", "manager": "rpm" },
       { "binary": "jq", "package": "jq", "manager": "rpm" }
@@ -75,6 +79,7 @@
 
   "WebFetch": {
     "_description": "WebFetch — web request tool for AI agents",
+    "_compression_layer": "layer_3_api",
     "aliases": ["WebFetch", "web_fetch", "WebSearch", "web_search", "web_extract", "x_search"],
     "required": [
       { "binary": "curl", "package": "curl", "manager": "rpm" }
@@ -86,7 +91,8 @@
 
   "Read": {
     "_description": "Read — file read and search tool for AI agents",
-    "aliases": ["Read", "read", "read_file", "read_many_files", "Grep", "grep_search", "search_files", "Glob", "glob", "list_directory", "Lsp", "lsp"],
+    "_compression_layer": "layer_1_skip",
+    "aliases": ["Read", "read", "read_file", "read_many_files", "Glob", "glob", "list_directory", "Grep", "grep", "grep_search", "search_files", "Lsp", "lsp", "NotebookRead", "notebook_read", "notebookread"],
     "required": [],
     "recommended": [],
     "config_files": [],
@@ -96,6 +102,7 @@
 
   "Write": {
     "_description": "Write — file write and edit tool for AI agents",
+    "_compression_layer": "layer_3_api",
     "aliases": ["Write", "write", "write_file", "Edit", "edit", "apply_patch", "patch"],
     "required": [],
     "recommended": [],

@@ -555,33 +555,109 @@ EOF
     assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
 
     # ==========================================
-    # 6.26 SKIP_TOOLS attribution: Bash + env error
+    # 6.26 Env attribution: Bash + env error (small response, attribution injected)
     # ==========================================
-    log_info "Test 6.26a: SKIP_TOOLS (Bash) + ENV_DEPENDENCY_MISSING — attribution reachable"
+    log_info "Test 6.26a: Bash + ENV_DEPENDENCY_MISSING — attribution injected"
     local skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
     local skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     local skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_DEPENDENCY_MISSING" "Bash attribution detects command not found"
     assert_contains "$skip_attr_out" "Skip retry" "Bash attribution includes Skip retry"
 
-    log_info "Test 6.26b: SKIP_TOOLS (Bash) + ENV_PERMISSION — attribution reachable"
+    log_info "Test 6.26b: Bash + ENV_PERMISSION — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
     skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_PERMISSION" "Bash attribution detects Permission denied"
 
-    log_info "Test 6.26c: SKIP_TOOLS (Bash) + ENV_FILE_MISSING — attribution reachable"
+    log_info "Test 6.26c: Bash + ENV_FILE_MISSING — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
     skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_FILE_MISSING" "Bash attribution detects No such file"
 
-    log_info "Test 6.26d: SKIP_TOOLS (Bash) + no env error — skip entirely"
+    log_info "Test 6.26d: Bash + no env error (small response) — skip entirely"
     skip_attr_resp='{"exit_code":0,"stdout":"hello world from shell","stderr":""}'
     skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_not_contains "$skip_attr_out" "ENV_" "Bash no-error: no attribution emitted"
-    assert_not_contains "$skip_attr_out" "compress" "Bash no-error: no compression emitted"
+    assert_not_contains "$skip_attr_out" "compress" "Bash no-error small: no compression emitted"
+
+    # ==========================================
+    # 6.26e Non-SKIP_TOOLS tool small response + env attribution (new path)
+    # Verify that non-content-retrieval tools with small responses still
+    # inject env attribution when an environment error is detected.
+    # ==========================================
+    log_info "Test 6.26e: Write (non-skip) + ENV_PERMISSION small — attribution injected"
+    local small_err_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret"}'
+    local small_err_input=$(jq -n --arg r "$small_err_resp" '{"tool_name":"Write","tool_response":$r}')
+    local small_err_out=$(echo "$small_err_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_contains "$small_err_out" "ENV_PERMISSION" "Write small error: attribution injected"
+    assert_contains "$small_err_out" "Skip retry" "Write small error: Skip retry included"
+
+    log_info "Test 6.26f: Write (non-skip) + no env error small — skip entirely"
+    local small_ok_resp='{"exit_code":0,"stdout":"ok"}'
+    local small_ok_input=$(jq -n --arg r "$small_ok_resp" '{"tool_name":"Write","tool_response":$r}')
+    local small_ok_out=$(echo "$small_ok_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    assert_not_contains "$small_ok_out" "ENV_" "Write small no-error: no attribution"
+    assert_not_contains "$small_ok_out" "compress" "Write small no-error: no compression"
+
+    # ==========================================
+    # 6.26g 3-layer classification correctness
+    # Verify unified tool_categories.json classifies tools correctly:
+    #   Layer 1 (skip): Read, Grep — not compressed
+    #   Layer 2 (shell): Bash — moderate truncation
+    #   Layer 3 (API): Write, WebFetch — zero-truncation
+    # ==========================================
+    log_info "Test 6.26g: 3-layer classification — Bash not in SKIP_TOOLS, Read is"
+    local class_out
+    class_out=$(python3 -c "
+import sys
+sys.path.insert(0, '${HOOK_DIR}')
+from hook_utils import SKIP_TOOLS, SHELL_TOOLS, get_thresholds
+# Layer 1: Read/Grep must be in SKIP_TOOLS
+assert 'Read' in SKIP_TOOLS, 'Read missing from SKIP_TOOLS'
+assert 'Grep' in SKIP_TOOLS, 'Grep missing from SKIP_TOOLS'
+# Layer 2: Bash must NOT be in SKIP_TOOLS (it is layer 2, compressed with 64K thresholds)
+assert 'Bash' not in SKIP_TOOLS, 'Bash wrongly in SKIP_TOOLS (should be layer 2)'
+assert 'Bash' in SHELL_TOOLS, 'Bash missing from SHELL_TOOLS'
+# Thresholds: Bash gets layer 2 (64K/128/8), Write gets layer 3 (1M/64K/32)
+bash_thr = get_thresholds('Bash')
+write_thr = get_thresholds('Write')
+assert bash_thr == (65536, 128, 8), f'Bash thresholds wrong: {bash_thr}'
+assert write_thr == (1048576, 65536, 32), f'Write thresholds wrong: {write_thr}'
+print('CLASSIFY_OK')
+" 2>&1)
+    assert_contains "$class_out" "CLASSIFY_OK" "3-layer classification correct"
+
+    # ==========================================
+    # 6.26h Behavioral dispatch: Read skips, Bash proceeds to compression
+    # Read must produce empty output (skip); Bash must attempt compression
+    # (produces non-empty hook output even if compression saves nothing).
+    # ==========================================
+    log_info "Test 6.26h: Read skips entirely, Bash enters compression pipeline"
+    local large_body
+    large_body=$(python3 -c "print('x' * 5000)")
+    local dispatch_resp
+    dispatch_resp=$(jq -n --arg b "$large_body" '{"exit_code":0,"stdout":$b,"stderr":""}')
+
+    # Read (layer 1) → skip → outputs only {} (skip() emits empty JSON object)
+    local read_input
+    read_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Read","tool_response":$r}')
+    local read_out
+    read_out=$(echo "$read_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    local read_trimmed
+    read_trimmed=$(echo "$read_out" | tr -d '[:space:]')
+    [ "$read_trimmed" = "{}" ] && log_pass "Read (layer 1) skips entirely" || log_fail "Read should skip with {}, got: $read_out"
+
+    # Bash (layer 2) → compression attempted → non-trivial hook output (not just {})
+    local bash_input
+    bash_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Bash","tool_response":$r}')
+    local bash_out
+    bash_out=$(echo "$bash_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    local bash_trimmed
+    bash_trimmed=$(echo "$bash_out" | tr -d '[:space:]')
+    [ -n "$bash_trimmed" ] && [ "$bash_trimmed" != "{}" ] && log_pass "Bash (layer 2) enters compression pipeline" || log_fail "Bash should attempt compression, got: $bash_out"
 
     # ==========================================
     # 6.27 No docker_socket or https_outbound in spec

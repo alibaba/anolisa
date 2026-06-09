@@ -138,6 +138,7 @@ install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_da
 install -m 0644 adapters/tokenless/common/cosh-extension.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/
 install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
 install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
+install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks/
 install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands/
 install -m 0755 adapters/tokenless/openclaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
 install -m 0755 adapters/tokenless/openclaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/
@@ -195,6 +196,7 @@ install -m 0644 adapters/tokenless/common/tool-ready-spec.json %{buildroot}%{_da
 install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh %{buildroot}%{_datadir}/anolisa/extensions/tokenless/
 install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
 install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
+install -m 0644 adapters/tokenless/common/hooks/tool_categories.json %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks/
 install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands/
 
 %files
@@ -238,6 +240,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tokenless-env-fix.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/*.py
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/*.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/hooks/tool_categories.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/commands/tokenless-stats.toml
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts/install.sh
@@ -285,6 +288,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/tokenless-env-fix.sh
 %attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.py
 %attr(0755,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/*.sh
+%attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/hooks/tool_categories.json
 %attr(0644,root,root) %{_datadir}/anolisa/extensions/tokenless/commands/tokenless-stats.toml
 
 %post
