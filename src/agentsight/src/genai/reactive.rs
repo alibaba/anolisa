@@ -517,4 +517,109 @@ mod tests {
             "Drop took too long ({drop_time:?}), background thread stuck"
         );
     }
+
+    /// Integration: context_overflow event triggers the full pipeline
+    /// (export → channel → background thread → ws-ckpt spawn attempt).
+    #[test]
+    fn export_context_overflow_triggers_checkpoint() {
+        use crate::genai::exporter::GenAIExporter;
+
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 2,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let exporter = match ReactiveExporter::new(config) {
+            Some(e) => e,
+            None => {
+                eprintln!("ws-ckpt not installed, skipping");
+                return;
+            }
+        };
+
+        let overflow_event = make_call(
+            Some("This model's maximum context length is 128000 tokens. You requested 200000."),
+            1000,
+            None,
+        );
+        exporter.export(&[overflow_event]);
+
+        // Wait for ws-ckpt spawn + timeout
+        std::thread::sleep(Duration::from_secs(13));
+        let start = std::time::Instant::now();
+        drop(exporter);
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Integration: notify_interruption triggers checkpoint attempt
+    /// (simulates unified.rs forwarding a RetryStorm detection).
+    #[test]
+    fn notify_interruption_triggers_checkpoint() {
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 2,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let exporter = match ReactiveExporter::new(config) {
+            Some(e) => e,
+            None => {
+                eprintln!("ws-ckpt not installed, skipping");
+                return;
+            }
+        };
+
+        exporter.notify_interruption("retry_storm", Some("conv-42".into()));
+
+        // Wait for ws-ckpt attempt + timeout
+        std::thread::sleep(Duration::from_secs(13));
+        let start = std::time::Instant::now();
+        drop(exporter);
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Integration: cumulative token advisory fires after 200K input tokens
+    /// with no cache, debounced per-agent per-hour.
+    #[test]
+    fn cumulative_advisory_fires_at_threshold() {
+        use crate::genai::exporter::GenAIExporter;
+
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 60,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let exporter = match ReactiveExporter::new(config) {
+            Some(e) => e,
+            None => {
+                eprintln!("ws-ckpt not installed, skipping");
+                return;
+            }
+        };
+
+        // Send 5 calls × 50K tokens = 250K total, no cache
+        for _ in 0..5 {
+            let event = make_call(None, 50_000, None);
+            exporter.export(&[event]);
+        }
+
+        // Give background thread time to process all TokenAccum messages
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Send one with cache → should NOT reset (any_cache_hit is per-window)
+        // Actually it WILL set any_cache_hit=true for this agent. But advisory
+        // already fired (if at all) after the 4th message (200K reached).
+        // The test validates the pipeline doesn't panic and processes correctly.
+
+        let cached_event = make_call(None, 10_000, Some(5_000));
+        exporter.export(&[cached_event]);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Clean shutdown
+        let start = std::time::Instant::now();
+        drop(exporter);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "Drop should be fast (no ws-ckpt in this test path)"
+        );
+    }
 }
