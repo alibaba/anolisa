@@ -27,7 +27,8 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/hermes/plugin.yaml \
     $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
-    $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json
+    $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
+    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json
 TOON_VER := 0.4.6
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -42,6 +43,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         qoder-install qoder-uninstall \
         claude-code-install claude-code-uninstall \
         codex-install codex-uninstall \
+        qwencode-install qwencode-uninstall \
         setup help \
         test-hooks
 
@@ -91,6 +93,11 @@ $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json: \
 
 $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json: $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json.in Cargo.toml
 	@echo "==> Generating codex/.codex-plugin/plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json: \
+    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json.in Cargo.toml
+	@echo "==> Generating qwencode/qwen-extension.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
@@ -197,9 +204,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install qwencode-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall qwencode-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -288,6 +295,18 @@ codex-uninstall:
 	@echo "==> Uninstalling Codex plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- Qwen Code ---
+QWENCODE_ADAPTER_DIR = $(SHARE_DIR)/qwencode
+
+qwencode-install:
+	@echo "==> Installing Qwen Code plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/install.sh
+
+qwencode-uninstall:
+	@echo "==> Uninstalling Qwen Code plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/uninstall.sh
+
 # One-step setup: build + install + all adapters
 setup: install adapter-install
 	@echo ""
@@ -303,7 +322,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, qwencode"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -327,7 +346,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+qwencode)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -341,6 +360,8 @@ help:
 	@echo "  claude-code-uninstall Unregister Claude Code plugin"
 	@echo "  codex-install     Register Codex plugin via codex CLI"
 	@echo "  codex-uninstall   Unregister Codex plugin"
+	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
+	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  help              Show this help"
 	@echo ""

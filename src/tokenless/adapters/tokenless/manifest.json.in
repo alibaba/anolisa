@@ -94,6 +94,22 @@
         "install":   "codex/scripts/install.sh",
         "uninstall": "codex/scripts/uninstall.sh"
       }
+    },
+    "qwencode": {
+      "compatibleVersions": ">=0.17.0",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-schema",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "qwencode/scripts/detect.sh",
+        "install":   "qwencode/scripts/install.sh",
+        "uninstall": "qwencode/scripts/uninstall.sh"
+      }
     }
   }
 }
