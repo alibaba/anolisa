@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,23 @@ struct AgentTokenState {
     last_advisory: Option<Instant>,
 }
 
+/// Lightweight handle for forwarding interruption alerts to the ReactiveExporter
+/// background thread. Send+Sync+Clone — safe to store in AgentSight and call from
+/// detect_and_store_interruptions().
+#[derive(Clone)]
+pub struct ReactiveNotifier {
+    tx: SyncSender<Msg>,
+}
+
+impl ReactiveNotifier {
+    pub fn notify_interruption(&self, interruption_type: &str, conversation_id: Option<String>) {
+        let _ = self.tx.try_send(Msg::InterruptionAlert {
+            interruption_type: interruption_type.to_string(),
+            conversation_id,
+        });
+    }
+}
+
 pub struct ReactiveExporter {
     tx: SyncSender<Msg>,
     shutdown: Arc<AtomicBool>,
@@ -61,7 +78,7 @@ pub struct ReactiveExporter {
 }
 
 impl ReactiveExporter {
-    pub fn new(config: ReactiveConfig) -> Option<Self> {
+    pub fn new(config: ReactiveConfig) -> Option<(Self, ReactiveNotifier)> {
         if !config.enabled {
             return None;
         }
@@ -184,7 +201,7 @@ impl ReactiveExporter {
                                 && !state.any_cache_hit
                                 && state
                                     .last_advisory
-                                    .map_or(true, |t| t.elapsed() > one_hour)
+                                    .is_none_or(|t| t.elapsed() > one_hour)
                             {
                                 log::info!(
                                     "[reactive] advisory: agent '{}' consumed {} input tokens with no prompt caching",
@@ -262,11 +279,15 @@ impl ReactiveExporter {
             })
             .ok()?;
 
-        Some(Self {
-            tx,
-            shutdown,
-            handle: Some(handle),
-        })
+        let notifier = ReactiveNotifier { tx: tx.clone() };
+        Some((
+            Self {
+                tx,
+                shutdown,
+                handle: Some(handle),
+            },
+            notifier,
+        ))
     }
 
     /// Send an interruption alert from the existing detection pipeline.
@@ -302,7 +323,6 @@ impl ReactiveExporter {
         }
         None
     }
-
 }
 
 impl GenAIExporter for ReactiveExporter {
@@ -350,10 +370,16 @@ impl Drop for ReactiveExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, TokenUsage};
+    use crate::genai::semantic::{
+        GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, TokenUsage,
+    };
     use std::collections::HashMap;
 
-    fn make_call(error: Option<&str>, input_tokens: u32, cache_read: Option<u32>) -> GenAISemanticEvent {
+    fn make_call(
+        error: Option<&str>,
+        input_tokens: u32,
+        cache_read: Option<u32>,
+    ) -> GenAISemanticEvent {
         let mut metadata = HashMap::new();
         metadata.insert("conversation_id".to_string(), "conv-1".to_string());
         GenAISemanticEvent::LLMCall(LLMCall {
@@ -399,7 +425,11 @@ mod tests {
 
     #[test]
     fn detect_critical_finds_crash() {
-        let events = vec![make_call(Some("process crashed with OOM killer"), 1000, None)];
+        let events = vec![make_call(
+            Some("process crashed with OOM killer"),
+            1000,
+            None,
+        )];
         let result = ReactiveExporter::detect_critical(&events);
         assert!(result.is_some());
         let (reason, conv) = result.unwrap();
@@ -450,7 +480,7 @@ mod tests {
             debounce_secs: 1,
             workspace_path: Some("/tmp".to_string()),
         };
-        if let Some(exporter) = ReactiveExporter::new(config) {
+        if let Some((exporter, _notifier)) = ReactiveExporter::new(config) {
             exporter.notify_interruption("retry_storm", Some("conv-99".into()));
             std::thread::sleep(Duration::from_millis(100));
             drop(exporter);
@@ -482,7 +512,7 @@ mod tests {
 
         // new() probes for ws-ckpt binary. If not installed, skip gracefully.
         let exporter = match ReactiveExporter::new(config) {
-            Some(e) => e,
+            Some((e, _)) => e,
             None => {
                 eprintln!("ws-ckpt not installed, skipping integration test");
                 return;
@@ -530,7 +560,7 @@ mod tests {
             workspace_path: Some("/tmp".to_string()),
         };
         let exporter = match ReactiveExporter::new(config) {
-            Some(e) => e,
+            Some((e, _)) => e,
             None => {
                 eprintln!("ws-ckpt not installed, skipping");
                 return;
@@ -561,7 +591,7 @@ mod tests {
             workspace_path: Some("/tmp".to_string()),
         };
         let exporter = match ReactiveExporter::new(config) {
-            Some(e) => e,
+            Some((e, _)) => e,
             None => {
                 eprintln!("ws-ckpt not installed, skipping");
                 return;
@@ -589,7 +619,7 @@ mod tests {
             workspace_path: Some("/tmp".to_string()),
         };
         let exporter = match ReactiveExporter::new(config) {
-            Some(e) => e,
+            Some((e, _)) => e,
             None => {
                 eprintln!("ws-ckpt not installed, skipping");
                 return;

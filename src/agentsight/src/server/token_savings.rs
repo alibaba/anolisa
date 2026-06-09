@@ -351,13 +351,11 @@ pub(crate) fn build_explanation(
 ) -> String {
     if category == "mcp_response" {
         format!(
-            "MCP响应压缩: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "MCP响应压缩: 原始 {before_tokens} tokens → {after_tokens} tokens，压缩率 {compression_ratio:.1}%。后续 {compounding_turns} 轮LLM调用均受益，复合节省 {compounded} tokens。"
         )
     } else {
         format!(
-            "工具输出优化: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "工具输出优化: 原始 {before_tokens} tokens → {after_tokens} tokens，压缩率 {compression_ratio:.1}%。后续 {compounding_turns} 轮LLM调用均受益，复合节省 {compounded} tokens。"
         )
     }
 }
@@ -414,7 +412,7 @@ pub(crate) fn generate_optimization_tips(
     if zero_savings_sessions > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: format!("发现 {} 个未优化会话", zero_savings_sessions),
+            title: format!("发现 {zero_savings_sessions} 个未优化会话"),
             description: "部分会话消耗较高但无优化记录，可能是对应 Agent 未启用 tokenless 或工具调用较少。建议检查这些会话的 Agent 配置。".to_string(),
         });
     }
@@ -424,8 +422,7 @@ pub(crate) fn generate_optimization_tips(
             level: "success".to_string(),
             title: "节省效果优秀".to_string(),
             description: format!(
-                "当前复合节省率 {:.1}%，表现优秀！继续保持当前配置。",
-                grand_compounded_rate
+                "当前复合节省率 {grand_compounded_rate:.1}%，表现优秀！继续保持当前配置。"
             ),
         });
     } else if grand_compounded_rate >= 15.0 {
@@ -433,8 +430,7 @@ pub(crate) fn generate_optimization_tips(
             level: "success".to_string(),
             title: "节省效果良好".to_string(),
             description: format!(
-                "当前复合节省率 {:.1}%，已达到良好水平。可尝试调整压缩策略以进一步提升。",
-                grand_compounded_rate
+                "当前复合节省率 {grand_compounded_rate:.1}%，已达到良好水平。可尝试调整压缩策略以进一步提升。"
             ),
         });
     }

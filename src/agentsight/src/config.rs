@@ -350,6 +350,17 @@ pub struct JsonRuntime {
     pub sls_logtail_path: Option<String>,
 }
 
+/// Reactive exporter configuration section
+#[derive(serde::Deserialize, Clone, Debug)]
+struct JsonReactive {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    debounce_secs: Option<u64>,
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
 /// 加密配置：可选公钥（PEM 字符串）或公钥文件路径
 #[derive(serde::Deserialize)]
 struct JsonEncryption {

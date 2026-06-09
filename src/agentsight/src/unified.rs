@@ -110,6 +110,8 @@ pub struct AgentSight {
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
     /// Cached feature flags so runtime paths can check them without the config.
     features: crate::config::FeatureFlags,
+    /// Notifier for forwarding Critical interruptions to ReactiveExporter
+    reactive_notifier: Option<crate::genai::reactive::ReactiveNotifier>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -331,8 +333,7 @@ impl AgentSight {
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
-                path
+                "SLS sysom mode detected (path={path}), skipping SQLite and default SLS exporter"
             );
             if logtail_currently_enabled {
                 let exporter = LogtailExporter::new_with_fixed_path(
@@ -420,17 +421,22 @@ impl AgentSight {
         }
 
         // Register ReactiveExporter (observe→act: checkpoint on critical interruptions)
-        {
+        let reactive_notifier = {
             let reactive_config = crate::genai::reactive::ReactiveConfig {
                 enabled: config.reactive_enabled.unwrap_or(false),
                 debounce_secs: config.reactive_debounce_secs.unwrap_or(30),
                 workspace_path: config.reactive_workspace.clone(),
             };
-            if let Some(exporter) = crate::genai::reactive::ReactiveExporter::new(reactive_config) {
+            if let Some((exporter, notifier)) =
+                crate::genai::reactive::ReactiveExporter::new(reactive_config)
+            {
                 log::info!("ReactiveExporter enabled");
                 genai_exporters.push(Box::new(exporter));
+                Some(notifier)
+            } else {
+                None
             }
-        }
+        };
 
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
@@ -557,6 +563,7 @@ impl AgentSight {
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
             features: config.features.clone(),
+            reactive_notifier,
         })
     }
 
@@ -1083,6 +1090,12 @@ impl AgentSight {
                                                 ie.interruption_type,
                                                 cid
                                             );
+                                            if let Some(ref n) = self.reactive_notifier {
+                                                n.notify_interruption(
+                                                    "retry_storm",
+                                                    Some(cid.to_string()),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1145,6 +1158,9 @@ impl AgentSight {
                                         cid,
                                         loop_event.detail
                                     );
+                                    if let Some(ref n) = self.reactive_notifier {
+                                        n.notify_interruption("dead_loop", Some(cid.to_string()));
+                                    }
 
                                     // ── Auto-kill 止血 ──
                                     let new_count = existing_count + 1;
