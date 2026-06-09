@@ -236,6 +236,8 @@ struct JsonFullConfig {
     #[serde(default)]
     deadloop: Option<JsonDeadloop>,
     #[serde(default)]
+    reactive: Option<JsonReactive>,
+    #[serde(default)]
     cgroup_filter_enabled: Option<bool>,
     #[serde(default)]
     cgroup_ids: Option<Vec<u64>>,
@@ -747,6 +749,14 @@ pub struct AgentsightConfig {
     // --- Runtime Resource Limits ---
     /// Bounded channel capacities, pending queue limits, etc.
     pub runtime_limits: RuntimeLimits,
+
+    // --- Reactive Exporter Configuration ---
+    /// Enable the reactive exporter (observe→act pipeline)
+    pub reactive_enabled: Option<bool>,
+    /// Minimum seconds between consecutive checkpoint actions
+    pub reactive_debounce_secs: Option<u64>,
+    /// Workspace path for ws-ckpt checkpoint
+    pub reactive_workspace: Option<String>,
 }
 
 impl Default for AgentsightConfig {
@@ -821,6 +831,11 @@ impl Default for AgentsightConfig {
 
             // Runtime resource limits
             runtime_limits: RuntimeLimits::default(),
+
+            // Reactive exporter defaults (disabled by default)
+            reactive_enabled: None,
+            reactive_debounce_secs: None,
+            reactive_workspace: None,
         }
     }
 }
@@ -959,6 +974,13 @@ impl AgentsightConfig {
             if let Some(count) = dl.kill_after_count {
                 self.deadloop_kill_after_count = count;
             }
+        }
+
+        // 解析 reactive exporter 配置
+        if let Some(ref r) = parsed.reactive {
+            self.reactive_enabled = r.enabled;
+            self.reactive_debounce_secs = r.debounce_secs;
+            self.reactive_workspace = r.workspace.clone();
         }
 
         // Parse cgroup filter settings

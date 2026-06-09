@@ -13,6 +13,7 @@ pub mod id_resolver;
 pub mod instance_id;
 pub mod logtail;
 mod openai_parse;
+pub mod reactive;
 pub mod semantic;
 pub mod storage;
 

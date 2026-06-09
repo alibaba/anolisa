@@ -419,6 +419,19 @@ impl AgentSight {
             }
         }
 
+        // Register ReactiveExporter (observe→act: checkpoint on critical interruptions)
+        {
+            let reactive_config = crate::genai::reactive::ReactiveConfig {
+                enabled: config.reactive_enabled.unwrap_or(false),
+                debounce_secs: config.reactive_debounce_secs.unwrap_or(30),
+                workspace_path: config.reactive_workspace.clone(),
+            };
+            if let Some(exporter) = crate::genai::reactive::ReactiveExporter::new(reactive_config) {
+                log::info!("ReactiveExporter enabled");
+                genai_exporters.push(Box::new(exporter));
+            }
+        }
+
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
             if Path::new(tokenizer_path).exists() {
