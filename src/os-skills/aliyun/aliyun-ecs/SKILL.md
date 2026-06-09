@@ -75,9 +75,9 @@ INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 | 启动实例 | `aliyun ecs StartInstance --InstanceId <实例ID>` |
 | 停止实例 | `aliyun ecs StopInstance --InstanceId <实例ID>` |
 | 重启实例 | `aliyun ecs RebootInstance --InstanceId <实例ID>` |
-| 释放实例 | `aliyun ecs DeleteInstance --InstanceId <实例ID> --Force true` |
+| 释放实例 | `aliyun ecs DeleteInstance --InstanceId <实例ID>` |
 
-> **破坏性操作验证**：执行 `DeleteInstance`、`StopInstance` 前，先用 `DescribeInstanceAttribute --InstanceId <实例ID>` 确认目标实例；执行后用 `DescribeInstances` 验证状态变更。
+> **破坏性操作验证**：执行 `DeleteInstance`、`StopInstance` 前，先用 `DescribeInstanceAttribute --InstanceId <实例ID>` 确认目标实例；执行后用 `DescribeInstances` 验证状态变更。仅当实例卡在运行状态无法正常释放时，才追加 `--Force true` 强制释放——该参数会跳过实例保护并执行强制关机，可能导致缓存数据丢失。
 
 ### 磁盘管理
 
