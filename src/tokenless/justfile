@@ -24,6 +24,9 @@ setup-rtk:
         echo "Applying grep fallback pattern fix patch..."; \
         patch --forward -p1 --no-backup-if-mismatch \
             -d {{rtk_dir}} < {{patch_dir}}/rtk-grep-fallback-fix.patch && \
+        echo "Applying pytest error report patch..."; \
+        patch --forward -p1 --no-backup-if-mismatch \
+            -d {{rtk_dir}} < {{patch_dir}}/rtk-pytest-error-report.patch && \
         echo "rtk setup complete."; \
     else \
         echo "rtk already set up ({{rtk_dir}}/Cargo.toml exists)."; \
