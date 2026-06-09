@@ -1684,8 +1684,6 @@ impl GenAISqliteStore {
         loop {
             match self.try_insert_event(event) {
                 Ok(()) => {
-                    // Success: execute checkpoint to flush WAL to main DB
-                    self.checkpoint()?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2056,6 +2054,17 @@ impl GenAISqliteStore {
         // Checkpoint with TRUNCATE to shrink WAL file
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
 
+        Ok(())
+    }
+
+    /// Flush WAL frames to the main database and truncate the WAL file.
+    ///
+    /// Call during graceful shutdown to clean up `-wal` / `-shm` files —
+    /// mirrors the sibling stores (token, http, audit) which do this via
+    /// `connection::wal_checkpoint` in their own `checkpoint()` methods.
+    pub fn wal_checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 }

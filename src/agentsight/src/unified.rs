@@ -846,7 +846,13 @@ impl AgentSight {
         self.running.store(false, Ordering::SeqCst);
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
-        // poller will be dropped automatically when AgentSight is dropped
+        // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit
+        // (mirrors Storage::Drop which checkpoints agentsight.db).
+        if let Some(ref store) = self.genai_sqlite_store {
+            if let Err(e) = store.wal_checkpoint() {
+                log::warn!("GenAI WAL checkpoint on shutdown failed: {e}");
+            }
+        }
     }
 
     /// Check and drain the pending_logtail mailbox.

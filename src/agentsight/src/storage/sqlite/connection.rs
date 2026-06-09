@@ -30,6 +30,11 @@ pub fn create_connection(path: &Path) -> Result<Connection> {
     // Enable WAL mode for better concurrent read performance
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
+    // Allow readers to retry briefly on transient write locks (VACUUM, checkpoint)
+    // rather than failing with SQLITE_BUSY immediately. 500ms matches the tokenless
+    // stats store and is long enough to ride out a typical prune-time VACUUM.
+    conn.busy_timeout(std::time::Duration::from_millis(500))?;
+
     Ok(conn)
 }
 
