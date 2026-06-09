@@ -21,6 +21,8 @@ use crate::color::Palette;
 use crate::context::CliContext;
 use crate::response::{self, CliError};
 
+const CLI_CHANGELOG_URL: &str = "https://agentic-os.sh/#anolisa-cli-changelog";
+
 /// Arguments for the unified update command surface.
 #[derive(Parser)]
 pub struct UpdateArgs {
@@ -125,6 +127,7 @@ pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), Cl
                 println!("  run without --dry-run to apply");
             } else {
                 println!("{} anolisa updated: {} → {}", color.ok("✓"), from, to);
+                println!("  view the changelog at {}", color.path(CLI_CHANGELOG_URL));
                 eprintln!(
                     "  {} signature verification not yet implemented; \
                      update trust relies on HTTPS only",
