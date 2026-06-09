@@ -1,21 +1,21 @@
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 982c937..175d0bf 100644
+index 359e4f6..c543753 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
-@@ -1294,6 +1294,9 @@ impl TimedExecution {
+@@ -1358,6 +1358,9 @@ impl TimedExecution {
          let input_tokens = estimate_tokens(input);
-         let output_tokens = estimate_tokens(output)
-
+         let output_tokens = estimate_tokens(output);
+ 
 +        // Also record to tokenless stats database (fail-silent)
 +        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
 +
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1355,6 +1358,159 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1419,6 +1422,159 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
-
+ 
 +/// Estimate token count from character count using ~4 chars/token heuristic.
 +fn estimate_tokens_from_chars(chars: usize) -> usize {
 +    if chars == 0 {
@@ -172,43 +172,14 @@ index 982c937..175d0bf 100644
  #[cfg(test)]
  mod tests {
      use super::*;
-diff --git a/src/hooks/constants.rs b/src/hooks/constants.rs
-index 20f29e5..57df255 100644
---- a/src/hooks/constants.rs
-+++ b/src/hooks/constants.rs
-@@ -8,7 +8,11 @@ pub const HOOKS_JSON: &str = "hooks.json";
- pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
- pub const BEFORE_TOOL_KEY: &str = "BeforeTool"
-
-+#[allow(dead_code)]
- pub const OPENCODE_PLUGIN_PATH: &str = ".config/opencode/plugins/rtk.ts";
-+#[allow(dead_code)]
- pub const CURSOR_DIR: &str = ".cursor";
-+#[allow(dead_code)]
- pub const CODEX_DIR: &str = ".codex";
-+#[allow(dead_code)]
- pub const GEMINI_DIR: &str = ".gemini";
 diff --git a/src/hooks/hook_check.rs b/src/hooks/hook_check.rs
-index 7bba2a2..c0e5f76 100644
+index 4dd26d8..3638321 100644
 --- a/src/hooks/hook_check.rs
 +++ b/src/hooks/hook_check.rs
 @@ -1,5 +1,6 @@
  //! Detects whether RTK hooks are installed and warns if they are outdated.
-
+ 
 +#[allow(unused_imports)]
  use super::constants::{
-     CLAUDE_DIR, CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HOOKS_SUBDIR,
-     OPENCODE_PLUGIN_PATH, REWRITE_HOOK_FILE,
-diff --git a/src/main.rs b/src/main.rs
-index f5a7e9d..7f600f9 100644
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -2097,7 +2097,9 @@ fn run_cli() -> Result<i32> {
-                     libc::raise(sig);
-                 }
-                 unsafe {
-+                    #[allow(function_casts_as_integer)]
-                     libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-+                    #[allow(function_casts_as_integer)]
-                     libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
-                 }
+     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+     SETTINGS_JSON,

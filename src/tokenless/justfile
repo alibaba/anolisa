@@ -3,8 +3,8 @@
 #        just setup-rtk   (clone + patch rtk only)
 #        just build-toon  (install toon binary)
 
-rtk_tag   := "v0.36.0"
-toon_ver  := "0.4.6"
+rtk_tag   := "v0.42.3"
+toon_ver  := "0.5.0"
 rtk_dir   := "third_party/rtk"
 patch_dir := "third_party/patches"
 
@@ -12,7 +12,7 @@ patch_dir := "third_party/patches"
 default:
     @just --list
 
-# Clone rtk from GitHub and apply tokenless stats patch
+# Clone rtk from GitHub and apply tokenless patches
 setup-rtk:
     @if [ ! -f {{rtk_dir}}/Cargo.toml ]; then \
         echo "Cloning rtk {{rtk_tag}} from GitHub..."; \

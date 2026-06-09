@@ -46,7 +46,7 @@ Core Features:
 The package includes:
 - tokenless: CLI tool for schema/response compression and toon integration
 - rtk: High-performance CLI proxy for command rewriting (vendored source, Apache-2.0, excluded from workspace)
-- toon: JSON to TOON format encoder/decoder (crates.io toon-format v0.4.6)
+- toon: JSON to TOON format encoder/decoder (crates.io toon-format v0.5.0)
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
 Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
