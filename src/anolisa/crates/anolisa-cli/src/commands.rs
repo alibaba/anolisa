@@ -15,12 +15,20 @@ pub mod runtime;
 pub mod self_;
 pub mod subscription;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::context::{CliContext, InstallMode};
 use crate::response::CliError;
+
+const HELP_TEMPLATE: &str = "\
+{before-help}{name} {version}\n\
+{about-with-newline}\n\
+{usage-heading} {usage}\
+{after-help}\
+\nOptions:\n{options}";
 
 #[derive(Parser)]
 #[command(
@@ -64,10 +72,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    // ── Tier 1 — Capability commands ────────────────────────────────
+    #[command(flatten)]
+    Capability(CapabilityCommands),
+
+    #[command(flatten)]
+    Management(ManagementCommands),
+}
+
+/// Tier 1 — everyday capability verbs.
+#[derive(Subcommand)]
+pub enum CapabilityCommands {
     /// Generate a bug report with diagnostic information
     Bug(tier1::bug::BugArgs),
     /// List capabilities and their availability / enable status
+    #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
     /// Enable one or more capabilities
     Enable(tier1::enable::EnableArgs),
@@ -89,8 +107,11 @@ pub enum Commands {
     Info(tier1::info::InfoArgs),
     /// Update self, runtime components, or everything ANOLISA-managed
     Update(tier1::update::UpdateArgs),
+}
 
-    // ── Tier 2 — Management surfaces ────────────────────────────────
+/// Tier 2 — independent management surfaces.
+#[derive(Subcommand)]
+pub enum ManagementCommands {
     /// Manage ANOLISA subscription
     Subscription(subscription::SubscriptionArgs),
     /// Manage agent-framework adapters
@@ -104,6 +125,68 @@ pub enum Commands {
     Osbase(osbase::OsbaseArgs),
 }
 
+/// Build the top-level [`clap::Command`] with grouped help rendering.
+///
+/// Generates the "Capability Commands / Management Commands / Other"
+/// sections dynamically from the registered subcommands so that adding
+/// a new variant to [`CapabilityCommands`] or [`ManagementCommands`]
+/// automatically updates `--help` without maintaining a separate const.
+pub fn build_cli() -> clap::Command {
+    let cmd = Cli::command();
+    let help_text = generate_grouped_help();
+    cmd.help_template(HELP_TEMPLATE).after_help(help_text)
+}
+
+fn generate_grouped_help() -> String {
+    let cap = subcommand_rows::<CapabilityCommands>();
+    let mgmt = subcommand_rows::<ManagementCommands>();
+    render_grouped_help(&cap, &mgmt)
+}
+
+fn subcommand_rows<T: Subcommand>() -> Vec<(String, String)> {
+    let cmd = T::augment_subcommands(clap::Command::new("group"));
+    let mut rows = Vec::new();
+    for sub in cmd.get_subcommands() {
+        let name = sub.get_name();
+        let aliases: Vec<&str> = sub.get_visible_aliases().collect();
+        let display = if aliases.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}, {}", aliases.join(", "))
+        };
+        let about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
+
+        rows.push((display, about));
+    }
+    rows
+}
+
+fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> String {
+    let longest = cap
+        .iter()
+        .chain(mgmt)
+        .map(|(d, _)| d.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // "help" length
+
+    let mut out = String::from("Capability Commands:\n");
+    for (display, about) in cap {
+        let _ = writeln!(out, "  {display:<longest$}  {about}");
+    }
+    out.push_str("\nManagement Commands:\n");
+    for (display, about) in mgmt {
+        let _ = writeln!(out, "  {display:<longest$}  {about}");
+    }
+    out.push_str("\nOther:\n");
+    let _ = writeln!(
+        out,
+        "  {:<longest$}  Print this message or the help of the given subcommand(s)",
+        "help"
+    );
+    out
+}
+
 /// Dispatch parsed CLI arguments to their handlers.
 ///
 /// Every handler receives the immutable [`CliContext`] so global flags
@@ -113,25 +196,27 @@ pub enum Commands {
 pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     validate_global_args(ctx)?;
     match cli.command {
-        // Tier 1
-        Commands::Bug(args) => tier1::bug::handle(args, ctx),
-        Commands::List(args) => tier1::list::handle(args, ctx),
-        Commands::Enable(args) => tier1::enable::handle(args, ctx),
-        Commands::Disable(args) => tier1::disable::handle(args, ctx),
-        Commands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
-        Commands::Status(args) => tier1::status::handle(args, ctx),
-        Commands::Doctor(args) => tier1::doctor::handle(args, ctx),
-        Commands::Logs(args) => tier1::logs::handle(args, ctx),
-        Commands::Restart(args) => tier1::restart::handle(args, ctx),
-        Commands::Env(args) => tier1::env::handle(args, ctx),
-        Commands::Info(args) => tier1::info::handle(args, ctx),
-        Commands::Update(args) => tier1::update::handle(args, ctx),
-        // Tier 2
-        Commands::Subscription(args) => subscription::handle(args, ctx),
-        Commands::Adapter(args) => adapter::handle(args, ctx),
-        Commands::SelfCmd(args) => self_::handle(args, ctx),
-        Commands::Runtime(args) => runtime::handle(args, ctx),
-        Commands::Osbase(args) => osbase::handle(args, ctx),
+        Commands::Capability(cmd) => match cmd {
+            CapabilityCommands::Bug(args) => tier1::bug::handle(args, ctx),
+            CapabilityCommands::List(args) => tier1::list::handle(args, ctx),
+            CapabilityCommands::Enable(args) => tier1::enable::handle(args, ctx),
+            CapabilityCommands::Disable(args) => tier1::disable::handle(args, ctx),
+            CapabilityCommands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
+            CapabilityCommands::Status(args) => tier1::status::handle(args, ctx),
+            CapabilityCommands::Doctor(args) => tier1::doctor::handle(args, ctx),
+            CapabilityCommands::Logs(args) => tier1::logs::handle(args, ctx),
+            CapabilityCommands::Restart(args) => tier1::restart::handle(args, ctx),
+            CapabilityCommands::Env(args) => tier1::env::handle(args, ctx),
+            CapabilityCommands::Info(args) => tier1::info::handle(args, ctx),
+            CapabilityCommands::Update(args) => tier1::update::handle(args, ctx),
+        },
+        Commands::Management(cmd) => match cmd {
+            ManagementCommands::Subscription(args) => subscription::handle(args, ctx),
+            ManagementCommands::Adapter(args) => adapter::handle(args, ctx),
+            ManagementCommands::SelfCmd(args) => self_::handle(args, ctx),
+            ManagementCommands::Runtime(args) => runtime::handle(args, ctx),
+            ManagementCommands::Osbase(args) => osbase::handle(args, ctx),
+        },
     }
 }
 
@@ -190,5 +275,50 @@ mod tests {
             .expect_err("traversing prefix must be rejected");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn generated_help_includes_all_subcommands() {
+        let mut cmd = build_cli();
+        let help = cmd.render_help().to_string();
+
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            assert!(
+                help.contains(name),
+                "subcommand `{name}` missing from generated help output"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_help_keeps_management_commands_in_management_section() {
+        let mut cmd = build_cli();
+        let help = cmd.render_help().to_string();
+        let management = help
+            .split("Management Commands:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\nOther:\n").next())
+            .expect("management help section must exist");
+
+        for sub in
+            ManagementCommands::augment_subcommands(clap::Command::new("group")).get_subcommands()
+        {
+            let name = sub.get_name();
+            assert!(
+                management.contains(name),
+                "management subcommand `{name}` missing from Management Commands section"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_appears_in_help() {
+        let mut cmd = build_cli();
+        let help = cmd.render_help().to_string();
+        assert!(
+            help.contains("ls"),
+            "visible alias `ls` should appear in help output"
+        );
     }
 }
