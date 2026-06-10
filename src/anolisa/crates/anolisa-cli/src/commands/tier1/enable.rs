@@ -943,21 +943,23 @@ mod tests {
         assert!(err.hint().unwrap_or("").contains("--with-adapter"));
     }
 
-    /// Smoke: with the bundled dev-tree manifests + index, the planner runs
-    /// end-to-end and produces a plan. We assert the call succeeds and that
-    /// the plan capability/install_mode match the request — we do not assert
-    /// a specific status because the host env (linux vs macOS) drives it.
+    /// Smoke: with the bundled dev-tree manifests + index, dry-run reaches the
+    /// renderer and returns a plan envelope. The temp prefix keeps registry
+    /// cache/config lookups away from system paths; we still do not assert a
+    /// specific status because the host env drives it.
     #[test]
-    fn enable_dry_run_happy_path_returns_plan_on_host() {
-        // We need an env-agnostic ctx, but ctx.install_mode=System with
-        // ctx.prefix=None defaults to / on system mode; that's fine for a
-        // bundled-catalog dry-run since nothing is written.
-        let _ = PathBuf::from("/tmp");
+    fn enable_dry_run_renders_plan_for_bundled_capability_with_temp_prefix() {
+        let tmp = tempdir().expect("tmpdir");
         let result = handle(
             args(&["agent-observability"]),
-            &ctx(true, true, InstallMode::System),
+            &ctx_with_prefix(
+                true,
+                true,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
         );
-        result.expect("dry-run plan should not error on bundled fixtures");
+        result.expect("dry-run should render a plan for bundled fixtures");
     }
 
     /// On macOS the OS precheck for `agent-observability` (requires linux)
