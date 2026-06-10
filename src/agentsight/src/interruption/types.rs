@@ -31,6 +31,8 @@ pub enum InterruptionType {
     /// Agent stuck in a logical loop: repeated tool sequences or similar LLM outputs
     /// without meaningful progress (no errors, just looping behavior)
     DeadLoop,
+    /// L1 regex security rule matched in LLM message content (injection / jailbreak)
+    SecurityMatch,
 }
 
 impl InterruptionType {
@@ -49,6 +51,7 @@ impl InterruptionType {
             Self::LlmError           => "llm_error",
             Self::RetryStorm         => "retry_storm",
             Self::DeadLoop           => "dead_loop",
+            Self::SecurityMatch      => "security_match",
         }
     }
 
@@ -66,6 +69,7 @@ impl InterruptionType {
             "llm_error"           => Some(Self::LlmError),
             "retry_storm"         => Some(Self::RetryStorm),
             "dead_loop"           => Some(Self::DeadLoop),
+            "security_match"      => Some(Self::SecurityMatch),
             _ => None,
         }
     }
@@ -85,6 +89,7 @@ impl InterruptionType {
             Self::LlmError           => Severity::High,
             Self::RetryStorm         => Severity::Critical,
             Self::DeadLoop           => Severity::Critical,
+            Self::SecurityMatch      => Severity::High,
         }
     }
 }
@@ -203,6 +208,7 @@ mod tests {
         assert_eq!(InterruptionType::LlmError.as_str(), "llm_error");
         assert_eq!(InterruptionType::RetryStorm.as_str(), "retry_storm");
         assert_eq!(InterruptionType::DeadLoop.as_str(), "dead_loop");
+        assert_eq!(InterruptionType::SecurityMatch.as_str(), "security_match");
     }
 
     #[test]
@@ -219,6 +225,7 @@ mod tests {
         assert_eq!(InterruptionType::from_str("llm_error"), Some(InterruptionType::LlmError));
         assert_eq!(InterruptionType::from_str("retry_storm"), Some(InterruptionType::RetryStorm));
         assert_eq!(InterruptionType::from_str("dead_loop"), Some(InterruptionType::DeadLoop));
+        assert_eq!(InterruptionType::from_str("security_match"), Some(InterruptionType::SecurityMatch));
         assert_eq!(InterruptionType::from_str("unknown"), None);
         assert_eq!(InterruptionType::from_str(""), None);
     }
@@ -237,6 +244,7 @@ mod tests {
         assert_eq!(InterruptionType::LlmError.default_severity(), Severity::High);
         assert_eq!(InterruptionType::RetryStorm.default_severity(), Severity::Critical);
         assert_eq!(InterruptionType::DeadLoop.default_severity(), Severity::Critical);
+        assert_eq!(InterruptionType::SecurityMatch.default_severity(), Severity::High);
     }
 
     #[test]
@@ -330,6 +338,7 @@ mod tests {
             InterruptionType::LlmError,
             InterruptionType::RetryStorm,
             InterruptionType::DeadLoop,
+            InterruptionType::SecurityMatch,
         ];
         for t in types {
             let json = serde_json::to_string(&t).unwrap();

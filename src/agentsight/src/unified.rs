@@ -33,7 +33,7 @@ use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
-use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_events};
+use crate::interruption::{DetectorConfig, InterruptionDetector, SecurityScanner, recover_oom_events};
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
@@ -68,6 +68,8 @@ pub struct AgentSight {
     genai_sqlite_store: Option<Arc<GenAISqliteStore>>,
     /// Interruption event detector (online rules)
     interruption_detector: InterruptionDetector,
+    /// L1 regex security scanner for LLM message content
+    security_scanner: SecurityScanner,
     /// Interruption event store (SQLite)
     interruption_store: Option<Arc<InterruptionStore>>,
     /// Unified storage
@@ -487,6 +489,7 @@ impl AgentSight {
             genai_exporters,
             genai_sqlite_store,
             interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
+            security_scanner: SecurityScanner::new(),
             interruption_store,
             storage,
             scanner,
@@ -1032,7 +1035,8 @@ impl AgentSight {
         if let Some(ref istore) = self.interruption_store {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
-                    let interruptions = self.interruption_detector.detect(llm_call);
+                    let mut interruptions = self.interruption_detector.detect(llm_call);
+                    interruptions.extend(self.security_scanner.scan(llm_call));
                     for ie in &interruptions {
                         // Deduplicate: skip if same (conversation_id, type, error_msg)
                         // already recorded.  Same error retried N times produces only
@@ -1040,7 +1044,22 @@ impl AgentSight {
                         // NOTE: RetryStorm detection only fires when conversation_id is Some.
                         // When None, each error inserts a separate row (no dedup, no storm detect).
                         if let Some(ref cid) = ie.conversation_id {
-                            let error_msg = llm_call.error.as_deref();
+                            // For SecurityMatch, use rule_id from detail as dedup key
+                            // so distinct rules (INJ-001 vs JB-001) are not collapsed.
+                            let security_rule_id: Option<String> = if ie.interruption_type
+                                == crate::interruption::InterruptionType::SecurityMatch
+                            {
+                                ie.detail.as_ref().and_then(|d| {
+                                    serde_json::from_str::<serde_json::Value>(d)
+                                        .ok()
+                                        .and_then(|v| v["rule_id"].as_str().map(|s| s.to_string()))
+                                })
+                            } else {
+                                None
+                            };
+                            let error_msg = security_rule_id
+                                .as_deref()
+                                .or_else(|| llm_call.error.as_deref());
                             if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
                             {
                                 log::debug!(
