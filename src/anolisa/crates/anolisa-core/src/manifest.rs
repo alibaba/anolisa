@@ -143,6 +143,11 @@ pub struct ComponentManifest {
     pub dependencies: DependenciesSpec,
     /// Feature toggles exposed by this component manifest.
     pub features: Vec<FeatureSpec>,
+    /// `[[adapters]]` declarations preserved verbatim. The component schema
+    /// itself does not install these — the Adapter layer (scan + framework
+    /// detect + safe install/remove) consumes them — but the manifest keeps
+    /// every parsed field so that tooling need not re-read the TOML.
+    pub adapters: Vec<AdapterSpec>,
     /// Minimal-schema `[component.health_check]`. `None` falls back to a
     /// synthesized `binary_version` over the first executable layout file —
     /// see [`ComponentManifest::health_spec`].
@@ -380,6 +385,35 @@ impl DependenciesSpec {
     }
 }
 
+/// One `[[adapters]]` entry. We keep every field the loader can parse so
+/// later tooling (adapter registry, doctor, build planner) does not have
+/// to re-read the TOML. `detect` is captured as a free-form map because
+/// each framework defines its own probe shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterSpec {
+    /// Adapter display or manifest name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Framework this adapter targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    /// Adapter kind (`first-party`, `third-party`, `protocol`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Framework-native plugin identifier, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// Source path inside the component artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Destination path after layout placeholder expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// Framework-specific detection hints preserved as TOML values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub detect: BTreeMap<String, toml::Value>,
+}
+
 /// One `[[health_checks]]` entry. Multiple checks per component are
 /// expected (binary probe + systemd unit + http endpoint, etc.) so we
 /// keep the entire list rather than only the first.
@@ -424,6 +458,8 @@ struct ComponentManifestRaw {
     dependencies: DependenciesRaw,
     #[serde(default)]
     features: Vec<FeatureRaw>,
+    #[serde(default)]
+    adapters: Vec<AdapterRaw>,
     #[serde(default, alias = "health")]
     health_checks: Vec<HealthCheckRaw>,
 }
@@ -615,6 +651,24 @@ struct FeatureRaw {
 }
 
 #[derive(Deserialize, Default)]
+struct AdapterRaw {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    framework: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    plugin_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    dest: Option<String>,
+    #[serde(default)]
+    detect: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize, Default)]
 struct HealthCheckRaw {
     #[serde(default)]
     name: Option<String>,
@@ -773,6 +827,20 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             })
             .collect();
 
+        let adapters: Vec<AdapterSpec> = raw
+            .adapters
+            .into_iter()
+            .map(|a| AdapterSpec {
+                name: a.name,
+                framework: a.framework,
+                kind: a.kind,
+                plugin_id: a.plugin_id,
+                source: a.source,
+                dest: a.dest,
+                detect: a.detect,
+            })
+            .collect();
+
         let health_checks: Vec<HealthSpec> = raw
             .health_checks
             .into_iter()
@@ -804,6 +872,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             env_requirements,
             dependencies,
             features,
+            adapters,
             health_check,
             health_checks,
         }
@@ -1345,10 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn adapters_section_is_ignored_as_unknown_keys() {
-        // T2.9: `[[adapters]]` is no longer part of the component schema. A
-        // manifest that still declares it must parse cleanly (tolerant) — the
-        // section is simply dropped, no adapter field survives.
+    fn adapters_preserve_framework_kind_plugin_source_dest_detect() {
         let toml_text = r#"
             [component]
             name = "agentsight"
@@ -1357,10 +1423,28 @@ mod tests {
             [[adapters]]
             framework = "openclaw"
             kind = "third-party"
+            plugin_id = "agentsight-openclaw"
             source = "adapters/agentsight/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.detect]
+            config_path = "~/.openclaw/config.toml"
         "#;
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
-        assert_eq!(m.component.name, "agentsight");
+        assert_eq!(m.adapters.len(), 1);
+        let a = &m.adapters[0];
+        assert_eq!(a.framework.as_deref(), Some("openclaw"));
+        assert_eq!(a.kind.as_deref(), Some("third-party"));
+        assert_eq!(a.plugin_id.as_deref(), Some("agentsight-openclaw"));
+        assert_eq!(a.source.as_deref(), Some("adapters/agentsight/openclaw"));
+        assert_eq!(
+            a.dest.as_deref(),
+            Some("{datadir}/adapters/{component}/openclaw/")
+        );
+        assert_eq!(
+            a.detect.get("config_path").and_then(|v| v.as_str()),
+            Some("~/.openclaw/config.toml")
+        );
     }
 
     #[test]

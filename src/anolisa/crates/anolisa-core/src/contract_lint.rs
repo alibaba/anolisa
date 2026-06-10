@@ -778,6 +778,7 @@ mod tests {
             env_requirements: EnvRequirements::default(),
             dependencies: DependenciesSpec::default(),
             features: Vec::<FeatureSpec>::new(),
+            adapters: Vec::new(),
             health_check: None,
             health_checks: Vec::new(),
         }

@@ -74,7 +74,7 @@ pub use lifecycle::{
     execute_plan,
 };
 pub use lock::{InstallLock, LockError};
-pub use manifest::{ComponentManifest, DistributionSelector, FileKind, HealthSpec};
+pub use manifest::{AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec};
 pub use register::{
     ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
     SubscriptionError, current_operator, require_root,
