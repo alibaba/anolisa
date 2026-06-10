@@ -118,6 +118,10 @@ pub struct ComponentManifest {
     pub schema_version: u32,
     /// Component identity and layer metadata.
     pub component: ComponentMeta,
+    /// `[component.contract]` schema/version envelope (minimal schema).
+    pub contract: ContractSpec,
+    /// `[component.artifact]` artifact shape description (minimal schema).
+    pub artifact: ArtifactSpec,
     /// Source tree or release source declaration.
     pub source: SourceSpec,
     /// Structured selector list. Each entry says "for this install_mode + OS
@@ -183,6 +187,45 @@ pub struct ComponentMeta {
     /// Optional domain label for capability grouping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    /// Human-facing component name (minimal schema `display_name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Owning team/maintainer (minimal schema `owner`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// SPDX license identifier (minimal schema `license`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Upstream repository URL (minimal schema `repository`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+/// `[component.contract]` — schema/version compatibility envelope (minimal
+/// schema). Both fields are optional during the tokenless-first migration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContractSpec {
+    /// Component-manifest schema version, e.g. `"1.0"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    /// Minimum ANOLISA CLI version that can install this component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_anolisa_version: Option<String>,
+}
+
+/// `[component.artifact]` — single-artifact shape description (minimal schema).
+/// Complements [`DistributionSelector`], which selects among multiple targets.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactSpec {
+    /// Artifact form: `binary` | `archive` | `script-only` | `mixed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+    /// Archive format when `artifact_type = "archive"`, e.g. `"tar.gz"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_format: Option<String>,
+    /// Filename template, e.g. `"{name}-{version}-{os}-{arch}.tar.gz"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub naming_pattern: Option<String>,
 }
 
 /// Source declaration for source-build capable components.
@@ -392,6 +435,65 @@ struct ComponentMetaRaw {
     layer: String,
     #[serde(default)]
     domain: Option<String>,
+    // Minimal-schema additions on the `[component]` table.
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
+    // Minimal-schema nested sub-tables (`[component.contract]`, etc.). When
+    // present they take precedence over the legacy top-level sections.
+    #[serde(default)]
+    contract: Option<ContractRaw>,
+    #[serde(default)]
+    platform: Option<EnvRequirementsRaw>,
+    #[serde(default)]
+    artifact: Option<ArtifactRaw>,
+    #[serde(default)]
+    layout: Option<LayoutRaw>,
+}
+
+#[derive(Deserialize, Default)]
+struct ContractRaw {
+    #[serde(default)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    min_anolisa_version: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ArtifactRaw {
+    #[serde(default, rename = "type")]
+    artifact_type: Option<String>,
+    #[serde(default)]
+    archive_format: Option<String>,
+    #[serde(default)]
+    naming_pattern: Option<String>,
+}
+
+/// `[component.layout]` — minimal-schema install layout. Maps onto the same
+/// internal [`InstallSpec`] as the legacy `[install]` section.
+#[derive(Deserialize, Default)]
+struct LayoutRaw {
+    #[serde(default)]
+    modes: Vec<String>,
+    #[serde(default)]
+    files: Vec<LayoutFileRaw>,
+}
+
+#[derive(Deserialize, Default)]
+struct LayoutFileRaw {
+    #[serde(default)]
+    source: Option<String>,
+    /// Minimal schema uses `target`; `dest` tolerated for symmetry.
+    #[serde(default, alias = "dest")]
+    target: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    // `type` (FileKind) is parsed by T2.2; ignored here as an unknown key.
 }
 
 #[derive(Deserialize, Default)]
@@ -541,12 +643,49 @@ struct HealthCheckRaw {
 
 impl From<ComponentManifestRaw> for ComponentManifest {
     fn from(raw: ComponentManifestRaw) -> Self {
+        // Destructure the `[component]` table once so the nested minimal-schema
+        // sub-tables (contract/platform/artifact/layout) can be consumed
+        // alongside the identity fields without partial-move friction.
+        let ComponentMetaRaw {
+            name,
+            version,
+            layer,
+            domain,
+            display_name,
+            owner,
+            license,
+            repository,
+            contract: contract_raw,
+            platform: platform_raw,
+            artifact: artifact_raw,
+            layout: layout_raw,
+        } = raw.component;
+
         let component = ComponentMeta {
-            name: raw.component.name,
-            version: raw.component.version,
-            layer: raw.component.layer,
-            domain: raw.component.domain,
+            name,
+            version,
+            layer,
+            domain,
+            display_name,
+            owner,
+            license,
+            repository,
         };
+
+        let contract = contract_raw
+            .map(|c| ContractSpec {
+                schema_version: c.schema_version,
+                min_anolisa_version: c.min_anolisa_version,
+            })
+            .unwrap_or_default();
+
+        let artifact = artifact_raw
+            .map(|a| ArtifactSpec {
+                artifact_type: a.artifact_type,
+                archive_format: a.archive_format,
+                naming_pattern: a.naming_pattern,
+            })
+            .unwrap_or_default();
 
         let source = raw.source.map(source_from_raw).unwrap_or_default();
 
@@ -572,36 +711,58 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             })
             .unwrap_or_default();
 
-        let install = raw
-            .install
-            .map(|i| {
-                let files = i
-                    .files
-                    .into_iter()
-                    .map(|f| InstallFileSpec {
-                        source: f.source,
-                        dest: f.dest,
-                        mode: f.mode,
-                    })
-                    .filter(|f| f.install_path().is_some())
-                    .collect();
-                let capabilities = i
-                    .capabilities
-                    .into_iter()
-                    .map(|c| InstallCapabilitySpec {
-                        path: c.path,
-                        caps: c.caps,
-                    })
-                    .filter(|c| c.path.is_some() || !c.caps.is_empty())
-                    .collect();
-                InstallSpec {
-                    modes: i.modes,
-                    files,
-                    services: i.services,
-                    capabilities,
-                }
-            })
-            .unwrap_or_default();
+        // Prefer the minimal-schema `[component.layout]`; fall back to the
+        // legacy top-level `[install]` for not-yet-migrated manifests. The
+        // minimal `target` key maps onto the internal `dest` (file `type` and
+        // nested service/capabilities arrive in T2.2/T2.7).
+        let install = if let Some(layout) = layout_raw {
+            let files = layout
+                .files
+                .into_iter()
+                .map(|f| InstallFileSpec {
+                    source: f.source,
+                    dest: f.target,
+                    mode: f.mode,
+                })
+                .filter(|f| f.install_path().is_some())
+                .collect();
+            InstallSpec {
+                modes: layout.modes,
+                files,
+                services: Vec::new(),
+                capabilities: Vec::new(),
+            }
+        } else {
+            raw.install
+                .map(|i| {
+                    let files = i
+                        .files
+                        .into_iter()
+                        .map(|f| InstallFileSpec {
+                            source: f.source,
+                            dest: f.dest,
+                            mode: f.mode,
+                        })
+                        .filter(|f| f.install_path().is_some())
+                        .collect();
+                    let capabilities = i
+                        .capabilities
+                        .into_iter()
+                        .map(|c| InstallCapabilitySpec {
+                            path: c.path,
+                            caps: c.caps,
+                        })
+                        .filter(|c| c.path.is_some() || !c.caps.is_empty())
+                        .collect();
+                    InstallSpec {
+                        modes: i.modes,
+                        files,
+                        services: i.services,
+                        capabilities,
+                    }
+                })
+                .unwrap_or_default()
+        };
 
         let dependencies = DependenciesSpec {
             build: raw.dependencies.build,
@@ -646,14 +807,22 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             })
             .collect();
 
+        // Prefer the minimal-schema `[component.platform]`; fall back to the
+        // legacy `[environment]` / `requires_env`.
+        let env_requirements = platform_raw
+            .map(EnvRequirements::from)
+            .unwrap_or_else(|| raw.environment.into());
+
         Self {
             schema_version: raw.schema_version,
             component,
+            contract,
+            artifact,
             source,
             distribution_selectors,
             build,
             install,
-            env_requirements: raw.environment.into(),
+            env_requirements,
             dependencies,
             features,
             adapters,
@@ -700,14 +869,14 @@ pub struct EnvRequirements {
 
 #[derive(Deserialize, Default)]
 struct EnvRequirementsRaw {
-    // Capability-style keys.
+    // Capability-style keys (also used by `[component.platform]`).
     #[serde(default)]
     os: Option<StringOrList>,
     #[serde(default)]
     arch: Option<StringOrList>,
     #[serde(default)]
     libc: Option<StringOrList>,
-    #[serde(default)]
+    #[serde(default, alias = "min_kernel")]
     kernel: Option<String>,
     #[serde(default)]
     pkg_base: Option<StringOrList>,
@@ -988,6 +1157,94 @@ mod tests {
         assert_eq!(m.dependencies.build, vec!["rust>=1.91"]);
         assert_eq!(m.dependencies.runtime, vec!["kernel-headers"]);
         assert!(m.dependencies.components.is_empty());
+    }
+
+    #[test]
+    fn component_manifest_parses_minimal_schema() {
+        // Minimal schema (phase1-2-dev §2.1): namespaced [component.*] sections.
+        let toml_text = r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+            display_name = "Tokenless"
+            owner = "tokenless-team"
+            license = "MIT"
+            repository = "https://github.com/alibaba/anolisa"
+
+            [component.contract]
+            schema_version = "1.0"
+            min_anolisa_version = "0.2.0"
+
+            [component.platform]
+            os = ["linux"]
+            arch = ["x86_64", "aarch64"]
+            min_kernel = "5.4"
+
+            [component.artifact]
+            type = "archive"
+            archive_format = "tar.gz"
+            naming_pattern = "{name}-{version}-{os}-{arch}.tar.gz"
+
+            [component.layout]
+            modes = ["user", "system"]
+
+            [[component.layout.files]]
+            source = "bin/tokenless"
+            target = "{bindir}/tokenless"
+            mode = "0755"
+            type = "executable"
+
+            [component.health_check]
+            type = "binary_version"
+            binary = "{bindir}/tokenless"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse minimal");
+        // Identity + new [component] metadata.
+        assert_eq!(m.component.name, "tokenless");
+        assert_eq!(m.component.display_name.as_deref(), Some("Tokenless"));
+        assert_eq!(m.component.owner.as_deref(), Some("tokenless-team"));
+        assert_eq!(m.component.license.as_deref(), Some("MIT"));
+        // [component.contract] / [component.artifact].
+        assert_eq!(m.contract.schema_version.as_deref(), Some("1.0"));
+        assert_eq!(m.contract.min_anolisa_version.as_deref(), Some("0.2.0"));
+        assert_eq!(m.artifact.artifact_type.as_deref(), Some("archive"));
+        assert_eq!(m.artifact.archive_format.as_deref(), Some("tar.gz"));
+        // [component.platform] → env_requirements (min_kernel → kernel_min).
+        assert_eq!(m.env_requirements.os, vec!["linux"]);
+        assert_eq!(m.env_requirements.arch, vec!["x86_64", "aarch64"]);
+        assert_eq!(m.env_requirements.kernel_min.as_deref(), Some("5.4"));
+        // [component.layout] → install (minimal `target` mapped to dest).
+        assert_eq!(m.install.modes, vec!["user", "system"]);
+        assert_eq!(m.install.files.len(), 1);
+        assert_eq!(m.install.files[0].source.as_deref(), Some("bin/tokenless"));
+        assert_eq!(
+            m.install.files[0].dest.as_deref(),
+            Some("{bindir}/tokenless")
+        );
+    }
+
+    #[test]
+    fn minimal_layout_takes_precedence_over_legacy_install() {
+        // When both are present, [component.layout] wins (migration guard).
+        let toml_text = r#"
+            [component]
+            name = "dual"
+            version = "1.0.0"
+
+            [component.layout]
+            [[component.layout.files]]
+            source = "bin/new"
+            target = "{bindir}/new"
+
+            [install]
+            modes = ["system"]
+            [[install.files]]
+            source = "bin/old"
+            dest = "{bindir}/old"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.install.files.len(), 1);
+        assert_eq!(m.install.files[0].source.as_deref(), Some("bin/new"));
     }
 
     #[test]

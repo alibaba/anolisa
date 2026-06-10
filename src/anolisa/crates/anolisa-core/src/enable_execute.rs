@@ -126,6 +126,23 @@ pub enum ExecuteError {
         #[source]
         source: DownloadError,
     },
+    /// The artifact's embedded `.anolisa/component.toml` does not match the
+    /// registry `meta.toml` the plan was built from (contract I3 requires a
+    /// byte-for-byte copy). Aborts before any file of this component is
+    /// installed — the "planned A, installing B" guard (T1.4).
+    #[error(
+        "component '{component}': artifact component.toml does not match planning meta.toml (expected sha256 {expected_sha256}, actual {})",
+        actual_sha256.as_deref().unwrap_or("<missing .anolisa/component.toml>")
+    )]
+    ManifestMismatch {
+        /// Component whose artifact contradicts the planning metadata.
+        component: String,
+        /// sha256 of the registry meta.toml used at plan time.
+        expected_sha256: String,
+        /// sha256 of the artifact's embedded manifest, `None` when the
+        /// artifact does not contain `.anolisa/component.toml` at all.
+        actual_sha256: Option<String>,
+    },
     /// Installing cached bytes into the ANOLISA-owned layout failed.
     #[error("install failed for component '{component}': {source}")]
     Install {
@@ -436,6 +453,56 @@ pub fn execute_enable(
             }
         };
 
+        // T1.4: when the plan carries the planning-time meta.toml digest,
+        // verify the artifact's embedded `.anolisa/component.toml` is the
+        // byte-identical copy contract I3 promises — BEFORE installing any
+        // file of this component. Only archive artifacts can embed the
+        // manifest; other types skip the check (nothing to compare).
+        if let Some(expected_sha) = artifact.meta_sha256.as_deref() {
+            if is_archive_artifact(&artifact.artifact_type) {
+                let actual = match embedded_manifest_sha256(&cached.cached_path) {
+                    Ok(digest) => digest,
+                    Err(source) => {
+                        let err = ExecuteError::Download {
+                            component: c.name.clone(),
+                            source,
+                        };
+                        return cleanup_and_fail(
+                            err,
+                            &installed,
+                            &central,
+                            &operation_id,
+                            plan,
+                            actor,
+                            &started_at,
+                            objects.clone(),
+                            None,
+                            lock,
+                        );
+                    }
+                };
+                if actual.as_deref() != Some(expected_sha) {
+                    let err = ExecuteError::ManifestMismatch {
+                        component: c.name.clone(),
+                        expected_sha256: expected_sha.to_string(),
+                        actual_sha256: actual,
+                    };
+                    return cleanup_and_fail(
+                        err,
+                        &installed,
+                        &central,
+                        &operation_id,
+                        plan,
+                        actor,
+                        &started_at,
+                        objects.clone(),
+                        None,
+                        lock,
+                    );
+                }
+            }
+        }
+
         let runner = InstallRunner::new(layout);
         let resolved: Vec<ResolvedInstallFile> = c
             .resolved_files
@@ -538,7 +605,14 @@ pub fn execute_enable(
             name: c.name.clone(),
             version: c.manifest_version.clone().unwrap_or_default(),
             status: ObjectStatus::Installed,
-            manifest_digest: None,
+            // Verified above against the artifact's embedded component.toml
+            // when the plan carried a meta digest; recorded so audit/status
+            // can tie the installed component back to its publishing meta.
+            manifest_digest: c
+                .artifact
+                .as_ref()
+                .and_then(|a| a.meta_sha256.as_ref())
+                .map(|d| format!("sha256:{d}")),
             distribution_source: c.artifact.as_ref().map(|a| a.url.clone()),
             installed_at: finished_at.clone(),
             last_operation_id: Some(operation_id.clone()),
@@ -749,6 +823,54 @@ pub fn execute_enable(
         reactivated: false,
     };
     Ok(outcome)
+}
+
+/// True when the artifact type is a tar.gz archive — the only artifact
+/// form that can embed `.anolisa/component.toml` for the T1.4 check.
+/// Accepts the same spellings the index parser accepts.
+fn is_archive_artifact(artifact_type: &str) -> bool {
+    matches!(artifact_type, "tar_gz" | "tar.gz" | "tar")
+}
+
+/// Extract `.anolisa/component.toml` from a tar.gz artifact and return the
+/// lowercase-hex sha256 of its bytes; `Ok(None)` when the archive has no
+/// such entry. Entry paths are compared after stripping any leading `./`
+/// (tar created with `-C dir .` prefixes every path that way).
+///
+/// # Errors
+/// [`DownloadError::Io`] when the archive cannot be read or is not valid
+/// gzip/tar — surfaced through the same bucket as other artifact IO.
+fn embedded_manifest_sha256(
+    artifact_path: &std::path::Path,
+) -> Result<Option<String>, DownloadError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let io_err = |source: std::io::Error| DownloadError::Io {
+        path: artifact_path.to_path_buf(),
+        source,
+    };
+
+    let file = std::fs::File::open(artifact_path).map_err(io_err)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive.entries().map_err(io_err)? {
+        let mut entry = entry.map_err(io_err)?;
+        // Scope the path borrow so `read_to_end` can take `&mut entry`.
+        let is_manifest = {
+            let path = entry.path().map_err(io_err)?;
+            let normalized = path.strip_prefix("./").unwrap_or(&path);
+            normalized == std::path::Path::new(".anolisa/component.toml")
+        };
+        if is_manifest {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(io_err)?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            return Ok(Some(format!("{:x}", hasher.finalize())));
+        }
+    }
+    Ok(None)
 }
 
 /// Cleanup helper invoked when any post-lock step fails. Unlinks every
@@ -1393,8 +1515,139 @@ mod tests {
         (url, sha256_of(bytes))
     }
 
+    /// Build a tar.gz artifact embedding `.anolisa/component.toml` plus one
+    /// payload at `bin/agentsight` — the publish-contract artifact shape the
+    /// T1.4 consistency check inspects. Returns `(file_url, artifact_sha256)`.
+    fn write_targz_artifact(
+        dir: &Path,
+        name: &str,
+        manifest_bytes: &[u8],
+        payload: &[u8],
+    ) -> (String, String) {
+        use flate2::{Compression, write::GzEncoder};
+        let p = dir.join(name);
+        let file = std_fs::File::create(&p).expect("create tar.gz");
+        let enc = GzEncoder::new(file, Compression::default());
+        let mut tar = tar::Builder::new(enc);
+
+        let mut manifest_header = tar::Header::new_gnu();
+        manifest_header.set_size(manifest_bytes.len() as u64);
+        manifest_header.set_mode(0o644);
+        manifest_header.set_cksum();
+        tar.append_data(
+            &mut manifest_header,
+            ".anolisa/component.toml",
+            manifest_bytes,
+        )
+        .expect("append manifest");
+
+        let mut payload_header = tar::Header::new_gnu();
+        payload_header.set_size(payload.len() as u64);
+        payload_header.set_mode(0o755);
+        payload_header.set_cksum();
+        tar.append_data(&mut payload_header, "bin/agentsight", payload)
+            .expect("append payload");
+
+        let enc = tar.into_inner().expect("finish tar");
+        enc.finish().expect("finish gz");
+        let bytes = std_fs::read(&p).expect("read back");
+        let url = format!("file://{}", p.to_str().expect("utf8 path"));
+        (url, sha256_of(&bytes))
+    }
+
     fn fixture_layout(prefix: &Path) -> FsLayout {
         FsLayout::system(Some(prefix.to_path_buf()))
+    }
+
+    /// T1.4 happy path: artifact's embedded component.toml matches the plan's
+    /// meta digest → install proceeds and `installed.toml` records the digest.
+    #[test]
+    fn manifest_match_installs_and_records_digest() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = fixture_layout(tmp.path());
+        let manifest_bytes: &[u8] = b"[component]\nname = \"agentsight\"\nversion = \"0.2.0\"\n";
+        let (url, sha) = write_targz_artifact(tmp.path(), "a.tar.gz", manifest_bytes, b"payload");
+
+        let mut artifact = artifact_plan(&url, &sha);
+        artifact.artifact_type = "tar_gz".to_string();
+        artifact.meta_sha256 = Some(sha256_of(manifest_bytes));
+        let dest = layout.bin_dir.join("agentsight");
+        let mut comp = fixture_component(
+            "agentsight",
+            Some(artifact),
+            vec![dest.display().to_string()],
+            PlanStatus::Ready,
+        );
+        comp.files[0].source = Some("bin/agentsight".to_string());
+        let plan = fixture_plan(
+            "agent-observability",
+            vec![comp],
+            PlanStatus::Ready,
+            "system",
+            &layout,
+        );
+
+        execute_enable(&plan, &layout, "tester").expect("matching manifest must install");
+        assert!(dest.is_file(), "payload must be installed");
+        let state =
+            std_fs::read_to_string(layout.state_dir.join("installed.toml")).expect("state file");
+        assert!(
+            state.contains(&format!("sha256:{}", sha256_of(manifest_bytes))),
+            "installed.toml must record the verified manifest digest:\n{state}",
+        );
+    }
+
+    /// T1.4 guard: artifact's embedded component.toml differs from the plan's
+    /// meta digest → abort with `ManifestMismatch`, nothing installed, no
+    /// state written.
+    #[test]
+    fn manifest_mismatch_aborts_with_no_files() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = fixture_layout(tmp.path());
+        let manifest_bytes: &[u8] = b"[component]\nname = \"agentsight\"\nversion = \"0.2.0\"\n";
+        let (url, sha) = write_targz_artifact(tmp.path(), "a.tar.gz", manifest_bytes, b"payload");
+
+        let mut artifact = artifact_plan(&url, &sha);
+        artifact.artifact_type = "tar_gz".to_string();
+        // Planning meta digest deliberately disagrees with the artifact.
+        artifact.meta_sha256 = Some(sha256_of(b"a different meta.toml body"));
+        let dest = layout.bin_dir.join("agentsight");
+        let mut comp = fixture_component(
+            "agentsight",
+            Some(artifact),
+            vec![dest.display().to_string()],
+            PlanStatus::Ready,
+        );
+        comp.files[0].source = Some("bin/agentsight".to_string());
+        let plan = fixture_plan(
+            "agent-observability",
+            vec![comp],
+            PlanStatus::Ready,
+            "system",
+            &layout,
+        );
+
+        let err = execute_enable(&plan, &layout, "tester").expect_err("mismatch must abort");
+        match err {
+            ExecuteError::ManifestMismatch {
+                component,
+                expected_sha256,
+                actual_sha256,
+            } => {
+                assert_eq!(component, "agentsight");
+                assert_eq!(expected_sha256, sha256_of(b"a different meta.toml body"));
+                assert_eq!(
+                    actual_sha256.as_deref(),
+                    Some(sha256_of(manifest_bytes).as_str())
+                );
+            }
+            other => panic!("expected ManifestMismatch, got {other:?}"),
+        }
+        assert!(!dest.exists(), "no file may be installed on mismatch");
+        assert!(
+            !layout.state_dir.join("installed.toml").exists(),
+            "state must not be written on mismatch",
+        );
     }
 
     /// Make `InstalledState::save` fail without breaking the executor's
@@ -1506,6 +1759,7 @@ mod tests {
             sha256: Some(sha256.to_string()),
             signature: None,
             artifact_id: None,
+            meta_sha256: None,
         }
     }
 
@@ -1902,6 +2156,7 @@ mod tests {
             sha256: None,
             signature: None,
             artifact_id: None,
+            meta_sha256: None,
         };
         let comp = fixture_component(
             "agentsight",

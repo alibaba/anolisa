@@ -1,8 +1,21 @@
-//! Registry: thin wrapper over [`Catalog`].
+//! Registry: local catalog lookup plus remote distribution-registry access.
 //!
-//! Registry is the historical entry point used by callers that just want
-//! lookup-by-name semantics over the bundled catalog. It now delegates fully
-//! to `Catalog` so layering and schema parsing live in one place.
+//! Two distinct concerns share this module:
+//! - [`Registry`] is the historical lookup facade over the bundled [`Catalog`]
+//!   (capability/component by name). It delegates fully to `Catalog`.
+//! - [`RegistryConfig`] + [`RegistryClient`] resolve the distribution
+//!   `index.toml` URL/cache policy and fetch the index over HTTP with a TTL
+//!   cache and offline fallback. Submodules are private; the public types are
+//!   re-exported flat from here (and again from the crate root).
+
+mod cache;
+mod client;
+mod config;
+mod error;
+
+pub use client::{FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, RegistryClient, UreqFetch};
+pub use config::RegistryConfig;
+pub use error::RegistryError;
 
 use crate::catalog::{Catalog, CatalogError, CatalogLayers};
 use crate::manifest::{CapabilityManifest, ComponentManifest};

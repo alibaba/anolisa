@@ -29,7 +29,8 @@
 use clap::Parser;
 
 use anolisa_core::{
-    EnablePlan, ExecuteError, ExecuteOutcome, PlanError, PlanStatus, execute_enable, plan_enable,
+    EnablePlan, ExecuteError, ExecuteOutcome, FetchedMeta, PlanError, PlanStatus, execute_enable,
+    plan_enable,
 };
 use anolisa_env::EnvService;
 
@@ -96,14 +97,33 @@ pub fn handle(args: EnableArgs, ctx: &CliContext) -> Result<(), CliError> {
     let policy = ExecutionPolicy::load().map_err(|err| policy_load_err(&command, err))?;
 
     let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
-    // Missing index is not a CLI error: the planner reports it inside the
-    // plan (overall warning + per-component blocked) so users still get a
-    // structured dry-run output instead of an opaque error message.
-    let dist_index = common::load_distribution_index(ctx, COMMAND)?
-        .unwrap_or_else(common::empty_distribution_index);
+    // Index source (T1.2 wiring): when the remote registry is configured
+    // (env `ANOLISA_REGISTRY_URL` or `etc_dir/config.toml` `[registry]`),
+    // fetch the index over HTTP with TTL cache + offline fallback.
+    // Otherwise keep the local bundled index — missing local index is not
+    // a CLI error: the planner reports it inside the plan so users still
+    // get a structured dry-run output instead of an opaque error message.
+    let registry = common::load_registry_client(ctx, COMMAND)?;
+    let mut registry_warnings: Vec<String> = Vec::new();
+    let dist_index = match &registry {
+        Some(client) => {
+            let (index, warning) = common::fetch_remote_index(client, COMMAND)?;
+            registry_warnings.extend(warning);
+            index
+        }
+        None => common::load_distribution_index(ctx, COMMAND)?
+            .unwrap_or_else(common::empty_distribution_index),
+    };
     let env = EnvService::detect();
     let layout = common::resolve_layout(ctx);
     let install_mode = ctx.install_mode.as_str();
+
+    let map_plan_err = |err: PlanError| match err {
+        PlanError::UnknownCapability(name) => CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!("capability '{name}' is not in the catalog"),
+        },
+    };
 
     // Run `plan_enable` *before* consulting the policy so an unknown
     // capability surfaces as INVALID_ARGUMENT (caller typo) rather than
@@ -119,12 +139,60 @@ pub fn handle(args: EnableArgs, ctx: &CliContext) -> Result<(), CliError> {
         &layout,
         &capability,
     )
-    .map_err(|err| match err {
-        PlanError::UnknownCapability(name) => CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: format!("capability '{name}' is not in the catalog"),
-        },
-    })?;
+    .map_err(map_plan_err)?;
+
+    // T1.3: with a remote registry, the authoritative component contract
+    // for a resolved version is its published meta.toml (≈1KB), not the
+    // bundled manifest. Fetch meta for every resolved component (full
+    // artifacts are NOT downloaded here), overlay them onto the catalog,
+    // and re-plan so layout/prechecks come from the publishing contract.
+    // Missing meta degrades to the bundled-manifest preview with a warning.
+    if let Some(client) = &registry {
+        let mut metas: Vec<(String, FetchedMeta)> = Vec::new();
+        for comp in &plan.components {
+            let Some(artifact) = &comp.artifact else {
+                continue;
+            };
+            match client.fetch_meta(&comp.name, &artifact.version, &artifact.url) {
+                Ok(Some(meta)) => metas.push((comp.name.clone(), meta)),
+                Ok(None) => registry_warnings.push(format!(
+                    "component '{}': no meta.toml published for v{} — plan previews the bundled manifest",
+                    comp.name, artifact.version,
+                )),
+                Err(err) => registry_warnings.push(format!(
+                    "component '{}': meta.toml fetch failed ({err}) — plan previews the bundled manifest",
+                    comp.name,
+                )),
+            }
+        }
+        if !metas.is_empty() {
+            let mut overlaid = catalog.clone();
+            for (name, meta) in &metas {
+                overlaid
+                    .components
+                    .insert(name.clone(), meta.manifest.clone());
+            }
+            plan = plan_enable(
+                &overlaid,
+                &dist_index,
+                &env,
+                install_mode,
+                &layout,
+                &capability,
+            )
+            .map_err(map_plan_err)?;
+            // Carry the meta digest into the plan so real-execute can hold
+            // the artifact to its publishing contract (T1.4).
+            for comp in plan.components.iter_mut() {
+                if let Some((_, meta)) = metas.iter().find(|(name, _)| name == &comp.name) {
+                    if let Some(artifact) = comp.artifact.as_mut() {
+                        artifact.meta_sha256 = Some(meta.sha256.clone());
+                    }
+                }
+            }
+        }
+    }
+    plan.warnings.extend(registry_warnings);
 
     // Dry-run is always allowed for any catalog capability — it never
     // touches the system and users need it to see plan/lint output for
@@ -286,6 +354,21 @@ fn execute_err_to_cli(capability: &str, err: ExecuteError) -> CliError {
         ExecuteError::Install { component, source } => CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!("install for component '{component}' failed: {source}"),
+        },
+        // The downloaded artifact's embedded component.toml contradicts the
+        // registry meta.toml the plan was built from — a publisher-side
+        // inconsistency (contract I3 violation). Nothing was installed; the
+        // user retries after the registry is republished consistently.
+        ExecuteError::ManifestMismatch {
+            component,
+            expected_sha256,
+            actual_sha256,
+        } => CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{component}': artifact's embedded component.toml does not match the registry meta.toml used for planning (expected sha256 {expected_sha256}, actual {}) — published artifact and meta.toml are inconsistent; nothing was installed. Re-run `anolisa enable {capability} --dry-run` after the registry is republished",
+                actual_sha256.as_deref().unwrap_or("<missing>"),
+            ),
         },
         ExecuteError::State { source } => CliError::Runtime {
             command: COMMAND.to_string(),

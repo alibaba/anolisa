@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anolisa_core::{Catalog, CatalogLayers, DistributionIndex, InstalledState, ObjectStatus};
+use anolisa_core::{
+    Catalog, CatalogLayers, DistributionIndex, IndexFreshness, InstalledState, ObjectStatus,
+    RegistryClient, RegistryConfig,
+};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::context::{CliContext, InstallMode};
@@ -162,6 +165,62 @@ fn distribution_index_path(layout: &FsLayout) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Build a [`RegistryClient`] when the remote registry is configured.
+///
+/// Remote fetching is strictly **opt-in** for the MVP: returns `None`
+/// unless `ANOLISA_REGISTRY_URL` is set or the layout's
+/// `etc_dir/config.toml` carries a `[registry]` table. Without opt-in the
+/// caller falls back to [`load_distribution_index`] (bundled local index),
+/// so default installs never block on a network timeout.
+pub fn load_registry_client(
+    ctx: &CliContext,
+    command: &str,
+) -> Result<Option<RegistryClient>, CliError> {
+    let layout = resolve_layout(ctx);
+    let env_url = std::env::var("ANOLISA_REGISTRY_URL").ok();
+    registry_client_from(&layout, env_url.as_deref(), command)
+}
+
+/// Env-free body of [`load_registry_client`] so tests can drive the opt-in
+/// matrix without mutating process environment.
+fn registry_client_from(
+    layout: &FsLayout,
+    env_url: Option<&str>,
+    command: &str,
+) -> Result<Option<RegistryClient>, CliError> {
+    let config_path = layout.etc_dir.join("config.toml");
+    let config = RegistryConfig::load_if_configured(&config_path, env_url).map_err(|err| {
+        CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!("registry configuration error: {err}"),
+        }
+    })?;
+    Ok(config.map(|c| RegistryClient::new(c, layout.cache_dir.join("registry"))))
+}
+
+/// Fetch the distribution index from the remote registry, translating the
+/// freshness signal into an optional human-readable plan warning (`None`
+/// for a silent fresh fetch).
+pub fn fetch_remote_index(
+    client: &RegistryClient,
+    command: &str,
+) -> Result<(DistributionIndex, Option<String>), CliError> {
+    let (index, freshness) = client.fetch_index().map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("registry index fetch failed: {err}"),
+    })?;
+    let warning = match freshness {
+        IndexFreshness::Fresh => None,
+        IndexFreshness::CacheHit => {
+            Some("registry index served from local cache (TTL valid)".to_string())
+        }
+        IndexFreshness::StaleOffline => {
+            Some("registry unreachable — serving stale cached index (offline fallback)".to_string())
+        }
+    };
+    Ok((index, warning))
+}
+
 /// Construct an empty in-memory [`DistributionIndex`]. Used by handlers
 /// that want a safe fallback when no index file exists so the planner can
 /// still produce a structured `blocked` plan instead of erroring out.
@@ -237,6 +296,31 @@ mod tests {
         let idx = empty_distribution_index();
         assert!(idx.entries.is_empty());
         assert_eq!(idx.schema_version, 1);
+    }
+
+    /// Remote registry must stay opt-in: no env override and no
+    /// `[registry]` table in `etc_dir/config.toml` → no client. Env URL or
+    /// a config table flips it on.
+    #[test]
+    fn registry_client_is_opt_in() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        let none = registry_client_from(&layout, None, "enable").expect("ok");
+        assert!(none.is_none(), "no opt-in must mean no client");
+
+        let via_env =
+            registry_client_from(&layout, Some("http://r.test/i.toml"), "enable").expect("ok");
+        assert!(via_env.is_some(), "env URL must opt in");
+
+        fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
+        fs::write(
+            layout.etc_dir.join("config.toml"),
+            "[registry]\nurl = \"http://file.test/i.toml\"\n",
+        )
+        .expect("write config");
+        let via_file = registry_client_from(&layout, None, "enable").expect("ok");
+        assert!(via_file.is_some(), "config [registry] table must opt in");
     }
 
     /// Overlay-distributed `index.toml` must win over the bundled

@@ -77,7 +77,10 @@ pub use register::{
     ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
     SubscriptionError, current_operator, require_root,
 };
-pub use registry::Registry;
+pub use registry::{
+    FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
+    RegistryError, UreqFetch,
+};
 pub use self_update::{
     ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,
     check_update, update_url,

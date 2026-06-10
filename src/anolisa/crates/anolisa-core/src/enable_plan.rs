@@ -206,6 +206,13 @@ pub struct ArtifactPlan {
     /// Provider-specific artifact id preserved for diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
+    /// sha256 of the registry `meta.toml` used at planning time. When set,
+    /// real-execute verifies the artifact's `.anolisa/component.toml` matches
+    /// byte-for-byte (contract I3) before installing anything — the T1.4
+    /// "planned A, installing B" guard. The planner itself leaves this `None`
+    /// (it is IO-free); the CLI fills it after `RegistryClient::fetch_meta`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_sha256: Option<String>,
 }
 
 /// Single precheck outcome. `status` is one of `"ok" | "warn" | "fail"`.
@@ -982,6 +989,7 @@ fn artifact_plan_from(entry: &DistributionEntry) -> ArtifactPlan {
         sha256: entry.sha256.clone(),
         signature: entry.signature.clone(),
         artifact_id: entry.artifact_id.clone(),
+        meta_sha256: None,
     }
 }
 
@@ -1187,7 +1195,13 @@ mod tests {
                 version: version.to_string(),
                 layer: "runtime".to_string(),
                 domain: Some("test".to_string()),
+                display_name: None,
+                owner: None,
+                license: None,
+                repository: None,
             },
+            contract: Default::default(),
+            artifact: Default::default(),
             source: SourceSpec::default(),
             distribution_selectors: selectors,
             build: BuildSpec::default(),
@@ -2239,7 +2253,13 @@ mod tests {
                 version: "1.0.0".to_string(),
                 layer: "runtime".to_string(),
                 domain: None,
+                display_name: None,
+                owner: None,
+                license: None,
+                repository: None,
             },
+            contract: Default::default(),
+            artifact: Default::default(),
             source: SourceSpec::default(),
             distribution_selectors: Vec::new(),
             build: BuildSpec::default(),
