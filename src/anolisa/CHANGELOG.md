@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-10
+
+### Added
+
+- **Agent-framework adapter lifecycle**: `anolisa adapter scan` now detects
+  available framework integrations, while `adapter install` resolves verified
+  tar.gz artifacts from the distribution index, reads embedded component
+  manifests, expands safe layout placeholders, and records adapter state plus
+  central-log entries
+- **Safe adapter removal**: `anolisa adapter remove` now supports dry-run and
+  JSON previews, deletes only ANOLISA-owned files within the active layout,
+  refuses symlinks/directories, and records skipped files with reasons
+- **OpenClaw adapter wiring**: `anolisa adapter install tokenless openclaw`
+  and `adapter remove tokenless openclaw` now register/unregister through the
+  OpenClaw CLI, including rollback or state retention when framework CLI
+  operations fail
+- **Remote registry-backed enable**: `anolisa enable` now fetches the default
+  remote distribution index, caches it with TTL freshness, overlays published
+  `meta.toml` contracts for resolved components, supports registry URL
+  overrides, and degrades to bundled or cached indexes when offline
+- **Component health checks**: component manifests can carry structured
+  health checks; `enable` records post-install probe results, and `status`
+  layers manifest health plus owned-file integrity probes into capability
+  health output
+
+### Changed
+
+- Flattened co-build registration from the former subscription surface into
+  top-level `anolisa register`, `anolisa register status`, and
+  `anolisa unregister`
+- Extended the tar.gz install runner to support directory sources, allowing
+  adapter packages to install whole source directories rather than only
+  basename-matched files
+
+### Fixed
+
+- Restored `AdapterSpec` parsing and exports after the adapter subsystem
+  landed on main
+- Hardened adapter install/remove failure handling so unsafe destinations are
+  rejected before extraction, partial installs roll back, and failed removals
+  keep state for retry
+
 ## [0.1.3] - 2026-06-09
 
 ### Added
@@ -118,6 +160,39 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.4] - 2026-06-10
+
+### 新增
+
+- **Agent framework adapter 生命周期**：`anolisa adapter scan` 现在可探测已安装的
+  framework 集成；`adapter install` 会从 distribution index 解析并校验 tar.gz
+  产物，读取产物内嵌 component manifest，展开安全的布局占位符，并写入 adapter
+  状态和 central-log 记录
+- **安全 adapter 移除**：`anolisa adapter remove` 现在支持 dry-run 和 JSON 预览，
+  只删除当前布局内的 ANOLISA-owned 文件，拒绝 symlink/目录，并记录跳过文件及原因
+- **OpenClaw adapter 接入**：`anolisa adapter install tokenless openclaw` 和
+  `adapter remove tokenless openclaw` 现在会通过 OpenClaw CLI 注册/反注册，
+  framework CLI 操作失败时会执行回滚或保留状态以便重试
+- **远程 registry 驱动的 enable**：`anolisa enable` 现在默认拉取远程
+  distribution index，按 TTL 缓存，针对已解析组件叠加已发布的 `meta.toml`
+  契约，支持 registry URL 覆盖，并在离线时降级到 bundled 或 cached index
+- **组件健康检查**：component manifest 现在可声明结构化 health check；`enable`
+  会记录安装后探测结果，`status` 会把 manifest health 和 owned-file integrity
+  探测合并到 capability health 输出
+
+### 变更
+
+- 将 co-build 注册从原 subscription 管理面扁平化为顶层 `anolisa register`、
+  `anolisa register status` 和 `anolisa unregister`
+- tar.gz install runner 现在支持目录 source，adapter 包可安装整个源目录，而不再
+  仅限按目标 basename 匹配单文件
+
+### 修复
+
+- adapter subsystem 合入 main 后，恢复 `AdapterSpec` 解析和导出
+- 强化 adapter install/remove 失败处理：解压前拒绝不安全目标，部分安装失败会回滚，
+  移除失败会保留状态以便重试
 
 ## [0.1.3] - 2026-06-09
 
