@@ -16,11 +16,13 @@ use super::error::RegistryError;
 
 /// Built-in distribution index URL.
 ///
-/// Placeholder pointing at the planned public mirror; operations finalize the
-/// real host before alpha. Any deployment overrides it via config file or
-/// `ANOLISA_REGISTRY_URL`, so the exact value here is not load-bearing.
+/// The live public mirror on Aliyun OSS. Since remote fetching is now
+/// default-on (every `enable` resolves the index from here unless overridden),
+/// this value is load-bearing: a deployment retargets it via the
+/// `[registry] url` config key or `ANOLISA_REGISTRY_URL`, and a cold-cache
+/// offline run degrades to the bundled local index rather than hard-failing.
 const DEFAULT_INDEX_URL: &str =
-    "https://anolisa-registry.oss-cn-hangzhou.aliyuncs.com/v1/index.toml";
+    "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/index.toml";
 
 /// Default cache freshness window (1 hour). Index older than this triggers a
 /// refetch on the next [`RegistryClient`](super::RegistryClient) access.

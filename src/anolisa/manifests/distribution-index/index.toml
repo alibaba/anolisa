@@ -27,3 +27,26 @@ libc = "glibc"
 install_modes = ["system"]
 sha256 = "e1ac72ba1b6ef67f10f5dbd164f3077eee04cd6404f96acacf6bab7f5d392c1d"
 size = 5473797
+
+# tokenless 0.5.0 — Linux x86_64 tarball (user + system mode).
+# Full published artifact: one tar.gz carrying `.anolisa/component.toml`,
+# `bin/tokenless`, the libexec helpers `rtk` + `toon`, and the
+# `share/anolisa/adapters/tokenless/` tree. ANOLISA `enable` installs only the
+# three binaries declared in the component contract; the adapter resources ride
+# along for the Adapter layer to deploy separately.
+# No `libc` selector → resolves on any libc; `backend = "raw"` is a plain
+# HTTPS GET of `url`. The planner queries with `version = None`, so this row
+# wins by highest-semver regardless of the bundled manifest's version.
+[[entries]]
+component = "tokenless"
+version = "0.5.0"
+channel = "stable"
+artifact_id = "tokenless-0.5.0-linux-x86_64-tar"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/tokenless/0.5.0/tokenless-0.5.0-linux-x86_64.tar.gz"
+os = "linux"
+arch = "x86_64"
+install_modes = ["user", "system"]
+sha256 = "29e56bb6f30aa0097a6d9e91da18076a389945054d527c82b58429e8fd71f69f"
+size = 8110156

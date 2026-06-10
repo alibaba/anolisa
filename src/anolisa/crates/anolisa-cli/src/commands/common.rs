@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use anolisa_core::{
-    Catalog, CatalogLayers, DistributionIndex, IndexFreshness, InstalledState, ObjectStatus,
-    RegistryClient, RegistryConfig,
+    Catalog, CatalogLayers, DistributionIndex, HttpFetch, IndexFreshness, InstalledState,
+    ObjectStatus, RegistryClient, RegistryConfig, RegistryError,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -165,13 +165,14 @@ fn distribution_index_path(layout: &FsLayout) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// Build a [`RegistryClient`] when the remote registry is configured.
+/// Build a [`RegistryClient`] for the active layout.
 ///
-/// Remote fetching is strictly **opt-in** for the MVP: returns `None`
-/// unless `ANOLISA_REGISTRY_URL` is set or the layout's
-/// `etc_dir/config.toml` carries a `[registry]` table. Without opt-in the
-/// caller falls back to [`load_distribution_index`] (bundled local index),
-/// so default installs never block on a network timeout.
+/// Remote fetching is **default-on**: [`RegistryConfig::load`] always returns
+/// a config (bundled default `< /etc/anolisa/config.toml < ANOLISA_REGISTRY_URL`),
+/// so this returns `Some` unless config loading itself fails. The `Option`
+/// return is retained because a caller may still treat "no client" as "use the
+/// local index only", and the offline path is handled downstream by
+/// [`fetch_remote_index_or_local`] rather than by suppressing the client here.
 pub fn load_registry_client(
     ctx: &CliContext,
     command: &str,
@@ -181,35 +182,82 @@ pub fn load_registry_client(
     registry_client_from(&layout, env_url.as_deref(), command)
 }
 
-/// Env-free body of [`load_registry_client`] so tests can drive the opt-in
-/// matrix without mutating process environment.
+/// Env-free body of [`load_registry_client`] so tests can drive the
+/// config-layering matrix without mutating process environment.
 fn registry_client_from(
     layout: &FsLayout,
     env_url: Option<&str>,
     command: &str,
 ) -> Result<Option<RegistryClient>, CliError> {
     let config_path = layout.etc_dir.join("config.toml");
-    let config = RegistryConfig::load_if_configured(&config_path, env_url).map_err(|err| {
-        CliError::InvalidArgument {
+    let config =
+        RegistryConfig::load(&config_path, env_url).map_err(|err| CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!("registry configuration error: {err}"),
-        }
-    })?;
-    Ok(config.map(|c| RegistryClient::new(c, layout.cache_dir.join("registry"))))
+        })?;
+    Ok(Some(RegistryClient::new(
+        config,
+        layout.cache_dir.join("registry"),
+    )))
 }
 
-/// Fetch the distribution index from the remote registry, translating the
-/// freshness signal into an optional human-readable plan warning (`None`
-/// for a silent fresh fetch).
-pub fn fetch_remote_index(
-    client: &RegistryClient,
+/// Outcome of resolving the distribution index for a command run.
+pub struct ResolvedIndex {
+    /// The index to plan against — remote when reachable, else the local
+    /// bundled index (see [`degraded_to_local`](Self::degraded_to_local)).
+    pub index: DistributionIndex,
+    /// Human-readable freshness/fallback notes to fold into the plan warnings.
+    pub warnings: Vec<String>,
+    /// `true` when the remote fetch failed offline and we fell back to the
+    /// local index. Callers use this to skip the per-component `meta.toml`
+    /// overlay — the network is confirmed down, so meta fetches would only
+    /// add noise.
+    pub degraded_to_local: bool,
+}
+
+/// Resolve the distribution index from the remote registry, degrading to the
+/// local bundled index when the network is down.
+///
+/// Only [`RegistryError::Offline`] (cold cache + unreachable endpoint) is
+/// swallowed into a local fallback — that is the regression default-on must
+/// not introduce: a first-ever offline `enable` should still render a plan
+/// against the bundled index instead of hard-failing. Any other registry
+/// error (malformed config, corrupt cache, parse failure) is a real fault and
+/// surfaces as [`CliError`].
+pub fn fetch_remote_index_or_local<H: HttpFetch>(
+    client: &RegistryClient<H>,
+    ctx: &CliContext,
     command: &str,
-) -> Result<(DistributionIndex, Option<String>), CliError> {
-    let (index, freshness) = client.fetch_index().map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("registry index fetch failed: {err}"),
-    })?;
-    let warning = match freshness {
+) -> Result<ResolvedIndex, CliError> {
+    match client.fetch_index() {
+        Ok((index, freshness)) => Ok(ResolvedIndex {
+            index,
+            warnings: freshness_warning(freshness).into_iter().collect(),
+            degraded_to_local: false,
+        }),
+        Err(RegistryError::Offline { .. }) => {
+            let index =
+                load_distribution_index(ctx, command)?.unwrap_or_else(empty_distribution_index);
+            Ok(ResolvedIndex {
+                index,
+                warnings: vec![
+                    "registry unreachable — using local bundled index (offline fallback)"
+                        .to_string(),
+                ],
+                degraded_to_local: true,
+            })
+        }
+        Err(err) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("registry index fetch failed: {err}"),
+        }),
+    }
+}
+
+/// Translate an index-freshness signal into an optional plan warning (`None`
+/// for a silent fresh fetch).
+fn freshness_warning(freshness: IndexFreshness) -> Option<String> {
+    match freshness {
         IndexFreshness::Fresh => None,
         IndexFreshness::CacheHit => {
             Some("registry index served from local cache (TTL valid)".to_string())
@@ -217,8 +265,7 @@ pub fn fetch_remote_index(
         IndexFreshness::StaleOffline => {
             Some("registry unreachable — serving stale cached index (offline fallback)".to_string())
         }
-    };
-    Ok((index, warning))
+    }
 }
 
 /// Construct an empty in-memory [`DistributionIndex`]. Used by handlers
@@ -298,20 +345,20 @@ mod tests {
         assert_eq!(idx.schema_version, 1);
     }
 
-    /// Remote registry must stay opt-in: no env override and no
-    /// `[registry]` table in `etc_dir/config.toml` → no client. Env URL or
-    /// a config table flips it on.
+    /// Remote registry is default-on: a client is built even with no env
+    /// override and no `[registry]` table (it uses the bundled default URL).
+    /// An env URL or a config table still works — they just retarget the URL.
     #[test]
-    fn registry_client_is_opt_in() {
+    fn registry_client_default_on_and_url_overridable() {
         let tmp = tempdir().expect("tmpdir");
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
 
-        let none = registry_client_from(&layout, None, "enable").expect("ok");
-        assert!(none.is_none(), "no opt-in must mean no client");
+        let default_on = registry_client_from(&layout, None, "enable").expect("ok");
+        assert!(default_on.is_some(), "default-on must build a client");
 
         let via_env =
             registry_client_from(&layout, Some("http://r.test/i.toml"), "enable").expect("ok");
-        assert!(via_env.is_some(), "env URL must opt in");
+        assert!(via_env.is_some(), "env URL retargets, still a client");
 
         fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
         fs::write(
@@ -320,7 +367,56 @@ mod tests {
         )
         .expect("write config");
         let via_file = registry_client_from(&layout, None, "enable").expect("ok");
-        assert!(via_file.is_some(), "config [registry] table must opt in");
+        assert!(via_file.is_some(), "config [registry] table retargets too");
+    }
+
+    /// A cold-cache offline fetch (network down, nothing cached) must not
+    /// hard-fail now that remote fetch is default-on: it degrades to the
+    /// local bundled index, flags `degraded_to_local`, and carries a warning.
+    #[test]
+    fn fetch_remote_index_or_local_degrades_when_offline() {
+        let tmp = tempdir().expect("tmpdir");
+        // Fresh cache root → no cached index → Offline on a down transport.
+        let cfg = RegistryConfig::bundled_default();
+        let client = RegistryClient::with_http(cfg, tmp.path().join("registry"), FailingHttp);
+
+        // System mode under a tmp prefix so the local lookup is hermetic: the
+        // overlay/packaged candidates under the prefix are absent, so
+        // load_distribution_index falls through to the dev-tree bundled index
+        // (which ships in this repo) without touching the real $HOME.
+        let ctx = CliContext {
+            install_mode: InstallMode::System,
+            prefix: Some(tmp.path().to_path_buf()),
+            json: false,
+            dry_run: true,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+        };
+        let resolved = fetch_remote_index_or_local(&client, &ctx, "enable")
+            .expect("offline degrades, not errors");
+
+        assert!(resolved.degraded_to_local, "offline must degrade to local");
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("offline fallback")),
+            "must warn about the fallback: {:?}",
+            resolved.warnings,
+        );
+    }
+
+    /// Always-failing HTTP transport: every GET reports the endpoint down, so
+    /// `fetch_index` returns `RegistryError::Offline` on a cold cache.
+    struct FailingHttp;
+
+    impl HttpFetch for FailingHttp {
+        fn get(&self, _url: &str) -> Result<Vec<u8>, anolisa_core::FetchFailure> {
+            Err(anolisa_core::FetchFailure::Network {
+                reason: "connection refused".into(),
+            })
+        }
     }
 
     /// Overlay-distributed `index.toml` must win over the bundled

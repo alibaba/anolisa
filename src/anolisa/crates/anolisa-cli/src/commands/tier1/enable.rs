@@ -97,19 +97,21 @@ pub fn handle(args: EnableArgs, ctx: &CliContext) -> Result<(), CliError> {
     let policy = ExecutionPolicy::load().map_err(|err| policy_load_err(&command, err))?;
 
     let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
-    // Index source (T1.2 wiring): when the remote registry is configured
-    // (env `ANOLISA_REGISTRY_URL` or `etc_dir/config.toml` `[registry]`),
-    // fetch the index over HTTP with TTL cache + offline fallback.
-    // Otherwise keep the local bundled index — missing local index is not
-    // a CLI error: the planner reports it inside the plan so users still
-    // get a structured dry-run output instead of an opaque error message.
+    // Index source (T1.2 wiring): remote fetch is now default-on. Pull the
+    // index over HTTP with TTL cache, degrading to the local bundled index
+    // only when the endpoint is unreachable on a cold cache (so a first-ever
+    // offline `enable` still renders a plan instead of hard-failing). The
+    // `degraded_to_local` flag gates the T1.3 meta overlay below: with the
+    // network confirmed down, per-component meta fetches would only add noise.
     let registry = common::load_registry_client(ctx, COMMAND)?;
     let mut registry_warnings: Vec<String> = Vec::new();
+    let mut index_is_local_fallback = true;
     let dist_index = match &registry {
         Some(client) => {
-            let (index, warning) = common::fetch_remote_index(client, COMMAND)?;
-            registry_warnings.extend(warning);
-            index
+            let resolved = common::fetch_remote_index_or_local(client, ctx, COMMAND)?;
+            registry_warnings.extend(resolved.warnings);
+            index_is_local_fallback = resolved.degraded_to_local;
+            resolved.index
         }
         None => common::load_distribution_index(ctx, COMMAND)?
             .unwrap_or_else(common::empty_distribution_index),
@@ -141,19 +143,22 @@ pub fn handle(args: EnableArgs, ctx: &CliContext) -> Result<(), CliError> {
     )
     .map_err(map_plan_err)?;
 
-    // T1.3: with a remote registry, the authoritative component contract
-    // for a resolved version is its published meta.toml (≈1KB), not the
-    // bundled manifest. Fetch meta for every resolved component (full
-    // artifacts are NOT downloaded here), overlay them onto the catalog,
-    // and re-plan so layout/prechecks come from the publishing contract.
-    // Missing meta degrades to the bundled-manifest preview with a warning.
+    // T1.3: with a reachable remote registry, the authoritative component
+    // contract for a resolved version is its published meta.toml (≈1KB), not
+    // the bundled manifest. Fetch meta for every resolved component (full
+    // artifacts are NOT downloaded here), overlay them onto the catalog, and
+    // re-plan so layout/prechecks come from the publishing contract. Missing
+    // meta degrades to the bundled-manifest preview with a warning. Skipped
+    // entirely when the index itself fell back to local (network confirmed
+    // down) — meta fetches would only fail and add noise.
     if let Some(client) = &registry {
-        let mut metas: Vec<(String, FetchedMeta)> = Vec::new();
-        for comp in &plan.components {
-            let Some(artifact) = &comp.artifact else {
-                continue;
-            };
-            match client.fetch_meta(&comp.name, &artifact.version, &artifact.url) {
+        if !index_is_local_fallback {
+            let mut metas: Vec<(String, FetchedMeta)> = Vec::new();
+            for comp in &plan.components {
+                let Some(artifact) = &comp.artifact else {
+                    continue;
+                };
+                match client.fetch_meta(&comp.name, &artifact.version, &artifact.url) {
                 Ok(Some(meta)) => metas.push((comp.name.clone(), meta)),
                 Ok(None) => registry_warnings.push(format!(
                     "component '{}': no meta.toml published for v{} — plan previews the bundled manifest",
@@ -164,29 +169,30 @@ pub fn handle(args: EnableArgs, ctx: &CliContext) -> Result<(), CliError> {
                     comp.name,
                 )),
             }
-        }
-        if !metas.is_empty() {
-            let mut overlaid = catalog.clone();
-            for (name, meta) in &metas {
-                overlaid
-                    .components
-                    .insert(name.clone(), meta.manifest.clone());
             }
-            plan = plan_enable(
-                &overlaid,
-                &dist_index,
-                &env,
-                install_mode,
-                &layout,
-                &capability,
-            )
-            .map_err(map_plan_err)?;
-            // Carry the meta digest into the plan so real-execute can hold
-            // the artifact to its publishing contract (T1.4).
-            for comp in plan.components.iter_mut() {
-                if let Some((_, meta)) = metas.iter().find(|(name, _)| name == &comp.name) {
-                    if let Some(artifact) = comp.artifact.as_mut() {
-                        artifact.meta_sha256 = Some(meta.sha256.clone());
+            if !metas.is_empty() {
+                let mut overlaid = catalog.clone();
+                for (name, meta) in &metas {
+                    overlaid
+                        .components
+                        .insert(name.clone(), meta.manifest.clone());
+                }
+                plan = plan_enable(
+                    &overlaid,
+                    &dist_index,
+                    &env,
+                    install_mode,
+                    &layout,
+                    &capability,
+                )
+                .map_err(map_plan_err)?;
+                // Carry the meta digest into the plan so real-execute can hold
+                // the artifact to its publishing contract (T1.4).
+                for comp in plan.components.iter_mut() {
+                    if let Some((_, meta)) = metas.iter().find(|(name, _)| name == &comp.name) {
+                        if let Some(artifact) = comp.artifact.as_mut() {
+                            artifact.meta_sha256 = Some(meta.sha256.clone());
+                        }
                     }
                 }
             }
