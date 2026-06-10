@@ -476,23 +476,22 @@ fn build_agent_step(
     };
 
     // Metrics
-    let metrics =
-        Some(AtifStepMetrics {
-            prompt_tokens: if event.input_tokens > 0 {
-                Some(event.input_tokens as u32)
-            } else {
-                None
-            },
-            completion_tokens: if event.output_tokens > 0 {
-                Some(event.output_tokens as u32)
-            } else {
-                None
-            },
-            cached_tokens: event
-                .cache_read_tokens
-                .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
-            extra: None,
-        });
+    let metrics = Some(AtifStepMetrics {
+        prompt_tokens: if event.input_tokens > 0 {
+            Some(event.input_tokens as u32)
+        } else {
+            None
+        },
+        completion_tokens: if event.output_tokens > 0 {
+            Some(event.output_tokens as u32)
+        } else {
+            None
+        },
+        cached_tokens: event
+            .cache_read_tokens
+            .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+        extra: None,
+    });
 
     // Timestamp: prefer end_timestamp (when response arrived)
     let timestamp_ns = event.end_timestamp_ns.unwrap_or(event.start_timestamp_ns);
