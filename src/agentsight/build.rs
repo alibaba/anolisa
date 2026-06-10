@@ -61,6 +61,10 @@ fn main() {
 
     // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
     generate_skeleton(&mut out, "tcpsniff");
+
+    // Generate schedmon skeleton and bindings
+    generate_skeleton(&mut out, "schedmon");
+    generate_header(&mut out, "schedmon");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");

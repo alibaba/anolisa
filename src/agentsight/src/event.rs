@@ -1,8 +1,9 @@
-use crate::probes::proctrace::VariableEvent as ProcEvent;
-use crate::probes::sslsniff::SslEvent;
-use crate::probes::procmon::Event as ProcMonEvent;
 use crate::probes::filewatch::FileWatchEvent;
 use crate::probes::filewrite::FileWriteEvent;
+use crate::probes::procmon::Event as ProcMonEvent;
+use crate::probes::proctrace::VariableEvent as ProcEvent;
+use crate::probes::schedmon::SchedEvent;
+use crate::probes::sslsniff::SslEvent;
 use crate::probes::udpdns::UdpDnsEvent;
 
 /// Unified event type that can represent any probe event
@@ -16,6 +17,7 @@ pub enum Event {
     FileWatch(FileWatchEvent),
     FileWrite(FileWriteEvent),
     UdpDns(UdpDnsEvent),
+    Sched(SchedEvent),
 }
 
 impl Event {
@@ -28,6 +30,7 @@ impl Event {
             Event::FileWatch(_) => "FileWatch",
             Event::FileWrite(_) => "FileWrite",
             Event::UdpDns(_) => "UdpDns",
+            Event::Sched(_) => "Sched",
         }
     }
 }
