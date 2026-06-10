@@ -37,11 +37,7 @@ impl CoshCore {
         provider: Box<dyn ContentGenerator>,
         tools: ToolRegistry,
     ) -> Self {
-        let model = config
-            .ai
-            .active_model
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
+        let model = config.resolve_provider().model;
         let (loaded_policy, warning) = LoadedPolicy::load();
         if let Some(w) = warning {
             eprintln!("[cosh-core] {w}");

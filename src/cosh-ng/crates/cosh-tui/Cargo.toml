@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core Agent Loop for cosh — JSONL stdin/stdout backend"
+description = "Unified TUI component for cosh — agent core + interactive TUI + headless JSONL backend"
 
 [[bin]]
-name = "cosh-tui-core"
+name = "cosh-tui"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
+atty = "0.2"
 cosh-types = { path = "../cosh-types" }
 cosh-platform = { path = "../cosh-platform" }
 serde.workspace = true

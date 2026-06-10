@@ -11,7 +11,7 @@ fn binary_path() -> std::path::PathBuf {
         .parent()
         .unwrap()
         .to_path_buf();
-    path.push("cosh-tui-core");
+    path.push("cosh-tui");
     path
 }
 
