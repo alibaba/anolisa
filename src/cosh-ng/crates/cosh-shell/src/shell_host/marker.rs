@@ -235,17 +235,18 @@ _cosh_precmd_marker() {
   local status=$?
   _cosh_emit_marker "precmd" "" "$status"
   _COSH_AT_PROMPT=1
+  return $status
 }
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 trap '_cosh_preexec_marker' DEBUG
-# Append precmd to existing PROMPT_COMMAND
+# Prepend precmd so it captures $? before other PROMPT_COMMAND entries
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND+=(_cosh_precmd_marker)
+  PROMPT_COMMAND=(_cosh_precmd_marker "${PROMPT_COMMAND[@]}")
 else
-  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
+  PROMPT_COMMAND="_cosh_precmd_marker${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
