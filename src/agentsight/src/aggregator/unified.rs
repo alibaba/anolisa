@@ -132,6 +132,14 @@ impl Aggregator {
         self.process.clear();
     }
 
+    /// Drain all connections belonging to a specific PID.
+    ///
+    /// Used by crash detection on `ProcMon::Exit` to immediately extract
+    /// in-flight connections before the periodic drain check runs.
+    pub fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<(ConnectionId, ConnectionState)> {
+        self.http.drain_connections_for_pid(pid)
+    }
+
     /// Drain connections whose PID is no longer alive.
     ///
     /// Delegates to the HTTP aggregator's dead-PID drain.

@@ -482,6 +482,25 @@ impl InterruptionStore {
         Ok(result)
     }
 
+    /// Check if a recent agent_crash event exists for the given PID.
+    ///
+    /// Used for dedup between trace-mode crash detection and serve-mode
+    /// HealthChecker: if trace already recorded the crash, serve skips it.
+    pub fn agent_crash_exists_recent(&self, pid: i32, window_secs: u64) -> bool {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let cutoff_ns = now_ns - (window_secs as i64 * 1_000_000_000);
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM interruption_events
+             WHERE interruption_type='agent_crash' AND pid=?1 AND occurred_at_ns > ?2",
+            params![pid, cutoff_ns],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0
+    }
+
     /// Purge interruption events older than cutoff_ns.
     pub fn purge_before(&self, cutoff_ns: i64) -> Result<usize, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();

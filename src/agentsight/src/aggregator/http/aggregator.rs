@@ -504,6 +504,47 @@ impl HttpConnectionAggregator {
             .collect()
     }
 
+    /// Drain all connections belonging to a specific PID.
+    ///
+    /// Returns `(ConnectionId, ConnectionState)` for entries that were in
+    /// `RequestPending` or `SseActive` state.  `Idle` entries are silently
+    /// discarded.  Used by crash detection on `ProcMon::Exit`.
+    pub fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<(ConnectionId, ConnectionState)> {
+        let keys: Vec<ConnectionId> = self.connections.iter()
+            .filter(|(k, _)| k.pid == pid)
+            .map(|(k, _)| *k)
+            .collect();
+
+        if keys.is_empty() {
+            return vec![];
+        }
+
+        let mut result = Vec::new();
+        for key in keys {
+            if let Some(state) = self.connections.pop(&key) {
+                match state {
+                    ConnectionState::Idle => {}
+                    _ => {
+                        log::debug!(
+                            "[HttpAggregator] Draining connection for exited PID: pid={} ssl_ptr={:#x}",
+                            key.pid, key.ssl_ptr,
+                        );
+                        result.push((key, state));
+                    }
+                }
+            }
+        }
+
+        if !result.is_empty() {
+            log::info!(
+                "[HttpAggregator] Drained {} connection(s) for exited pid={}",
+                result.len(), pid,
+            );
+        }
+
+        result
+    }
+
     /// Drain connections whose PID is no longer alive.
     ///
     /// Checks `/proc/{pid}` for each unique PID in the connection pool.

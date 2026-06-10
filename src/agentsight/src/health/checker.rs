@@ -165,6 +165,15 @@ impl HealthChecker {
                                 );
                                 continue;
                             }
+                            // Dedup: skip if trace-mode already recorded a
+                            // recent agent_crash for this PID (within 120s).
+                            if istore.agent_crash_exists_recent(rep.pid as i32, 120) {
+                                log::debug!(
+                                    "Skipping agent_crash for pid={} — already recorded by trace mode",
+                                    rep.pid,
+                                );
+                                continue;
+                            }
                             let call_ids: Vec<&str> =
                                 calls.iter().map(|(c, _)| c.as_str()).collect();
                             let mut detail = serde_json::json!({

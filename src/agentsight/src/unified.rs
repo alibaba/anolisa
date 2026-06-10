@@ -784,6 +784,7 @@ impl AgentSight {
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
                     self.detach_process(*pid, &agent_name);
+                    self.handle_agent_crash_detection(*pid, &agent_name);
                 }
             }
         }
@@ -1180,6 +1181,117 @@ impl AgentSight {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Immediate crash detection when a tracked agent process exits.
+    ///
+    /// Called from `ProcMon::Exit` handler. Drains in-flight connections for
+    /// the PID, persists them as pending calls, then generates an `agent_crash`
+    /// interruption event if any pending calls exist.
+    fn handle_agent_crash_detection(&mut self, pid: u32, agent_name: &str) {
+        use crate::aggregator::ConnectionState;
+        use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+
+        // 1. Drain in-flight connections for this PID from the aggregator
+        let drained = self.aggregator.drain_connections_for_pid(pid);
+
+        // 2. Persist drained connections as pending calls
+        for (conn_id, state) in &drained {
+            let (_state_name, request) = match state {
+                ConnectionState::RequestPending { request } => ("RequestPending", request),
+                ConnectionState::SseActive { request: Some(req), .. } => ("SseActive", req),
+                _ => continue,
+            };
+
+            if let Some(pending) = self.genai_builder.build_pending_from_request(
+                request,
+                conn_id,
+                &self.pid_agent_name_cache,
+            ) {
+                if let Some(ref store) = self.genai_sqlite_store {
+                    if let Err(e) = store.insert_pending(&pending) {
+                        log::warn!("[CrashDetect] Failed to persist pending call: {}", e);
+                    }
+                }
+            }
+        }
+
+        // 3. Query all pending calls for this PID (including any persisted earlier)
+        let pending_calls = if let Some(ref store) = self.genai_sqlite_store {
+            store.list_pending_for_pids(&[pid as i32]).unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        if pending_calls.is_empty() {
+            log::debug!(
+                "[CrashDetect] Agent {} (pid={}) exited with no pending calls — normal shutdown",
+                agent_name, pid,
+            );
+            return;
+        }
+
+        // 4. Generate agent_crash interruption event
+        if let Some(ref istore) = self.interruption_store {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+
+            let is_oom = was_pid_oom_killed(pid as i32);
+
+            // Group by (session_id, conversation_id) to produce one event per conversation
+            let mut by_conv: std::collections::HashMap<
+                (Option<String>, Option<String>),
+                Vec<String>,
+            > = std::collections::HashMap::new();
+            for (call_id, session_id, _trace_id, conversation_id) in &pending_calls {
+                by_conv
+                    .entry((session_id.clone(), conversation_id.clone()))
+                    .or_default()
+                    .push(call_id.clone());
+            }
+
+            for ((session_id, conversation_id), call_ids) in &by_conv {
+                let mut detail = serde_json::json!({
+                    "pid": pid,
+                    "agent_name": agent_name,
+                    "call_ids": call_ids,
+                    "source": "trace_procmon_exit",
+                });
+                if is_oom {
+                    detail["oom"] = serde_json::json!(true);
+                }
+                let event = InterruptionEvent::new(
+                    InterruptionType::AgentCrash,
+                    session_id.clone(),
+                    None,
+                    conversation_id.clone(),
+                    None,
+                    Some(pid as i32),
+                    Some(agent_name.to_string()),
+                    now_ns,
+                    Some(detail),
+                );
+                if let Err(e) = istore.insert(&event) {
+                    log::warn!("[CrashDetect] Failed to record agent_crash for pid={}: {}", pid, e);
+                } else {
+                    log::info!(
+                        "[CrashDetect] Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s), oom={})",
+                        agent_name, pid, session_id, conversation_id, call_ids.len(), is_oom,
+                    );
+                }
+                crate::genai::logtail::export_interruption_events(std::slice::from_ref(&event));
+            }
+
+            // Mark all pending calls for this PID as interrupted
+            if let Some(ref store) = self.genai_sqlite_store {
+                let itype = if is_oom { "oom_crash" } else { "agent_crash" };
+                if let Err(e) = store.mark_pending_interrupted_for_pid(pid as i32, itype) {
+                    log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={}: {}", pid, e);
                 }
             }
         }
