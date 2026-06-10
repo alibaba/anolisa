@@ -134,6 +134,8 @@ fn expand_env_vars(s: &str) -> String {
 
 impl CoreConfig {
     pub fn load() -> Self {
+        crate::migrate::try_migrate();
+
         let candidates = [
             std::env::current_dir()
                 .ok()

@@ -6,6 +6,7 @@ mod context;
 mod core;
 mod hook;
 mod loop_detect;
+mod migrate;
 mod protocol;
 mod provider;
 mod session;
