@@ -1,0 +1,51 @@
+[component]
+name = "sandbox-gvisor"
+version = "0.1.0"
+layer = "osbase"
+description = "gVisor user-space kernel (runsc) — syscall-interception isolation without KVM"
+
+[install]
+modes = ["system"]
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+requires_kernel = ">=4.15"
+
+# RPMs consumed by sandbox_install.rs::gvisor_packages().
+# These names MUST match the constants GVISOR_*_PACKAGES in sandbox_install.rs.
+# The 4 RPMs below are NOT in upstream Anolis/AlibabaCloudLinux repos —
+# ANOLISA must publish them via the `anolisa-sandbox` repo (see
+# ANOLISA-design/docs/anolisa/osbase/sandbox/sandbox-rpm-packaging.md).
+[dependencies]
+runtime = ["gvisor-runsc"]
+shim = ["gvisor-runsc", "containerd-shim-runsc-v1"]
+substrate = ["gvisor-runsc", "containerd-shim-runsc-v1", "atelet", "ateom-gvisor"]
+
+[dependencies.repository]
+# Logical repo ID surfaced to operators in error messages and `anolisa doctor`.
+id = "anolisa-sandbox"
+description = "ANOLISA-published RPMs for sandbox engines (gvisor-runsc, containerd-shim-runsc-v1, atelet, ateom-gvisor)"
+documentation = "ANOLISA-design/docs/anolisa/osbase/sandbox/sandbox-rpm-packaging.md"
+
+# Spec templates that produce the RPMs above. Used by scripts/rpm-build.sh
+# when the repository is being primed.
+[dependencies.repository.specs]
+"gvisor-runsc" = "anolisa/src/anolisa/packaging/sandbox/gvisor-runsc.spec.in"
+"containerd-shim-runsc-v1" = "anolisa/src/anolisa/packaging/sandbox/containerd-shim-runsc-v1.spec.in"
+"atelet" = "anolisa/src/anolisa/packaging/sandbox/atelet.spec.in"
+"ateom-gvisor" = "anolisa/src/anolisa/packaging/sandbox/ateom-gvisor.spec.in"
+
+# Declared minimum RPM versions — reference values validated by
+# gvisor-substrate-arch-validation-experiment.md §10 (run-3, 2026-06-08)
+# on Alibaba Cloud Linux 4.0.3 / kernel 6.6.102.
+#
+# NOTE (v0.1.4): these are advisory only. sandbox_install.rs preflight
+# currently checks package presence, not version; tightening this into a
+# hard floor is tracked as a follow-up. Until then, treat the values as
+# the lowest combination ANOLISA has end-to-end validated.
+[dependencies.minimum_versions]
+"gvisor-runsc" = "20260601.0"
+"containerd-shim-runsc-v1" = "20260601.0"
+"atelet" = "0.1.0"
+"ateom-gvisor" = "0.1.0"

@@ -97,6 +97,16 @@ pub enum SandboxCommands {
         #[arg(long)]
         variant: Option<String>,
 
+        /// L2 runtime to register the engine into (gvisor: containerd|docker).
+        /// Firecracker rejects this flag (direct KVM access).
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Control-panel data-plane overlay (gvisor: substrate).
+        /// Requires --runtime=containerd.
+        #[arg(long)]
+        control_panel: Option<String>,
+
         /// Print install plan without executing
         #[arg(long)]
         dry_run: bool,
@@ -215,6 +225,8 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
         SandboxCommands::Install {
             target,
             variant,
+            runtime,
+            control_panel,
             dry_run,
             force,
             no_verify,
@@ -244,6 +256,8 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
             let request = SandboxInstallRequest {
                 backend,
                 variant: variant_str,
+                runtime,
+                control_panel,
                 dry_run: dry_run || ctx.dry_run,
                 force,
                 no_verify,

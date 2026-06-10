@@ -59,6 +59,82 @@ const FIRECRACKER_E2B_PACKAGES: &[&str] = &[
     "e2b-system-config",
 ];
 
+/// Required RPMs for gVisor standalone mode (`install gvisor`).
+pub(crate) const GVISOR_STANDALONE_PACKAGES: &[&str] = &["gvisor-runsc"];
+
+/// Required RPMs for gVisor shim mode (`install gvisor --runtime=containerd`).
+pub(crate) const GVISOR_SHIM_PACKAGES: &[&str] = &["gvisor-runsc", "containerd-shim-runsc-v1"];
+
+/// Required RPMs for gVisor Docker mode (`install gvisor --runtime=docker`).
+pub(crate) const GVISOR_DOCKER_PACKAGES: &[&str] = &["gvisor-runsc"];
+
+/// Required RPMs for gVisor + Substrate data-plane mode.
+pub(crate) const GVISOR_SUBSTRATE_PACKAGES: &[&str] = &[
+    "gvisor-runsc",
+    "containerd-shim-runsc-v1",
+    "atelet",
+    "ateom-gvisor",
+];
+
+/// Logical RPM repository ID surfaced in error messages and `anolisa doctor`.
+///
+/// MUST stay in sync with `[dependencies.repository] id` in
+/// `manifests/osbase/sandbox-gvisor.toml`. The 4 RPMs in `GVISOR_*_PACKAGES`
+/// are NOT in upstream Anolis/AlibabaCloudLinux repos — ANOLISA must publish
+/// them via this repo. See `sandbox-rpm-packaging.md` for details.
+pub(crate) const ANOLISA_SANDBOX_REPO_ID: &str = "anolisa-sandbox";
+
+/// Path to the packaging design document, embedded in error messages so
+/// operators can reach it without leaving the terminal.
+pub(crate) const SANDBOX_RPM_PACKAGING_DOC: &str =
+    "ANOLISA-design/docs/anolisa/osbase/sandbox/sandbox-rpm-packaging.md";
+
+/// Probe whether a package is *available* in any configured dnf repository
+/// (without installing it). Returns:
+/// - `Some(true)`  — package is in a repo and dnf is functioning
+/// - `Some(false)` — dnf functioned but the package was not found
+/// - `None`        — dnf could not be invoked / probe was inconclusive (treat
+///                   as "don't gate" — fall through to the actual install
+///                   attempt so we don't generate spurious errors on quirky
+///                   environments)
+///
+/// Implementation note: we use `dnf repoquery --quiet --qf '%{name}'` rather
+/// than `dnf list --available` because the latter writes to stderr on miss
+/// and exits non-zero, while `repoquery` exits 0 with empty stdout on miss.
+#[allow(clippy::doc_overindented_list_items)]
+fn dnf_repoquery_available(package: &str) -> Option<bool> {
+    let output = Command::new("dnf")
+        .args(["repoquery", "--quiet", "--qf", "%{name}", package])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(stdout.lines().any(|line| line.trim() == package))
+}
+
+/// Build the human-readable error message used when one or more required RPMs
+/// are missing from the configured dnf repos. Centralised so that both the
+/// pre-flight repoquery check and the post-install fallback path produce the
+/// same actionable text — operators always see the same remediation.
+fn gvisor_missing_rpm_error(missing: &[&str], required: &[&str]) -> String {
+    format!(
+        "required ANOLISA sandbox RPM(s) not found in any configured repo: {missing}. \
+         These packages are NOT shipped by upstream Anolis/AlibabaCloudLinux — \
+         ANOLISA must publish them via the `{repo}` repo. \
+         Required for this install mode: {required}. \
+         Action: enable repo `{repo}` (build via spec.in templates under \
+         anolisa/src/anolisa/packaging/sandbox/, then push to the internal \
+         dnf repository). See {doc} for the full playbook.",
+        missing = missing.join(", "),
+        required = required.join(", "),
+        repo = ANOLISA_SANDBOX_REPO_ID,
+        doc = SANDBOX_RPM_PACKAGING_DOC,
+    )
+}
+
 /// Probe whether `dnf` is available on the host. Sandbox install fixes the
 /// package-manager command to `dnf` (see [`detect_package_manager`] /
 /// [`DnfBackend`]); a yum-only environment would pass the platform-level
@@ -133,9 +209,20 @@ impl SandboxBackendKind {
 pub struct SandboxInstallRequest {
     pub backend: SandboxBackendKind,
     /// Variant identifier validated by [`validate_request`]. For firecracker:
-    /// `"standard"` | `"default"` | `"e2b"`. Unknown values surface as
-    /// [`SandboxInstallError::Unsupported`].
+    /// `"standard"` | `"default"` | `"e2b"`. For gvisor: `"default"` only
+    /// (gVisor has no fork — see gvisor-substrate-design-note §5.1). Unknown
+    /// values surface as [`SandboxInstallError::Unsupported`].
     pub variant: String,
+    /// L2 runtime to register the engine into. For gvisor:
+    /// `Some("containerd")` (shim mode) | `Some("docker")` (Docker daemon.json)
+    /// | `None` (standalone). Firecracker rejects any value (it bypasses L2).
+    /// See gvisor-substrate-design-note §5.1.
+    pub runtime: Option<String>,
+    /// Optional control-panel data-plane overlay layered on top of an
+    /// engine+runtime install. Currently only `Some("substrate")` paired
+    /// with `runtime=Some("containerd")` for the gvisor backend; all other
+    /// combinations are rejected by [`validate_request`].
+    pub control_panel: Option<String>,
     /// Produce a [`SandboxInstallDryRun`] without side effects: no install
     /// lock, no state write, no central-log entry.
     pub dry_run: bool,
@@ -445,6 +532,13 @@ fn run_pipeline(
                 &mut installed_version,
             )?,
         },
+        SandboxBackendKind::Gvisor => run_gvisor(
+            request,
+            env_facts,
+            &mut phases,
+            &mut warnings,
+            &mut installed_version,
+        )?,
         other => {
             return Err(SandboxInstallError::Unsupported {
                 backend: other.to_string(),
@@ -1521,6 +1615,767 @@ fn firecracker_provision_default_assets(
 }
 
 // ===========================================================================
+// gVisor backend (standalone / shim / docker / + substrate data-plane)
+// ===========================================================================
+
+/// Dispatch entry for gVisor install — routes to the correct pipeline based on
+/// `--runtime` and `--control-panel` flags.
+fn run_gvisor(
+    request: &SandboxInstallRequest,
+    env_facts: &EnvFacts,
+    phases: &mut Vec<PhaseResult>,
+    warnings: &mut Vec<String>,
+    installed_version: &mut Option<String>,
+) -> Result<(), SandboxInstallError> {
+    // --- Phase 1: Pre-flight ---
+    let preflight = gvisor_preflight(request, env_facts)?;
+    phases.push(preflight);
+
+    // --- Phase 2: Packages ---
+    let packages = gvisor_packages(request, env_facts)?;
+    phases.push(packages);
+
+    // --- Phase 3: OS Primitives ---
+    let os_config = gvisor_os_primitives(request, warnings)?;
+    phases.push(os_config);
+
+    // --- Phase 4: Service (gVisor has no persistent service) ---
+    phases.push(PhaseResult {
+        phase: InstallPhase::ServiceSetup,
+        status: PhaseStatus::Skipped,
+        message: "skipped: runsc is on-demand; containerd manages shim lifecycle".to_string(),
+    });
+
+    // --- Phase 5: Post-verify ---
+    if !request.no_verify {
+        let verify = gvisor_verify(request, warnings, installed_version)?;
+        phases.push(verify);
+    } else {
+        phases.push(PhaseResult {
+            phase: InstallPhase::PostVerify,
+            status: PhaseStatus::Skipped,
+            message: "skipped by --no-verify".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Phase 1: Pre-flight for gVisor.
+fn gvisor_preflight(
+    request: &SandboxInstallRequest,
+    facts: &EnvFacts,
+) -> Result<PhaseResult, SandboxInstallError> {
+    // Check OS
+    if facts.os != "linux" {
+        return Err(SandboxInstallError::EnvNotSatisfied {
+            reason: format!("gvisor requires Linux, got '{}'", facts.os),
+            remediation: None,
+        });
+    }
+
+    // Check arch (gVisor primarily targets x86_64; aarch64 is experimental)
+    if facts.arch != "x86_64" && facts.arch != "aarch64" {
+        return Err(SandboxInstallError::EnvNotSatisfied {
+            reason: format!("gvisor requires x86_64 or aarch64, got '{}'", facts.arch),
+            remediation: None,
+        });
+    }
+
+    // Kernel >= 4.15 required
+    if let Some(ref kernel) = facts.kernel
+        && !kernel_version_at_least(kernel, 4, 15)
+    {
+        return Err(SandboxInstallError::EnvNotSatisfied {
+            reason: format!("gvisor requires kernel >= 4.15, got '{kernel}'"),
+            remediation: Some("upgrade your kernel to >= 4.15".to_string()),
+        });
+    }
+
+    // ptrace_scope check (Yama LSM); gVisor needs ptrace_scope <= 2
+    let ptrace_ok = check_ptrace_scope();
+    if !ptrace_ok {
+        return Err(SandboxInstallError::EnvNotSatisfied {
+            reason: "kernel.yama.ptrace_scope > 2; gVisor systrap platform requires <= 2"
+                .to_string(),
+            remediation: Some(
+                "echo 1 > /proc/sys/kernel/yama/ptrace_scope, or set kernel.yama.ptrace_scope=1 in sysctl"
+                    .to_string(),
+            ),
+        });
+    }
+
+    // If shim mode, check containerd is active
+    let mut extra_info = Vec::new();
+    if request.runtime.as_deref() == Some("containerd")
+        || request.control_panel.as_deref() == Some("substrate")
+    {
+        let ctd_active = is_service_active("containerd.service");
+        if !ctd_active {
+            return Err(SandboxInstallError::EnvNotSatisfied {
+                reason: "containerd.service not active; shim mode requires a running containerd"
+                    .to_string(),
+                remediation: Some(
+                    "install and start containerd first: anolisa osbase sandbox install container"
+                        .to_string(),
+                ),
+            });
+        }
+        extra_info.push("containerd=active".to_string());
+    }
+
+    let kernel_str = facts.kernel.as_deref().unwrap_or("unknown");
+    let msg = if extra_info.is_empty() {
+        format!("kernel={kernel_str}, arch={}, ptrace_scope=ok", facts.arch)
+    } else {
+        format!(
+            "kernel={kernel_str}, arch={}, ptrace_scope=ok, {}",
+            facts.arch,
+            extra_info.join(", ")
+        )
+    };
+
+    Ok(PhaseResult {
+        phase: InstallPhase::Preflight,
+        status: PhaseStatus::Success,
+        message: msg,
+    })
+}
+
+/// Check Yama ptrace_scope <= 2.
+fn check_ptrace_scope() -> bool {
+    let path = Path::new("/proc/sys/kernel/yama/ptrace_scope");
+    if !path.exists() {
+        // No Yama LSM -> unrestricted, OK
+        return true;
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            let val: u32 = content.trim().parse().unwrap_or(0);
+            val <= 2
+        }
+        Err(_) => true, // Cannot read -> assume OK
+    }
+}
+
+/// Check whether a systemd service unit is currently active.
+fn is_service_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Phase 2: Package installation for gVisor.
+fn gvisor_packages(
+    request: &SandboxInstallRequest,
+    facts: &EnvFacts,
+) -> Result<PhaseResult, SandboxInstallError> {
+    if !dnf_command_exists() {
+        return Err(SandboxInstallError::PackageFailed(
+            "dnf binary not found in PATH; gvisor sandbox install requires dnf".to_string(),
+        ));
+    }
+    let pkg_mgr = detect_package_manager(facts.pkg_base.as_deref()).map_err(|e| {
+        SandboxInstallError::PackageFailed(format!("cannot detect package manager: {e}"))
+    })?;
+
+    let required_packages: &[&str] =
+        match (request.runtime.as_deref(), request.control_panel.as_deref()) {
+            (_, Some("substrate")) => GVISOR_SUBSTRATE_PACKAGES,
+            (Some("containerd"), _) => GVISOR_SHIM_PACKAGES,
+            (Some("docker"), _) => GVISOR_DOCKER_PACKAGES,
+            _ => GVISOR_STANDALONE_PACKAGES,
+        };
+
+    let mut to_install = Vec::new();
+    for pkg in required_packages {
+        if !pkg_mgr.is_installed(pkg) {
+            to_install.push(*pkg);
+        }
+    }
+
+    // Pre-flight: probe each not-yet-installed package via `dnf repoquery` to
+    // detect the case where the ANOLISA sandbox repo is missing/unconfigured.
+    // We only block when every probe is conclusive AND at least one comes back
+    // false — otherwise we let `dnf install` run and surface its own error
+    // (avoids spurious failures on hosts where repoquery is restricted).
+    if !to_install.is_empty() {
+        let mut missing_in_repo: Vec<&str> = Vec::new();
+        for pkg in &to_install {
+            if let Some(false) = dnf_repoquery_available(pkg) {
+                missing_in_repo.push(*pkg);
+            }
+        }
+        if !missing_in_repo.is_empty() {
+            return Err(SandboxInstallError::PackageFailed(
+                gvisor_missing_rpm_error(&missing_in_repo, required_packages),
+            ));
+        }
+    }
+
+    if !to_install.is_empty() {
+        pkg_mgr.install(&to_install).map_err(|e| {
+            // Wrap the raw dnf error with the same actionable hint as the
+            // pre-flight path so operators get a consistent remediation
+            // regardless of which leg failed (e.g. repoquery succeeded but
+            // install hit a checksum/signature issue).
+            SandboxInstallError::PackageFailed(format!(
+                "failed to install {}: {e}. If the failure is `No package \
+                 named ... available`, the ANOLISA sandbox RPM repo (`{}`) \
+                 is likely missing or unconfigured — see {}.",
+                to_install.join(", "),
+                ANOLISA_SANDBOX_REPO_ID,
+                SANDBOX_RPM_PACKAGING_DOC,
+            ))
+        })?;
+    }
+
+    let msg = if to_install.is_empty() {
+        format!("already installed: {}", required_packages.join(", "))
+    } else {
+        format!("installed: {}", to_install.join(", "))
+    };
+
+    Ok(PhaseResult {
+        phase: InstallPhase::Packages,
+        status: PhaseStatus::Success,
+        message: msg,
+    })
+}
+
+/// Phase 3: OS-level configuration for gVisor.
+fn gvisor_os_primitives(
+    request: &SandboxInstallRequest,
+    warnings: &mut Vec<String>,
+) -> Result<PhaseResult, SandboxInstallError> {
+    let mut actions = Vec::new();
+    let warnings_before = warnings.len();
+
+    // 1. Write /etc/runsc/config.toml (platform=systrap)
+    gvisor_write_runsc_config(request, &mut actions, warnings);
+
+    // 2. If shim mode, register containerd runtime handler
+    if request.runtime.as_deref() == Some("containerd")
+        || request.control_panel.as_deref() == Some("substrate")
+    {
+        gvisor_register_containerd_handler(&mut actions, warnings);
+    }
+
+    // 3. If docker mode, register in daemon.json
+    if request.runtime.as_deref() == Some("docker") {
+        gvisor_register_docker_runtime(&mut actions, warnings);
+    }
+
+    // 4. If substrate, provision data-plane directories and config
+    if request.control_panel.as_deref() == Some("substrate") {
+        gvisor_provision_substrate_dataplane(&mut actions, warnings);
+    }
+
+    let msg = if actions.is_empty() {
+        "no OS primitives configured".to_string()
+    } else {
+        actions.join("; ")
+    };
+
+    let had_warnings = warnings.len() > warnings_before;
+    Ok(PhaseResult {
+        phase: InstallPhase::OsPrimitives,
+        status: if had_warnings {
+            PhaseStatus::Warning
+        } else {
+            PhaseStatus::Success
+        },
+        message: msg,
+    })
+}
+
+/// Write /etc/runsc/config.toml with platform=systrap and checkpoint/restore
+/// flags enabled.
+fn gvisor_write_runsc_config(
+    request: &SandboxInstallRequest,
+    actions: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    let path = Path::new("/etc/runsc/config.toml");
+    let checkpoint_line = if request.control_panel.as_deref() == Some("substrate") {
+        "checkpoint = true\nrestore = true\n"
+    } else {
+        "# checkpoint/restore available but not force-enabled\n"
+    };
+    let content = format!(
+        "# ANOLISA sandbox: gVisor runsc configuration\n\
+         [runsc]\n\
+         platform = \"systrap\"\n\
+         network = \"sandbox\"\n\
+         {checkpoint_line}"
+    );
+    match write_config_file(path, &content) {
+        Ok(()) => actions.push(format!("wrote {}", path.display())),
+        Err(e) => warnings.push(format!("could not write {}: {e}", path.display())),
+    }
+}
+
+/// Register runsc as a containerd runtime handler.
+///
+/// containerd does NOT auto-import drop-in TOML fragments under
+/// `/etc/containerd/`; the runtime entry must live in the main
+/// `/etc/containerd/config.toml` (or be referenced via an explicit
+/// `imports = [...]` line at the top of it). We therefore patch the main
+/// config in place.
+///
+/// Behavior:
+///   1. If the file is missing, generate the default with
+///      `containerd config default` (the canonical way to bootstrap);
+///      fall back to a minimal stub if `containerd` is not on PATH.
+///   2. Idempotent: parse the existing file via `toml_edit` and only mutate
+///      the `runsc` runtime sub-table when needed; if the desired
+///      `runtime_type` / `options` are already set, skip the write.
+///   3. AST-level merge (not string append): preserves user comments and
+///      ordering, and crucially avoids producing duplicate plugin tables —
+///      containerd 2.x parses TOML strictly and will refuse to start if the
+///      same plugin table appears twice.
+///   4. Restart containerd so the handler is picked up.
+fn gvisor_register_containerd_handler(actions: &mut Vec<String>, warnings: &mut Vec<String>) {
+    let cfg_path = Path::new("/etc/containerd/config.toml");
+
+    // Step 1: ensure config.toml exists. Prefer `containerd config default`.
+    if !cfg_path.exists() {
+        let generated = Command::new("containerd")
+            .args(["config", "default"])
+            .output();
+        let default_content = match generated {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+            _ => {
+                // Minimal fallback so the merge below has a sane base.
+                String::from(
+                    "# generated by ANOLISA: minimal containerd config (containerd not on PATH)\nversion = 2\n\n[plugins.\"io.containerd.grpc.v1.cri\"]\n",
+                )
+            }
+        };
+        if let Err(e) = write_config_file(cfg_path, &default_content) {
+            warnings.push(format!("could not create {}: {e}", cfg_path.display()));
+            return;
+        }
+        actions.push(format!(
+            "created {} (containerd default)",
+            cfg_path.display()
+        ));
+    }
+
+    // Step 2: read + parse via toml_edit (preserves comments & order).
+    let existing = match fs::read_to_string(cfg_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("could not read {}: {e}", cfg_path.display()));
+            return;
+        }
+    };
+    let mut doc = match existing.parse::<toml_edit::DocumentMut>() {
+        Ok(d) => d,
+        Err(e) => {
+            // Fail-fast: refusing to overwrite an unparseable config is safer
+            // than silently truncating the operator's config.toml.
+            warnings.push(format!(
+                "refusing to patch {}: file is not valid TOML ({e}). Fix the \
+                 file by hand or back it up and re-run; ANOLISA will not \
+                 overwrite an unparseable containerd config.",
+                cfg_path.display(),
+            ));
+            return;
+        }
+    };
+
+    // Step 3: merge `runsc` runtime sub-table at the canonical path:
+    //   plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc
+    // We descend through dotted-key tables so we don't clobber siblings
+    // (other runtimes, snapshotter config, etc.).
+    let changed = ensure_containerd_runsc_runtime(&mut doc);
+
+    if !changed {
+        actions.push(format!(
+            "{} already registers io.containerd.runsc.v1",
+            cfg_path.display()
+        ));
+    } else {
+        let merged = doc.to_string();
+        if let Err(e) = write_config_file(cfg_path, &merged) {
+            warnings.push(format!("could not patch {}: {e}", cfg_path.display()));
+            return;
+        }
+        actions.push(format!(
+            "patched {} (registered io.containerd.runsc.v1 via toml_edit AST merge)",
+            cfg_path.display()
+        ));
+    }
+
+    // Step 4: restart containerd so it picks up the handler.
+    let _ = Command::new("systemctl")
+        .args(["restart", "containerd.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    actions.push("systemctl restart containerd.service".to_string());
+}
+
+/// Ensure the `plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc`
+/// sub-table contains the canonical runsc registration. Returns `true` if the
+/// document was modified (caller must re-serialize and write back), `false`
+/// if the desired state is already present.
+///
+/// We descend table-by-table rather than calling `doc["a.b.c"]` so dotted
+/// path semantics are unambiguous regardless of how the user wrote their
+/// existing config (inline tables, dotted keys, or nested `[[..]]` headers).
+fn ensure_containerd_runsc_runtime(doc: &mut toml_edit::DocumentMut) -> bool {
+    use toml_edit::{Item, Table, value};
+
+    fn descend<'a>(parent: &'a mut Table, key: &str) -> &'a mut Table {
+        let entry = parent
+            .entry(key)
+            .or_insert_with(|| Item::Table(Table::new()));
+        if !entry.is_table() {
+            // Replace non-table (None / Value / ArrayOfTables) with an empty
+            // table so the merge can proceed without panicking.
+            *entry = Item::Table(Table::new());
+        }
+        entry
+            .as_table_mut()
+            .expect("entry was just normalized to a table")
+    }
+
+    let root = doc.as_table_mut();
+    let plugins = descend(root, "plugins");
+    let cri = descend(plugins, "io.containerd.grpc.v1.cri");
+    let containerd_tbl = descend(cri, "containerd");
+    let runtimes = descend(containerd_tbl, "runtimes");
+    let runsc = descend(runtimes, "runsc");
+
+    let mut changed = false;
+
+    // runtime_type = "io.containerd.runsc.v1"
+    let want_type = "io.containerd.runsc.v1";
+    let type_ok = runsc
+        .get("runtime_type")
+        .and_then(|i| i.as_str())
+        .map(|s| s == want_type)
+        .unwrap_or(false);
+    if !type_ok {
+        runsc["runtime_type"] = value(want_type);
+        changed = true;
+    }
+
+    // [..runtimes.runsc.options]
+    //   TypeUrl    = "io.containerd.runsc.v1.options"
+    //   ConfigPath = "/etc/runsc/config.toml"
+    let options = descend(runsc, "options");
+    for (k, want) in [
+        ("TypeUrl", "io.containerd.runsc.v1.options"),
+        ("ConfigPath", "/etc/runsc/config.toml"),
+    ] {
+        let ok = options
+            .get(k)
+            .and_then(|i| i.as_str())
+            .map(|s| s == want)
+            .unwrap_or(false);
+        if !ok {
+            options[k] = value(want);
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+/// Register runsc in Docker daemon.json.
+///
+/// Uses `serde_json::Value` to merge into the existing config so we:
+///   * preserve unrelated keys (`log-driver`, `data-root`, ...) byte-for-byte
+///     after pretty-printing,
+///   * never produce duplicate keys (the previous string-concat path could),
+///   * never silently overwrite an invalid daemon.json (we fail-fast instead
+///     — a corrupted daemon.json takes the whole Docker daemon down, which
+///     is much worse than refusing to install).
+fn gvisor_register_docker_runtime(actions: &mut Vec<String>, warnings: &mut Vec<String>) {
+    use serde_json::{Map, Value, json};
+
+    let daemon_json = Path::new("/etc/docker/daemon.json");
+    let want_path = "/usr/bin/runsc";
+
+    // Step 1: read existing config (if any).
+    let existing = if daemon_json.exists() {
+        match fs::read_to_string(daemon_json) {
+            Ok(s) => s,
+            Err(e) => {
+                warnings.push(format!("could not read {}: {e}", daemon_json.display()));
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    // Step 2: parse (or start fresh). An empty / whitespace-only file is
+    // treated as `{}`; anything else that fails to parse is surfaced as a
+    // hard warning — we will NOT overwrite a non-empty unparseable file
+    // because that risks taking down the user's Docker daemon.
+    let mut root: Value = if existing.trim().is_empty() {
+        Value::Object(Map::new())
+    } else {
+        match serde_json::from_str(&existing) {
+            Ok(v @ Value::Object(_)) => v,
+            Ok(_) => {
+                warnings.push(format!(
+                    "refusing to patch {}: top-level value is not a JSON object. \
+                     Fix the file by hand and re-run.",
+                    daemon_json.display(),
+                ));
+                return;
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "refusing to patch {}: file is not valid JSON ({e}). \
+                     ANOLISA will not overwrite an unparseable daemon.json \
+                     because a broken file takes the whole Docker daemon \
+                     down. Fix the file by hand or back it up and re-run.",
+                    daemon_json.display(),
+                ));
+                return;
+            }
+        }
+    };
+
+    // Step 3: structured merge — only touch runtimes.runsc.path.
+    let runtimes = root
+        .as_object_mut()
+        .expect("root verified as object above")
+        .entry("runtimes".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !runtimes.is_object() {
+        warnings.push(format!(
+            "refusing to patch {}: existing `runtimes` field is not a JSON object",
+            daemon_json.display(),
+        ));
+        return;
+    }
+    let runtimes_map = runtimes.as_object_mut().unwrap();
+
+    // Idempotency: if runsc.path is already set to /usr/bin/runsc, skip write.
+    if let Some(Value::Object(existing_runsc)) = runtimes_map.get("runsc") {
+        if existing_runsc.get("path").and_then(Value::as_str) == Some(want_path) {
+            actions.push(format!(
+                "{} already registers runsc → {}",
+                daemon_json.display(),
+                want_path,
+            ));
+            return;
+        }
+    }
+    runtimes_map.insert("runsc".to_string(), json!({ "path": want_path }));
+
+    // Step 4: serialize (pretty so operators can still diff the file by eye).
+    let serialized = match serde_json::to_string_pretty(&root) {
+        Ok(s) => s + "\n",
+        Err(e) => {
+            warnings.push(format!("could not serialize merged daemon.json: {e}"));
+            return;
+        }
+    };
+
+    match write_config_file(daemon_json, &serialized) {
+        Ok(()) => {
+            actions.push(format!(
+                "wrote {} (added runsc runtime via serde_json merge)",
+                daemon_json.display()
+            ));
+            let _ = Command::new("systemctl")
+                .args(["restart", "docker.service"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            actions.push("systemctl restart docker.service".to_string());
+        }
+        Err(e) => warnings.push(format!("could not write {}: {e}", daemon_json.display())),
+    }
+}
+
+/// Provision Substrate data-plane directories, TLS placeholders, and
+/// node-config.yaml. Pure local preparation — does NOT connect to cluster.
+fn gvisor_provision_substrate_dataplane(actions: &mut Vec<String>, warnings: &mut Vec<String>) {
+    // Create directory structure
+    let dirs: &[&str] = &[
+        "/var/lib/substrate/checkpoints",
+        "/var/lib/substrate/state",
+        "/etc/substrate/config",
+        "/etc/substrate/tls",
+    ];
+    for dir in dirs {
+        match fs::create_dir_all(dir) {
+            Ok(()) => {}
+            Err(e) => warnings.push(format!("could not create {dir}: {e}")),
+        }
+    }
+    actions.push(
+        "mkdir -p /var/lib/substrate/{checkpoints,state} /etc/substrate/{config,tls}".to_string(),
+    );
+
+    // TLS certificate placeholders
+    let tls_placeholder = Path::new("/etc/substrate/tls/README");
+    let tls_content = "# ANOLISA sandbox: TLS certificates placeholder\n# cert-manager will provision real certificates after kubeadm join.\n";
+    let _ = write_config_file(tls_placeholder, tls_content);
+
+    // node-config.yaml
+    let node_config_path = Path::new("/etc/substrate/config/node-config.yaml");
+    let node_config = "\
+# ANOLISA sandbox: Substrate node configuration\n\
+# This file is pre-provisioned; atelet reads it after kubeadm join.\n\
+apiVersion: substrate.google.com/v1alpha1\n\
+kind: NodeConfig\n\
+metadata:\n\
+  name: local-node\n\
+spec:\n\
+  runtime: gvisor\n\
+  platform: systrap\n\
+  checkpoint:\n\
+    enabled: true\n\
+    path: /var/lib/substrate/checkpoints\n\
+  statePath: /var/lib/substrate/state\n\
+";
+    match write_config_file(node_config_path, node_config) {
+        Ok(()) => actions.push(format!("wrote {}", node_config_path.display())),
+        Err(e) => warnings.push(format!(
+            "could not write {}: {e}",
+            node_config_path.display()
+        )),
+    }
+}
+
+/// Phase 5: Post-install verification for gVisor.
+fn gvisor_verify(
+    request: &SandboxInstallRequest,
+    warnings: &mut Vec<String>,
+    installed_version: &mut Option<String>,
+) -> Result<PhaseResult, SandboxInstallError> {
+    let mut msg_parts = Vec::new();
+    let warnings_before = warnings.len();
+
+    // runsc --version
+    let runsc_ver = run_version_command("runsc");
+    match &runsc_ver {
+        Some(version) => {
+            *installed_version = Some(version.clone());
+            msg_parts.push(format!("runsc {version}"));
+        }
+        None => {
+            return Err(SandboxInstallError::VerifyFailed(
+                "runsc --version returned non-zero or not in PATH".to_string(),
+            ));
+        }
+    }
+
+    // runsc do /bin/true — verify syscall interception
+    let do_check = Command::new("runsc")
+        .args(["do", "/bin/true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match do_check {
+        Ok(s) if s.success() => msg_parts.push("runsc do /bin/true ok".to_string()),
+        _ => {
+            warnings
+                .push("runsc do /bin/true failed; syscall interception may not work".to_string());
+        }
+    }
+
+    // runsc help checkpoint (verify subcommand is registered).
+    // NOTE: do NOT use `runsc checkpoint --help` here. gVisor uses the
+    // google/subcommands framework whose subcommand SetFlags only registers
+    // the command's own flags (image-path, leave-running, ...); --help is not
+    // a registered flag, so stdlib flag parsing returns an error and the
+    // process exits with subcommands.ExitUsageError (non-zero) — even though
+    // the usage text is printed. Use `runsc help <cmd>` instead, which is the
+    // framework's built-in introspection path and exits 0 on success.
+    let ckpt_check = Command::new("runsc")
+        .args(["help", "checkpoint"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match ckpt_check {
+        Ok(s) if s.success() => msg_parts.push("checkpoint capability present".to_string()),
+        _ => {
+            warnings.push(
+                "runsc help checkpoint failed; checkpoint/restore may not be available".to_string(),
+            );
+        }
+    }
+
+    // Shim-mode: verify the containerd runsc handler is registered.
+    //
+    // NOTE: do NOT use `ctr run --runtime io.containerd.runsc.v1 ...` here.
+    // That used to be the check, but it pulls docker.io/library/busybox over
+    // the network (often unreachable from CN ECS without a mirror) and also
+    // requires the containerd daemon to be running. Failing either of those
+    // unrelated preconditions is *not* evidence that the handler is
+    // mis-registered, yet it produced a misleading DEGRADED warning.
+    //
+    // Instead, we check two static, network-free facts that together prove
+    // the handler is wired in:
+    //   1. the shim binary `containerd-shim-runsc-v1` exists in /usr/bin
+    //      (installed by the containerd-shim-runsc-v1 RPM);
+    //   2. /etc/containerd/config.toml contains the runtime_type line
+    //      `io.containerd.runsc.v1` (written by our install path).
+    if request.runtime.as_deref() == Some("containerd")
+        || request.control_panel.as_deref() == Some("substrate")
+    {
+        let shim_path = Path::new("/usr/bin/containerd-shim-runsc-v1");
+        let cfg_path = Path::new("/etc/containerd/config.toml");
+        let shim_ok = shim_path.exists();
+        let cfg_ok = std::fs::read_to_string(cfg_path)
+            .map(|s| s.contains("io.containerd.runsc.v1"))
+            .unwrap_or(false);
+        match (shim_ok, cfg_ok) {
+            (true, true) => msg_parts.push("runsc containerd handler registered".to_string()),
+            (false, _) => warnings.push(
+                "/usr/bin/containerd-shim-runsc-v1 missing; runsc shim not installed".to_string(),
+            ),
+            (true, false) => warnings.push(
+                "/etc/containerd/config.toml missing io.containerd.runsc.v1 runtime entry"
+                    .to_string(),
+            ),
+        }
+    }
+
+    // Substrate: verify binaries + directories
+    if request.control_panel.as_deref() == Some("substrate") {
+        for bin in &["/usr/local/bin/atelet", "/usr/local/bin/ateom-gvisor"] {
+            if !Path::new(bin).exists() {
+                warnings.push(format!("{bin} not found after install"));
+            }
+        }
+        for dir in &["/var/lib/substrate", "/etc/substrate"] {
+            if !Path::new(dir).is_dir() {
+                warnings.push(format!("{dir} directory missing"));
+            }
+        }
+        msg_parts.push("substrate data-plane verified".to_string());
+    }
+
+    let status = if warnings.len() > warnings_before {
+        PhaseStatus::Warning
+    } else {
+        PhaseStatus::Success
+    };
+
+    Ok(PhaseResult {
+        phase: InstallPhase::PostVerify,
+        status,
+        message: msg_parts.join(", "),
+    })
+}
+
+// ===========================================================================
 // Dry-run plan builder
 // ===========================================================================
 
@@ -1528,6 +2383,9 @@ fn firecracker_provision_default_assets(
 pub fn build_dry_run_plan(request: &SandboxInstallRequest) -> SandboxInstallDryRun {
     let phases = match request.backend {
         SandboxBackendKind::Firecracker => firecracker_dry_run_phases(&request.variant),
+        SandboxBackendKind::Gvisor => {
+            gvisor_dry_run_phases(request.runtime.as_deref(), request.control_panel.as_deref())
+        }
         _ => vec![DryRunPhase {
             phase: InstallPhase::Preflight,
             actions: vec![format!(
@@ -1633,6 +2491,99 @@ fn firecracker_dry_run_phases(variant: &str) -> Vec<DryRunPhase> {
     }
 }
 
+fn gvisor_dry_run_phases(runtime: Option<&str>, control_panel: Option<&str>) -> Vec<DryRunPhase> {
+    let mode_label = match (runtime, control_panel) {
+        (_, Some("substrate")) => "shim + substrate data-plane",
+        (Some("containerd"), _) => "shim (containerd)",
+        (Some("docker"), _) => "docker",
+        _ => "standalone",
+    };
+
+    let preflight_actions = {
+        let mut a = vec![
+            "Check OS = Linux".to_string(),
+            "Check arch = x86_64 or aarch64".to_string(),
+            "Check kernel >= 4.15".to_string(),
+            "Check kernel.yama.ptrace_scope <= 2".to_string(),
+        ];
+        if runtime == Some("containerd") || control_panel == Some("substrate") {
+            a.push("Check containerd.service active".to_string());
+        }
+        a
+    };
+
+    let pkg_list: &[&str] = match (runtime, control_panel) {
+        (_, Some("substrate")) => GVISOR_SUBSTRATE_PACKAGES,
+        (Some("containerd"), _) => GVISOR_SHIM_PACKAGES,
+        (Some("docker"), _) => GVISOR_DOCKER_PACKAGES,
+        _ => GVISOR_STANDALONE_PACKAGES,
+    };
+
+    let mut os_primitives_actions =
+        vec!["Write /etc/runsc/config.toml (platform=systrap)".to_string()];
+    if runtime == Some("containerd") || control_panel == Some("substrate") {
+        os_primitives_actions.push(
+            "Patch /etc/containerd/config.toml (register io.containerd.runsc.v1 runtime handler)"
+                .to_string(),
+        );
+        os_primitives_actions.push("systemctl restart containerd.service".to_string());
+    }
+    if runtime == Some("docker") {
+        os_primitives_actions
+            .push("Write /etc/docker/daemon.json (register runsc OCI runtime)".to_string());
+        os_primitives_actions.push("systemctl restart docker.service".to_string());
+    }
+    if control_panel == Some("substrate") {
+        os_primitives_actions.push("mkdir -p /var/lib/substrate/{checkpoints,state}".to_string());
+        os_primitives_actions.push("mkdir -p /etc/substrate/{config,tls}".to_string());
+        os_primitives_actions.push("Write /etc/substrate/config/node-config.yaml".to_string());
+        os_primitives_actions
+            .push("Write /etc/substrate/tls/README (cert-manager placeholder)".to_string());
+    }
+
+    let mut verify_actions = vec![
+        "runsc --version".to_string(),
+        "runsc do /bin/true (syscall interception)".to_string(),
+        "runsc help checkpoint (checkpoint capability)".to_string(),
+    ];
+    if runtime == Some("containerd") || control_panel == Some("substrate") {
+        verify_actions.push(
+            "Verify /usr/bin/containerd-shim-runsc-v1 + io.containerd.runsc.v1 in /etc/containerd/config.toml"
+                .to_string(),
+        );
+    }
+    if control_panel == Some("substrate") {
+        verify_actions.push("Verify atelet + ateom-gvisor binaries in PATH".to_string());
+        verify_actions.push("Verify /var/lib/substrate/ + /etc/substrate/ directories".to_string());
+    }
+
+    vec![
+        DryRunPhase {
+            phase: InstallPhase::Preflight,
+            actions: preflight_actions,
+        },
+        DryRunPhase {
+            phase: InstallPhase::Packages,
+            actions: vec![format!(
+                "dnf install: {} (mode: {mode_label})",
+                pkg_list.join(", ")
+            )],
+        },
+        DryRunPhase {
+            phase: InstallPhase::OsPrimitives,
+            actions: os_primitives_actions,
+        },
+        DryRunPhase {
+            phase: InstallPhase::ServiceSetup,
+            actions: vec!["(none \u{2014} runsc is on-demand)".to_string()],
+        },
+        DryRunPhase {
+            phase: InstallPhase::PostVerify,
+            actions: verify_actions,
+        },
+    ]
+}
+
 // ===========================================================================
 // State integration helpers
 // ===========================================================================
@@ -1675,7 +2626,16 @@ fn write_installed_state(
         managed: true,
         adopted: false,
         subscription_scope: Default::default(),
-        enabled_features: vec![format!("variant={}", request.variant)],
+        enabled_features: {
+            let mut feats = vec![format!("variant={}", request.variant)];
+            if let Some(ref rt) = request.runtime {
+                feats.push(format!("runtime={rt}"));
+            }
+            if let Some(ref cp) = request.control_panel {
+                feats.push(format!("control_panel={cp}"));
+            }
+            feats
+        },
         component_refs: Vec::new(),
         files: Vec::new(),
         external_modified_files: Vec::new(),
@@ -1851,22 +2811,116 @@ fn check_kvm_permissions(_warnings: &mut Vec<String>) {
 }
 
 /// Validate the request is for a supported backend/variant combination.
+///
+/// Implements the rev4 fail-fast checklist (gvisor-substrate-design-note §5.4.2):
+/// rejects 7 illegal flag combinations up-front instead of letting them
+/// surface as confusing errors deep in the pipeline.
 pub fn validate_request(request: &SandboxInstallRequest) -> Result<(), SandboxInstallError> {
     match request.backend {
-        SandboxBackendKind::Firecracker => match request.variant.as_str() {
-            "standard" | "default" | "e2b" => Ok(()),
-            "kata-fc" => Err(SandboxInstallError::Unsupported {
-                backend: "firecracker".to_string(),
-                variant: format!("{} (not yet implemented)", request.variant),
-            }),
-            _ => Err(SandboxInstallError::Unsupported {
-                backend: "firecracker".to_string(),
-                variant: format!(
-                    "{} (unknown variant; valid: standard, e2b, kata-fc)",
-                    request.variant
-                ),
-            }),
-        },
+        SandboxBackendKind::Firecracker => {
+            // fail-fast #7: firecracker bypasses L2 — refuse any --runtime.
+            if request.runtime.is_some() {
+                return Err(SandboxInstallError::Unsupported {
+                    backend: "firecracker".to_string(),
+                    variant: "firecracker does not use --runtime; it accesses KVM directly"
+                        .to_string(),
+                });
+            }
+            if request.control_panel.is_some() {
+                return Err(SandboxInstallError::Unsupported {
+                    backend: "firecracker".to_string(),
+                    variant: "firecracker does not support --control-panel".to_string(),
+                });
+            }
+            match request.variant.as_str() {
+                "standard" | "default" | "e2b" => Ok(()),
+                "kata-fc" => Err(SandboxInstallError::Unsupported {
+                    backend: "firecracker".to_string(),
+                    variant: format!("{} (not yet implemented)", request.variant),
+                }),
+                _ => Err(SandboxInstallError::Unsupported {
+                    backend: "firecracker".to_string(),
+                    variant: format!(
+                        "{} (unknown variant; valid: standard, e2b, kata-fc)",
+                        request.variant
+                    ),
+                }),
+            }
+        }
+        SandboxBackendKind::Gvisor => {
+            // fail-fast #1: gVisor has no fork; reject any --variant override
+            // other than the default placeholder "default".
+            //
+            // The CLI fills `variant` with `default_variant()` when the user
+            // omits --variant, so we accept that exact string. Any other
+            // value (substrate / ax / e2b / runc / ...) means the user passed
+            // --variant explicitly, which is illegal for gvisor.
+            match request.variant.as_str() {
+                "default" => {}
+                "substrate" => {
+                    return Err(SandboxInstallError::Unsupported {
+                        backend: "gvisor".to_string(),
+                        variant:
+                            "gvisor does not support --variant; use --control-panel=substrate instead"
+                                .to_string(),
+                    });
+                }
+                "e2b" => {
+                    return Err(SandboxInstallError::Unsupported {
+                        backend: "gvisor".to_string(),
+                        variant: "unknown variant for gvisor; e2b is a variant of firecracker"
+                            .to_string(),
+                    });
+                }
+                _ => {
+                    return Err(SandboxInstallError::Unsupported {
+                        backend: "gvisor".to_string(),
+                        variant: format!(
+                            "{} (gvisor does not support --variant; use --runtime=containerd|docker and/or --control-panel=substrate)",
+                            request.variant
+                        ),
+                    });
+                }
+            }
+            // fail-fast #3: rev4 only ships containerd / docker integration.
+            if let Some(rt) = request.runtime.as_deref() {
+                match rt {
+                    "containerd" | "docker" => {}
+                    _ => {
+                        return Err(SandboxInstallError::Unsupported {
+                            backend: "gvisor".to_string(),
+                            variant: format!(
+                                "unsupported runtime '{rt}'; rev4 supports containerd, docker"
+                            ),
+                        });
+                    }
+                }
+            }
+            // fail-fast #4: --control-panel=substrate strictly requires the
+            // containerd shim — Substrate's data-plane (atelet) is wired
+            // through containerd RuntimeClass, see design-note §5.3.4.
+            if let Some(cp) = request.control_panel.as_deref() {
+                if cp != "substrate" {
+                    return Err(SandboxInstallError::Unsupported {
+                        backend: "gvisor".to_string(),
+                        variant: format!(
+                            "unsupported --control-panel '{cp}'; rev4 only supports 'substrate'"
+                        ),
+                    });
+                }
+                if request.runtime.as_deref() != Some("containerd") {
+                    return Err(SandboxInstallError::EnvNotSatisfied {
+                        reason: "--control-panel=substrate requires --runtime=containerd"
+                            .to_string(),
+                        remediation: Some(
+                            "add --runtime=containerd, or drop --control-panel=substrate"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        }
         other => Err(SandboxInstallError::Unsupported {
             backend: other.to_string(),
             variant: format!("{} (not yet implemented)", request.variant),
@@ -1909,6 +2963,8 @@ mod tests {
             dry_run: false,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         assert!(validate_request(&req).is_ok());
@@ -1922,6 +2978,8 @@ mod tests {
             dry_run: false,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         assert!(validate_request(&req).is_err());
@@ -1935,6 +2993,8 @@ mod tests {
             dry_run: false,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         assert!(validate_request(&req).is_err());
@@ -1948,6 +3008,8 @@ mod tests {
             dry_run: true,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         let plan = build_dry_run_plan(&req);
@@ -1964,6 +3026,8 @@ mod tests {
             dry_run: false,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         assert!(validate_request(&req).is_ok());
@@ -1977,6 +3041,8 @@ mod tests {
             dry_run: true,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         let plan = build_dry_run_plan(&req);
@@ -2012,6 +3078,8 @@ mod tests {
             dry_run: true,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         let plan = build_dry_run_plan(&req);
@@ -2039,6 +3107,8 @@ mod tests {
             dry_run: true,
             force: false,
             no_verify: false,
+            runtime: None,
+            control_panel: None,
             json: false,
         };
         let plan = build_dry_run_plan(&req);
@@ -2062,6 +3132,380 @@ mod tests {
         assert!(
             osc.iter().any(|a| a.contains("vm-config.json")),
             "e2b variant must provision default vm-config.json: {osc:?}"
+        );
+    }
+
+    // ----- gVisor tests -----
+
+    #[test]
+    fn test_validate_request_gvisor_standalone() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: None,
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        assert!(validate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_gvisor_shim() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("containerd".to_string()),
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        assert!(validate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_gvisor_docker() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("docker".to_string()),
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        assert!(validate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_gvisor_substrate() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("containerd".to_string()),
+            control_panel: Some("substrate".to_string()),
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        assert!(validate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_validate_gvisor_fail_fast_variant_substrate() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "substrate".to_string(),
+            runtime: None,
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("--control-panel=substrate"));
+    }
+
+    #[test]
+    fn test_validate_gvisor_fail_fast_variant_e2b() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "e2b".to_string(),
+            runtime: None,
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("firecracker"));
+    }
+
+    #[test]
+    fn test_validate_gvisor_fail_fast_unsupported_runtime() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("podman".to_string()),
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("podman"));
+    }
+
+    #[test]
+    fn test_validate_gvisor_fail_fast_substrate_without_containerd() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("docker".to_string()),
+            control_panel: Some("substrate".to_string()),
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("--runtime=containerd"));
+    }
+
+    #[test]
+    fn test_validate_firecracker_fail_fast_runtime() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Firecracker,
+            variant: "standard".to_string(),
+            runtime: Some("containerd".to_string()),
+            control_panel: None,
+            dry_run: false,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("KVM directly"));
+    }
+
+    #[test]
+    fn test_dry_run_plan_gvisor_standalone() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: None,
+            control_panel: None,
+            dry_run: true,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let plan = build_dry_run_plan(&req);
+        assert_eq!(plan.phases.len(), 5);
+        assert_eq!(plan.phases[0].phase, InstallPhase::Preflight);
+        assert_eq!(plan.phases[4].phase, InstallPhase::PostVerify);
+        // Verify pkg list
+        assert!(plan.phases[1].actions[0].contains("gvisor-runsc"));
+        assert!(plan.phases[1].actions[0].contains("standalone"));
+    }
+
+    #[test]
+    fn test_dry_run_plan_gvisor_substrate() {
+        let req = SandboxInstallRequest {
+            backend: SandboxBackendKind::Gvisor,
+            variant: "default".to_string(),
+            runtime: Some("containerd".to_string()),
+            control_panel: Some("substrate".to_string()),
+            dry_run: true,
+            force: false,
+            no_verify: false,
+            json: false,
+        };
+        let plan = build_dry_run_plan(&req);
+        assert_eq!(plan.phases.len(), 5);
+        // Pre-flight should check containerd
+        assert!(
+            plan.phases[0]
+                .actions
+                .iter()
+                .any(|a| a.contains("containerd"))
+        );
+        // Packages should include substrate
+        assert!(plan.phases[1].actions[0].contains("atelet"));
+        assert!(plan.phases[1].actions[0].contains("ateom-gvisor"));
+        // OS primitives should include substrate dirs
+        assert!(
+            plan.phases[2]
+                .actions
+                .iter()
+                .any(|a| a.contains("/var/lib/substrate"))
+        );
+        assert!(
+            plan.phases[2]
+                .actions
+                .iter()
+                .any(|a| a.contains("node-config.yaml"))
+        );
+        // Verify should check substrate
+        assert!(plan.phases[4].actions.iter().any(|a| a.contains("atelet")));
+    }
+
+    // -- RPM packaging error message tests ---------------------------------
+    //
+    // These guard the human-readable error returned when the ANOLISA sandbox
+    // RPMs are missing from configured repos. The format is part of the
+    // operator-facing contract — changes that drop the repo ID, the doc path,
+    // or the list of missing packages will silently degrade the diagnostic.
+
+    #[test]
+    fn test_gvisor_missing_rpm_error_lists_missing_and_required() {
+        let missing = ["atelet", "ateom-gvisor"];
+        let required = GVISOR_SUBSTRATE_PACKAGES;
+        let msg = gvisor_missing_rpm_error(&missing, required);
+        // Missing packages must appear verbatim.
+        assert!(msg.contains("atelet"), "missing pkg name dropped: {msg}");
+        assert!(
+            msg.contains("ateom-gvisor"),
+            "missing pkg name dropped: {msg}"
+        );
+        // Required set must be enumerated so operators see the full mode.
+        assert!(
+            msg.contains("gvisor-runsc"),
+            "required set truncated: {msg}"
+        );
+        assert!(
+            msg.contains("containerd-shim-runsc-v1"),
+            "required set truncated: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_gvisor_missing_rpm_error_points_to_repo_and_doc() {
+        let missing = ["gvisor-runsc"];
+        let msg = gvisor_missing_rpm_error(&missing, GVISOR_STANDALONE_PACKAGES);
+        // The repo ID and doc path are the actionable hooks; both must appear.
+        assert!(
+            msg.contains(ANOLISA_SANDBOX_REPO_ID),
+            "repo id missing: {msg}"
+        );
+        assert!(
+            msg.contains(SANDBOX_RPM_PACKAGING_DOC),
+            "doc path missing: {msg}"
+        );
+        // Confirm the message explicitly says these aren't upstream packages
+        // — prevents operators from chasing distro repos.
+        assert!(
+            msg.contains("NOT shipped by upstream"),
+            "upstream-not-available phrase missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_anolisa_sandbox_repo_id_matches_manifest() {
+        // sandbox-gvisor.toml declares `[dependencies.repository] id =
+        // "anolisa-sandbox"`. If you rename either side without the other,
+        // operators will see a repo ID in error messages that doesn't exist
+        // in the manifest — catch the drift here.
+        assert_eq!(ANOLISA_SANDBOX_REPO_ID, "anolisa-sandbox");
+    }
+
+    #[test]
+    fn test_packaging_doc_path_is_sandbox_relative() {
+        // The doc path is rendered into error messages verbatim; keep it
+        // workspace-relative (no leading slash, no file:// prefix).
+        assert!(
+            SANDBOX_RPM_PACKAGING_DOC.starts_with("ANOLISA-design/"),
+            "unexpected doc path: {SANDBOX_RPM_PACKAGING_DOC}"
+        );
+        assert!(
+            SANDBOX_RPM_PACKAGING_DOC.ends_with("sandbox-rpm-packaging.md"),
+            "unexpected doc path: {SANDBOX_RPM_PACKAGING_DOC}"
+        );
+    }
+
+    // -- containerd config.toml AST merge ---------------------------------
+    //
+    // These guard the toml_edit-based merge in
+    // `ensure_containerd_runsc_runtime`. The previous implementation did a
+    // plain string append, which broke under containerd 2.x's strict TOML
+    // parser as soon as the user already had a `runtimes` / `runtimes.runsc`
+    // table. The tests below pin the merged-document invariants we rely on.
+
+    fn render(doc: &toml_edit::DocumentMut) -> String {
+        doc.to_string()
+    }
+
+    #[test]
+    fn test_containerd_merge_writes_canonical_keys_into_empty_doc() {
+        let mut doc = "".parse::<toml_edit::DocumentMut>().unwrap();
+        let changed = ensure_containerd_runsc_runtime(&mut doc);
+        assert!(changed, "empty doc must be marked as changed");
+        let out = render(&doc);
+        assert!(
+            out.contains("io.containerd.runsc.v1"),
+            "runtime_type missing: {out}"
+        );
+        assert!(
+            out.contains("io.containerd.runsc.v1.options"),
+            "TypeUrl missing: {out}"
+        );
+        assert!(
+            out.contains("/etc/runsc/config.toml"),
+            "ConfigPath missing: {out}"
+        );
+    }
+
+    #[test]
+    fn test_containerd_merge_is_idempotent() {
+        let initial = r#"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+    TypeUrl = "io.containerd.runsc.v1.options"
+    ConfigPath = "/etc/runsc/config.toml"
+"#;
+        let mut doc = initial.parse::<toml_edit::DocumentMut>().unwrap();
+        let changed = ensure_containerd_runsc_runtime(&mut doc);
+        assert!(!changed, "already-correct doc must not be marked changed");
+    }
+
+    #[test]
+    fn test_containerd_merge_preserves_sibling_runtime() {
+        // Operator already has runc registered; we must not clobber it and
+        // must NOT produce a duplicate `runtimes.runsc` table.
+        let initial = r#"version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+"#;
+        let mut doc = initial.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(ensure_containerd_runsc_runtime(&mut doc));
+        let out = render(&doc);
+
+        // Sibling preserved.
+        assert!(
+            out.contains("io.containerd.runc.v2"),
+            "runc clobbered: {out}"
+        );
+        // runsc registered.
+        assert!(
+            out.contains("io.containerd.runsc.v1"),
+            "runsc missing: {out}"
+        );
+
+        // No duplicate `runtimes.runsc` table header (the regression we are
+        // protecting against under containerd 2.x).
+        let dup_count = out.matches("runtimes.runsc]").count();
+        assert!(dup_count <= 1, "duplicate runsc table headers: {out}");
+    }
+
+    #[test]
+    fn test_containerd_merge_updates_stale_runtime_type() {
+        // User has a stale entry pointing at the v0 shim; merge must rewrite
+        // it to the v1 shim without producing a second table.
+        let initial = r#"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v0"
+"#;
+        let mut doc = initial.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(ensure_containerd_runsc_runtime(&mut doc));
+        let out = render(&doc);
+        assert!(
+            out.contains("io.containerd.runsc.v1"),
+            "v1 shim not written: {out}"
+        );
+        assert!(
+            !out.contains("io.containerd.runsc.v0"),
+            "stale v0 shim left: {out}"
         );
     }
 }
