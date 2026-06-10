@@ -1080,7 +1080,7 @@ impl AgentSight {
                                         cid,
                                         ie.interruption_type.as_str(),
                                     );
-                                    if count >= 5 && ie.interruption_type != crate::interruption::InterruptionType::RetryStorm {
+                                    if should_trigger_retry_storm(count.into(), &ie.interruption_type) {
                                         let storm_event = crate::interruption::InterruptionEvent::new(
                                             crate::interruption::InterruptionType::RetryStorm,
                                             ie.session_id.clone(),
@@ -1661,5 +1661,80 @@ impl AgentSight {
 impl Drop for AgentSight {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+fn should_trigger_retry_storm(
+    count: i64,
+    interruption_type: &crate::interruption::InterruptionType,
+) -> bool {
+    use crate::interruption::InterruptionType;
+    count >= 5
+        && *interruption_type != InterruptionType::RetryStorm
+        && *interruption_type != InterruptionType::SecurityMatch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interruption::InterruptionType;
+
+    #[test]
+    fn test_retry_storm_triggers_for_error_types() {
+        let error_types = [
+            InterruptionType::RateLimit,
+            InterruptionType::AuthError,
+            InterruptionType::NetworkTimeout,
+            InterruptionType::ServiceUnavailable,
+            InterruptionType::LlmError,
+            InterruptionType::SseTruncated,
+            InterruptionType::ContextOverflow,
+            InterruptionType::TokenLimit,
+            InterruptionType::SafetyFilter,
+            InterruptionType::AgentCrash,
+        ];
+        for itype in &error_types {
+            assert!(
+                should_trigger_retry_storm(5, itype),
+                "RetryStorm should fire for {:?} at count=5",
+                itype,
+            );
+            assert!(
+                should_trigger_retry_storm(10, itype),
+                "RetryStorm should fire for {:?} at count=10",
+                itype,
+            );
+        }
+    }
+
+    #[test]
+    fn test_retry_storm_does_not_trigger_below_threshold() {
+        assert!(!should_trigger_retry_storm(4, &InterruptionType::RateLimit));
+        assert!(!should_trigger_retry_storm(0, &InterruptionType::LlmError));
+        assert!(!should_trigger_retry_storm(1, &InterruptionType::AuthError));
+    }
+
+    #[test]
+    fn test_retry_storm_excluded_for_security_match() {
+        assert!(!should_trigger_retry_storm(
+            5,
+            &InterruptionType::SecurityMatch
+        ));
+        assert!(!should_trigger_retry_storm(
+            100,
+            &InterruptionType::SecurityMatch
+        ));
+    }
+
+    #[test]
+    fn test_retry_storm_excluded_for_retry_storm() {
+        assert!(!should_trigger_retry_storm(
+            5,
+            &InterruptionType::RetryStorm
+        ));
+        assert!(!should_trigger_retry_storm(
+            100,
+            &InterruptionType::RetryStorm
+        ));
     }
 }
