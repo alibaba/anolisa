@@ -1,164 +1,137 @@
-//! Session management for cosh-tui.
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use crate::provider::Message;
 
-/// Metadata about a session.
-#[derive(Serialize, Deserialize)]
-pub struct SessionMetadata {
-    pub id: String,
-    pub name: String,
-    pub created_at: String,
-    pub working_dir: String,
-    pub command_count: usize,
+pub struct SessionStore {
+    base_dir: PathBuf,
 }
 
-/// History entries recorded in a session.
-#[derive(Serialize, Deserialize)]
-pub struct SessionHistory {
-    pub entries: Vec<SessionHistoryEntry>,
-}
-
-/// A single history entry within a session.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct SessionHistoryEntry {
-    pub command: String,
-    pub output: String,
-    pub success: bool,
-    pub timestamp: String,
-}
-
-/// Return the base directory for session storage.
-pub fn session_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".copilot-shell")
-        .join("sessions")
-}
-
-/// Save session metadata and history to disk.
-///
-/// Atomic: each file is written to `<name>.tmp` then renamed over the target.
-/// Permissions are tightened to 0700 directory / 0600 files because session
-/// history may contain prompts, tool outputs, or chat content the user does
-/// not want world-readable.
-pub fn save_session(
-    metadata: &SessionMetadata,
-    history: &SessionHistory,
-) -> std::io::Result<()> {
-    let dir = session_dir().join(&metadata.id);
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+impl SessionStore {
+    pub fn new(persist_dir: &str) -> Self {
+        let base_dir = if persist_dir.starts_with('~') {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(&persist_dir[2..])
+        } else {
+            PathBuf::from(persist_dir)
+        };
+        Self { base_dir }
     }
-    write_atomic_0600(
-        &dir.join("metadata.json"),
-        serde_json::to_string_pretty(metadata)?.as_bytes(),
-    )?;
-    write_atomic_0600(
-        &dir.join("history.json"),
-        serde_json::to_string_pretty(history)?.as_bytes(),
-    )?;
-    Ok(())
-}
 
-fn write_atomic_0600(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    fn session_path(&self, session_id: &str) -> PathBuf {
+        self.base_dir.join(format!("{session_id}.json"))
     }
-    std::fs::rename(&tmp, path)
-}
 
-/// Load a session's history from disk.
-#[allow(dead_code)]
-pub fn load_session_history(session_id: &str) -> Option<SessionHistory> {
-    let path = session_dir().join(session_id).join("history.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
+    pub fn persist(&self, session_id: &str, messages: &[Message]) -> Result<(), String> {
+        std::fs::create_dir_all(&self.base_dir)
+            .map_err(|e| format!("Failed to create session dir: {e}"))?;
 
-/// List all saved sessions by scanning the session directory.
-pub fn list_sessions() -> Vec<SessionMetadata> {
-    let dir = session_dir();
-    let mut sessions = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let meta_path = entry.path().join("metadata.json");
-            if meta_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&meta_path) {
-                    if let Ok(meta) = serde_json::from_str::<SessionMetadata>(&content) {
-                        sessions.push(meta);
-                    }
+        let json = serde_json::to_string_pretty(messages)
+            .map_err(|e| format!("Failed to serialize messages: {e}"))?;
+
+        std::fs::write(self.session_path(session_id), json)
+            .map_err(|e| format!("Failed to write session file: {e}"))?;
+
+        Ok(())
+    }
+
+    pub fn resume(&self, session_id: &str) -> Result<Vec<Message>, String> {
+        let path = self.session_path(session_id);
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_from_path(path: &Path) -> Result<Vec<Message>, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read session file: {e}"))?;
+
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse session file: {e}"))
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(&self.base_dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().map_or(false, |ext| ext == "json") {
+                    path.file_stem().map(|s| s.to_string_lossy().to_string())
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect()
     }
-    sessions
+
+    pub fn clear(&self, session_id: &str) -> Result<(), String> {
+        let path = self.session_path(session_id);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove session file: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
-    fn test_save_and_load_session() {
-        let test_id = format!("test_session_{}", std::process::id());
-        let metadata = SessionMetadata {
-            id: test_id.clone(),
-            name: "test-session".to_string(),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            working_dir: "/tmp".to_string(),
-            command_count: 3,
-        };
-        let history = SessionHistory {
-            entries: vec![
-                SessionHistoryEntry {
-                    command: "pkg list".to_string(),
-                    output: "vim nginx".to_string(),
-                    success: true,
-                    timestamp: "100ms".to_string(),
-                },
-                SessionHistoryEntry {
-                    command: "bad cmd".to_string(),
-                    output: "error".to_string(),
-                    success: false,
-                    timestamp: "50ms".to_string(),
-                },
-            ],
-        };
+    fn persist_and_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap());
 
-        // Save
-        save_session(&metadata, &history).expect("save_session failed");
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("hi there"),
+        ];
 
-        // Verify metadata
-        let dir = session_dir().join(&test_id);
-        assert!(dir.join("metadata.json").exists());
-        assert!(dir.join("history.json").exists());
+        store.persist("test-session", &messages).unwrap();
+        let loaded = store.resume("test-session").unwrap();
 
-        // Load and verify
-        let loaded = load_session_history(&test_id).expect("load failed");
-        assert_eq!(loaded.entries.len(), 2);
-        assert_eq!(loaded.entries[0].command, "pkg list");
-        assert!(!loaded.entries[1].success);
-
-        // List sessions should find it
-        let sessions = list_sessions();
-        assert!(sessions.iter().any(|s| s.id == test_id));
-
-        // Cleanup
-        let _ = fs::remove_dir_all(dir);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[1].role, "assistant");
     }
 
     #[test]
-    fn test_list_sessions_empty_dir() {
-        // Just ensure it doesn't panic on missing dir
-        let _sessions = list_sessions();
+    fn list_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap());
+
+        store.persist("sess-1", &[Message::user("a")]).unwrap();
+        store.persist("sess-2", &[Message::user("b")]).unwrap();
+
+        let mut sessions = store.list();
+        sessions.sort();
+        assert_eq!(sessions, vec!["sess-1", "sess-2"]);
+    }
+
+    #[test]
+    fn clear_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap());
+
+        store.persist("sess-1", &[Message::user("a")]).unwrap();
+        assert!(store.resume("sess-1").is_ok());
+
+        store.clear("sess-1").unwrap();
+        assert!(store.resume("sess-1").is_err());
+    }
+
+    #[test]
+    fn resume_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap());
+        assert!(store.resume("nonexistent").is_err());
+    }
+
+    #[test]
+    fn list_empty_dir() {
+        let store = SessionStore::new("/nonexistent/path");
+        assert!(store.list().is_empty());
     }
 }
