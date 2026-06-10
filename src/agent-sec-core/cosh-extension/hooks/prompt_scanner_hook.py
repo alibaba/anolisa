@@ -43,6 +43,11 @@ def _allow() -> str:
     return json.dumps({"decision": "allow"})
 
 
+def _ask(reason: str) -> str:
+    """Return an 'ask' cosh HookOutput so the user sees the issue and decides."""
+    return json.dumps({"decision": "ask", "reason": reason}, ensure_ascii=False)
+
+
 def _build_detail_reason(scan_result: dict) -> str:
     """Build a detailed reason string from scan result for security operations."""
     threat_type = scan_result.get("threat_type", "")
@@ -71,9 +76,9 @@ def _format_cosh(scan_result: dict) -> str:
         verdict == "pass"  -> decision "allow"
         verdict == "warn"  -> decision "ask"  (let user decide)
         verdict == "deny"  -> decision "ask"  (let user decide)
-        otherwise           -> fail-open "allow"
+        otherwise           -> decision "ask"  (fail-ask: surface scan failure to user)
     """
-    verdict = scan_result.get("verdict", "pass")
+    verdict = scan_result.get("verdict")
 
     if verdict == "pass":
         return json.dumps({"decision": "allow"})
@@ -92,8 +97,9 @@ def _format_cosh(scan_result: dict) -> str:
             {"decision": "ask", "reason": reason},
             ensure_ascii=False,
         )
-    # other error or unknown verdict -> fail-open
-    return json.dumps({"decision": "allow"})
+    # missing, error, or unknown verdict -> fail-ask: let user decide
+    error_detail = scan_result.get("summary", verdict or "unknown")
+    return _ask(f"[prompt-scanner] 扫描异常 (verdict={verdict}): {error_detail}")
 
 
 # -- main ------------------------------------------------------------------
@@ -142,11 +148,11 @@ def main() -> None:
             f"[prompt-scanner] CLI timed out after {exc.timeout}s",
             file=sys.stderr,
         )
-        print(_allow())
+        print(_ask(f"[prompt-scanner] 安全扫描超时 ({exc.timeout}s)，未完成扫描"))
         return
     except Exception as exc:
         print(f"[prompt-scanner] CLI invocation failed: {exc}", file=sys.stderr)
-        print(_allow())
+        print(_ask(f"[prompt-scanner] 安全扫描调用失败: {exc}"))
         return
 
     if proc.returncode != 0:
@@ -156,7 +162,7 @@ def main() -> None:
             f" {'; '.join(stderr_tail)}",
             file=sys.stderr,
         )
-        print(_allow())
+        print(_ask(f"[prompt-scanner] 安全扫描异常退出 (code={proc.returncode})"))
         return
 
     # 4. Parse ScanResult JSON from stdout
@@ -167,7 +173,7 @@ def main() -> None:
             f"[prompt-scanner] failed to parse CLI output: {exc}",
             file=sys.stderr,
         )
-        print(_allow())
+        print(_ask("[prompt-scanner] 安全扫描结果解析失败，未完成扫描"))
         return
 
     # 5. Format and print cosh output

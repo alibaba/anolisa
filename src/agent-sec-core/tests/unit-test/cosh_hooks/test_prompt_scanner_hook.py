@@ -6,7 +6,7 @@ integration-style tests.
 
 Tests cover:
 1. verdict → decision mapping (pass, warn, deny, error, unknown)
-2. Error verdict fails open
+2. Error/unknown verdicts fail-ask (not fail-open)
 3. Subprocess integration: pipe JSON into the hook and verify stdout
 """
 
@@ -90,35 +90,39 @@ class TestFormatCoshDeny:
 
 
 class TestFormatCoshError:
-    """verdict=error → fail-open allow."""
+    """verdict=error → fail-ask: surface to user."""
 
-    def test_error_returns_allow(self):
+    def test_error_returns_ask(self):
         result = json.loads(
             _format_cosh(
                 {
                     "verdict": "error",
-                    "summary": "internal scanner failure",
+                    "summary": "agent-sec daemon is unavailable",
                 }
             )
         )
-        assert result["decision"] == "allow"
+        assert result["decision"] == "ask"
+        assert "扫描异常" in result["reason"]
+        assert "agent-sec daemon is unavailable" in result["reason"]
 
-    def test_error_with_empty_summary_returns_allow(self):
+    def test_error_with_no_detail_returns_ask(self):
         result = json.loads(_format_cosh({"verdict": "error"}))
-        assert result["decision"] == "allow"
+        assert result["decision"] == "ask"
+        assert "error" in result["reason"]
 
 
 class TestFormatCoshUnknown:
-    """Unknown verdict → fail-open allow."""
+    """Unknown verdict → fail-ask: surface to user."""
 
-    def test_unknown_verdict_returns_allow(self):
+    def test_unknown_verdict_returns_ask(self):
         result = json.loads(_format_cosh({"verdict": "unknown"}))
-        assert result["decision"] == "allow"
+        assert result["decision"] == "ask"
 
-    def test_missing_verdict_defaults_to_allow(self):
-        """When verdict key is missing, default is 'pass' → allow."""
+    def test_missing_verdict_returns_ask(self):
+        """When verdict key is missing, fail-ask (not fail-open)."""
         result = json.loads(_format_cosh({}))
-        assert result["decision"] == "allow"
+        assert result["decision"] == "ask"
+        assert "扫描异常" in result["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +224,59 @@ class TestCoshHookSubprocess:
             "user_input",
         ]
         assert captured["kwargs"]["check"] is False
+
+    def _mock_stdin(self, monkeypatch):
+        """Set stdin to a valid prompt so main() reaches the subprocess call."""
+        monkeypatch.setattr(
+            prompt_scanner_hook.sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "test prompt"})),
+        )
+
+    def test_cli_timeout_returns_ask(self, monkeypatch, capsys):
+        self._mock_stdin(monkeypatch)
+
+        def fake_run(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 10))
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        prompt_scanner_hook.main()
+        output = json.loads(capsys.readouterr().out)
+        assert output["decision"] == "ask"
+        assert "超时" in output["reason"]
+
+    def test_cli_exception_returns_ask(self, monkeypatch, capsys):
+        self._mock_stdin(monkeypatch)
+
+        def fake_run(args, **kwargs):
+            raise OSError("No such file")
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        prompt_scanner_hook.main()
+        output = json.loads(capsys.readouterr().out)
+        assert output["decision"] == "ask"
+        assert "调用失败" in output["reason"]
+
+    def test_cli_nonzero_exit_returns_ask(self, monkeypatch, capsys):
+        self._mock_stdin(monkeypatch)
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="segfault")
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        prompt_scanner_hook.main()
+        output = json.loads(capsys.readouterr().out)
+        assert output["decision"] == "ask"
+        assert "异常退出" in output["reason"]
+
+    def test_cli_bad_json_returns_ask(self, monkeypatch, capsys):
+        self._mock_stdin(monkeypatch)
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, returncode=0, stdout="not-json", stderr="")
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        prompt_scanner_hook.main()
+        output = json.loads(capsys.readouterr().out)
+        assert output["decision"] == "ask"
+        assert "解析失败" in output["reason"]
