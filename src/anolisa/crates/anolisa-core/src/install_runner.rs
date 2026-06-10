@@ -13,10 +13,10 @@
 //! create files outside those roots, so a failed install can roll back by
 //! deleting just the paths it returns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anolisa_platform::fs_layout::FsLayout;
 use flate2::read::GzDecoder;
@@ -124,6 +124,13 @@ pub enum InstallError {
         path: PathBuf,
     },
 
+    /// Two manifest/archive entries resolved to the same destination.
+    #[error("destination '{path}' is declared more than once")]
+    DuplicateDestination {
+        /// Duplicate destination path.
+        path: PathBuf,
+    },
+
     /// Layout substitution failed to consume a template placeholder.
     #[error(
         "destination '{path}' resolved to an unrendered template — manifest variable not substituted"
@@ -213,35 +220,11 @@ impl<'a> InstallRunner<'a> {
         if files.is_empty() {
             return Err(InstallError::NoDestinations);
         }
-        for file in files {
-            self.validate_dest(&file.dest)?;
-        }
-        // Fresh-install only for P1-F: refuse to overwrite anything already
-        // on disk. Backup/restore of pre-existing ANOLISA-owned files lands
-        // in P1-G; until then, the runner must never silently clobber.
-        // Check all dests up front so a partial run can't leave half-written
-        // siblings behind. Use `symlink_metadata` rather than `exists()` so
-        // a broken symlink (target missing, `exists()` returns false) is
-        // still caught and refused.
-        for file in files {
-            match fs::symlink_metadata(&file.dest) {
-                Ok(_) => {
-                    return Err(InstallError::DestExists {
-                        path: file.dest.clone(),
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(InstallError::Io {
-                        path: file.dest.clone(),
-                        source,
-                    });
-                }
-            }
-        }
-
         match artifact_type {
-            "binary" => self.install_binary(cached_artifact, files),
+            "binary" => {
+                self.validate_install_targets(files)?;
+                self.install_binary(cached_artifact, files)
+            }
             "tar_gz" => self.install_tar_gz(cached_artifact, files),
             other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
         }
@@ -270,28 +253,57 @@ impl<'a> InstallRunner<'a> {
     ) -> Result<InstallOutcome, InstallError> {
         let entries = read_tar_gz_entries(cached_artifact)?;
 
-        let mut out = Vec::with_capacity(files.len());
+        let mut expanded: Vec<(ResolvedInstallFile, Vec<u8>)> = Vec::new();
         for file in files {
-            let key = match file.source.as_deref() {
-                Some(source) => normalize_archive_key(source),
-                None => file
-                    .dest
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            };
-            if key.is_empty() {
-                return Err(InstallError::ExternalPath {
-                    path: file.dest.clone(),
-                });
+            if let Some(source) = file.source.as_deref()
+                && archive_source_is_dir(source)
+            {
+                let prefix = normalize_archive_key(source);
+                let prefix = prefix.trim_end_matches('/');
+                let mut matched = false;
+                for (key, bytes) in &entries.full_paths {
+                    let Some(relative) = archive_relative_under(key, prefix) else {
+                        continue;
+                    };
+                    if relative.is_empty() {
+                        continue;
+                    }
+                    matched = true;
+                    expanded.push((
+                        ResolvedInstallFile {
+                            source: Some(key.clone()),
+                            dest: file.dest.join(relative),
+                            mode: file.mode.clone(),
+                        },
+                        bytes.clone(),
+                    ));
+                }
+                if !matched {
+                    return Err(InstallError::MissingArchiveEntry {
+                        basename: format!("{prefix}/"),
+                    });
+                }
+                continue;
             }
-            let bytes = entries
-                .get(&key)
-                .ok_or_else(|| InstallError::MissingArchiveEntry {
-                    basename: key.clone(),
-                })?;
-            let installed = write_dest_atomic(&file.dest, bytes, file.mode.as_deref())?;
+
+            let key = archive_source_key(file)?;
+            let bytes =
+                entries
+                    .lookup
+                    .get(&key)
+                    .ok_or_else(|| InstallError::MissingArchiveEntry {
+                        basename: key.clone(),
+                    })?;
+            expanded.push((file.clone(), bytes.clone()));
+        }
+
+        let expanded_files: Vec<ResolvedInstallFile> =
+            expanded.iter().map(|(file, _)| file.clone()).collect();
+        self.validate_install_targets(&expanded_files)?;
+
+        let mut out = Vec::with_capacity(expanded.len());
+        for (file, bytes) in expanded {
+            let installed = write_dest_atomic(&file.dest, &bytes, file.mode.as_deref())?;
             out.push(installed);
         }
         Ok(InstallOutcome { files: out })
@@ -316,6 +328,42 @@ impl<'a> InstallRunner<'a> {
             }
         })
     }
+
+    fn validate_install_targets(&self, files: &[ResolvedInstallFile]) -> Result<(), InstallError> {
+        let mut seen = BTreeSet::new();
+        for file in files {
+            if !seen.insert(file.dest.clone()) {
+                return Err(InstallError::DuplicateDestination {
+                    path: file.dest.clone(),
+                });
+            }
+            self.validate_dest(&file.dest)?;
+        }
+        // Fresh-install only for P1-F: refuse to overwrite anything already
+        // on disk. Backup/restore of pre-existing ANOLISA-owned files lands
+        // in P1-G; until then, the runner must never silently clobber.
+        // Check all dests up front so a partial run can't leave half-written
+        // siblings behind. Use `symlink_metadata` rather than `exists()` so
+        // a broken symlink (target missing, `exists()` returns false) is
+        // still caught and refused.
+        for file in files {
+            match fs::symlink_metadata(&file.dest) {
+                Ok(_) => {
+                    return Err(InstallError::DestExists {
+                        path: file.dest.clone(),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(InstallError::Io {
+                        path: file.dest.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn read_file_bytes(path: &Path) -> Result<Vec<u8>, InstallError> {
@@ -325,15 +373,22 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>, InstallError> {
     })
 }
 
+/// Tar entries keyed by their full archive path plus the legacy lookup map.
+struct TarGzEntries {
+    full_paths: BTreeMap<String, Vec<u8>>,
+    lookup: BTreeMap<String, Vec<u8>>,
+}
+
 /// Last-write-wins on duplicate archive keys. Entries are addressable both by
 /// full archive path (for manifest `source`) and basename (legacy behavior).
-fn read_tar_gz_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, InstallError> {
+fn read_tar_gz_entries(path: &Path) -> Result<TarGzEntries, InstallError> {
     let file = File::open(path).map_err(|source| InstallError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let mut archive = Archive::new(GzDecoder::new(file));
-    let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut full_paths: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut lookup: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let entries = archive
         .entries()
         .map_err(|e| InstallError::Archive(format!("entries: {e}")))?;
@@ -346,27 +401,81 @@ fn read_tar_gz_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, Install
             .path()
             .map_err(|e| InstallError::Archive(format!("path: {e}")))?
             .into_owned();
-        let Some(path_key) = entry_path.to_str().map(normalize_archive_key) else {
+        let Some(path_key) = archive_key_from_path(&entry_path)? else {
             continue;
         };
-        let basename = entry_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(str::to_string);
+        let basename = path_key.rsplit('/').next().map(str::to_string);
         let mut buf = Vec::new();
         entry
             .read_to_end(&mut buf)
             .map_err(|e| InstallError::Archive(format!("read entry '{path_key}': {e}")))?;
         if let Some(basename) = basename {
-            out.insert(basename, buf.clone());
+            lookup.insert(basename, buf.clone());
         }
-        out.insert(path_key, buf);
+        lookup.insert(path_key.clone(), buf.clone());
+        full_paths.insert(path_key, buf);
     }
-    Ok(out)
+    Ok(TarGzEntries { full_paths, lookup })
+}
+
+fn archive_source_key(file: &ResolvedInstallFile) -> Result<String, InstallError> {
+    let key = match file.source.as_deref() {
+        Some(source) => normalize_archive_key(source),
+        None => file
+            .dest
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if key.is_empty() {
+        return Err(InstallError::ExternalPath {
+            path: file.dest.clone(),
+        });
+    }
+    Ok(key)
+}
+
+fn archive_source_is_dir(source: &str) -> bool {
+    source.ends_with('/')
+}
+
+fn archive_relative_under<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        return Some(key);
+    }
+    let rest = key.strip_prefix(prefix)?;
+    rest.strip_prefix('/')
 }
 
 fn normalize_archive_key(path: &str) -> String {
     path.trim_start_matches("./").to_string()
+}
+
+fn archive_key_from_path(path: &Path) -> Result<Option<String>, InstallError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let Some(part) = part.to_str() else {
+                    return Ok(None);
+                };
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(InstallError::Archive(format!(
+                    "unsafe archive entry path '{}'",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join("/")))
+    }
 }
 
 fn write_dest_atomic(
@@ -681,6 +790,52 @@ mod tests {
         assert_eq!(outcome.files.len(), 1);
         assert_eq!(outcome.files[0].path, dest);
         assert_eq!(fs::read(&outcome.files[0].path).unwrap(), payload);
+    }
+
+    #[test]
+    fn tar_gz_install_expands_directory_source_prefix() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let manifest: &[u8] = br#"{"name":"tokenless"}"#;
+        let script: &[u8] = b"console.log('ok');";
+        let gz = build_tar_gz(&[
+            ("target/release/openclaw-plugin/plugin.json", manifest),
+            ("target/release/openclaw-plugin/dist/index.js", script),
+            ("target/release/other-plugin/ignored.txt", b"ignored"),
+        ]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let dest_root = layout.datadir.join("adapters/tokenless/openclaw");
+        let outcome = runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("target/release/openclaw-plugin/".to_string()),
+                    dest: dest_root.clone(),
+                    mode: Some("0644".to_string()),
+                }],
+            )
+            .expect("install ok");
+
+        assert_eq!(outcome.files.len(), 2);
+        assert_eq!(fs::read(dest_root.join("plugin.json")).unwrap(), manifest);
+        assert_eq!(fs::read(dest_root.join("dist/index.js")).unwrap(), script);
+        assert!(!dest_root.join("ignored.txt").exists());
+    }
+
+    #[test]
+    fn tar_gz_install_rejects_unsafe_archive_paths() {
+        let err = archive_key_from_path(Path::new("../escape.txt"))
+            .expect_err("must reject unsafe archive path");
+        match err {
+            InstallError::Archive(msg) => assert!(msg.contains("unsafe archive entry path")),
+            other => panic!("expected Archive, got {other:?}"),
+        }
     }
 
     #[test]
