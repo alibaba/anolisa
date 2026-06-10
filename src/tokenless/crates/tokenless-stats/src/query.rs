@@ -398,7 +398,10 @@ mod tests {
         let ops = parsed.get("by_operation").unwrap().as_object().unwrap();
         let keys: Vec<&String> = ops.keys().collect();
         // BTreeMap sorts lexicographically
-        assert_eq!(keys, vec!["compress-response", "compress-schema", "rewrite-command"]);
+        assert_eq!(
+            keys,
+            vec!["compress-response", "compress-schema", "rewrite-command"]
+        );
     }
 
     #[test]
