@@ -68,6 +68,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
 thiserror = "1.0.63"
 typed-arena = "2.0.2"
 uname = "0.1.1"
+uuid = { version = "1", features = ["v4"] }
 # Static link OpenSSL to avoid runtime dependency on libssl.so.1.1
 openssl = { version = "0.10", features = ["vendored"] }
 flate2 = "1"

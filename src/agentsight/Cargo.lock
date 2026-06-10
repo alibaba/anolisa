@@ -269,6 +269,7 @@ dependencies = [
  "typed-arena",
  "uname",
  "ureq 2.12.1",
+ "uuid",
 ]
 
 [[package]]

@@ -173,17 +173,8 @@ impl InterruptionEvent {
     }
 }
 
-/// Generate a 32-char hex ID (uses current timestamp + random bytes)
 fn new_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    // Mix with a pseudo-random value derived from address of a stack var
-    let stack_var: u64 = 0;
-    let addr = &stack_var as *const u64 as u64;
-    format!("{:016x}{:016x}", ns as u64 ^ addr, ns as u64)
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 #[cfg(test)]
@@ -392,11 +383,10 @@ mod tests {
     fn test_new_id_uniqueness() {
         let id1 = new_id();
         let id2 = new_id();
-        // IDs should be 32 chars hex
         assert_eq!(id1.len(), 32);
         assert_eq!(id2.len(), 32);
-        // All hex chars
         assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(id1, id2);
     }
 
     #[test]
