@@ -4,23 +4,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Interactive TUI for cosh - human-facing terminal interface"
+description = "Core Agent Loop for cosh — JSONL stdin/stdout backend"
 
 [[bin]]
-name = "cosh-tui"
+name = "cosh-tui-core"
 path = "src/main.rs"
 
 [dependencies]
 cosh-types = { path = "../cosh-types" }
 cosh-platform = { path = "../cosh-platform" }
-ratatui = "0.28"
-crossterm = "0.28"
 serde.workspace = true
 serde_json.workspace = true
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["stream", "json", "native-tls"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
 dirs = "5"
-rustc_version_runtime = "0.3"
-ureq = { version = "2", features = ["json", "native-certs"] }
 chrono = { workspace = true, features = ["clock"] }
-aes-gcm = "0.10"
-scrypt = "0.11"
 which.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
