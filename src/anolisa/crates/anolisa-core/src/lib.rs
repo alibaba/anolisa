@@ -18,6 +18,7 @@ pub mod download;
 pub mod enable_execute;
 pub mod enable_plan;
 pub mod feature_flags;
+pub mod health;
 pub mod hooks;
 pub mod install_runner;
 pub mod integrity;
@@ -57,6 +58,7 @@ pub use enable_plan::{
     PLAN_SCHEMA_VERSION, PlanError, PlanStatus, PrecheckResult, plan_enable,
 };
 pub use feature_flags::FeatureStore;
+pub use health::{CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, run_check};
 pub use hooks::{
     HookOutcome, HookPhase, HookRunResult, HookSkipReason, HookSpec, discover_component_phase_hook,
     run_hook, run_hooks, run_phase_hooks,
@@ -72,7 +74,7 @@ pub use lifecycle::{
     execute_plan,
 };
 pub use lock::{InstallLock, LockError};
-pub use manifest::{ComponentManifest, DistributionSelector, HealthSpec};
+pub use manifest::{ComponentManifest, DistributionSelector, FileKind, HealthSpec};
 pub use register::{
     ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
     SubscriptionError, current_operator, require_root,

@@ -31,6 +31,7 @@ use crate::contract_lint::{LintFinding, LintSeverity, lint_capability};
 use crate::distribution::{
     ArtifactType, DistributionEntry, DistributionIndex, ResolveError, ResolveQuery,
 };
+use crate::health::CheckSpec;
 use crate::install_runner::SUPPORTED_ARTIFACT_TYPES;
 use crate::manifest::{
     DistributionSelector, EnvRequirements, InstallCapabilitySpec, InstallFileSpec,
@@ -184,6 +185,13 @@ pub struct ComponentPlan {
     pub requires_privilege: bool,
     /// Component-level host requirements that influenced prechecks.
     pub env_requirements: EnvRequirements,
+    /// Post-install health probe carried from the manifest so the executor
+    /// can verify the component without re-loading the catalog: the declared
+    /// `[component.health_check]`, or a synthesized `binary_version` over the
+    /// first executable file. `None` when neither is available — see
+    /// [`crate::manifest::ComponentManifest::health_spec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<CheckSpec>,
 }
 
 /// Concrete artifact the resolver picked for a component.
@@ -750,12 +758,16 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                 capabilities: Vec::new(),
                 requires_privilege: false,
                 env_requirements: EnvRequirements::default(),
+                health_check: None,
             };
         }
     };
 
     let requires_privilege = ctx.install_mode == "system";
     let resolved_files = render_files(&comp.install.files, ctx.layout);
+    // Carry the synthesized/declared health probe into every plan slice so the
+    // executor never re-loads the catalog to find it.
+    let health_check = comp.health_spec();
 
     // Evaluate the component's own env_requirements and append to the
     // top-level precheck list so users see a single ordered table. The
@@ -792,6 +804,7 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
             capabilities: comp.install.capabilities.clone(),
             requires_privilege,
             env_requirements: comp.env_requirements.clone(),
+            health_check: health_check.clone(),
         };
     }
 
@@ -813,6 +826,7 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
             capabilities: comp.install.capabilities.clone(),
             requires_privilege,
             env_requirements: comp.env_requirements.clone(),
+            health_check: health_check.clone(),
         };
     }
 
@@ -859,6 +873,7 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                     capabilities: comp.install.capabilities.clone(),
                     requires_privilege,
                     env_requirements: comp.env_requirements.clone(),
+                    health_check: health_check.clone(),
                 };
             }
 
@@ -893,6 +908,7 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                     capabilities: comp.install.capabilities.clone(),
                     requires_privilege,
                     env_requirements: comp.env_requirements.clone(),
+                    health_check: health_check.clone(),
                 };
             }
 
@@ -913,6 +929,7 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                 capabilities: comp.install.capabilities.clone(),
                 requires_privilege,
                 env_requirements: comp.env_requirements.clone(),
+                health_check: health_check.clone(),
             }
         }
         Err(err) => {
@@ -930,16 +947,21 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                 capabilities: comp.install.capabilities.clone(),
                 requires_privilege,
                 env_requirements: comp.env_requirements.clone(),
+                health_check: health_check.clone(),
             }
         }
     }
 }
 
-/// Substitute `{bindir}`, `{etcdir}`/`{etc_dir}`, `{statedir}`/`{state_dir}`,
-/// `{logdir}`/`{log_dir}`, `{datadir}`, `{libexecdir}`/`{libexec_dir}` in each
-/// manifest file pattern using the resolved layout. Unknown placeholders are
-/// left as-is so users can still see which patterns the install runner would
-/// need to handle.
+/// Substitute `{bindir}`, `{etcdir}`/`{etc_dir}`/`{sysconfdir}`,
+/// `{statedir}`/`{state_dir}`, `{logdir}`/`{log_dir}`,
+/// `{datadir}`/`{sharedir}`, `{libexecdir}`/`{libexec_dir}` in each manifest
+/// file pattern using the resolved layout. Unknown placeholders are left as-is
+/// so users can still see which patterns the install runner would need to
+/// handle.
+///
+/// `{sysconfdir}` and `{sharedir}` are the minimal-schema spellings; the legacy
+/// `{etcdir}`/`{datadir}` names remain accepted for additive compatibility.
 fn render_files(files: &[InstallFileSpec], layout: &FsLayout) -> Vec<String> {
     let bin = layout.bin_dir.to_string_lossy().into_owned();
     let etc = layout.etc_dir.to_string_lossy().into_owned();
@@ -952,12 +974,14 @@ fn render_files(files: &[InstallFileSpec], layout: &FsLayout) -> Vec<String> {
         .filter_map(|f| f.install_path())
         .map(|f| {
             f.replace("{bindir}", &bin)
+                .replace("{sysconfdir}", &etc)
                 .replace("{etcdir}", &etc)
                 .replace("{etc_dir}", &etc)
                 .replace("{statedir}", &state)
                 .replace("{state_dir}", &state)
                 .replace("{logdir}", &log)
                 .replace("{log_dir}", &log)
+                .replace("{sharedir}", &data)
                 .replace("{datadir}", &data)
                 .replace("{libexecdir}", &libexec)
                 .replace("{libexec_dir}", &libexec)
@@ -1119,7 +1143,7 @@ mod tests {
     use crate::distribution::{ArtifactType, DistributionEntry, DistributionIndex};
     use crate::manifest::{
         BuildSpec, CapabilityManifest, CapabilityMeta, ComponentManifest, ComponentMeta,
-        DependenciesSpec, DistributionSelector, FeatureSpec, InstallCapabilitySpec,
+        DependenciesSpec, DistributionSelector, FeatureSpec, FileKind, InstallCapabilitySpec,
         InstallFileSpec, InstallSpec, SourceSpec,
     };
     use crate::{Catalog, CatalogLayers};
@@ -1208,6 +1232,7 @@ mod tests {
             install: InstallSpec {
                 modes: install_modes,
                 files: vec![InstallFileSpec {
+                    kind: FileKind::Data,
                     source: None,
                     dest: Some("{bindir}/agentsight".to_string()),
                     mode: None,
@@ -1218,7 +1243,7 @@ mod tests {
             env_requirements: EnvRequirements::default(),
             dependencies: DependenciesSpec::default(),
             features: Vec::<FeatureSpec>::new(),
-            adapters: Vec::new(),
+            health_check: None,
             health_checks: Vec::new(),
         }
     }
@@ -2095,6 +2120,7 @@ mod tests {
         assert_eq!(
             comp_plan.files,
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/agentsight".to_string()),
                 mode: None,
@@ -2122,16 +2148,19 @@ mod tests {
         let mut comp = make_component("agentsight", "0.2.0", vec!["user".to_string()], Vec::new());
         comp.install.files = vec![
             InstallFileSpec {
+                kind: FileKind::Data,
                 source: Some("target/release/agentsight".to_string()),
                 dest: Some("{bindir}/agentsight".to_string()),
                 mode: Some("0755".to_string()),
             },
             InstallFileSpec {
+                kind: FileKind::Data,
                 source: Some("{datadir}/source-only".to_string()),
                 dest: None,
                 mode: None,
             },
             InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{etcdir}/dest-only".to_string()),
                 mode: Some("0644".to_string()),
@@ -2183,6 +2212,49 @@ mod tests {
         assert!(comp_plan.resolved_files[0].ends_with("/.local/bin/agentsight"));
         assert!(comp_plan.resolved_files[1].ends_with("/.local/share/anolisa/source-only"));
         assert!(comp_plan.resolved_files[2].ends_with("/.config/anolisa/dest-only"));
+    }
+
+    #[test]
+    fn render_files_accepts_minimal_schema_dir_aliases() {
+        let layout = FsLayout::user(PathBuf::from("/tmp/home"));
+        let files = vec![
+            InstallFileSpec {
+                kind: FileKind::Config,
+                source: None,
+                dest: Some("{sysconfdir}/app.conf".to_string()),
+                mode: None,
+            },
+            InstallFileSpec {
+                kind: FileKind::Config,
+                source: None,
+                dest: Some("{etcdir}/app.conf".to_string()),
+                mode: None,
+            },
+            InstallFileSpec {
+                kind: FileKind::Data,
+                source: None,
+                dest: Some("{sharedir}/asset".to_string()),
+                mode: None,
+            },
+            InstallFileSpec {
+                kind: FileKind::Data,
+                source: None,
+                dest: Some("{datadir}/asset".to_string()),
+                mode: None,
+            },
+        ];
+        let rendered = render_files(&files, &layout);
+        // The minimal-schema `{sysconfdir}` resolves identically to the legacy
+        // `{etcdir}`; both must point at the same on-disk config directory.
+        assert_eq!(rendered[0], rendered[1]);
+        // Likewise `{sharedir}` is an alias of the legacy `{datadir}`.
+        assert_eq!(rendered[2], rendered[3]);
+        assert!(
+            !rendered[0].contains('{'),
+            "alias left unexpanded: {rendered:?}"
+        );
+        assert!(rendered[0].ends_with("/anolisa/app.conf"));
+        assert!(rendered[2].ends_with("/anolisa/asset"));
     }
 
     #[test]
@@ -2266,6 +2338,7 @@ mod tests {
             install: InstallSpec {
                 modes: vec!["user".to_string()],
                 files: vec![InstallFileSpec {
+                    kind: FileKind::Data,
                     source: None,
                     dest: Some("{bindir}/second".to_string()),
                     mode: None,
@@ -2276,7 +2349,7 @@ mod tests {
             env_requirements: EnvRequirements::default(),
             dependencies: DependenciesSpec::default(),
             features: Vec::<FeatureSpec>::new(),
-            adapters: Vec::new(),
+            health_check: None,
             health_checks: Vec::new(),
         };
         let catalog = make_catalog(vec![cap], vec![primary, secondary]);

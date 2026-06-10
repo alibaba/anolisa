@@ -12,6 +12,7 @@
 //! schema growth in either direction does not break existing artifacts.
 
 use crate::distribution::ArtifactType;
+use crate::health::CheckSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -142,12 +143,12 @@ pub struct ComponentManifest {
     pub dependencies: DependenciesSpec,
     /// Feature toggles exposed by this component manifest.
     pub features: Vec<FeatureSpec>,
-    /// All adapter declarations preserved verbatim; downstream tooling
-    /// can inspect `framework`/`plugin_id`/`source`/`dest`/`detect`
-    /// without re-parsing the TOML.
-    pub adapters: Vec<AdapterSpec>,
-    /// All `[[health_checks]]` entries in source order. The old single
-    /// `health` field would silently drop everything after the first.
+    /// Minimal-schema `[component.health_check]`. `None` falls back to a
+    /// synthesized `binary_version` over the first executable layout file —
+    /// see [`ComponentManifest::health_spec`].
+    pub health_check: Option<CheckSpec>,
+    /// Legacy `[[health_checks]]` entries in source order, retained for the
+    /// existing `status` probe path during the additive-compat window.
     pub health_checks: Vec<HealthSpec>,
 }
 
@@ -261,6 +262,27 @@ pub struct InstallSpec {
     pub capabilities: Vec<InstallCapabilitySpec>,
 }
 
+/// Role of an installed file (minimal-schema `type` key).
+///
+/// Drives default permissions (an [`FileKind::Executable`] without an explicit
+/// mode installs 0755) and default health-check synthesis — the first
+/// executable layout file becomes a `binary_version` probe when no
+/// `[component.health_check]` is declared. Legacy `[install]` files carry no
+/// `type` and default to [`FileKind::Data`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    /// Opaque data file (default).
+    #[default]
+    Data,
+    /// Executable binary.
+    Executable,
+    /// Configuration file (purge-scoped on uninstall).
+    Config,
+    /// Shared library.
+    Library,
+}
+
 /// One file mapping in an install contract.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallFileSpec {
@@ -273,6 +295,16 @@ pub struct InstallFileSpec {
     /// Unix file mode requested by the manifest, e.g. `"0755"` or `"0644"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// File role from the minimal-schema `type` key. Defaults to
+    /// [`FileKind::Data`]; legacy `[install]` files have no `type`.
+    #[serde(default, skip_serializing_if = "is_default_file_kind")]
+    pub kind: FileKind,
+}
+
+/// Skip serializing the default [`FileKind`] so round-tripped legacy manifests
+/// stay byte-stable.
+fn is_default_file_kind(kind: &FileKind) -> bool {
+    *kind == FileKind::Data
 }
 
 impl InstallFileSpec {
@@ -348,35 +380,6 @@ impl DependenciesSpec {
     }
 }
 
-/// One `[[adapters]]` entry. We keep every field the loader can parse so
-/// later tooling (adapter registry, doctor, build planner) does not have
-/// to re-read the TOML. `detect` is captured as a free-form map because
-/// each framework defines its own probe shape.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct AdapterSpec {
-    /// Adapter display or manifest name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Framework this adapter targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
-    /// Adapter kind (`first-party`, `third-party`, `protocol`, ...).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Framework-native plugin identifier, when one exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_id: Option<String>,
-    /// Source path inside the component artifact.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// Destination path after layout placeholder expansion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dest: Option<String>,
-    /// Framework-specific detection hints preserved as TOML values.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub detect: BTreeMap<String, toml::Value>,
-}
-
 /// One `[[health_checks]]` entry. Multiple checks per component are
 /// expected (binary probe + systemd unit + http endpoint, etc.) so we
 /// keep the entire list rather than only the first.
@@ -421,8 +424,6 @@ struct ComponentManifestRaw {
     dependencies: DependenciesRaw,
     #[serde(default)]
     features: Vec<FeatureRaw>,
-    #[serde(default)]
-    adapters: Vec<AdapterRaw>,
     #[serde(default, alias = "health")]
     health_checks: Vec<HealthCheckRaw>,
 }
@@ -454,6 +455,10 @@ struct ComponentMetaRaw {
     artifact: Option<ArtifactRaw>,
     #[serde(default)]
     layout: Option<LayoutRaw>,
+    // `[component.health_check]` — minimal-schema structured check. Parses
+    // directly into the internally-tagged `CheckSpec` (`type = "..."`).
+    #[serde(default)]
+    health_check: Option<CheckSpec>,
 }
 
 #[derive(Deserialize, Default)]
@@ -493,7 +498,9 @@ struct LayoutFileRaw {
     target: Option<String>,
     #[serde(default)]
     mode: Option<String>,
-    // `type` (FileKind) is parsed by T2.2; ignored here as an unknown key.
+    /// Minimal-schema `type` → [`FileKind`]. Absent defaults to `Data`.
+    #[serde(default, rename = "type")]
+    kind: FileKind,
 }
 
 #[derive(Deserialize, Default)]
@@ -608,24 +615,6 @@ struct FeatureRaw {
 }
 
 #[derive(Deserialize, Default)]
-struct AdapterRaw {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    framework: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    plugin_id: Option<String>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    dest: Option<String>,
-    #[serde(default)]
-    detect: BTreeMap<String, toml::Value>,
-}
-
-#[derive(Deserialize, Default)]
 struct HealthCheckRaw {
     #[serde(default)]
     name: Option<String>,
@@ -659,6 +648,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             platform: platform_raw,
             artifact: artifact_raw,
             layout: layout_raw,
+            health_check,
         } = raw.component;
 
         let component = ComponentMeta {
@@ -713,8 +703,9 @@ impl From<ComponentManifestRaw> for ComponentManifest {
 
         // Prefer the minimal-schema `[component.layout]`; fall back to the
         // legacy top-level `[install]` for not-yet-migrated manifests. The
-        // minimal `target` key maps onto the internal `dest` (file `type` and
-        // nested service/capabilities arrive in T2.2/T2.7).
+        // minimal `target` key maps onto the internal `dest`; nested
+        // service/capabilities arrive in T2.7. Legacy `[install]` files carry
+        // no `type`, so they default to `FileKind::Data`.
         let install = if let Some(layout) = layout_raw {
             let files = layout
                 .files
@@ -723,6 +714,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                     source: f.source,
                     dest: f.target,
                     mode: f.mode,
+                    kind: f.kind,
                 })
                 .filter(|f| f.install_path().is_some())
                 .collect();
@@ -742,6 +734,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                             source: f.source,
                             dest: f.dest,
                             mode: f.mode,
+                            kind: FileKind::Data,
                         })
                         .filter(|f| f.install_path().is_some())
                         .collect();
@@ -780,20 +773,6 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             })
             .collect();
 
-        let adapters: Vec<AdapterSpec> = raw
-            .adapters
-            .into_iter()
-            .map(|a| AdapterSpec {
-                name: a.name,
-                framework: a.framework,
-                kind: a.kind,
-                plugin_id: a.plugin_id,
-                source: a.source,
-                dest: a.dest,
-                detect: a.detect,
-            })
-            .collect();
-
         let health_checks: Vec<HealthSpec> = raw
             .health_checks
             .into_iter()
@@ -825,7 +804,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             env_requirements,
             dependencies,
             features,
-            adapters,
+            health_check,
             health_checks,
         }
     }
@@ -1031,6 +1010,30 @@ impl ComponentManifest {
     /// Parse a component manifest from TOML text.
     pub fn from_toml_str(s: &str) -> Result<Self, ManifestError> {
         toml::from_str(s).map_err(|e| ManifestError::Parse("<string>".into(), e.to_string()))
+    }
+
+    /// Health check to run after install: the declared
+    /// `[component.health_check]`, or a synthesized `binary_version` over the
+    /// first [`FileKind::Executable`] layout file. Returns `None` when neither
+    /// is available (no declared check and no executable to probe).
+    ///
+    /// The synthesized probe targets the file's install destination
+    /// (post-placeholder template), so the engine expands `{bindir}` against
+    /// the active layout — matching how the file itself was installed.
+    pub fn health_spec(&self) -> Option<CheckSpec> {
+        if let Some(spec) = &self.health_check {
+            return Some(spec.clone());
+        }
+        self.install
+            .files
+            .iter()
+            .find(|f| f.kind == FileKind::Executable)
+            .and_then(|f| f.install_path())
+            .map(|target| CheckSpec::BinaryVersion {
+                binary: target.to_string(),
+                expect_pattern: None,
+                timeout_secs: None,
+            })
     }
 }
 
@@ -1342,7 +1345,10 @@ mod tests {
     }
 
     #[test]
-    fn adapters_preserve_framework_kind_plugin_source_dest_detect() {
+    fn adapters_section_is_ignored_as_unknown_keys() {
+        // T2.9: `[[adapters]]` is no longer part of the component schema. A
+        // manifest that still declares it must parse cleanly (tolerant) — the
+        // section is simply dropped, no adapter field survives.
         let toml_text = r#"
             [component]
             name = "agentsight"
@@ -1351,28 +1357,119 @@ mod tests {
             [[adapters]]
             framework = "openclaw"
             kind = "third-party"
-            plugin_id = "agentsight-openclaw"
             source = "adapters/agentsight/openclaw"
-            dest = "{datadir}/adapters/{component}/openclaw/"
-
-            [adapters.detect]
-            config_path = "~/.openclaw/config.toml"
         "#;
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
-        assert_eq!(m.adapters.len(), 1);
-        let a = &m.adapters[0];
-        assert_eq!(a.framework.as_deref(), Some("openclaw"));
-        assert_eq!(a.kind.as_deref(), Some("third-party"));
-        assert_eq!(a.plugin_id.as_deref(), Some("agentsight-openclaw"));
-        assert_eq!(a.source.as_deref(), Some("adapters/agentsight/openclaw"));
-        assert_eq!(
-            a.dest.as_deref(),
-            Some("{datadir}/adapters/{component}/openclaw/")
-        );
-        assert_eq!(
-            a.detect.get("config_path").and_then(|v| v.as_str()),
-            Some("~/.openclaw/config.toml")
-        );
+        assert_eq!(m.component.name, "agentsight");
+    }
+
+    #[test]
+    fn layout_file_kind_parses_and_defaults_to_data() {
+        let toml_text = r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+
+            [component.layout]
+            [[component.layout.files]]
+            source = "bin/tokenless"
+            target = "{bindir}/tokenless"
+            type = "executable"
+
+            [[component.layout.files]]
+            source = "share/data.bin"
+            target = "{sharedir}/tokenless/data.bin"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.install.files.len(), 2);
+        assert_eq!(m.install.files[0].kind, FileKind::Executable);
+        // No `type` key → defaults to Data.
+        assert_eq!(m.install.files[1].kind, FileKind::Data);
+    }
+
+    #[test]
+    fn layout_files_target_aliases_dest() {
+        // `target` (minimal) and `dest` (legacy) land in the same internal
+        // field, so both spellings install to the same place.
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "t"
+            version = "1.0.0"
+            [component.layout]
+            [[component.layout.files]]
+            source = "bin/t"
+            dest = "{bindir}/t"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(m.install.files[0].dest.as_deref(), Some("{bindir}/t"));
+    }
+
+    #[test]
+    fn health_spec_uses_declared_check_when_present() {
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+            [component.health_check]
+            type = "binary_version"
+            binary = "{bindir}/tokenless"
+        "#,
+        )
+        .expect("parse");
+        match m.health_spec() {
+            Some(CheckSpec::BinaryVersion { binary, .. }) => {
+                assert_eq!(binary, "{bindir}/tokenless");
+            }
+            other => panic!("expected declared binary_version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_spec_synthesizes_binary_version_from_first_executable() {
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+            [component.layout]
+            [[component.layout.files]]
+            source = "share/x"
+            target = "{sharedir}/x"
+            type = "data"
+            [[component.layout.files]]
+            source = "bin/tokenless"
+            target = "{bindir}/tokenless"
+            type = "executable"
+        "#,
+        )
+        .expect("parse");
+        match m.health_spec() {
+            Some(CheckSpec::BinaryVersion { binary, .. }) => {
+                assert_eq!(binary, "{bindir}/tokenless", "first executable wins");
+            }
+            other => panic!("expected synthesized binary_version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_spec_is_none_without_check_or_executable() {
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "t"
+            version = "1.0.0"
+            [component.layout]
+            [[component.layout.files]]
+            source = "share/x"
+            target = "{sharedir}/x"
+            type = "data"
+        "#,
+        )
+        .expect("parse");
+        assert!(m.health_spec().is_none());
     }
 
     #[test]

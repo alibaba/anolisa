@@ -29,7 +29,7 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::catalog::Catalog;
 use crate::distribution::{ArtifactType, DistributionEntry, DistributionIndex};
 use crate::install_runner::SUPPORTED_ARTIFACT_TYPES;
-use crate::manifest::{ComponentManifest, EnvRequirements, HealthSpec};
+use crate::manifest::{ArtifactSpec, ComponentManifest, ContractSpec, EnvRequirements, HealthSpec};
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
 
 /// Severity of a [`LintFinding`]. Wire form is lowercase to match the
@@ -209,6 +209,10 @@ fn lint_component(
         }
     }
 
+    // ---- minimal-schema required fields ------------------------------------
+
+    lint_minimal_schema(capability, comp, findings);
+
     // ---- install files: paths must land under owned roots ------------------
 
     lint_install_files(capability, comp, layout, findings);
@@ -217,14 +221,134 @@ fn lint_component(
 
     lint_env_requirements(capability, name, &comp.env_requirements, findings);
 
-    // ---- health / adapters: structural shape only --------------------------
+    // ---- health: structural shape only -------------------------------------
 
     lint_health_checks(capability, name, &comp.health_checks, findings);
-    lint_adapters(capability, comp, findings);
 
     // ---- distribution index entries ----------------------------------------
 
     lint_distribution(capability, comp, dist_index, findings);
+}
+
+/// A manifest opts into the minimal schema (phase1-2-dev §2.1) the moment it
+/// carries any of its distinguishing markers: a `[component].owner`, a
+/// non-empty `[component.contract]`, or a non-empty `[component.artifact]`.
+///
+/// Detection is additive on purpose. Legacy manifests — `[component]` + flat
+/// `[install]`/`[environment]` with none of these markers — never enter the
+/// stricter required-field pass, so [`lint_minimal_schema`] cannot newly block
+/// an artifact that was previously `Ready`. The destructive flip to
+/// minimal-only lives in a later batch.
+fn uses_minimal_schema(comp: &ComponentManifest) -> bool {
+    comp.component.owner.is_some()
+        || comp.contract != ContractSpec::default()
+        || comp.artifact != ArtifactSpec::default()
+}
+
+/// Required-field pass for minimal-schema manifests only (see
+/// [`uses_minimal_schema`]). Each missing field is an error because the
+/// minimal schema promises a self-describing artifact: identity (`name`,
+/// `version`, `owner`), a compatibility envelope (`contract.schema_version`),
+/// a target (`platform.os`/`platform.arch`), an artifact shape
+/// (`artifact.type`), and at least one install file (`layout.files`).
+/// `health_check` stays optional — `enable` synthesizes a probe from the first
+/// executable when it is absent.
+fn lint_minimal_schema(
+    capability: &str,
+    comp: &ComponentManifest,
+    findings: &mut Vec<LintFinding>,
+) {
+    if !uses_minimal_schema(comp) {
+        return;
+    }
+
+    let name = comp.component.name.as_str();
+
+    // `name` anchors every other finding, so flag an empty one capability-level.
+    if name.trim().is_empty() {
+        findings.push(LintFinding::error(
+            capability,
+            None,
+            "E_MISSING_COMPONENT_NAME",
+            "minimal-schema component has an empty [component].name",
+        ));
+    }
+
+    if blank(comp.component.owner.as_deref()) {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_MISSING_OWNER",
+            format!(
+                "minimal-schema component '{name}' has no [component].owner — required so an installed artifact is attributable"
+            ),
+        ));
+    }
+
+    if blank(comp.contract.schema_version.as_deref()) {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_MISSING_CONTRACT_SCHEMA_VERSION",
+            format!(
+                "minimal-schema component '{name}' has no [component.contract].schema_version — required to gate compatibility"
+            ),
+        ));
+    }
+
+    if comp.env_requirements.os.iter().all(|o| o.trim().is_empty()) {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_MISSING_PLATFORM_OS",
+            format!(
+                "minimal-schema component '{name}' declares no [component.platform].os — resolver cannot target a host"
+            ),
+        ));
+    }
+
+    if comp
+        .env_requirements
+        .arch
+        .iter()
+        .all(|a| a.trim().is_empty())
+    {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_MISSING_PLATFORM_ARCH",
+            format!(
+                "minimal-schema component '{name}' declares no [component.platform].arch — resolver cannot target a host"
+            ),
+        ));
+    }
+
+    if blank(comp.artifact.artifact_type.as_deref()) {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_MISSING_ARTIFACT_TYPE",
+            format!(
+                "minimal-schema component '{name}' has no [component.artifact].type (binary | archive | script-only | mixed)"
+            ),
+        ));
+    }
+
+    if comp.install.files.is_empty() {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_NO_LAYOUT_FILES",
+            format!(
+                "minimal-schema component '{name}' declares no [component.layout.files] — nothing for enable to install"
+            ),
+        ));
+    }
+}
+
+/// `true` when the optional string is absent or only whitespace.
+fn blank(value: Option<&str>) -> bool {
+    value.map(str::trim).unwrap_or("").is_empty()
 }
 
 fn lint_install_files(
@@ -291,12 +415,14 @@ fn render_install_path(template: &str, layout: &FsLayout) -> String {
     let lib = layout.lib_dir.to_string_lossy().into_owned();
     template
         .replace("{bindir}", &bin)
+        .replace("{sysconfdir}", &etc)
         .replace("{etcdir}", &etc)
         .replace("{etc_dir}", &etc)
         .replace("{statedir}", &state)
         .replace("{state_dir}", &state)
         .replace("{logdir}", &log)
         .replace("{log_dir}", &log)
+        .replace("{sharedir}", &data)
         .replace("{datadir}", &data)
         .replace("{libexecdir}", &libexec)
         .replace("{libexec_dir}", &libexec)
@@ -382,20 +508,6 @@ fn lint_health_checks(
                 format!(
                     "component '{component}' health_checks[{idx}] has no command/probe/unit — nothing to run"
                 ),
-            ));
-        }
-    }
-}
-
-fn lint_adapters(capability: &str, comp: &ComponentManifest, findings: &mut Vec<LintFinding>) {
-    let name = comp.component.name.as_str();
-    for (idx, adapter) in comp.adapters.iter().enumerate() {
-        if adapter.framework.is_none() {
-            findings.push(LintFinding::error(
-                capability,
-                Some(name),
-                "E_ADAPTER_NO_FRAMEWORK",
-                format!("component '{name}' adapters[{idx}] is missing 'framework'"),
             ));
         }
     }
@@ -605,7 +717,7 @@ mod tests {
     use crate::distribution::{ArtifactType, DistributionEntry, DistributionIndex};
     use crate::manifest::{
         BuildSpec, CapabilityManifest, CapabilityMeta, ComponentManifest, ComponentMeta,
-        DependenciesSpec, FeatureSpec, InstallFileSpec, InstallSpec, SourceSpec,
+        DependenciesSpec, FeatureSpec, FileKind, InstallFileSpec, InstallSpec, SourceSpec,
     };
     use crate::{Catalog, CatalogLayers};
     use std::collections::BTreeMap;
@@ -666,7 +778,7 @@ mod tests {
             env_requirements: EnvRequirements::default(),
             dependencies: DependenciesSpec::default(),
             features: Vec::<FeatureSpec>::new(),
-            adapters: Vec::new(),
+            health_check: None,
             health_checks: Vec::new(),
         }
     }
@@ -768,6 +880,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("/etc/passwd".to_string()),
                 mode: None,
@@ -788,6 +901,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/../escape".to_string()),
                 mode: None,
@@ -808,6 +922,7 @@ mod tests {
             "1.0.0",
             vec!["weird".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -819,6 +934,116 @@ mod tests {
         assert!(codes.contains(&"E_UNSUPPORTED_INSTALL_MODE"));
     }
 
+    /// A fully-populated minimal-schema component: owner + contract +
+    /// platform + artifact + one executable layout file. Tests clone this and
+    /// null out fields to assert the required-field pass fires only where it
+    /// should.
+    fn minimal_comp(name: &str) -> ComponentManifest {
+        let mut comp = comp_with(
+            name,
+            "1.0.0",
+            vec!["user".to_string()],
+            vec![InstallFileSpec {
+                kind: FileKind::Executable,
+                source: None,
+                dest: Some(format!("{{bindir}}/{name}")),
+                mode: None,
+            }],
+        );
+        comp.component.owner = Some("team".to_string());
+        comp.contract = ContractSpec {
+            schema_version: Some("1.0".to_string()),
+            min_anolisa_version: None,
+        };
+        comp.artifact = ArtifactSpec {
+            artifact_type: Some("binary".to_string()),
+            archive_format: None,
+            naming_pattern: None,
+        };
+        comp.env_requirements = EnvRequirements {
+            os: vec!["linux".to_string()],
+            arch: vec!["x86_64".to_string()],
+            ..EnvRequirements::default()
+        };
+        comp
+    }
+
+    #[test]
+    fn minimal_schema_complete_manifest_has_no_required_field_errors() {
+        let cap = cap_with("c", vec!["m".to_string()], "");
+        let comp = minimal_comp("m");
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        // Empty index yields a W_NO_DISTRIBUTION_ENTRY warning, never an error.
+        assert!(!has_errors(&findings), "unexpected errors: {findings:?}");
+    }
+
+    #[test]
+    fn minimal_schema_missing_required_fields_block() {
+        let cap = cap_with("c", vec!["m".to_string()], "");
+        let mut comp = minimal_comp("m");
+        // Keep the `owner` marker so minimal mode stays on, then strip the rest.
+        comp.contract = ContractSpec::default();
+        comp.artifact = ArtifactSpec::default();
+        comp.env_requirements = EnvRequirements::default();
+        comp.install.files.clear();
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"E_MISSING_CONTRACT_SCHEMA_VERSION"));
+        assert!(codes.contains(&"E_MISSING_PLATFORM_OS"));
+        assert!(codes.contains(&"E_MISSING_PLATFORM_ARCH"));
+        assert!(codes.contains(&"E_MISSING_ARTIFACT_TYPE"));
+        assert!(codes.contains(&"E_NO_LAYOUT_FILES"));
+        assert!(has_errors(&findings));
+    }
+
+    #[test]
+    fn minimal_schema_missing_owner_is_flagged_via_contract_marker() {
+        // The `owner` itself is absent, so the contract sub-table is what opts
+        // this manifest into minimal mode — proving detection is not owner-only.
+        let cap = cap_with("c", vec!["m".to_string()], "");
+        let mut comp = minimal_comp("m");
+        comp.component.owner = None;
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"E_MISSING_OWNER"));
+        assert!(has_errors(&findings));
+    }
+
+    #[test]
+    fn legacy_schema_skips_minimal_required_fields() {
+        // No owner/contract/artifact markers → legacy. Even though it declares
+        // no platform and no artifact.type, none of the minimal required-field
+        // codes may appear — the additive guard must not newly block it.
+        let cap = cap_with("c", vec!["x".to_string()], "");
+        let comp = comp_with(
+            "x",
+            "1.0.0",
+            vec!["user".to_string()],
+            vec![InstallFileSpec {
+                kind: FileKind::Data,
+                source: None,
+                dest: Some("{bindir}/x".to_string()),
+                mode: None,
+            }],
+        );
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        for c in [
+            "E_MISSING_OWNER",
+            "E_MISSING_CONTRACT_SCHEMA_VERSION",
+            "E_MISSING_PLATFORM_OS",
+            "E_MISSING_PLATFORM_ARCH",
+            "E_MISSING_ARTIFACT_TYPE",
+            "E_NO_LAYOUT_FILES",
+        ] {
+            assert!(!codes.contains(&c), "legacy manifest newly blocked by {c}");
+        }
+    }
+
     #[test]
     fn missing_sha256_in_distribution_is_an_error() {
         let cap = cap_with("c", vec!["x".to_string()], "");
@@ -827,6 +1052,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -854,6 +1080,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -881,6 +1108,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -907,6 +1135,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -950,6 +1179,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,
@@ -996,6 +1226,7 @@ mod tests {
             "1.0.0",
             vec!["user".to_string()],
             vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/x".to_string()),
                 mode: None,

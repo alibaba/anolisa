@@ -17,6 +17,7 @@
 //! returned [`ExecuteOutcome`] or [`ExecuteError`] to the user.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -29,12 +30,13 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::central_log::{CentralLog, CentralLogError, LogKind, LogRecord, LogStatus, Severity};
 use crate::download::{DownloadCache, DownloadError};
 use crate::enable_plan::{EnablePlan, PlanStatus};
+use crate::health::{CheckEnv, CheckOutcome, CheckStatus, run_check};
 use crate::hooks::{HookPhase, run_phase_hooks};
 use crate::install_runner::{InstallError, InstallRunner, ResolvedInstallFile};
 use crate::lock::{InstallLock, LockError};
 use crate::service;
 use crate::state::{
-    FileOwner, InstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
+    FileOwner, HealthEntry, InstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
     OperationRecord, OwnedFile, ServiceRef, StateError,
 };
 
@@ -546,6 +548,48 @@ pub fn execute_enable(
         }
     }
 
+    // Step 4.6 — post-install health probes. Run after every component's
+    // files are on disk but before state is persisted, so each verdict and any
+    // degraded status land in the same `installed.toml` write. The probes that
+    // execute here (binary_version / file_exists / command) only need files
+    // present; systemd-active is Unsupported in this milestone, so running
+    // before the best-effort service start (Step 7) costs nothing.
+    //
+    // A hard health failure NEVER fails enable: the bytes are installed and
+    // verified, so we degrade the object to `Partial` and surface a warning
+    // rather than rolling back a working install over a probe.
+    let check_env = CheckEnv {
+        layout,
+        dry_run: false,
+    };
+    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut health_by_component: BTreeMap<String, Vec<HealthEntry>> = BTreeMap::new();
+    let mut degraded_components: BTreeSet<String> = BTreeSet::new();
+    let mut health_warnings: Vec<String> = Vec::new();
+    for c in &plan.components {
+        let Some(spec) = &c.health_check else {
+            continue;
+        };
+        let outcome = run_check(spec, &check_env);
+        // The root node's status is authoritative: an `any_of` can pass with a
+        // Failed child, so "degraded" cannot be inferred from leaves alone.
+        if outcome.status == CheckStatus::Failed {
+            degraded_components.insert(c.name.clone());
+            let detail = outcome
+                .detail
+                .clone()
+                .unwrap_or_else(|| outcome.spec_label.clone());
+            health_warnings.push(format!(
+                "component '{}' health check failed: {detail}",
+                c.name
+            ));
+        }
+        let mut entries = Vec::new();
+        collect_health_entries(&outcome, &checked_at, &mut entries);
+        health_by_component.insert(c.name.clone(), entries);
+    }
+    let any_degraded = !degraded_components.is_empty();
+
     // Step 5 — persist state. `state_path` was bound at step 2a.
     let finished_at_utc = Utc::now();
     let finished_at = finished_at_utc.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -600,11 +644,18 @@ pub fn execute_enable(
             })
             .collect();
 
+        let comp_health = health_by_component.remove(&c.name).unwrap_or_default();
+        let comp_status = if degraded_components.contains(&c.name) {
+            ObjectStatus::Partial
+        } else {
+            ObjectStatus::Installed
+        };
+
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: c.name.clone(),
             version: c.manifest_version.clone().unwrap_or_default(),
-            status: ObjectStatus::Installed,
+            status: comp_status,
             // Verified above against the artifact's embedded component.toml
             // when the plan carried a meta digest; recorded so audit/status
             // can tie the installed component back to its publishing meta.
@@ -634,7 +685,7 @@ pub fn execute_enable(
                     enabled: false,
                 })
                 .collect(),
-            health: Vec::new(),
+            health: comp_health,
         });
     }
 
@@ -644,7 +695,14 @@ pub fn execute_enable(
         // Capability has no version field on the plan; use the stability
         // label so the on-disk record's version stays non-empty.
         version: plan.stability.clone(),
-        status: ObjectStatus::Installed,
+        // Roll a component health failure up to the capability so list/status
+        // surfaces a degraded capability rather than a green one hiding a
+        // Partial child.
+        status: if any_degraded {
+            ObjectStatus::Partial
+        } else {
+            ObjectStatus::Installed
+        },
         manifest_digest: None,
         distribution_source: None,
         installed_at: finished_at.clone(),
@@ -728,6 +786,9 @@ pub fn execute_enable(
     // next time the operator runs `anolisa status`).
     let mut warnings = plan.warnings.clone();
     warnings.extend(pre_enable.warnings);
+    // Health degradations were detected at Step 4.6; surface them on the
+    // outcome so the CLI prints them even though enable itself succeeded.
+    warnings.extend(health_warnings);
     let service_units: Vec<(String, String)> = plan
         .components
         .iter()
@@ -823,6 +884,22 @@ pub fn execute_enable(
         reactivated: false,
     };
     Ok(outcome)
+}
+
+/// Flatten a [`CheckOutcome`] tree into [`HealthEntry`] rows in pre-order —
+/// the aggregate node first, then its children — so `anolisa status` can show
+/// both the combined verdict and each leaf probe. `checked_at` is stamped
+/// identically across the tree because every node was observed in one pass.
+fn collect_health_entries(outcome: &CheckOutcome, checked_at: &str, out: &mut Vec<HealthEntry>) {
+    out.push(HealthEntry {
+        name: outcome.spec_label.clone(),
+        status: outcome.status.as_str().to_string(),
+        checked_at: checked_at.to_string(),
+        reason: outcome.detail.clone(),
+    });
+    for child in &outcome.children {
+        collect_health_entries(child, checked_at, out);
+    }
 }
 
 /// True when the artifact type is a tar.gz archive — the only artifact
@@ -1491,7 +1568,8 @@ mod tests {
         ArtifactPlan, ComponentPlan, EnablePlan, EnvFactsSummary, LayoutSummary,
         PLAN_SCHEMA_VERSION,
     };
-    use crate::manifest::{EnvRequirements, InstallFileSpec};
+    use crate::health::CheckSpec;
+    use crate::manifest::{EnvRequirements, FileKind, InstallFileSpec};
     use sha2::{Digest, Sha256};
     use std::fs as std_fs;
     use std::path::Path;
@@ -1694,6 +1772,7 @@ mod tests {
             artifact,
             services: vec!["agentsight.service".to_string()],
             files: vec![InstallFileSpec {
+                kind: FileKind::Data,
                 source: None,
                 dest: Some("{bindir}/agentsight".to_string()),
                 mode: None,
@@ -1702,6 +1781,7 @@ mod tests {
             capabilities: Vec::new(),
             requires_privilege: true,
             env_requirements: EnvRequirements::default(),
+            health_check: None,
         }
     }
 
@@ -1947,6 +2027,128 @@ mod tests {
         }
         assert!(lines[0].get("status").map(|v| v.is_null()).unwrap_or(true));
         assert_eq!(lines[1].get("status").and_then(|v| v.as_str()), Some("ok"),);
+    }
+
+    #[test]
+    fn health_check_pass_records_entry_and_keeps_installed() {
+        let root = tempdir().expect("tempdir");
+        let payloads = tempdir().expect("tempdir");
+        let layout = fixture_layout(root.path());
+
+        let payload = b"fake-agentsight-binary-bytes";
+        let (url, sha) = write_payload_artifact(payloads.path(), "agentsight", payload);
+
+        let dest = layout.bin_dir.join("agentsight");
+        let mut comp = fixture_component(
+            "agentsight",
+            Some(artifact_plan(&url, &sha)),
+            vec![dest.display().to_string()],
+            PlanStatus::Ready,
+        );
+        // A file_exists probe over the just-installed binary passes; the
+        // `{bindir}` placeholder is expanded by the engine against the layout.
+        comp.health_check = Some(CheckSpec::FileExists {
+            path: "{bindir}/agentsight".to_string(),
+            mode: None,
+            owner: None,
+        });
+        let plan = fixture_plan(
+            "agent-observability",
+            vec![comp],
+            PlanStatus::Ready,
+            "system",
+            &layout,
+        );
+
+        let outcome = execute_enable(&plan, &layout, "tester").expect("execute ok");
+        assert!(
+            outcome.warnings.iter().all(|w| !w.contains("health check")),
+            "no health warning expected: {:?}",
+            outcome.warnings,
+        );
+
+        let state =
+            InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state");
+        let agentsight = state
+            .find_object(ObjectKind::Component, "agentsight")
+            .expect("component object present");
+        assert_eq!(agentsight.status, ObjectStatus::Installed);
+        assert_eq!(agentsight.health.len(), 1, "one health entry recorded");
+        assert_eq!(agentsight.health[0].status, "ok");
+        let cap = state
+            .find_object(ObjectKind::Capability, "agent-observability")
+            .expect("capability object present");
+        assert_eq!(cap.status, ObjectStatus::Installed);
+    }
+
+    #[test]
+    fn health_check_failure_degrades_to_partial_with_warning() {
+        let root = tempdir().expect("tempdir");
+        let payloads = tempdir().expect("tempdir");
+        let layout = fixture_layout(root.path());
+
+        let payload = b"fake-agentsight-binary-bytes";
+        let (url, sha) = write_payload_artifact(payloads.path(), "agentsight", payload);
+
+        let dest = layout.bin_dir.join("agentsight");
+        let mut comp = fixture_component(
+            "agentsight",
+            Some(artifact_plan(&url, &sha)),
+            vec![dest.display().to_string()],
+            PlanStatus::Ready,
+        );
+        // Probe a sibling path that was never installed → hard failure. The
+        // install itself must stay committed: enable degrades, never rolls back.
+        comp.health_check = Some(CheckSpec::FileExists {
+            path: "{bindir}/never-installed".to_string(),
+            mode: None,
+            owner: None,
+        });
+        let plan = fixture_plan(
+            "agent-observability",
+            vec![comp],
+            PlanStatus::Ready,
+            "system",
+            &layout,
+        );
+
+        let outcome = execute_enable(&plan, &layout, "tester").expect("execute still succeeds");
+        // Bytes are on disk despite the failed probe.
+        assert!(
+            dest.exists(),
+            "install must not roll back on health failure"
+        );
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("health check failed")),
+            "expected a health warning: {:?}",
+            outcome.warnings,
+        );
+
+        let state =
+            InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state");
+        let agentsight = state
+            .find_object(ObjectKind::Component, "agentsight")
+            .expect("component object present");
+        assert_eq!(
+            agentsight.status,
+            ObjectStatus::Partial,
+            "degraded, not failed",
+        );
+        assert_eq!(agentsight.health.len(), 1);
+        assert_eq!(agentsight.health[0].status, "failed");
+        let cap = state
+            .find_object(ObjectKind::Capability, "agent-observability")
+            .expect("capability object present");
+        assert_eq!(
+            cap.status,
+            ObjectStatus::Partial,
+            "degradation rolls up to the capability",
+        );
+        // The operation itself is still recorded ok — enable succeeded.
+        assert_eq!(state.operations[0].status, "ok");
     }
 
     #[test]
