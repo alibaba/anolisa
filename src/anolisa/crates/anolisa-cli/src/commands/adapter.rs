@@ -11,10 +11,10 @@
 //!
 //! ## `adapter install <component> <framework>`
 //!
-//! Resolves the manifest adapter, expands the destination path against
-//! the active [`FsLayout`], and runs detection. Only `--dry-run` is
-//! operational today; real execution returns `NOT_IMPLEMENTED` without
-//! writing state because artifact staging/download is not yet available.
+//! Resolves the manifest adapter, downloads the component artifact from
+//! the distribution index, extracts files per the adapter source/dest
+//! mapping, writes state and central log. On failure after partial file
+//! copy, installed files are cleaned up so no phantom state remains.
 //!
 //! ## `adapter remove <component> <framework>`
 //!
@@ -31,9 +31,16 @@ use serde::Serialize;
 
 use anolisa_core::adapter::{detect_framework, expand_layout_placeholders};
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
+use anolisa_core::distribution::ArtifactType;
+use anolisa_core::download::DownloadCache;
+use anolisa_core::install_runner::{InstallRunner, ResolvedInstallFile};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
-use anolisa_core::state::{FileOwner, InstallMode as StateInstallMode, ObjectKind, OwnedFile};
+use anolisa_core::state::{
+    FileOwner, InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
+    OperationRecord, OwnedFile,
+};
+use anolisa_core::{DistributionIndex, ResolveQuery};
 
 use crate::color::Palette;
 use crate::commands::common;
@@ -102,6 +109,17 @@ struct InstallPlan {
     dest: String,
     detected: bool,
     detect_reason: String,
+}
+
+/// JSON output for successful adapter install.
+#[derive(Serialize)]
+struct InstallResult {
+    component: String,
+    framework: String,
+    adapter: String,
+    version: String,
+    operation_id: String,
+    files_installed: Vec<String>,
 }
 
 /// JSON output for adapter remove (both dry-run and real execution).
@@ -245,7 +263,7 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         source: adapter.source.clone(),
         dest: expanded_dest.display().to_string(),
         detected: detect_result.detected,
-        detect_reason: detect_result.reason,
+        detect_reason: detect_result.reason.clone(),
     };
 
     if ctx.dry_run {
@@ -266,13 +284,236 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         return Ok(());
     }
 
-    // Real execution requires artifact staging which is not implemented.
-    // Do NOT write state/log here — a phantom "installed" record without
-    // real files would mislead status/remove/list.
-    Err(CliError::not_implemented_with_hint(
-        command,
-        "adapter install real execution requires artifact staging; use --dry-run to preview the plan",
-    ))
+    // -- Real execution: resolve artifact, download, install, write state/log --
+
+    let started_at = now_iso8601();
+    let adapter_name = format!("{component}/{framework}");
+    let version = comp.component.version.clone();
+
+    // Resolve artifact from distribution index.
+    let dist_index =
+        common::load_distribution_index(ctx, &command)?.ok_or_else(|| CliError::Runtime {
+            command: command.clone(),
+            reason: "no distribution index available — cannot resolve artifact".to_string(),
+        })?;
+
+    let entry = resolve_adapter_artifact(&dist_index, component, &version, ctx, &command)?;
+
+    let sha256 = entry.sha256.as_deref().ok_or_else(|| CliError::Runtime {
+        command: command.clone(),
+        reason: format!(
+            "distribution entry for '{component}' has no sha256 — refusing to install unverified artifact"
+        ),
+    })?;
+
+    // Download artifact to cache.
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded = cache
+        .fetch(&entry.url, Some(sha256))
+        .map_err(|err| CliError::Runtime {
+            command: command.clone(),
+            reason: format!("failed to download artifact: {err}"),
+        })?;
+
+    // Construct source→dest file mapping.
+    let artifact_type_str = artifact_type_wire(&entry.artifact_type);
+    let files = vec![ResolvedInstallFile {
+        source: adapter.source.clone(),
+        dest: expanded_dest.clone(),
+        mode: None,
+    }];
+
+    // Acquire lock for state mutation.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+
+    // Execute file copy.
+    let runner = InstallRunner::new(&layout);
+    let outcome = runner
+        .install_files(artifact_type_str, &downloaded.cached_path, &files)
+        .map_err(|err| CliError::Runtime {
+            command: command.clone(),
+            reason: format!("install failed: {err}"),
+        })?;
+
+    // Write state. On failure, clean up installed files.
+    let operation_id = format!(
+        "op-adapter-install-{}",
+        started_at.replace([':', '-', 'T', 'Z'], "")
+    );
+
+    let owned_files: Vec<OwnedFile> = outcome
+        .files
+        .iter()
+        .map(|f| OwnedFile {
+            path: f.path.clone(),
+            owner: FileOwner::Anolisa,
+            sha256: Some(f.sha256.clone()),
+        })
+        .collect();
+
+    let installed_file_paths: Vec<String> = outcome
+        .files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+
+    let obj = InstalledObject {
+        kind: ObjectKind::Adapter,
+        name: adapter_name.clone(),
+        version: version.clone(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        distribution_source: Some(entry.url.clone()),
+        installed_at: started_at.clone(),
+        last_operation_id: Some(operation_id.clone()),
+        managed: true,
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: vec![component.to_string()],
+        files: owned_files,
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+    };
+
+    let mut state = common::load_installed_state(ctx, &command)?;
+    state.install_mode = match ctx.install_mode {
+        crate::context::InstallMode::System => StateInstallMode::System,
+        crate::context::InstallMode::User => StateInstallMode::User,
+    };
+    state.prefix = layout.prefix.clone();
+    state.upsert_object(obj);
+    state.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.clone(),
+        status: "ok".to_string(),
+        started_at: started_at.clone(),
+        finished_at: Some(now_iso8601()),
+    });
+
+    let state_path = layout.state_dir.join("installed.toml");
+    if let Err(err) = state.save(&state_path) {
+        rollback_installed_files(&outcome.files);
+        return Err(CliError::Runtime {
+            command,
+            reason: format!("failed to save state (files rolled back): {err}"),
+        });
+    }
+
+    // Central log.
+    let log = CentralLog::open(layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(operation_id.clone()),
+        command: format!("adapter install {adapter_name}"),
+        source: "anolisa-cli".to_string(),
+        component: Some(component.to_string()),
+        severity: Severity::Info,
+        message: format!("adapter {adapter_name} installed"),
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at: started_at.clone(),
+        finished_at: Some(now_iso8601()),
+        status: Some(LogStatus::Ok),
+        objects: vec![adapter_name.clone()],
+        backup_ids: Vec::new(),
+        warnings: Vec::new(),
+        details: serde_json::Value::Null,
+    };
+    if let Err(err) = log.append(&record) {
+        eprintln!("warning: failed to write central log: {err}");
+    }
+
+    // Output.
+    if ctx.json {
+        return render_json(
+            &command,
+            InstallResult {
+                component: component.to_string(),
+                framework: framework.to_string(),
+                adapter: adapter_name,
+                version,
+                operation_id,
+                files_installed: installed_file_paths,
+            },
+        );
+    }
+
+    if !ctx.quiet {
+        let color = Palette::new(ctx.no_color);
+        println!(
+            "{} {} {}",
+            color.command("adapter install"),
+            adapter_name,
+            color.ok("succeeded")
+        );
+        println!(
+            "{} {}",
+            color.label("operation_id:"),
+            color.id(&operation_id)
+        );
+        println!(
+            "{} {}",
+            color.label("files installed:"),
+            installed_file_paths.len()
+        );
+        for p in &installed_file_paths {
+            println!("  - {}", color.path(p));
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve the artifact entry for a component from the distribution index.
+fn resolve_adapter_artifact(
+    dist_index: &DistributionIndex,
+    component: &str,
+    version: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<anolisa_core::DistributionEntry, CliError> {
+    let env = anolisa_env::EnvService::detect();
+    let preferred = [ArtifactType::TarGz, ArtifactType::Binary];
+    let query = ResolveQuery {
+        component,
+        version: Some(version),
+        channel: None,
+        install_mode: ctx.install_mode.as_str(),
+        os: &env.os,
+        arch: &env.arch,
+        libc: env.libc.as_deref(),
+        pkg_base: None,
+        preferred_types: &preferred,
+    };
+    dist_index.resolve(&query).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to resolve artifact for '{component}': {err}"),
+    })
+}
+
+/// Wire-form artifact type string for the install runner.
+fn artifact_type_wire(t: &ArtifactType) -> &'static str {
+    match t {
+        ArtifactType::TarGz => "tar_gz",
+        ArtifactType::Binary => "binary",
+        ArtifactType::Rpm => "rpm",
+        ArtifactType::Deb => "deb",
+        ArtifactType::Zip => "zip",
+        ArtifactType::Oci => "oci",
+        ArtifactType::File => "file",
+    }
+}
+
+/// Best-effort cleanup of installed files after a state-save failure.
+fn rollback_installed_files(files: &[anolisa_core::InstalledFile]) {
+    for f in files {
+        let _ = std::fs::remove_file(&f.path);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -898,5 +1139,355 @@ mod tests {
         )
         .expect_err("list must return not implemented");
         assert_eq!(err.code(), "NOT_IMPLEMENTED");
+    }
+
+    // =========================================================================
+    // Integration tests: adapter install + remove end-to-end
+    // =========================================================================
+
+    mod install_integration {
+        use super::*;
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use sha2::{Digest, Sha256};
+        use std::fs;
+        use tar::{Builder, Header};
+
+        fn sha256_hex(bytes: &[u8]) -> String {
+            let mut h = Sha256::new();
+            h.update(bytes);
+            let digest = h.finalize();
+            digest.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+            let buf: Vec<u8> = Vec::new();
+            let enc = GzEncoder::new(buf, Compression::default());
+            let mut tar = Builder::new(enc);
+            for (path, data) in entries {
+                let mut hdr = Header::new_gnu();
+                hdr.set_size(data.len() as u64);
+                hdr.set_mode(0o644);
+                hdr.set_cksum();
+                tar.append_data(&mut hdr, path, *data).unwrap();
+            }
+            let enc = tar.into_inner().unwrap();
+            enc.finish().unwrap()
+        }
+
+        /// Sets up a complete test environment:
+        /// - system prefix under tmp
+        /// - overlay manifests with distribution index pointing to a file:// tar.gz
+        /// - the tar.gz built from provided entries
+        ///
+        /// Returns (ctx, tar_gz_sha256)
+        fn setup_env(
+            tmp: &std::path::Path,
+            tar_entries: &[(&str, &[u8])],
+            component: &str,
+            version: &str,
+        ) -> (CliContext, String) {
+            let layout = FsLayout::system(Some(tmp.to_path_buf()));
+
+            // Build tar.gz artifact.
+            let tar_bytes = build_tar_gz(tar_entries);
+            let tar_sha = sha256_hex(&tar_bytes);
+            let artifact_dir = tmp.join("artifacts");
+            fs::create_dir_all(&artifact_dir).unwrap();
+            let tar_path = artifact_dir.join("adapter.tar.gz");
+            fs::write(&tar_path, &tar_bytes).unwrap();
+            let tar_url = format!("file://{}", tar_path.display());
+
+            // Write overlay distribution index.
+            let dist_dir = layout.manifests_overlay.join("distribution-index");
+            fs::create_dir_all(&dist_dir).unwrap();
+            let index_content = format!(
+                r#"schema_version = 1
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "tar"
+url = "{tar_url}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{tar_sha}"
+"#,
+                os = anolisa_env::EnvService::detect().os,
+                arch = anolisa_env::EnvService::detect().arch,
+            );
+            fs::write(dist_dir.join("index.toml"), &index_content).unwrap();
+
+            // Ensure state/cache dirs exist.
+            fs::create_dir_all(&layout.state_dir).unwrap();
+            fs::create_dir_all(&layout.cache_dir).unwrap();
+
+            let ctx = ctx_with_prefix(false, false, InstallMode::System, Some(tmp.to_path_buf()));
+            (ctx, tar_sha)
+        }
+
+        // -- install: end-to-end success -----------------------------------------
+
+        #[test]
+        fn install_downloads_copies_files_and_writes_state() {
+            let tmp = tempdir().expect("tmpdir");
+            let plugin_json = br#"{"name":"tokenless"}"#;
+            let index_js = b"console.log('adapter loaded');";
+            let (ctx, _sha) = setup_env(
+                tmp.path(),
+                &[
+                    ("target/release/cosh-ext/plugin.json", plugin_json),
+                    ("target/release/cosh-ext/dist/index.js", index_js),
+                ],
+                "tokenless",
+                // Must match the tokenless manifest's component.version
+                &tokenless_version(),
+            );
+
+            handle_install(&ctx, "tokenless", "cosh").expect("install must succeed");
+
+            // Verify files exist at the expanded destination.
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let dest_root = layout.datadir.join("adapters/tokenless/cosh");
+            assert!(
+                dest_root.join("plugin.json").exists(),
+                "plugin.json must be installed"
+            );
+            assert!(
+                dest_root.join("dist/index.js").exists(),
+                "dist/index.js must be installed"
+            );
+            assert_eq!(
+                fs::read(dest_root.join("plugin.json")).unwrap(),
+                plugin_json
+            );
+            assert_eq!(fs::read(dest_root.join("dist/index.js")).unwrap(), index_js);
+
+            // Verify state has the adapter object.
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            let obj = state
+                .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                .expect("adapter object must exist in state");
+            assert_eq!(obj.status, ObjectStatus::Installed);
+            assert_eq!(obj.component_refs, vec!["tokenless".to_string()]);
+            assert_eq!(obj.files.len(), 2);
+            assert!(obj.files.iter().all(|f| f.owner == FileOwner::Anolisa));
+            assert!(obj.files.iter().all(|f| f.sha256.is_some()));
+
+            // Verify central log written.
+            assert!(layout.central_log.exists(), "central log must be written");
+        }
+
+        // -- install then remove: full lifecycle ---------------------------------
+
+        #[test]
+        fn install_then_remove_leaves_no_files_or_state() {
+            let tmp = tempdir().expect("tmpdir");
+            let plugin_json = br#"{"name":"tokenless"}"#;
+            let (ctx, _sha) = setup_env(
+                tmp.path(),
+                &[("target/release/cosh-ext/plugin.json", plugin_json)],
+                "tokenless",
+                &tokenless_version(),
+            );
+
+            handle_install(&ctx, "tokenless", "cosh").expect("install must succeed");
+
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let dest_root = layout.datadir.join("adapters/tokenless/cosh");
+            assert!(dest_root.join("plugin.json").exists());
+
+            handle_remove("tokenless", "cosh", false, &ctx).expect("remove must succeed");
+
+            assert!(
+                !dest_root.join("plugin.json").exists(),
+                "file must be removed"
+            );
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            assert!(
+                state
+                    .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                    .is_none(),
+                "adapter object must be removed from state"
+            );
+        }
+
+        // -- install: missing sha256 in distribution entry -----------------------
+
+        #[test]
+        fn install_rejects_entry_without_sha256() {
+            let tmp = tempdir().expect("tmpdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            fs::create_dir_all(&layout.state_dir).unwrap();
+            fs::create_dir_all(&layout.cache_dir).unwrap();
+
+            // Write a distribution index with no sha256.
+            let dist_dir = layout.manifests_overlay.join("distribution-index");
+            fs::create_dir_all(&dist_dir).unwrap();
+            let env = anolisa_env::EnvService::detect();
+            let index_content = format!(
+                r#"schema_version = 1
+
+[[entries]]
+component = "tokenless"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "tar"
+url = "file:///nonexistent/artifact.tar.gz"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+"#,
+                version = tokenless_version(),
+                os = env.os,
+                arch = env.arch,
+            );
+            fs::write(dist_dir.join("index.toml"), &index_content).unwrap();
+
+            let ctx = ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            );
+            let err =
+                handle_install(&ctx, "tokenless", "cosh").expect_err("must reject missing sha256");
+            assert_eq!(err.code(), "EXECUTION_FAILED");
+            assert!(err.reason().contains("sha256"));
+
+            // No state written.
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            assert!(
+                state
+                    .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                    .is_none(),
+                "no phantom state on sha256 rejection"
+            );
+        }
+
+        // -- install: checksum mismatch does not leave state ---------------------
+
+        #[test]
+        fn install_checksum_mismatch_does_not_leave_state() {
+            let tmp = tempdir().expect("tmpdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            fs::create_dir_all(&layout.state_dir).unwrap();
+            fs::create_dir_all(&layout.cache_dir).unwrap();
+
+            // Build a tar.gz but declare a wrong sha256 in the index.
+            let tar_bytes = build_tar_gz(&[("target/release/cosh-ext/plugin.json", b"data")]);
+            let artifact_dir = tmp.path().join("artifacts");
+            fs::create_dir_all(&artifact_dir).unwrap();
+            let tar_path = artifact_dir.join("adapter.tar.gz");
+            fs::write(&tar_path, &tar_bytes).unwrap();
+            let tar_url = format!("file://{}", tar_path.display());
+
+            let dist_dir = layout.manifests_overlay.join("distribution-index");
+            fs::create_dir_all(&dist_dir).unwrap();
+            let env = anolisa_env::EnvService::detect();
+            let index_content = format!(
+                r#"schema_version = 1
+
+[[entries]]
+component = "tokenless"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "tar"
+url = "{tar_url}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{wrong_sha}"
+"#,
+                version = tokenless_version(),
+                os = env.os,
+                arch = env.arch,
+                wrong_sha = "0".repeat(64),
+            );
+            fs::write(dist_dir.join("index.toml"), &index_content).unwrap();
+
+            let ctx = ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            );
+            let err = handle_install(&ctx, "tokenless", "cosh")
+                .expect_err("must reject checksum mismatch");
+            assert_eq!(err.code(), "EXECUTION_FAILED");
+
+            // No state or files left.
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            assert!(
+                state
+                    .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                    .is_none(),
+                "no state on checksum failure"
+            );
+            let dest_root = layout.datadir.join("adapters/tokenless/cosh");
+            assert!(!dest_root.exists(), "no adapter files on checksum failure");
+        }
+
+        // -- install: dest already exists rejects without leaving state -----------
+
+        #[test]
+        fn install_dest_exists_does_not_leave_state() {
+            let tmp = tempdir().expect("tmpdir");
+            let plugin_json = br#"{"name":"pre-existing"}"#;
+            let (ctx, _sha) = setup_env(
+                tmp.path(),
+                &[("target/release/cosh-ext/plugin.json", b"new-data")],
+                "tokenless",
+                &tokenless_version(),
+            );
+
+            // Pre-create the dest file to trigger DestExists.
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let dest_root = layout.datadir.join("adapters/tokenless/cosh");
+            fs::create_dir_all(&dest_root).unwrap();
+            fs::write(dest_root.join("plugin.json"), plugin_json).unwrap();
+
+            let err = handle_install(&ctx, "tokenless", "cosh")
+                .expect_err("must reject when dest exists");
+            assert_eq!(err.code(), "EXECUTION_FAILED");
+
+            // Pre-existing file untouched.
+            assert_eq!(
+                fs::read(dest_root.join("plugin.json")).unwrap(),
+                plugin_json
+            );
+
+            // No state written.
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            assert!(
+                state
+                    .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                    .is_none(),
+                "no state when dest exists"
+            );
+        }
+
+        /// Read the tokenless component version from the dev-tree manifest so
+        /// the test fixtures automatically match.
+        fn tokenless_version() -> String {
+            let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../manifests/runtime/tokenless.toml");
+            let content = fs::read_to_string(&manifest_path).expect("read tokenless manifest");
+            let table: toml::Table = toml::from_str(&content).expect("parse tokenless manifest");
+            table["component"]["version"]
+                .as_str()
+                .expect("component.version must be string")
+                .to_string()
+        }
     }
 }
