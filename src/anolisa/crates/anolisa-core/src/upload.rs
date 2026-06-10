@@ -13,7 +13,7 @@ use std::process::Command;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 /// agentsight SLS log enablement marker file
-const SLS_LOG_MARKER: &str = "/etc/anolisa/enable_sls_log";
+const SLS_LOG_MARKER: &str = "/etc/anolisa/enable_token_collector";
 
 /// Default SLS account ID
 const DEFAULT_SLS_ACCOUNT_ID_B64: &str = "MTgwODA3ODk1MDc3MDI2NA==";
@@ -394,7 +394,7 @@ impl UploadStarter {
 
     /// Enable upload: install ilogtail → configure account → configure user_defined_id → enable agentsight data write
     ///
-    /// Called after `anolisa subscription register` successfully writes register.json.
+    /// Called after `anolisa register` successfully writes register.json.
     pub fn start(&self) -> Result<(), UploadError> {
         validate_sls_account_id(&self.config.sls_account_id)?;
 
@@ -424,7 +424,7 @@ impl UploadStarter {
 
     /// Stop upload: remove user_defined_id tags and SLS account file (keep ilogtail installed)
     ///
-    /// Called after `anolisa subscription unregister` successfully writes register.json.
+    /// Called after `anolisa unregister` successfully writes register.json.
     /// Note: does not uninstall ilogtail itself, only revokes upload configuration.
     pub fn stop(&self) -> Result<(), UploadError> {
         // 0. Remove agentsight SLS log marker file

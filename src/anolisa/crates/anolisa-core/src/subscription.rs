@@ -7,14 +7,12 @@
 //! ```text
 //! INIT (fresh)  ──[register()]──► REGISTERED
 //! INIT (fresh)  ──[unregister()]─► UNREGISTERED
-//! INIT (fresh)  ──[later()]──────► INIT (later)  ──(30d)──► INIT (fresh)
 //! UNREGISTERED  ──[register()]──► REGISTERED
 //! REGISTERED    ──[unregister()]─► UNREGISTERED
 //! ```
 //!
 //! **Irreversibility**: once INIT → UNREGISTERED (explicit refusal), the login
 //! script will no longer show the interactive prompt.
-//! INIT internal fresh ↔ later can cycle repeatedly (each later() resets the timer).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -24,9 +22,6 @@ use std::path::{Path, PathBuf};
 
 /// register.json schema version, starting at 1
 pub const REGISTER_JSON_VERSION: u32 = 1;
-
-/// Later expiry threshold: 30 days (in seconds), hard-coded and non-configurable
-pub const LATER_EXPIRE_SECS: i64 = 30 * 86_400;
 
 // ── Product type ─────────────────────────────────────────────────────
 
@@ -116,15 +111,13 @@ pub struct RegisterRecord {
     pub operator: Option<String>,
 }
 
-// ── Logical state (distinguishes fresh / later) ─────────────────────
+// ── Logical state ─────────────────────────────────────────────────────
 
 /// Logical state derived after parsing register.json
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentState {
-    /// Fresh INIT — no decision has been made yet
+    /// INIT — no decision has been made yet
     InitFresh,
-    /// User previously chose Later and the 30-day window has not expired
-    InitLater { later_start_time: DateTime<Utc> },
     /// Explicitly refused or withdrew registration
     Unregistered,
     /// Consent granted, upload active
@@ -244,25 +237,12 @@ impl RegistrationManager {
         }
     }
 
-    /// Map a `RegisterRecord` to `ConsentState` (including later-expiry check).
+    /// Map a `RegisterRecord` to `ConsentState`.
     fn record_to_state(&self, rec: &RegisterRecord) -> ConsentState {
         match rec.state {
             RegisterState::Registered => ConsentState::Registered,
             RegisterState::Unregistered => ConsentState::Unregistered,
-            RegisterState::Init => match rec.later_start_time {
-                None => ConsentState::InitFresh,
-                Some(ts) => {
-                    let elapsed = (Utc::now() - ts).num_seconds();
-                    // elapsed < 0: clock skew / tampering — treat as expired, show prompt immediately
-                    if !(0..LATER_EXPIRE_SECS).contains(&elapsed) {
-                        ConsentState::InitFresh
-                    } else {
-                        ConsentState::InitLater {
-                            later_start_time: ts,
-                        }
-                    }
-                }
-            },
+            RegisterState::Init => ConsentState::InitFresh,
         }
     }
 
@@ -357,37 +337,6 @@ impl RegistrationManager {
             product_type: Some(product_type),
             later_start_time: None,
             registration_time,
-            source: Some(RegisterSource::Cli),
-            operator: Some(operator.to_string()),
-        };
-        self.atomic_write(&record)?;
-        Ok(())
-    }
-
-    /// Perform Later: write/refresh `later_start_time` to now, state stays `init`.
-    ///
-    /// Only allowed in Init state (fresh / later);
-    /// calling from Registered / Unregistered returns an error.
-    ///
-    /// The CLI layer performs the same state check before calling (for friendlier messages);
-    /// this serves as a defensive guard against non-CLI callers bypassing validation.
-    pub fn do_later(&self, operator: &str) -> Result<(), SubscriptionError> {
-        let _lock = self.acquire_lock()?;
-        let (current, _) = self.read_state_and_record();
-        match current {
-            ConsentState::Registered => return Err(SubscriptionError::AlreadyRegistered),
-            ConsentState::Unregistered => return Err(SubscriptionError::NotRegistered),
-            ConsentState::InitFresh | ConsentState::InitLater { .. } => {}
-        }
-
-        let product_type = self.detect_product_type();
-
-        let record = RegisterRecord {
-            version: REGISTER_JSON_VERSION,
-            state: RegisterState::Init,
-            product_type: Some(product_type),
-            later_start_time: Some(Utc::now()),
-            registration_time: None,
             source: Some(RegisterSource::Cli),
             operator: Some(operator.to_string()),
         };
@@ -535,7 +484,7 @@ pub enum SubscriptionError {
     NotRoot,
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("already registered. Use 'anolisa subscription status' to check.")]
+    #[error("already registered. Use 'anolisa register status' to check.")]
     AlreadyRegistered,
     #[error("not currently registered.")]
     NotRegistered,
@@ -599,60 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn test_later_sets_init_later() {
-        let dir = TempDir::new().unwrap();
-        let m = mgr(&dir);
-        m.do_later("admin").unwrap();
-        assert!(matches!(m.read_state(), ConsentState::InitLater { .. }));
-    }
-
-    #[test]
-    fn test_later_expired_returns_init_fresh() {
-        let dir = TempDir::new().unwrap();
-        let m = mgr(&dir);
-        // Manually write a later_start_time 31 days in the past
-        let old_ts = Utc::now() - chrono::Duration::days(31);
-        let rec = RegisterRecord {
-            version: 1,
-            state: RegisterState::Init,
-            product_type: Some(ProductType::Unknown),
-            later_start_time: Some(old_ts),
-            registration_time: None,
-            source: Some(RegisterSource::Cli),
-            operator: Some("admin".into()),
-        };
-        fs::write(
-            &m.register_path,
-            serde_json::to_string_pretty(&rec).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(m.read_state(), ConsentState::InitFresh);
-    }
-
-    #[test]
-    fn test_later_future_timestamp_returns_init_fresh() {
-        let dir = TempDir::new().unwrap();
-        let m = mgr(&dir);
-        // Clock-skew simulation: later_start_time is in the future
-        let future_ts = Utc::now() + chrono::Duration::days(1);
-        let rec = RegisterRecord {
-            version: 1,
-            state: RegisterState::Init,
-            product_type: Some(ProductType::Unknown),
-            later_start_time: Some(future_ts),
-            registration_time: None,
-            source: Some(RegisterSource::Cli),
-            operator: Some("admin".into()),
-        };
-        fs::write(
-            &m.register_path,
-            serde_json::to_string_pretty(&rec).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(m.read_state(), ConsentState::InitFresh);
-    }
-
-    #[test]
     fn test_product_type_from_release_file() {
         let dir = TempDir::new().unwrap();
         let m = mgr(&dir);
@@ -667,25 +562,6 @@ mod tests {
     fn test_product_type_fallback_unknown() {
         let dir = TempDir::new().unwrap();
         assert_eq!(mgr(&dir).detect_product_type(), ProductType::Unknown);
-    }
-
-    #[test]
-    fn test_later_rejects_registered() {
-        let dir = TempDir::new().unwrap();
-        let m = mgr(&dir);
-        m.do_register("admin").unwrap();
-        let err = m.do_later("admin").unwrap_err();
-        assert!(matches!(err, SubscriptionError::AlreadyRegistered));
-    }
-
-    #[test]
-    fn test_later_rejects_unregistered() {
-        let dir = TempDir::new().unwrap();
-        let m = mgr(&dir);
-        m.do_register("admin").unwrap();
-        m.do_unregister("admin").unwrap();
-        let err = m.do_later("admin").unwrap_err();
-        assert!(matches!(err, SubscriptionError::NotRegistered));
     }
 
     #[test]

@@ -87,8 +87,8 @@ pub use state::{
     ServiceRef, StateError, SubscriptionScope,
 };
 pub use subscription::{
-    ConsentState, LATER_EXPIRE_SECS, ProductType, RegisterRecord, RegisterSource, RegisterState,
-    RegistrationManager, SubscriptionError, current_operator, require_root,
+    ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
+    SubscriptionError, current_operator, require_root,
 };
 pub use transaction::{
     JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,

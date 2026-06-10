@@ -2,7 +2,7 @@
 //!
 //! Two-tier structure (see design doc):
 //! - **Tier 1** — capability-vocabulary verbs for everyday use (`tier1/`).
-//! - **Tier 2** — independent management surfaces (subscription / adapter / self
+//! - **Tier 2** — independent management surfaces (register / adapter / self
 //!   / runtime / osbase). Each surface uses its own appropriate vocabulary.
 
 pub mod common;
@@ -11,9 +11,9 @@ pub mod tier1;
 // Tier 2 surfaces
 pub mod adapter;
 pub mod osbase;
+pub mod register;
 pub mod runtime;
 pub mod self_;
-pub mod subscription;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -112,8 +112,10 @@ pub enum CapabilityCommands {
 /// Tier 2 — independent management surfaces.
 #[derive(Subcommand)]
 pub enum ManagementCommands {
-    /// Manage ANOLISA subscription
-    Subscription(subscription::SubscriptionArgs),
+    /// Register for token collection, or query registration status (requires root/sudo)
+    Register(register::RegisterArgs),
+    /// Withdraw consent and stop token upload (requires root/sudo)
+    Unregister(register::UnregisterArgs),
     /// Manage agent-framework adapters
     Adapter(adapter::AdapterArgs),
     /// Manage anolisa CLI itself
@@ -211,7 +213,8 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             CapabilityCommands::Update(args) => tier1::update::handle(args, ctx),
         },
         Commands::Management(cmd) => match cmd {
-            ManagementCommands::Subscription(args) => subscription::handle(args, ctx),
+            ManagementCommands::Register(args) => register::handle_register_group(args, ctx),
+            ManagementCommands::Unregister(args) => register::handle_unregister_cmd(args, ctx),
             ManagementCommands::Adapter(args) => adapter::handle(args, ctx),
             ManagementCommands::SelfCmd(args) => self_::handle(args, ctx),
             ManagementCommands::Runtime(args) => runtime::handle(args, ctx),

@@ -1,6 +1,5 @@
 use anolisa_core::{
-    ConsentState, LATER_EXPIRE_SECS, RegistrationManager, UploadConfig, UploadStarter,
-    current_operator, require_root,
+    ConsentState, RegistrationManager, UploadConfig, UploadStarter, current_operator, require_root,
 };
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
@@ -10,63 +9,65 @@ use crate::context::CliContext;
 use crate::response::CliError;
 
 #[derive(Parser)]
-pub struct SubscriptionArgs {
+#[command(args_conflicts_with_subcommands = true)]
+pub struct RegisterArgs {
     #[command(subcommand)]
-    pub command: SubscriptionCommands,
+    pub command: Option<RegisterCommands>,
+
+    /// Skip interactive confirmation (for scripts / automation)
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand)]
-pub enum SubscriptionCommands {
-    /// Register this machine for token collection (requires root/sudo)
-    Register {
-        /// Skip interactive confirmation (for scripts / automation)
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Withdraw consent and stop token upload (requires root/sudo)
-    Unregister {
-        /// Skip interactive confirmation
-        #[arg(long)]
-        force: bool,
-    },
+pub enum RegisterCommands {
     /// Show token collection registration status
     Status {
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
     },
-    /// Defer the registration decision — you will be reminded in 30 days (requires root/sudo)
-    Later,
 }
 
-/// Dispatch `subscription` subcommands to their respective handlers
-pub fn handle(args: SubscriptionArgs, _ctx: &CliContext) -> Result<(), CliError> {
+#[derive(Parser)]
+pub struct UnregisterArgs {
+    /// Skip interactive confirmation
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Dispatch `register` subcommands or default register action
+pub fn handle_register_group(args: RegisterArgs, _ctx: &CliContext) -> Result<(), CliError> {
     let mgr = RegistrationManager::new();
     match args.command {
-        SubscriptionCommands::Register { yes } => handle_register(&mgr, yes),
-        SubscriptionCommands::Unregister { force } => handle_unregister(&mgr, force),
-        SubscriptionCommands::Status { json } => handle_status(&mgr, json),
-        SubscriptionCommands::Later => handle_later(&mgr),
+        None => handle_register(&mgr, args.yes),
+        Some(RegisterCommands::Status { json }) => handle_status(&mgr, json),
     }
+}
+
+/// Handle top-level `unregister` command
+pub fn handle_unregister_cmd(args: UnregisterArgs, _ctx: &CliContext) -> Result<(), CliError> {
+    let mgr = RegistrationManager::new();
+    handle_unregister(&mgr, args.force)
 }
 
 // ── register ──────────────────────────────────────────────────────────────────
 
 fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError> {
     require_root().map_err(|e| CliError::Runtime {
-        command: "subscription register".to_string(),
+        command: "register".to_string(),
         reason: e.to_string(),
     })?;
 
     if mgr.read_state() == ConsentState::Registered {
         println!("Already registered.");
-        println!("Use 'anolisa subscription status' to check.");
+        println!("Use 'anolisa register status' to check.");
         return Ok(());
     }
 
     if mgr.is_sysom_registered() {
         println!("Already registered (via sysom).");
-        println!("Use 'anolisa subscription status' to check.");
+        println!("Use 'anolisa register status' to check.");
         return Ok(());
     }
 
@@ -75,7 +76,7 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     if !yes {
         if !std::io::stdin().is_terminal() {
             return Err(CliError::Runtime {
-                command: "subscription register".to_string(),
+                command: "register".to_string(),
                 reason: "non-interactive session detected; pass --yes to confirm registration"
                     .to_string(),
             });
@@ -85,7 +86,7 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
         if !prompt_yn("Register? [Y/N]: ", false) {
             println!("Cancelled.");
             return Err(CliError::Runtime {
-                command: "subscription register".to_string(),
+                command: "register".to_string(),
                 reason: "user cancelled".to_string(),
             });
         }
@@ -95,9 +96,9 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     let starter = UploadStarter::new(upload_cfg);
     if let Err(e) = starter.start() {
         return Err(CliError::Runtime {
-            command: "subscription register".to_string(),
+            command: "register".to_string(),
             reason: format!(
-                "unable to start data upload service: {e}\n  Please check network connectivity and try again."
+                "unable to start usage report service: {e}\n  Please check network connectivity and try again."
             ),
         });
     }
@@ -113,24 +114,26 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
             }
         }
         return Err(CliError::Runtime {
-            command: "subscription register".to_string(),
+            command: "register".to_string(),
             reason: e.to_string(),
         });
     }
 
     println!();
     println!("Registered successfully.");
-    println!("  Status:      registered");
+    println!("  Status:       registered");
     if let Some(rec) = mgr.read_record() {
         if let Some(t) = rec.registration_time {
-            println!("  Registered:  {}", t.format("%Y-%m-%dT%H:%M:%SZ"));
+            println!("  Registered:   {}", t.format("%Y-%m-%dT%H:%M:%SZ"));
         }
     }
-    println!("  Upload:      active");
+    println!("  Usage Report: active");
 
     if !mgr.is_agentsight_running() {
         println!();
-        println!("  agentsight is not running. Subscription functionality is incomplete.");
+        println!(
+            "  Note: agentsight is not running. Usage report may not work until agentsight is started."
+        );
     }
 
     Ok(())
@@ -140,35 +143,32 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
 
 fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliError> {
     require_root().map_err(|e| CliError::Runtime {
-        command: "subscription unregister".to_string(),
+        command: "unregister".to_string(),
         reason: e.to_string(),
     })?;
 
     let already_unregistered = mgr.read_state() == ConsentState::Unregistered;
 
     if already_unregistered && !force {
-        // State is already UNREGISTERED; nothing to do unless --force is used to
-        // retry a previously failed upload teardown.
         println!("Not currently registered.");
         println!("  If upload teardown previously failed, run with --force to retry cleanup.");
         return Ok(());
     }
 
     if !already_unregistered {
-        // Only prompt when we're actually changing state
         if !force {
             if !std::io::stdin().is_terminal() {
                 return Err(CliError::Runtime {
-                    command: "subscription unregister".to_string(),
+                    command: "unregister".to_string(),
                     reason:
                         "non-interactive session detected; pass --force to confirm unregistration"
                             .to_string(),
                 });
             }
-            if !prompt_yn("Stop subscription? [y/N]: ", false) {
+            if !prompt_yn("Unregister? [y/N]: ", false) {
                 println!("Cancelled.");
                 return Err(CliError::Runtime {
-                    command: "subscription unregister".to_string(),
+                    command: "unregister".to_string(),
                     reason: "user cancelled".to_string(),
                 });
             }
@@ -179,7 +179,7 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
         let operator = current_operator();
         mgr.do_unregister(&operator)
             .map_err(|e| CliError::Runtime {
-                command: "subscription unregister".to_string(),
+                command: "unregister".to_string(),
                 reason: e.to_string(),
             })?;
     }
@@ -191,17 +191,17 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
         eprintln!("error: consent recorded as UNREGISTERED, but upload teardown failed: {e}");
         eprintln!("  The system will NOT upload new data (consent denied),");
         eprintln!("  but residual ilogtail configuration may remain.");
-        eprintln!("  Retry with: sudo anolisa subscription unregister --force");
+        eprintln!("  Retry with: sudo anolisa unregister --force");
         return Err(CliError::Runtime {
-            command: "subscription unregister".to_string(),
+            command: "unregister".to_string(),
             reason: format!(
                 "upload teardown failed: {e}. Consent is UNREGISTERED; retry with --force."
             ),
         });
     }
 
-    println!("Unregistered. Data upload stopped.");
-    println!("  To re-enable: sudo anolisa subscription register");
+    println!("Unregistered. Usage report stopped.");
+    println!("  To re-enable: sudo anolisa register");
 
     Ok(())
 }
@@ -226,15 +226,16 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
 
     // sysom service registration (sysak_meta is active)
     if sysom_active {
-        let source_is_sysom = rec
+        // Console source means the registration was done through sysom's web console
+        let registered_via_console = rec
             .as_ref()
             .and_then(|r| r.source.as_ref())
             .map(|s| *s == anolisa_core::RegisterSource::Console)
             .unwrap_or(false);
 
-        if state != ConsentState::Registered || source_is_sysom {
+        if state != ConsentState::Registered || registered_via_console {
             println!("  Consent State: REGISTERED");
-            println!("  Data Upload:   active");
+            println!("  Usage Report:  active");
             println!("  Source:        console");
             if let Some(r) = &rec {
                 if let Some(t) = r.registration_time {
@@ -251,22 +252,14 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
     match &state {
         ConsentState::InitFresh => {
             println!("  Consent State: INIT (not yet decided)");
-            println!("  Data Upload:   disabled (local only)");
+            println!("  Usage Report:  disabled (local only)");
             println!();
             println!("  You haven't decided whether to enable Token collection.");
-            println!("  Run 'sudo anolisa subscription register' to enable.");
-        }
-        ConsentState::InitLater { later_start_time } => {
-            let remaining = format_remaining(*later_start_time);
-            println!("  Consent State: INIT (decided later)");
-            println!("  Data Upload:   disabled (local only)");
-            println!();
-            println!("  Reminder in {remaining}.");
-            println!("  Run 'sudo anolisa subscription register' to enable now.");
+            println!("  Run 'sudo anolisa register' to enable.");
         }
         ConsentState::Unregistered => {
             println!("  Consent State: UNREGISTERED");
-            println!("  Data Upload:   disabled (local only)");
+            println!("  Usage Report:  disabled (local only)");
             if let Some(r) = &rec {
                 if let Some(t) = r.registration_time {
                     let via = format_source(&r.source);
@@ -274,11 +267,11 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
                 }
             }
             println!();
-            println!("  To enable upload: sudo anolisa subscription register");
+            println!("  To enable registration: sudo anolisa register");
         }
         ConsentState::Registered => {
             println!("  Consent State: REGISTERED");
-            println!("  Data Upload:   active");
+            println!("  Usage Report:  active");
             if let Some(r) = &rec {
                 if let Some(t) = r.registration_time {
                     let via = format_source(&r.source);
@@ -294,46 +287,6 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
-// ── later ─────────────────────────────────────────────────────────────────────
-
-fn handle_later(mgr: &RegistrationManager) -> Result<(), CliError> {
-    require_root().map_err(|e| CliError::Runtime {
-        command: "subscription later".to_string(),
-        reason: e.to_string(),
-    })?;
-
-    // core do_later also has the same state validation (defensive guard);
-    // check here first to provide friendlier error messages.
-    let state = mgr.read_state();
-    match state {
-        ConsentState::Registered => {
-            return Err(CliError::Runtime {
-                command: "subscription later".to_string(),
-                reason:
-                    "already registered. Use 'anolisa subscription unregister' to withdraw first"
-                        .to_string(),
-            });
-        }
-        ConsentState::Unregistered => {
-            return Err(CliError::Runtime {
-                command: "subscription later".to_string(),
-                reason: "already unregistered. Use 'anolisa subscription register' to re-enable"
-                    .to_string(),
-            });
-        }
-        ConsentState::InitFresh | ConsentState::InitLater { .. } => {}
-    }
-
-    let operator = current_operator();
-    mgr.do_later(&operator).map_err(|e| CliError::Runtime {
-        command: "subscription later".to_string(),
-        reason: e.to_string(),
-    })?;
-
-    println!("Decision deferred. You will be reminded in 30 days.");
-    Ok(())
-}
-
 // ── JSON output ─────────────────────────────────────────────────────────────
 
 fn print_status_json(
@@ -346,7 +299,7 @@ fn print_status_json(
         "registered"
     } else {
         match state {
-            ConsentState::InitFresh | ConsentState::InitLater { .. } => "init",
+            ConsentState::InitFresh => "init",
             ConsentState::Unregistered => "unregistered",
             ConsentState::Registered => "registered",
         }
@@ -371,12 +324,6 @@ fn print_status_json(
         if let Some(src) = &r.source {
             obj["source"] = serde_json::Value::String(src.to_string());
         }
-        if let ConsentState::InitLater { later_start_time } = state {
-            let total_secs =
-                LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
-            let days_left = (total_secs as f64 / 86_400.0).ceil() as i64;
-            obj["later_days_remaining"] = serde_json::Value::Number(days_left.max(0).into());
-        }
     }
 
     if sysom_active {
@@ -393,22 +340,6 @@ fn format_source(source: &Option<anolisa_core::RegisterSource>) -> String {
     match source {
         Some(s) => format!(" (via {s})"),
         None => String::new(),
-    }
-}
-
-fn format_remaining(later_start_time: chrono::DateTime<chrono::Utc>) -> String {
-    let total_secs = LATER_EXPIRE_SECS - (chrono::Utc::now() - later_start_time).num_seconds();
-    if total_secs <= 0 {
-        return "< 1 hour".to_string();
-    }
-    let days = total_secs / 86_400;
-    let hours = (total_secs % 86_400) / 3_600;
-    if days > 0 {
-        format!("{days} day(s)")
-    } else if hours > 0 {
-        format!("{hours} hour(s)")
-    } else {
-        "< 1 hour".to_string()
     }
 }
 
@@ -487,7 +418,7 @@ fn print_register_banner() {
         "      this machine",
         "    \u{00B7} Uses Alibaba Cloud internal network, zero public network",
         "      cost, zero extra configuration",
-        "    \u{00B7} You stay in control \u{2014} run 'anolisa subscription unregister'",
+        "    \u{00B7} You stay in control \u{2014} run 'anolisa unregister'",
         "      to opt out at any time",
         "",
         "  Help us make Agentic OS even better?",
