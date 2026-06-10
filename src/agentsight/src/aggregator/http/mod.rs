@@ -7,7 +7,7 @@ mod pair;
 mod response;
 
 // Re-export main types
-pub use aggregator::{HttpConnectionAggregator, ConnectionId, ConnectionState};
+pub use aggregator::{ConnectionId, ConnectionState, HttpConnectionAggregator};
 pub use pair::HttpPair;
 pub use response::AggregatedResponse;
 

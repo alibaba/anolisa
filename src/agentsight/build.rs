@@ -38,11 +38,11 @@ fn main() {
 
     generate_skeleton(&mut out, "sslsniff");
     generate_header(&mut out, "sslsniff");
-    
+
     // Generate proctrace skeleton and bindings
     generate_skeleton(&mut out, "proctrace");
     generate_header(&mut out, "proctrace");
-    
+
     // Generate procmon skeleton and bindings
     generate_skeleton(&mut out, "procmon");
     generate_header(&mut out, "procmon");
@@ -61,7 +61,7 @@ fn main() {
 
     // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
     generate_skeleton(&mut out, "tcpsniff");
-    
+
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
     // generate_header(&mut out, "stackdeltatypes");
@@ -71,8 +71,7 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
     let frontend_dist = PathBuf::from(&manifest_dir).join("frontend-dist");
     if !frontend_dist.exists() {
-        std::fs::create_dir_all(&frontend_dist)
-            .expect("Failed to create frontend-dist directory");
+        std::fs::create_dir_all(&frontend_dist).expect("Failed to create frontend-dist directory");
     }
     // Watch the directory AND each file inside it so cargo detects content changes
     println!("cargo:rerun-if-changed=frontend-dist");
@@ -84,7 +83,9 @@ fn main() {
 
     // Generate C header from src/ffi.rs via cbindgen
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let header_path = PathBuf::from(&crate_dir).join("include").join("agentsight.h");
+    let header_path = PathBuf::from(&crate_dir)
+        .join("include")
+        .join("agentsight.h");
     std::fs::create_dir_all(header_path.parent().unwrap())
         .expect("Failed to create include/ directory");
     cbindgen::Builder::new()
@@ -132,9 +133,7 @@ fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String>
         while i + "agentsight_".len() < bytes.len() {
             if l[i..].starts_with("agentsight_") {
                 let mut j = i + "agentsight_".len();
-                while j < bytes.len()
-                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-                {
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                     j += 1;
                 }
                 if j < bytes.len() && bytes[j] == b'(' {

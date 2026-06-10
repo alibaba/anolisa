@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::analyzer::TokenConsumptionBreakdown;
 use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use crate::analyzer::TokenConsumptionBreakdown;
 
 /// A row stored in the token_consumption table (excludes per_message and output_per_block)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,10 +156,10 @@ impl TokenConsumptionStore {
         pid: u32,
         comm: &str,
     ) -> anyhow::Result<i64> {
-        let by_role_json = serde_json::to_string(&breakdown.by_role)
-            .unwrap_or_else(|_| "{}".to_string());
-        let output_by_type_json = serde_json::to_string(&breakdown.output_by_type)
-            .unwrap_or_else(|_| "{}".to_string());
+        let by_role_json =
+            serde_json::to_string(&breakdown.by_role).unwrap_or_else(|_| "{}".to_string());
+        let output_by_type_json =
+            serde_json::to_string(&breakdown.output_by_type).unwrap_or_else(|_| "{}".to_string());
 
         let sql = format!(
             "INSERT INTO {} (
@@ -171,23 +171,24 @@ impl TokenConsumptionStore {
             self.table_name
         );
 
-        self.conn.execute(
-            &sql,
-            params![
-                timestamp_ns as i64,
-                pid as i64,
-                comm,
-                breakdown.provider,
-                breakdown.model,
-                breakdown.total_input_tokens as i64,
-                breakdown.total_output_tokens as i64,
-                breakdown.tools_tokens as i64,
-                breakdown.system_prompt_tokens as i64,
-                by_role_json,
-                output_by_type_json,
-            ],
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {}", e))?;
+        self.conn
+            .execute(
+                &sql,
+                params![
+                    timestamp_ns as i64,
+                    pid as i64,
+                    comm,
+                    breakdown.provider,
+                    breakdown.model,
+                    breakdown.total_input_tokens as i64,
+                    breakdown.total_output_tokens as i64,
+                    breakdown.tools_tokens as i64,
+                    breakdown.system_prompt_tokens as i64,
+                    by_role_json,
+                    output_by_type_json,
+                ],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {}", e))?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -195,7 +196,10 @@ impl TokenConsumptionStore {
     /// Query records with the given filter.
     ///
     /// Returns individual rows sorted by timestamp descending.
-    pub fn query(&self, filter: &TokenConsumptionFilter) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
+    pub fn query(
+        &self,
+        filter: &TokenConsumptionFilter,
+    ) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
         let mut conditions: Vec<String> = Vec::new();
         let mut bind_idx = 1usize;
 
@@ -327,7 +331,11 @@ impl TokenConsumptionStore {
     }
 
     /// Query records in a time range
-    pub fn by_time_range(&self, start_ns: u64, end_ns: u64) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
+    pub fn by_time_range(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> anyhow::Result<Vec<TokenConsumptionRecord>> {
         self.query(&TokenConsumptionFilter {
             start_ns: Some(start_ns),
             end_ns: Some(end_ns),

@@ -2,12 +2,12 @@
 //!
 //! Pure logic layer, no IO. Converts `AggregatedResult` into `AuditRecord`.
 
-use crate::aggregator::HttpPair;
+use super::record::{AuditEventType, AuditExtra, AuditRecord};
 use crate::aggregator::AggregatedProcess;
 use crate::aggregator::AggregatedResult;
+use crate::aggregator::HttpPair;
 use crate::analyzer::HttpRecord;
 use crate::analyzer::token::TokenRecord;
-use super::record::{AuditEventType, AuditExtra, AuditRecord};
 
 /// Analyzes aggregated results and extracts audit records
 pub struct AuditAnalyzer;
@@ -42,14 +42,19 @@ impl AuditAnalyzer {
     /// Only creates llm_call for SSE responses, which are LLM streaming API calls.
     /// Non-SSE requests (like npm package queries) are filtered out.
     /// This method works for both HTTP/1.1 and HTTP/2 uniformly.
-    pub fn analyze_http(&self, http_record: &HttpRecord, token_record: Option<&TokenRecord>) -> Option<AuditRecord> {
+    pub fn analyze_http(
+        &self,
+        http_record: &HttpRecord,
+        token_record: Option<&TokenRecord>,
+    ) -> Option<AuditRecord> {
         // Only create llm_call for SSE responses
         if !http_record.is_sse {
             return None;
         }
 
         // Extract model from request body if available
-        let model = http_record.request_body
+        let model = http_record
+            .request_body
             .as_ref()
             .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
             .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));

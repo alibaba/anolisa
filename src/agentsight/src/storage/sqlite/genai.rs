@@ -493,9 +493,8 @@ impl GenAISqliteStore {
                     }
                 };
                 let input_messages: Option<String> = {
-                    let latest = crate::genai::semantic::latest_round_input_messages(
-                        &call.request.messages,
-                    );
+                    let latest =
+                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
                     if latest.is_empty() {
                         None
                     } else {
@@ -1079,7 +1078,8 @@ impl GenAISqliteStore {
     pub fn get_tool_call_turn_indices(
         &self,
         session_ids: &[&str],
-    ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>> {
+    ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>>
+    {
         let conn = self.conn.lock().unwrap();
         let mut result = std::collections::HashMap::new();
 
@@ -1101,19 +1101,25 @@ impl GenAISqliteStore {
 
                 // Also map the call_id itself (for backward compat with
                 // stats.db that may still store call_id as tool_use_id)
-                result.insert(call_id.clone(), ToolCallTurnInfo {
-                    turn_index: turn,
-                    session_id: session_id.clone(),
-                });
+                result.insert(
+                    call_id.clone(),
+                    ToolCallTurnInfo {
+                        turn_index: turn,
+                        session_id: session_id.clone(),
+                    },
+                );
 
                 // Expand each tool_call_id in the JSON array
                 if let Some(json_str) = tool_call_ids_json {
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json_str) {
                         for tc_id in ids {
-                            result.insert(tc_id, ToolCallTurnInfo {
-                                turn_index: turn,
-                                session_id: session_id.clone(),
-                            });
+                            result.insert(
+                                tc_id,
+                                ToolCallTurnInfo {
+                                    turn_index: turn,
+                                    session_id: session_id.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -1205,7 +1211,7 @@ impl GenAISqliteStore {
                    AND session_id = ?1
                    AND conversation_id IS NOT NULL
                  GROUP BY conversation_id
-                 ORDER BY start_ns DESC"
+                 ORDER BY start_ns DESC",
             )
         };
 
@@ -1756,9 +1762,8 @@ impl GenAISqliteStore {
 
                 // Extract input messages (incremental: latest round only)
                 let input_messages: Option<String> = {
-                    let latest = crate::genai::semantic::latest_round_input_messages(
-                        &call.request.messages,
-                    );
+                    let latest =
+                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
                     if latest.is_empty() {
                         None
                     } else {
@@ -2188,7 +2193,11 @@ mod tests {
         // session_id IS NOT NULL) won't find it — use a raw count instead.
         let conn = store.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM genai_events WHERE call_id = 'test-call-001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM genai_events WHERE call_id = 'test-call-001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "store_event must persist the row");
 

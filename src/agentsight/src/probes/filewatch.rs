@@ -9,13 +9,15 @@ use libbpf_rs::{
     Link, MapHandle,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{
-    mem::MaybeUninit,
-    os::fd::AsFd,
-};
+use std::{mem::MaybeUninit, os::fd::AsFd};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/filewatch.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/filewatch.rs"));
@@ -50,7 +52,8 @@ impl FileWatchEvent {
         let raw = unsafe { &*(data.as_ptr() as *const RawFileWatchEvent) };
 
         // Parse comm (null-terminated)
-        let comm = raw.comm
+        let comm = raw
+            .comm
             .iter()
             .take_while(|&&c| c != 0)
             .map(|&c| c as u8)
@@ -58,7 +61,8 @@ impl FileWatchEvent {
         let comm = String::from_utf8_lossy(&comm).into_owned();
 
         // Parse filename (null-terminated)
-        let filename = raw.filename
+        let filename = raw
+            .filename
             .iter()
             .take_while(|&&c| c != 0)
             .map(|&c| c as u8)
@@ -106,7 +110,9 @@ impl FileWatch {
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
-        let mut open_skel = builder.open().context("failed to open filewatch BPF object")?;
+        let mut open_skel = builder
+            .open()
+            .context("failed to open filewatch BPF object")?;
 
         // Mirror the cgroup-filter rodata flag.
         open_skel.rodata_mut().filter_cgroup_enabled = cgroup_filter_enabled;
@@ -138,7 +144,9 @@ impl FileWatch {
                 .context("failed to reuse external cgroup_filter map for filewatch")?;
         }
 
-        let skel = open_skel.load().context("failed to load filewatch BPF object")?;
+        let skel = open_skel
+            .load()
+            .context("failed to load filewatch BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         let skel =

@@ -1,8 +1,8 @@
+use crate::chrome_trace::{ChromeTraceEvent, ns_to_us};
+use crate::probes::sslsniff::SslEvent;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::rc::Rc;
-use crate::chrome_trace::{ChromeTraceEvent, ns_to_us};
-use crate::probes::sslsniff::SslEvent;
 
 /// SSE Event - Standard Server-Sent Events message (legacy version with String data)
 /// Follows the W3C EventSource specification: https://html.spec.whatwg.org/multipage/server-sent-events.html
@@ -140,7 +140,7 @@ impl ParsedSseEvent {
 impl fmt::Debug for ParsedSseEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("ParsedSseEvent");
-        
+
         if let Some(ref id) = self.id {
             debug.field("id", id);
         }
@@ -150,24 +150,24 @@ impl fmt::Debug for ParsedSseEvent {
         if let Some(retry) = self.retry {
             debug.field("retry", &retry);
         }
-        
+
         // Check if this is a done marker
         if self.is_done() {
             debug.field("done", &true);
         }
-        
+
         // Format data with smart detection
         let data = self.data();
         if !data.is_empty() {
             debug.field("data", &format_sse_data(data));
         }
-        
+
         // Add metadata
         debug
             .field("data_len", &self.data_len)
             .field("pid", &self.source_event.pid)
             .field("timestamp_ns", &self.source_event.timestamp_ns);
-        
+
         debug.finish()
     }
 }
@@ -184,7 +184,11 @@ fn format_sse_data(data: &[u8]) -> String {
         format!("(text, {} bytes)\n{}", data.len(), text)
     } else {
         // Binary data - show as base64
-        format!("(binary, {} bytes)\n{}", data.len(), base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data))
+        format!(
+            "(binary, {} bytes)\n{}",
+            data.len(),
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)
+        )
     }
 }
 
@@ -258,20 +262,31 @@ impl SSEEvents {
 
         // Build args with aggregated information
         let mut args = serde_json::Map::new();
-        args.insert("event_count".to_string(), serde_json::json!(self.events.len()));
-        args.insert("consumed_bytes".to_string(), serde_json::json!(self.consumed_bytes));
-        args.insert("remaining_bytes".to_string(), serde_json::json!(self.remaining.len()));
+        args.insert(
+            "event_count".to_string(),
+            serde_json::json!(self.events.len()),
+        );
+        args.insert(
+            "consumed_bytes".to_string(),
+            serde_json::json!(self.consumed_bytes),
+        );
+        args.insert(
+            "remaining_bytes".to_string(),
+            serde_json::json!(self.remaining.len()),
+        );
 
         // Aggregate data from all events
         let total_data_size: usize = self.events.iter().map(|e| e.data.len()).sum();
-        args.insert("total_data_size".to_string(), serde_json::json!(total_data_size));
+        args.insert(
+            "total_data_size".to_string(),
+            serde_json::json!(total_data_size),
+        );
 
         // Combine all events' data (no truncation, no limit)
-        let all_data: Vec<String> = self.events
+        let all_data: Vec<String> = self
+            .events
             .iter()
-            .map(|e| {
-                format!("[{}] {}", e.event.as_deref().unwrap_or("message"), e.data)
-            })
+            .map(|e| format!("[{}] {}", e.event.as_deref().unwrap_or("message"), e.data))
             .collect();
 
         if !all_data.is_empty() {
@@ -279,7 +294,8 @@ impl SSEEvents {
         }
 
         // Collect all event types
-        let event_types: Vec<&str> = self.events
+        let event_types: Vec<&str> = self
+            .events
             .iter()
             .filter_map(|e| e.event.as_deref())
             .collect();
@@ -318,10 +334,7 @@ impl SSEEvent {
 
     /// Check if this is a "ping" or keepalive event (data is empty and no other fields)
     pub fn is_keepalive(&self) -> bool {
-        self.data.is_empty()
-            && self.id.is_none()
-            && self.event.is_none()
-            && self.retry.is_none()
+        self.data.is_empty() && self.id.is_none() && self.event.is_none() && self.retry.is_none()
     }
 
     /// Format as SSE protocol string
@@ -356,12 +369,7 @@ impl SSEEvent {
     ///
     /// # Returns
     /// A ChromeTraceEvent suitable for visualization in Perfetto
-    pub fn to_chrome_trace_event(
-        &self,
-        pid: u32,
-        tid: u64,
-        timestamp_ns: u64,
-    ) -> ChromeTraceEvent {
+    pub fn to_chrome_trace_event(&self, pid: u32, tid: u64, timestamp_ns: u64) -> ChromeTraceEvent {
         // Build event name based on event type or data preview
         let name = match &self.event {
             Some(event_type) => format!("SSE {}", event_type),
@@ -378,7 +386,10 @@ impl SSEEvent {
             self.data.clone()
         };
         args.insert("data".to_string(), serde_json::json!(data_preview));
-        args.insert("data_length".to_string(), serde_json::json!(self.data.len()));
+        args.insert(
+            "data_length".to_string(),
+            serde_json::json!(self.data.len()),
+        );
 
         if let Some(id) = &self.id {
             args.insert("id".to_string(), serde_json::json!(id));
@@ -414,10 +425,18 @@ mod tests {
 
     fn make_event(data: &[u8]) -> Rc<SslEvent> {
         Rc::new(SslEvent {
-            source: 0, timestamp_ns: 5000, delta_ns: 0,
-            pid: 1, tid: 1, uid: 0, len: data.len() as u32,
-            rw: 1, comm: "test".to_string(),
-            buf: data.to_vec(), is_handshake: false, ssl_ptr: 0x1,
+            source: 0,
+            timestamp_ns: 5000,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: data.len() as u32,
+            rw: 1,
+            comm: "test".to_string(),
+            buf: data.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x1,
         })
     }
 
@@ -471,7 +490,7 @@ mod tests {
         let ev = make_event(data);
         let parsed = ParsedSseEvent::new(
             None,
-            Some("message_stop".to_string()),  // event field
+            Some("message_stop".to_string()), // event field
             None,
             0,
             data.len(),
@@ -484,14 +503,7 @@ mod tests {
     fn test_is_done_anthropic_event_field_only() {
         // Even with empty data, event=message_stop should trigger done
         let ev = make_event(b"");
-        let parsed = ParsedSseEvent::new(
-            None,
-            Some("message_stop".to_string()),
-            None,
-            0,
-            0,
-            ev,
-        );
+        let parsed = ParsedSseEvent::new(None, Some("message_stop".to_string()), None, 0, 0, ev);
         assert!(parsed.is_done());
     }
 
@@ -553,7 +565,12 @@ mod tests {
 
     #[test]
     fn test_sse_event_is_keepalive() {
-        let e = SSEEvent { id: None, event: None, data: String::new(), retry: None };
+        let e = SSEEvent {
+            id: None,
+            event: None,
+            data: String::new(),
+            retry: None,
+        };
         assert!(e.is_keepalive());
 
         let e2 = SSEEvent::new("data");
@@ -619,8 +636,10 @@ mod tests {
 
         container.events.push(SSEEvent::new("data1"));
         container.events.push(SSEEvent {
-            id: None, event: Some("delta".to_string()),
-            data: "data2".to_string(), retry: None,
+            id: None,
+            event: Some("delta".to_string()),
+            data: "data2".to_string(),
+            retry: None,
         });
         container.consumed_bytes = 100;
 
@@ -659,7 +678,9 @@ mod tests {
             Some("id1".to_string()),
             Some("message".to_string()),
             Some(3000),
-            0, data.len(), ev,
+            0,
+            data.len(),
+            ev,
         );
         let debug = format!("{:?}", parsed);
         assert!(debug.contains("id1"));

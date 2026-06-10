@@ -9,7 +9,7 @@
 //! use agentsight::aggregator::AggregatedResult;
 //!
 //! let analyzer = Analyzer::new();
-//! 
+//!
 //! // Analyze aggregated result
 //! for result in analyzer.analyze_aggregated(&aggregated_result) {
 //!     match result {
@@ -21,13 +21,16 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
+use crate::analyzer::token::extract_response_content;
 use crate::parser::sse::ParsedSseEvent;
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
-use crate::analyzer::token::extract_response_content;
 
-use super::{AuditAnalyzer, TokenParser, MessageParser, TokenRecord, TokenUsage, ParsedApiMessage, AnalysisResult, HttpRecord};
-use super::result::{TokenConsumptionBreakdown, MessageTokenCount, OutputTokenCount};
+use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
+use super::{
+    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
+    TokenRecord, TokenUsage,
+};
 
 /// Token count result for request messages
 #[derive(Debug, Clone)]
@@ -83,9 +86,8 @@ pub fn count_request_tokens(
     chat_template: &LlmTokenizer,
 ) -> Option<RequestTokenCount> {
     // Extract messages
-    let messages = request_json.get("messages")
-        .and_then(|m| m.as_array())?;
-    
+    let messages = request_json.get("messages").and_then(|m| m.as_array())?;
+
     if messages.is_empty() {
         return None;
     }
@@ -97,29 +99,34 @@ pub fn count_request_tokens(
     let template_messages: Vec<serde_json::Value> = messages.to_vec();
 
     // Extract tools JSON array for passing to template
-    let tools_json: Option<Vec<serde_json::Value>> = request_json.get("tools")
+    let tools_json: Option<Vec<serde_json::Value>> = request_json
+        .get("tools")
         .and_then(|t| t.as_array())
         .map(|arr| arr.to_vec());
 
     // Count tools tokens separately (for informational breakdown)
-    let mut tools_tokens: usize = tools_json.as_ref()
-        .map(|arr| arr.iter()
-            .filter_map(|t| serde_json::to_string(t).ok())
-            .filter_map(|s| tokenizer.count(&s).ok())
-            .sum())
+    let mut tools_tokens: usize = tools_json
+        .as_ref()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| serde_json::to_string(t).ok())
+                .filter_map(|s| tokenizer.count(&s).ok())
+                .sum()
+        })
         .unwrap_or(0);
 
     // Use apply_chat_template_with_tools to format all messages WITH tools
     // This ensures the tools instruction text is included in the total count
     let tools_slice = tools_json.as_deref();
-    let total_tokens = match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
-        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-        Err(e) => {
-            log::warn!("Failed to apply chat template with tools: {}", e);
-            // Fallback: count raw content + tools separately
-            0
-        }
-    };
+    let total_tokens =
+        match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(e) => {
+                log::warn!("Failed to apply chat template with tools: {}", e);
+                // Fallback: count raw content + tools separately
+                0
+            }
+        };
 
     // Count per-message tokens: first calculate raw token counts, then distribute total_tokens by percentage
     // Step 1: Calculate raw token count for each message
@@ -130,21 +137,26 @@ pub fn count_request_tokens(
             .ok()
             .and_then(|s| tokenizer.count(&s).ok())
             .unwrap_or(0);
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
+        let role = msg
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("unknown")
+            .to_string();
         if role == "tool" {
             tokens += tools_tokens;
             tools_tokens = 0;
         }
         raw_per_message.push((role, tokens));
     }
-    
+
     // Step 2: Calculate total raw tokens and distribute total_tokens by percentage
     let raw_total: usize = raw_per_message.iter().map(|(_, t)| *t).sum();
-    
+
     if raw_total > 0 {
         // Distribute total_tokens proportionally based on raw token percentages
         for (role, raw_tokens) in raw_per_message.iter() {
-            let actual_tokens = ((*raw_tokens as f64 / raw_total as f64) * total_tokens as f64).round() as usize;
+            let actual_tokens =
+                ((*raw_tokens as f64 / raw_total as f64) * total_tokens as f64).round() as usize;
             *by_role.entry(role.clone()).or_insert(0) += actual_tokens;
             per_message.push(MessageTokenCount {
                 role: role.clone(),
@@ -227,18 +239,20 @@ pub fn count_response_tokens(
     }
 
     let mut has_content = false;
-    
+
     // NOTE: API output token count includes:
     // - Model-generated text markers like <think>...</think> (these ARE counted)
     // - NOT special control tokens like <|im_start|>, <|im_end|> (these are NOT counted)
-    
+
     // Add reasoning content with <think> wrapper (model generates these markers)
     if !all_reasoning.is_empty() {
         has_content = true;
-        
+
         // Format: <think>\n{reasoning}\n</think>\n\n
         let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
-        let tokens = tokenizer.count(&reasoning_with_tags).unwrap_or(all_reasoning.len() / 4);
+        let tokens = tokenizer
+            .count(&reasoning_with_tags)
+            .unwrap_or(all_reasoning.len() / 4);
         *by_type.entry("reasoning".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "reasoning".to_string(),
@@ -249,8 +263,10 @@ pub fn count_response_tokens(
     // Add text content
     if !all_content.is_empty() {
         has_content = true;
-        
-        let tokens = tokenizer.count(&all_content).unwrap_or(all_content.len() / 4);
+
+        let tokens = tokenizer
+            .count(&all_content)
+            .unwrap_or(all_content.len() / 4);
         *by_type.entry("text".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "text".to_string(),
@@ -267,7 +283,6 @@ pub fn count_response_tokens(
     // - Following chunks: ": {...}" (colon + arguments fragments)
     // We need to aggregate all chunks first to get the complete tool call
     if !all_tool_calls.is_empty() {
-        
         // Aggregate all chunks: first chunk has "name: ", rest have ": fragment"
         let mut aggregated = String::new();
         for tc in &all_tool_calls {
@@ -280,7 +295,7 @@ pub fn count_response_tokens(
                 aggregated.push_str(fragment);
             }
         }
-        
+
         // Now parse the aggregated "name: arguments" string
         let (name, arguments) = if let Some(pos) = aggregated.find(": ") {
             (&aggregated[..pos], &aggregated[pos + 2..])
@@ -290,7 +305,7 @@ pub fn count_response_tokens(
         } else {
             ("", aggregated.as_str())
         };
-        
+
         // Build Qwen tool_call template format:
         // <tool_call>
         // <function={name}>
@@ -303,7 +318,7 @@ pub fn count_response_tokens(
         tool_call_str.push_str("<tool_call>\n<function=");
         tool_call_str.push_str(name);
         tool_call_str.push_str(">\n");
-        
+
         // Parse arguments JSON and format each parameter
         if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(arguments) {
             if let Some(obj) = args_json.as_object() {
@@ -326,12 +341,14 @@ pub fn count_response_tokens(
             tool_call_str.push_str(arguments);
             tool_call_str.push_str("\n");
         }
-        
+
         tool_call_str.push_str("</function>\n</tool_call>");
-        
+
         has_content = true;
-        
-        let tokens = tokenizer.count(&tool_call_str).unwrap_or(tool_call_str.len() / 4);
+
+        let tokens = tokenizer
+            .count(&tool_call_str)
+            .unwrap_or(tool_call_str.len() / 4);
         *by_type.entry("tool_calls".to_string()).or_insert(0) += tokens;
         per_block.push(OutputTokenCount {
             content_type: "tool_calls".to_string(),
@@ -401,10 +418,7 @@ impl Analyzer {
     /// let chat_template = ChatTemplateType::Qwen.create_template();
     /// let analyzer = Analyzer::with_tokenizer(Box::new(tokenizer), chat_template);
     /// ```
-    pub fn with_tokenizer(
-        tokenizer: LlmTokenizer,
-        chat_template: LlmTokenizer,
-    ) -> Self {
+    pub fn with_tokenizer(tokenizer: LlmTokenizer, chat_template: LlmTokenizer) -> Self {
         Analyzer {
             audit: AuditAnalyzer::new(),
             token: TokenParser::new(),
@@ -487,13 +501,13 @@ impl Analyzer {
 
             // Extract audit from HttpRecord (only for SSE responses / LLM calls)
             // Pass token_result so audit record gets populated token counts
-            if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref()) {
+            if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref())
+            {
                 results.push(AnalysisResult::Audit(audit_record));
             }
 
             results.push(AnalysisResult::Http(http_record));
         }
-
 
         if let Some(record) = token_result {
             results.push(AnalysisResult::Token(record));
@@ -534,7 +548,8 @@ impl Analyzer {
                     return None;
                 }
                 let req_body = stream.request_json_body();
-                let resp_body = stream.response_sse_json_array()
+                let resp_body = stream
+                    .response_sse_json_array()
                     .or_else(|| stream.response_json_body());
                 self.analyze_message(&path, req_body.as_ref(), resp_body.as_ref())
             }
@@ -554,7 +569,8 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         sse_events: &[ParsedSseEvent],
     ) -> Option<AnalysisResult> {
-        self.message.parse_by_path_with_sse(path, request_body, sse_events)
+        self.message
+            .parse_by_path_with_sse(path, request_body, sse_events)
             .map(AnalysisResult::Message)
     }
 
@@ -565,7 +581,9 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let usage = sse_events.iter().rev()
+        let usage = sse_events
+            .iter()
+            .rev()
             .find_map(|e| self.token.parse_event(e))?;
 
         let record = TokenRecord::new(
@@ -584,7 +602,7 @@ impl Analyzer {
         // NOTE: tool_calls and reasoning_content extraction from SSE events
         // is handled in genai::builder via direct SSE response body parsing.
 
-        if record.total_tokens() ==0 {
+        if record.total_tokens() == 0 {
             return None;
         }
 
@@ -614,7 +632,8 @@ impl Analyzer {
         let request_json_ref = request_json.as_ref()?;
 
         // Extract model name
-        let model = request_json_ref.get("model")
+        let model = request_json_ref
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown");
 
@@ -635,56 +654,65 @@ impl Analyzer {
         };
 
         // Count input tokens from request messages using chat template
-        let input_tokens = if let Some(messages) = request_json_ref.get("messages").and_then(|m| m.as_array()) {
-            if messages.is_empty() {
-                0
-            } else {
-                // Clone messages for in-place modification of tool_calls.arguments
-                let mut msgs = messages.clone();
-                
-                // Process tool_calls arguments: parse JSON string to object in place
-                for msg in msgs.iter_mut() {
-                    if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                        for tool_call in tool_calls.iter_mut() {
-                            if let Some(func) = tool_call.get_mut("function") {
-                                if let Some(args) = func.get("arguments") {
-                                    if let Some(args_str) = args.as_str() {
-                                        // Try to parse arguments string as JSON object
-                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
-                                            func["arguments"] = parsed;
+        let input_tokens =
+            if let Some(messages) = request_json_ref.get("messages").and_then(|m| m.as_array()) {
+                if messages.is_empty() {
+                    0
+                } else {
+                    // Clone messages for in-place modification of tool_calls.arguments
+                    let mut msgs = messages.clone();
+
+                    // Process tool_calls arguments: parse JSON string to object in place
+                    for msg in msgs.iter_mut() {
+                        if let Some(tool_calls) =
+                            msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
+                        {
+                            for tool_call in tool_calls.iter_mut() {
+                                if let Some(func) = tool_call.get_mut("function") {
+                                    if let Some(args) = func.get("arguments") {
+                                        if let Some(args_str) = args.as_str() {
+                                            // Try to parse arguments string as JSON object
+                                            if let Ok(parsed) =
+                                                serde_json::from_str::<serde_json::Value>(args_str)
+                                            {
+                                                func["arguments"] = parsed;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                
-                // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref.get("tools")
-                    .and_then(|t| t.as_array())
-                    .map(|arr| arr.to_vec());
-                let tools_slice = tools_json.as_deref();
-                
-                // Apply chat template with tools to get the actual prompt sent to LLM
-                match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
-                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
-                    Err(e) => {
-                        log::warn!("Failed to apply chat template: {}, falling back to raw count", e);
-                        // Fallback: count raw message content
-                        let mut total = 0u64;
-                        for msg in &msgs {
-                            if let Ok(msg_str) = serde_json::to_string(msg) {
-                                total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
+
+                    // Extract tools JSON array for passing to template
+                    let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
+                        .get("tools")
+                        .and_then(|t| t.as_array())
+                        .map(|arr| arr.to_vec());
+                    let tools_slice = tools_json.as_deref();
+
+                    // Apply chat template with tools to get the actual prompt sent to LLM
+                    match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
+                        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to apply chat template: {}, falling back to raw count",
+                                e
+                            );
+                            // Fallback: count raw message content
+                            let mut total = 0u64;
+                            for msg in &msgs {
+                                if let Ok(msg_str) = serde_json::to_string(msg) {
+                                    total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
+                                }
                             }
+                            total
                         }
-                        total
                     }
                 }
-            }
-        } else {
-            0
-        };
+            } else {
+                0
+            };
 
         // Count output tokens from SSE events content
         let output_tokens = {
@@ -694,7 +722,9 @@ impl Analyzer {
 
             for event in sse_events {
                 if let Some(chunk) = event.json_body() {
-                    if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(&chunk)) {
+                    if let Some((content, reasoning, tool_calls)) =
+                        extract_response_content(Some(&chunk))
+                    {
                         if !content.is_empty() {
                             all_content.push_str(&content);
                         }
@@ -757,20 +787,29 @@ impl Analyzer {
                 let req = &pair.request;
                 let resp = &pair.response;
 
-                let request_body = req.json_body()
+                let request_body = req
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
-                let response_body = resp.parsed.json_body()
+                let response_body = resp
+                    .parsed
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body_str = resp.parsed.body_str_decompressed();
-                        if body_str.is_empty() { None }
-                        else { Some(body_str) }
+                        if body_str.is_empty() {
+                            None
+                        } else {
+                            Some(body_str)
+                        }
                     });
 
                 Some(HttpRecord {
@@ -782,9 +821,12 @@ impl Analyzer {
                     status_code: resp.status_code(),
                     request_headers: serde_json::to_string(&req.headers).unwrap_or_default(),
                     request_body,
-                    response_headers: serde_json::to_string(&resp.parsed.headers).unwrap_or_default(),
+                    response_headers: serde_json::to_string(&resp.parsed.headers)
+                        .unwrap_or_default(),
                     response_body,
-                    duration_ns: resp.end_timestamp_ns().saturating_sub(req.source_event.timestamp_ns),
+                    duration_ns: resp
+                        .end_timestamp_ns()
+                        .saturating_sub(req.source_event.timestamp_ns),
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -793,12 +835,16 @@ impl Analyzer {
                 let req = &pair.request;
                 let resp = &pair.response;
 
-                let request_body = req.json_body()
+                let request_body = req
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
                 // For SSE responses, aggregate all SSE event JSON payloads
@@ -818,20 +864,27 @@ impl Analyzer {
                     status_code: resp.status_code(),
                     request_headers: serde_json::to_string(&req.headers).unwrap_or_default(),
                     request_body,
-                    response_headers: serde_json::to_string(&resp.parsed.headers).unwrap_or_default(),
+                    response_headers: serde_json::to_string(&resp.parsed.headers)
+                        .unwrap_or_default(),
                     response_body,
-                    duration_ns: resp.end_timestamp_ns().saturating_sub(req.source_event.timestamp_ns),
+                    duration_ns: resp
+                        .end_timestamp_ns()
+                        .saturating_sub(req.source_event.timestamp_ns),
                     is_sse: true,
                     sse_event_count: resp.sse_event_count(),
                 })
             }
             AggregatedResult::RequestOnly { request, .. } => {
-                let request_body = request.json_body()
+                let request_body = request
+                    .json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = request.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(String::from_utf8_lossy(body).to_string())
+                        }
                     });
 
                 Some(HttpRecord {
@@ -855,17 +908,22 @@ impl Analyzer {
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)
-                let (response_body, sse_event_count) = if let Some(sse_json) = stream.response_sse_json_array() {
-                    // Successfully parsed as SSE
-                    let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
-                    (Some(serde_json::to_string(&sse_json).unwrap_or_default()), event_count)
-                } else {
-                    // Not SSE, try regular JSON or raw text
-                    let body = stream.response_json_body()
-                        .map(|v| serde_json::to_string(&v).unwrap_or_default())
-                        .or_else(|| stream.response_body_str());
-                    (body, 0)
-                };
+                let (response_body, sse_event_count) =
+                    if let Some(sse_json) = stream.response_sse_json_array() {
+                        // Successfully parsed as SSE
+                        let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
+                        (
+                            Some(serde_json::to_string(&sse_json).unwrap_or_default()),
+                            event_count,
+                        )
+                    } else {
+                        // Not SSE, try regular JSON or raw text
+                        let body = stream
+                            .response_json_body()
+                            .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                            .or_else(|| stream.response_body_str());
+                        (body, 0)
+                    };
 
                 Some(HttpRecord {
                     timestamp_ns: stream.start_timestamp_ns,
@@ -878,7 +936,9 @@ impl Analyzer {
                     request_body,
                     response_headers: stream.response_headers_json(),
                     response_body,
-                    duration_ns: stream.end_timestamp_ns.saturating_sub(stream.start_timestamp_ns),
+                    duration_ns: stream
+                        .end_timestamp_ns
+                        .saturating_sub(stream.start_timestamp_ns),
                     is_sse: sse_event_count > 0,
                     sse_event_count,
                 })
@@ -907,19 +967,21 @@ impl Analyzer {
         comm: &str,
     ) -> Option<TokenRecord> {
         let usage = self.token.parse_event(event)?;
-        
-        Some(TokenRecord::new(
-            pid,
-            comm.to_string(),
-            usage.provider.to_string(),
-            usage.input_tokens,
-            usage.output_tokens,
+
+        Some(
+            TokenRecord::new(
+                pid,
+                comm.to_string(),
+                usage.provider.to_string(),
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+            .with_model(usage.model.clone().unwrap_or_default())
+            .with_cache_tokens(
+                usage.cache_creation_input_tokens.unwrap_or(0),
+                usage.cache_read_input_tokens.unwrap_or(0),
+            ),
         )
-        .with_model(usage.model.clone().unwrap_or_default())
-        .with_cache_tokens(
-            usage.cache_creation_input_tokens.unwrap_or(0),
-            usage.cache_read_input_tokens.unwrap_or(0),
-        ))
     }
 
     /// Analyze an SSE event and return AnalysisResult
@@ -969,7 +1031,8 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         response_body: Option<&serde_json::Value>,
     ) -> Option<AnalysisResult> {
-        self.message.parse_by_path(path, request_body, response_body)
+        self.message
+            .parse_by_path(path, request_body, response_body)
             .map(AnalysisResult::Message)
     }
 
@@ -983,14 +1046,18 @@ impl Analyzer {
         request_body: Option<&serde_json::Value>,
         response_body: Option<&serde_json::Value>,
     ) -> Option<ParsedApiMessage> {
-        self.message.parse_by_path(path, request_body, response_body)
+        self.message
+            .parse_by_path(path, request_body, response_body)
     }
 
     /// Analyze AggregatedResult and extract token consumption breakdown
     ///
     /// This is a convenience method that combines extract_token_data and
     /// compute_token_consumption into a single call.
-    pub fn analyze_token_consumption(&self, result: &AggregatedResult) -> Option<TokenConsumptionBreakdown> {
+    pub fn analyze_token_consumption(
+        &self,
+        result: &AggregatedResult,
+    ) -> Option<TokenConsumptionBreakdown> {
         // Extract context (pid, comm) from the aggregated result (SseComplete only)
         let (pid, comm, request_json, response_jsons, path) = match result {
             AggregatedResult::SseComplete(pair) => (
@@ -1012,7 +1079,9 @@ impl Analyzer {
         let (tokenizer, chat_template) = match (&self.tokenizer, &self.chat_template) {
             (Some(t), Some(ct)) => (t, ct),
             _ => {
-                log::warn!("Tokenizer or chat template not available, cannot compute accurate token consumption");
+                log::warn!(
+                    "Tokenizer or chat template not available, cannot compute accurate token consumption"
+                );
                 return None;
             }
         };
@@ -1021,7 +1090,8 @@ impl Analyzer {
         let request_json_ref = request_json.as_ref()?;
 
         // Extract model
-        let model = request_json_ref.get("model")
+        let model = request_json_ref
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -1031,7 +1101,8 @@ impl Analyzer {
             "anthropic"
         } else {
             "openai"
-        }.to_string();
+        }
+        .to_string();
 
         // Count request tokens
         let request_count = count_request_tokens(request_json_ref, tokenizer, chat_template)?;

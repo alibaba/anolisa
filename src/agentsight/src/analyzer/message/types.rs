@@ -620,9 +620,7 @@ pub struct OpenAiSseDelta {
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicSseEvent {
     /// Message start event (contains initial message metadata)
-    MessageStart {
-        message: AnthropicSseMessageStart,
-    },
+    MessageStart { message: AnthropicSseMessageStart },
     /// Content block start event
     ContentBlockStart {
         index: u32,
@@ -634,9 +632,7 @@ pub enum AnthropicSseEvent {
         delta: AnthropicSseDelta,
     },
     /// Content block stop event
-    ContentBlockStop {
-        index: u32,
-    },
+    ContentBlockStop { index: u32 },
     /// Message delta event (stop_reason, usage update)
     MessageDelta {
         delta: AnthropicSseMessageDelta,
@@ -647,9 +643,7 @@ pub enum AnthropicSseEvent {
     /// Ping event
     Ping,
     /// Error event
-    Error {
-        error: serde_json::Value,
-    },
+    Error { error: serde_json::Value },
 }
 
 /// Anthropic SSE message start data
@@ -683,22 +677,16 @@ pub struct AnthropicSseMessageStart {
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicSseDelta {
     /// Text delta
-    TextDelta {
-        text: String,
-    },
+    TextDelta { text: String },
     /// Thinking delta (extended thinking / chain-of-thought)
-    ThinkingDelta {
-        thinking: String,
-    },
+    ThinkingDelta { thinking: String },
     /// Signature delta (thinking block signature)
     SignatureDelta {
         #[serde(default)]
         signature: String,
     },
     /// Input JSON delta (for tool use)
-    InputJsonDelta {
-        partial_json: String,
-    },
+    InputJsonDelta { partial_json: String },
 }
 
 /// Anthropic SSE message delta
@@ -915,7 +903,9 @@ mod tests {
     #[test]
     fn test_openai_content_parts_with_image() {
         let parts = OpenAIContent::Parts(vec![
-            OpenAIContentPart::Text { text: "Look at this:".to_string() },
+            OpenAIContentPart::Text {
+                text: "Look at this:".to_string(),
+            },
             OpenAIContentPart::ImageUrl {
                 image_url: OpenAIImageUrl {
                     url: "https://example.com/img.png".to_string(),
@@ -948,7 +938,8 @@ mod tests {
 
     #[test]
     fn test_anthropic_system_prompt_blocks() {
-        let json_str = r#"[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}]"#;
+        let json_str =
+            r#"[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}]"#;
         let blocks: Vec<AnthropicSystemBlock> = serde_json::from_str(json_str).unwrap();
         let prompt = AnthropicSystemPrompt::Blocks(blocks);
         assert_eq!(prompt.as_text(), "Part 1\nPart 2");
@@ -988,8 +979,14 @@ mod tests {
         assert_eq!(text.as_text(), "simple");
 
         let blocks = AnthropicMessageContent::Blocks(vec![
-            AnthropicContentBlock::Text { text: "part1".to_string(), cache_control: None },
-            AnthropicContentBlock::Text { text: "part2".to_string(), cache_control: None },
+            AnthropicContentBlock::Text {
+                text: "part1".to_string(),
+                cache_control: None,
+            },
+            AnthropicContentBlock::Text {
+                text: "part2".to_string(),
+                cache_control: None,
+            },
         ]);
         assert_eq!(blocks.as_text(), "part1part2");
     }
@@ -1052,12 +1049,22 @@ mod tests {
             request: Some(OpenAIRequest {
                 model: "gpt-4".to_string(),
                 messages: vec![],
-                temperature: None, max_tokens: None, stream: None,
-                top_p: None, n: None, stop: None,
-                presence_penalty: None, frequency_penalty: None,
-                user: None, tools: None, tool_choice: None,
-                response_format: None, seed: None, logprobs: None,
-                top_logprobs: None, parallel_tool_calls: None,
+                temperature: None,
+                max_tokens: None,
+                stream: None,
+                top_p: None,
+                n: None,
+                stop: None,
+                presence_penalty: None,
+                frequency_penalty: None,
+                user: None,
+                tools: None,
+                tool_choice: None,
+                response_format: None,
+                seed: None,
+                logprobs: None,
+                top_logprobs: None,
+                parallel_tool_calls: None,
             }),
             response: None,
         };
@@ -1072,8 +1079,11 @@ mod tests {
             response: Some(OpenAIResponse {
                 id: "chatcmpl-xyz".to_string(),
                 object: "chat.completion".to_string(),
-                created: 0, model: "gpt-4".to_string(),
-                choices: vec![], usage: None, system_fingerprint: None,
+                created: 0,
+                model: "gpt-4".to_string(),
+                choices: vec![],
+                usage: None,
+                system_fingerprint: None,
             }),
         };
         assert_eq!(msg.response_id(), Some("chatcmpl-xyz"));

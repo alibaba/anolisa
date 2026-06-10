@@ -34,7 +34,9 @@ impl MetricsCommand {
 
         // ── Prometheus text format output ──────────────────────────────────
 
-        println!("# HELP agentsight_token_input_total Total input tokens consumed by agent (all-time)");
+        println!(
+            "# HELP agentsight_token_input_total Total input tokens consumed by agent (all-time)"
+        );
         println!("# TYPE agentsight_token_input_total counter");
         for s in &summaries {
             println!(
@@ -45,7 +47,9 @@ impl MetricsCommand {
         }
 
         println!();
-        println!("# HELP agentsight_token_output_total Total output tokens consumed by agent (all-time)");
+        println!(
+            "# HELP agentsight_token_output_total Total output tokens consumed by agent (all-time)"
+        );
         println!("# TYPE agentsight_token_output_total counter");
         for s in &summaries {
             println!(
@@ -56,7 +60,9 @@ impl MetricsCommand {
         }
 
         println!();
-        println!("# HELP agentsight_token_total_total Total tokens (input+output) consumed by agent (all-time)");
+        println!(
+            "# HELP agentsight_token_total_total Total tokens (input+output) consumed by agent (all-time)"
+        );
         println!("# TYPE agentsight_token_total_total counter");
         for s in &summaries {
             println!(
@@ -67,7 +73,9 @@ impl MetricsCommand {
         }
 
         println!();
-        println!("# HELP agentsight_llm_requests_total Total LLM requests made by agent (all-time)");
+        println!(
+            "# HELP agentsight_llm_requests_total Total LLM requests made by agent (all-time)"
+        );
         println!("# TYPE agentsight_llm_requests_total counter");
         for s in &summaries {
             println!(
@@ -82,6 +90,6 @@ impl MetricsCommand {
 /// Escape Prometheus label value: backslash → \\, double-quote → \", newline → \n
 fn escape_label(s: &str) -> String {
     s.replace('\\', "\\\\")
-     .replace('"', "\\\"")
-     .replace('\n', "\\n")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }

@@ -136,7 +136,8 @@ impl HealthChecker {
                         if is_oom {
                             log::info!(
                                 "Agent {} (pids={:?}) was OOM-killed (confirmed via dmesg)",
-                                agent_name, pids
+                                agent_name,
+                                pids
                             );
                         }
 

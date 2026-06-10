@@ -7,9 +7,9 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use crate::analyzer::HttpRecord;
 use crate::config::AgentsightConfig;
@@ -256,13 +256,24 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
 
 fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let response_id = call.metadata.get("response_id").map(|s| safe_cstring(s));
-    let conversation_id = call.metadata.get("conversation_id").map(|s| safe_cstring(s));
+    let conversation_id = call
+        .metadata
+        .get("conversation_id")
+        .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
     let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
 
     // Construct request_url from metadata
-    let server_addr = call.metadata.get("server.address").cloned().unwrap_or_default();
-    let server_port = call.metadata.get("server.port").cloned().unwrap_or_default();
+    let server_addr = call
+        .metadata
+        .get("server.address")
+        .cloned()
+        .unwrap_or_default();
+    let server_port = call
+        .metadata
+        .get("server.port")
+        .cloned()
+        .unwrap_or_default();
     let path = call.metadata.get("path").cloned().unwrap_or_default();
     let url = if server_port.is_empty() {
         format!("https://{}{}", server_addr, path)
@@ -279,10 +290,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("status_code")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let is_sse: bool = call
-        .metadata
-        .get("is_sse")
-        .map_or(false, |s| s == "true");
+    let is_sse: bool = call.metadata.get("is_sse").map_or(false, |s| s == "true");
 
     let finish_reason = call
         .response
@@ -304,20 +312,16 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
             None => (false, 0, 0, 0, 0, 0),
         };
 
-    let req_messages_json =
-        serde_json::to_string(&call.request.messages).unwrap_or_default();
-    let resp_messages_json =
-        serde_json::to_string(&call.response.messages).unwrap_or_default();
+    let req_messages_json = serde_json::to_string(&call.request.messages).unwrap_or_default();
+    let resp_messages_json = serde_json::to_string(&call.response.messages).unwrap_or_default();
     let req_messages = safe_cstring(&req_messages_json);
     let resp_messages = safe_cstring(&resp_messages_json);
 
     // Incremental (latest-round) input messages: the same per-round increment
     // stored in SQLite (`genai_events.input_messages`). Drops system messages
     // and keeps everything from the last `user` message onward.
-    let input_delta =
-        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
-    let input_message_delta_json =
-        serde_json::to_string(&input_delta).unwrap_or_default();
+    let input_delta = crate::genai::semantic::latest_round_input_messages(&call.request.messages);
+    let input_message_delta_json = serde_json::to_string(&input_delta).unwrap_or_default();
     let input_message_delta = safe_cstring(&input_message_delta_json);
 
     let tools_json = call
@@ -414,9 +418,7 @@ unsafe fn dispatch_event(
 /// The pointer is valid until the next API call on the same thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn agentsight_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr())
-    })
+    LAST_ERROR.with(|e| e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
 }
 
 // ---- Configuration ----
@@ -587,9 +589,7 @@ pub unsafe extern "C" fn agentsight_config_free(cfg: *mut AgentsightConfigHandle
 /// Create a new AgentSight handle.  Does NOT start the pipeline yet.
 /// Returns NULL on failure (call `agentsight_last_error()` for details).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn agentsight_new(
-    cfg: *mut AgentsightConfigHandle,
-) -> *mut AgentsightHandle {
+pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mut AgentsightHandle {
     // Create eventfd
     let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     if efd < 0 {
@@ -667,7 +667,10 @@ fn ffi_background_thread(
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("agentsight background thread: AgentSight::new failed: {}", e);
+            log::error!(
+                "agentsight background thread: AgentSight::new failed: {}",
+                e
+            );
             return;
         }
     };
@@ -833,7 +836,10 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert!(cfg.cmdline_rules[0].allow);
-        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
+        assert_eq!(
+            cfg.cmdline_rules[0].agent_name,
+            Some("Claude Code".to_string())
+        );
         assert!(!cfg.cmdline_rules[1].allow);
         assert!(cfg.cmdline_rules[1].agent_name.is_none());
     }

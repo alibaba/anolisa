@@ -16,17 +16,18 @@
 use crate::config::{self, TcpTarget};
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle, MapFlags,
+    Link, MapFlags, MapHandle,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{
-    mem::MaybeUninit,
-    net::Ipv4Addr,
-    os::fd::AsFd,
-};
+use std::{mem::MaybeUninit, net::Ipv4Addr, os::fd::AsFd};
 
 // --- Generated skeleton ---
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/tcpsniff.skel.rs"));
 }
@@ -56,7 +57,9 @@ impl TcpSniff {
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
-        let mut open_skel = builder.open().context("failed to open tcpsniff BPF object")?;
+        let mut open_skel = builder
+            .open()
+            .context("failed to open tcpsniff BPF object")?;
 
         // Reuse the shared ring buffer
         open_skel
@@ -94,7 +97,9 @@ impl TcpSniff {
                 .context("failed to disable old recvmsg fexit")?;
         }
 
-        let skel = open_skel.load().context("failed to load tcpsniff BPF object")?;
+        let skel = open_skel
+            .load()
+            .context("failed to load tcpsniff BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
         let skel =

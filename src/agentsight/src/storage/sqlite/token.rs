@@ -2,14 +2,14 @@
 //!
 //! Uses SQLite for persistent storage of token usage records.
 
+use chrono::{Datelike, Utc};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::{Utc, Datelike};
-use serde::{Deserialize, Serialize};
-use rusqlite::{params, Connection};
 
-use crate::analyzer::TokenRecord;
 use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use crate::analyzer::TokenRecord;
 
 /// Time period for queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ impl TimePeriod {
     pub fn time_range(&self) -> (u64, u64) {
         let now = Utc::now();
         let now_naive = now.naive_utc();
-        
+
         let (start, end) = match self {
             TimePeriod::Today => {
                 let start = now_naive.date().and_hms_opt(0, 0, 0).unwrap();
@@ -83,13 +83,13 @@ impl TimePeriod {
                 (start, end)
             }
         };
-        
+
         let start_ns = start.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
         let end_ns = end.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
-        
+
         (start_ns, end_ns)
     }
-    
+
     /// Get previous period for comparison
     pub fn previous_period(&self) -> TimePeriod {
         match self {
@@ -144,12 +144,12 @@ impl TokenQueryResult {
     pub fn formatted_total(&self) -> String {
         format_tokens(self.total_tokens)
     }
-    
+
     /// Format input tokens with K/M suffix
     pub fn formatted_input(&self) -> String {
         format_tokens(self.input_tokens)
     }
-    
+
     /// Format output tokens with K/M suffix
     pub fn formatted_output(&self) -> String {
         format_tokens(self.output_tokens)
@@ -175,7 +175,7 @@ impl TokenComparison {
         let sign = if self.change >= 0 { "+" } else { "" };
         let change_formatted = format_tokens(self.change.unsigned_abs());
         let percent = format!("{:.0}%", self.change_percent.abs());
-        
+
         if self.change >= 0 {
             format!("{}{} (+{}%)", sign, change_formatted, percent)
         } else {
@@ -233,10 +233,10 @@ impl TokenStore {
     /// Create a new token store with custom table name
     pub fn with_table(path: impl Into<PathBuf>, table_name: &str) -> Self {
         let path = path.into();
-        let conn = create_connection(&path)
-            .expect("Failed to open SQLite database for token store");
+        let conn =
+            create_connection(&path).expect("Failed to open SQLite database for token store");
         let table_name = table_name.to_string();
-        
+
         // Create table if not exists
         let create_table_sql = format!(
             "CREATE TABLE IF NOT EXISTS {} (
@@ -258,31 +258,39 @@ impl TokenStore {
         );
         conn.execute(&create_table_sql, [])
             .expect("Failed to create token table");
-        
+
         // Create index on timestamp for efficient range queries
         conn.execute(
-            &format!("CREATE INDEX IF NOT EXISTS idx_{}_timestamp ON {}(timestamp_ns)", table_name, table_name),
+            &format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_timestamp ON {}(timestamp_ns)",
+                table_name, table_name
+            ),
             [],
-        ).expect("Failed to create timestamp index");
-        
+        )
+        .expect("Failed to create timestamp index");
+
         // Create index on agent for breakdown queries
         conn.execute(
-            &format!("CREATE INDEX IF NOT EXISTS idx_{}_agent ON {}(agent)", table_name, table_name),
+            &format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_agent ON {}(agent)",
+                table_name, table_name
+            ),
             [],
-        ).expect("Failed to create agent index");
-        
+        )
+        .expect("Failed to create agent index");
+
         TokenStore { conn, table_name }
     }
-    
+
     /// Get default storage path
     pub fn default_path() -> PathBuf {
         default_base_path().join("tokens.db")
     }
-    
+
     /// Insert a token record (unified interface, matches AuditStore)
     pub fn insert(&self, record: &TokenRecord) -> anyhow::Result<i64> {
         let timestamp_ns = record.timestamp_ns;
-        
+
         let sql = format!(
             "INSERT INTO {} (
                 timestamp_ns, pid, comm, agent, model, provider,
@@ -291,34 +299,36 @@ impl TokenStore {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             self.table_name
         );
-        self.conn.execute(
-            &sql,
-            params![
-                timestamp_ns as i64,
-                record.pid as i64,
-                record.comm,
-                record.agent,
-                record.model,
-                record.provider,
-                record.input_tokens as i64,
-                record.output_tokens as i64,
-                record.cache_creation_tokens.map(|v| v as i64),
-                record.cache_read_tokens.map(|v| v as i64),
-                record.request_id,
-                record.endpoint,
-            ],
-        ).map_err(|e| anyhow::anyhow!("Failed to insert token record: {}", e))?;
-        
+        self.conn
+            .execute(
+                &sql,
+                params![
+                    timestamp_ns as i64,
+                    record.pid as i64,
+                    record.comm,
+                    record.agent,
+                    record.model,
+                    record.provider,
+                    record.input_tokens as i64,
+                    record.output_tokens as i64,
+                    record.cache_creation_tokens.map(|v| v as i64),
+                    record.cache_read_tokens.map(|v| v as i64),
+                    record.request_id,
+                    record.endpoint,
+                ],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to insert token record: {}", e))?;
+
         Ok(self.conn.last_insert_rowid())
     }
-    
+
     /// Add a token record (legacy method, kept for backward compatibility)
     pub fn add(&mut self, record: TokenRecord) -> Result<i64, rusqlite::Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        
+
         let sql = format!(
             "INSERT INTO {} (
                 timestamp_ns, pid, comm, agent, model, provider,
@@ -344,10 +354,10 @@ impl TokenStore {
                 record.endpoint,
             ],
         )?;
-        
+
         Ok(self.conn.last_insert_rowid())
     }
-    
+
     /// Get all records (for compatibility, but not recommended for large datasets)
     pub fn all(&self) -> Vec<TokenRecord> {
         let sql = format!(
@@ -357,10 +367,11 @@ impl TokenStore {
              FROM {} ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(&sql)
             .expect("Failed to prepare statement");
-        
+
         stmt.query_map([], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
@@ -384,12 +395,12 @@ impl TokenStore {
         .filter_map(|r| r.ok())
         .collect()
     }
-    
+
     /// Get records in time range
     pub fn by_time_range(&self, start_ns: u64, end_ns: u64) -> Vec<TokenRecord> {
         self.by_time_range_owned(start_ns, end_ns)
     }
-    
+
     /// Get owned records in time range
     pub fn by_time_range_owned(&self, start_ns: u64, end_ns: u64) -> Vec<TokenRecord> {
         let sql = format!(
@@ -401,10 +412,11 @@ impl TokenStore {
              ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(&sql)
             .expect("Failed to prepare statement");
-        
+
         stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
@@ -428,30 +440,35 @@ impl TokenStore {
         .filter_map(|r| r.ok())
         .collect()
     }
-    
+
     /// Get records for last N hours
     pub fn by_last_hours(&self, hours: u64) -> Vec<TokenRecord> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        
+
         let hours_ns = hours * 3600 * 1_000_000_000;
         let start_ns = now.saturating_sub(hours_ns);
-        
+
         self.by_time_range_owned(start_ns, now)
     }
-    
+
     /// Clear all records
     pub fn clear(&mut self) -> Result<(), rusqlite::Error> {
-        self.conn.execute(&format!("DELETE FROM {}", self.table_name), [])?;
+        self.conn
+            .execute(&format!("DELETE FROM {}", self.table_name), [])?;
         Ok(())
     }
-    
+
     /// Get record count
     pub fn count(&self) -> u64 {
         self.conn
-            .query_row(&format!("SELECT COUNT(*) FROM {}", self.table_name), [], |row| row.get::<_, i64>(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", self.table_name),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap_or(0) as u64
     }
 
@@ -459,11 +476,10 @@ impl TokenStore {
     ///
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> anyhow::Result<u64> {
-        let sql = format!(
-            "DELETE FROM {} WHERE timestamp_ns < ?1",
-            self.table_name
-        );
-        let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])
+        let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
+        let deleted = self
+            .conn
+            .execute(&sql, params![cutoff_ns as i64])
             .map_err(|e| anyhow::anyhow!("Failed to purge token records: {}", e))?;
         Ok(deleted as u64)
     }
@@ -484,20 +500,20 @@ impl<'a> TokenQuery<'a> {
     pub fn new(store: &'a TokenStore) -> Self {
         TokenQuery { store }
     }
-    
+
     /// Query by time period
     pub fn by_period(&self, period: TimePeriod) -> TokenQueryResult {
         let (start_ns, end_ns) = period.time_range();
         let records = self.store.by_time_range(start_ns, end_ns);
         self.build_result(records, period.to_string())
     }
-    
+
     /// Query last N hours
     pub fn by_hours(&self, hours: u64) -> TokenQueryResult {
         let records = self.store.by_last_hours(hours);
         self.build_result(records, format!("最近 {} 小时", hours))
     }
-    
+
     /// Query with comparison
     pub fn by_period_with_compare(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
@@ -530,38 +546,41 @@ impl<'a> TokenQuery<'a> {
 
         result
     }
-    
+
     /// Query with breakdown by agent
     pub fn by_period_with_breakdown(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
         result.breakdown = self.compute_breakdown(period);
         result
     }
-    
+
     /// Query with comparison and breakdown
     pub fn full_query(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period_with_compare(period);
         result.breakdown = self.compute_breakdown(period);
         result
     }
-    
+
     /// Query hours with comparison
     pub fn by_hours_with_compare(&self, hours: u64) -> TokenQueryResult {
         let mut result = self.by_hours(hours);
 
         // Get previous period data
         let prev_records = self.store.by_last_hours(hours * 2);
-        let prev_records: Vec<_> = prev_records.into_iter().filter(|r| {
-            // Get records from the earlier half
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let hours_ns = hours * 3600 * 1_000_000_000;
-            let start_ns = now.saturating_sub(hours_ns * 2);
-            let mid_ns = now.saturating_sub(hours_ns);
-            r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
-        }).collect();
+        let prev_records: Vec<_> = prev_records
+            .into_iter()
+            .filter(|r| {
+                // Get records from the earlier half
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let hours_ns = hours * 3600 * 1_000_000_000;
+                let start_ns = now.saturating_sub(hours_ns * 2);
+                let mid_ns = now.saturating_sub(hours_ns);
+                r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
+            })
+            .collect();
 
         let prev_total: u64 = prev_records.iter().map(|r| r.total_tokens()).sum();
 
@@ -589,14 +608,14 @@ impl<'a> TokenQuery<'a> {
 
         result
     }
-    
+
     /// Build result from records
     fn build_result(&self, records: Vec<TokenRecord>, period: String) -> TokenQueryResult {
         let input_tokens: u64 = records.iter().map(|r| r.input_tokens).sum();
         let output_tokens: u64 = records.iter().map(|r| r.output_tokens).sum();
         let total_tokens = input_tokens + output_tokens;
         let request_count = records.len() as u64;
-        
+
         TokenQueryResult {
             period,
             input_tokens,
@@ -607,30 +626,28 @@ impl<'a> TokenQuery<'a> {
             breakdown: Vec::new(),
         }
     }
-    
+
     /// Compute breakdown by agent
     fn compute_breakdown(&self, period: TimePeriod) -> Vec<TokenBreakdown> {
         let (start_ns, end_ns) = period.time_range();
         let records = self.store.by_time_range(start_ns, end_ns);
-        
+
         let total_tokens: u64 = records.iter().map(|r| r.total_tokens()).sum();
-        
+
         // Group by agent name (or comm if no agent)
-        let mut agent_totals: std::collections::HashMap<String, (u64, u64, u64, u64)> = 
+        let mut agent_totals: std::collections::HashMap<String, (u64, u64, u64, u64)> =
             std::collections::HashMap::new();
-        
+
         for record in records {
-            let name = record.agent.as_ref()
-                .unwrap_or(&record.comm)
-                .clone();
-            
+            let name = record.agent.as_ref().unwrap_or(&record.comm).clone();
+
             let entry = agent_totals.entry(name).or_insert((0, 0, 0, 0));
             entry.0 += record.total_tokens();
             entry.1 += record.input_tokens;
             entry.2 += record.output_tokens;
             entry.3 += 1;
         }
-        
+
         // Convert to breakdown
         let mut breakdown: Vec<TokenBreakdown> = agent_totals
             .into_iter()
@@ -640,7 +657,7 @@ impl<'a> TokenQuery<'a> {
                 } else {
                     0.0
                 };
-                
+
                 TokenBreakdown {
                     name,
                     total_tokens: total,
@@ -651,7 +668,7 @@ impl<'a> TokenQuery<'a> {
                 }
             })
             .collect();
-        
+
         // Sort by total tokens descending
         breakdown.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
         breakdown
@@ -661,55 +678,71 @@ impl<'a> TokenQuery<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_time_period_range() {
         let (start, end) = TimePeriod::Today.time_range();
         assert!(start < end);
         assert!(end > 0);
     }
-    
+
     #[test]
     fn test_format_tokens() {
         assert_eq!(format_tokens(500), "500");
         assert_eq!(format_tokens(1500), "1.5K");
         assert_eq!(format_tokens(1_500_000), "1.5M");
     }
-    
+
     #[test]
     fn test_format_tokens_with_commas() {
         assert_eq!(format_tokens_with_commas(1000), "1,000");
         assert_eq!(format_tokens_with_commas(125000), "125,000");
     }
-    
+
     #[test]
     fn test_token_store() {
         let mut store = TokenStore::new("/tmp/test_tokens.db");
-        
+
         let record = TokenRecord::new(1234, "python".to_string(), "openai".to_string(), 100, 50);
         let id = store.add(record).unwrap();
         assert!(id > 0);
-        
+
         let records = store.all();
         assert!(!records.is_empty());
-        
+
         // Cleanup
         std::fs::remove_file("/tmp/test_tokens.db").ok();
     }
-    
+
     #[test]
     fn test_token_query() {
         let mut store = TokenStore::new("/tmp/test_tokens_query.db");
-        
+
         // Add some records
-        store.add(TokenRecord::new(1234, "python".to_string(), "openai".to_string(), 100, 50)).unwrap();
-        store.add(TokenRecord::new(1234, "python".to_string(), "anthropic".to_string(), 200, 100)).unwrap();
-        
+        store
+            .add(TokenRecord::new(
+                1234,
+                "python".to_string(),
+                "openai".to_string(),
+                100,
+                50,
+            ))
+            .unwrap();
+        store
+            .add(TokenRecord::new(
+                1234,
+                "python".to_string(),
+                "anthropic".to_string(),
+                200,
+                100,
+            ))
+            .unwrap();
+
         let query = TokenQuery::new(&store);
         let result = query.by_period(TimePeriod::Today);
-        
+
         assert!(result.total_tokens > 0);
-        
+
         // Cleanup
         std::fs::remove_file("/tmp/test_tokens_query.db").ok();
     }

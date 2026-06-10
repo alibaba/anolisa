@@ -287,10 +287,7 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 ///
 /// Returns `true` if the PID appears in a "Killed process" OOM line in dmesg.
 pub fn was_pid_oom_killed(pid: i32) -> bool {
-    let output = match Command::new("dmesg")
-        .arg("-T")
-        .output()
-    {
+    let output = match Command::new("dmesg").arg("-T").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => {
             // Fallback without -T

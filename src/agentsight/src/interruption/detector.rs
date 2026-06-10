@@ -4,8 +4,8 @@
 //! `InterruptionDetector::detect(call)` checks a single call against all
 //! single-call rules and returns any detected interruption events.
 
-use crate::genai::semantic::LLMCall;
 use super::types::{InterruptionEvent, InterruptionType};
+use crate::genai::semantic::LLMCall;
 
 /// Configuration for the interruption detector
 pub struct DetectorConfig {
@@ -56,13 +56,15 @@ impl InterruptionDetector {
         let mut events = Vec::new();
 
         let session_id = call.metadata.get("session_id").cloned();
-        let trace_id   = call.metadata.get("response_id").cloned();
+        let trace_id = call.metadata.get("response_id").cloned();
         let conversation_id = call.metadata.get("conversation_id").cloned();
-        let call_id    = Some(call.call_id.clone());
-        let pid        = Some(call.pid);
+        let call_id = Some(call.call_id.clone());
+        let pid = Some(call.pid);
         let agent_name = call.agent_name.clone();
 
-        let status_code: u16 = call.metadata.get("status_code")
+        let status_code: u16 = call
+            .metadata
+            .get("status_code")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200);
 
@@ -71,8 +73,7 @@ impl InterruptionDetector {
         let response_body = call.response.raw_body.as_deref().unwrap_or("");
         let combined_error = format!("{} {}", error_text, response_body).to_ascii_lowercase();
 
-        let is_context_overflow =
-            combined_error.contains("context_length_exceeded")
+        let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")
             || combined_error.contains("context window")
             || combined_error.contains("context_length")
@@ -86,7 +87,8 @@ impl InterruptionDetector {
             || status_code == 413;
 
         // ── 1. AuthError (401/403 / invalid_api_key) ──────────────────────────
-        if status_code == 401 || status_code == 403
+        if status_code == 401
+            || status_code == 403
             || combined_error.contains("invalid_api_key")
             || combined_error.contains("authentication")
             || combined_error.contains("unauthorized")
@@ -99,8 +101,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::AuthError,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -120,8 +126,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::RateLimit,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -129,7 +139,8 @@ impl InterruptionDetector {
         }
 
         // ── 3. NetworkTimeout (408/504 / timeout) ─────────────────────────────
-        if status_code == 408 || status_code == 504
+        if status_code == 408
+            || status_code == 504
             || combined_error.contains("timeout")
             || combined_error.contains("timed out")
             || combined_error.contains("deadline exceeded")
@@ -141,8 +152,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::NetworkTimeout,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -150,7 +165,8 @@ impl InterruptionDetector {
         }
 
         // ── 4. ServiceUnavailable (502/503 / overloaded) ──────────────────────
-        if status_code == 502 || status_code == 503
+        if status_code == 502
+            || status_code == 503
             || combined_error.contains("overloaded")
             || combined_error.contains("service_unavailable")
             || combined_error.contains("server is overloaded")
@@ -163,8 +179,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ServiceUnavailable,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -182,8 +202,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ContextOverflow,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -192,7 +216,10 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        let finish_reason = call.response.messages.first()
+        let finish_reason = call
+            .response
+            .messages
+            .first()
             .and_then(|m| m.finish_reason.as_deref());
         if finish_reason == Some("content_filter") {
             let detail = serde_json::json!({
@@ -202,8 +229,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SafetyFilter,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -220,8 +251,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::LlmError,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -231,14 +266,15 @@ impl InterruptionDetector {
         // ── 8. SSE truncated ──────────────────────────────────────────────────
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志
         // 正常终止标志：finish_reason 为 stop/tool_calls，或收到 [DONE]
-        let is_sse = call.metadata.get("is_sse").map(|s| s == "true").unwrap_or(false);
+        let is_sse = call
+            .metadata
+            .get("is_sse")
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let has_normal_finish = finish_reason == Some("stop")
             || finish_reason == Some("tool_calls")
             || finish_reason == Some("end_turn");
-        if is_sse
-            && !has_normal_finish
-            && call.duration_ns >= self.config.sse_min_duration_ns
-        {
+        if is_sse && !has_normal_finish && call.duration_ns >= self.config.sse_min_duration_ns {
             let detail = serde_json::json!({
                 "model": call.model,
                 "duration_ms": call.duration_ns / 1_000_000,
@@ -246,8 +282,12 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SseTruncated,
-                session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                pid, agent_name.clone(),
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
                 call.end_timestamp_ns as i64,
                 Some(detail),
             ));
@@ -267,8 +307,12 @@ impl InterruptionDetector {
                         });
                         events.push(InterruptionEvent::new(
                             InterruptionType::TokenLimit,
-                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                            pid, agent_name.clone(),
+                            session_id.clone(),
+                            trace_id.clone(),
+                            conversation_id.clone(),
+                            call_id.clone(),
+                            pid,
+                            agent_name.clone(),
                             call.end_timestamp_ns as i64,
                             Some(detail),
                         ));
@@ -295,8 +339,12 @@ impl InterruptionDetector {
                         });
                         events.push(InterruptionEvent::new(
                             InterruptionType::ContextOverflow,
-                            session_id.clone(), trace_id.clone(), conversation_id.clone(), call_id.clone(),
-                            pid, agent_name.clone(),
+                            session_id.clone(),
+                            trace_id.clone(),
+                            conversation_id.clone(),
+                            call_id.clone(),
+                            pid,
+                            agent_name.clone(),
                             call.end_timestamp_ns as i64,
                             Some(detail),
                         ));
@@ -307,7 +355,6 @@ impl InterruptionDetector {
 
         events
     }
-
 }
 
 #[cfg(test)]
@@ -348,9 +395,7 @@ mod tests {
             pid: 1234,
             process_name: "agent".to_string(),
             agent_name: Some("TestAgent".to_string()),
-            metadata: HashMap::from([
-                ("status_code".to_string(), "200".to_string()),
-            ]),
+            metadata: HashMap::from([("status_code".to_string(), "200".to_string())]),
         }
     }
 
@@ -367,39 +412,52 @@ mod tests {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
         call.error = Some("context_length_exceeded".to_string());
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_context_overflow_http_413() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "413".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "413".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_context_overflow_response_body() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         // 修复后从 call.response.raw_body 读取响应体
         call.response.raw_body = Some("maximum context length is 128k".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_detect_llm_error_http_500() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "500".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
@@ -419,7 +477,8 @@ mod tests {
     fn test_detect_sse_truncated() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 2_000_000_000; // > 1 second min
         // response.messages is empty
         let events = detector.detect(&call);
@@ -431,7 +490,8 @@ mod tests {
     fn test_no_sse_truncated_short_duration() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 500_000_000; // < 1 second min
         let events = detector.detect(&call);
         assert!(events.is_empty());
@@ -502,29 +562,41 @@ mod tests {
         }];
         let events = detector.detect(&call);
         // Should have context_overflow (from rule 5)
-        assert!(events.iter().any(|e| e.interruption_type == InterruptionType::ContextOverflow));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow)
+        );
     }
 
     #[test]
     fn test_context_overflow_supersedes_llm_error() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         call.error = Some("context_length_exceeded: max 128000 tokens".to_string());
         let events = detector.detect(&call);
         // Should be context_overflow, NOT llm_error
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
     fn test_event_metadata_fields() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "500".to_string());
-        call.metadata.insert("session_id".to_string(), "sess-abc".to_string());
-        call.metadata.insert("response_id".to_string(), "trace-xyz".to_string());
-        call.metadata.insert("conversation_id".to_string(), "conv-123".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
+        call.metadata
+            .insert("session_id".to_string(), "sess-abc".to_string());
+        call.metadata
+            .insert("response_id".to_string(), "trace-xyz".to_string());
+        call.metadata
+            .insert("conversation_id".to_string(), "conv-123".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, Some("sess-abc".to_string()));
@@ -558,7 +630,11 @@ mod tests {
             finish_reason: Some("length".to_string()),
         }];
         let events = detector.detect(&call);
-        assert!(events.iter().any(|e| e.interruption_type == InterruptionType::TokenLimit));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit)
+        );
     }
 
     // ── 新增类型的测试 ──────────────────────────────────────────────────────
@@ -567,7 +643,8 @@ mod tests {
     fn test_detect_auth_error_401() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "401".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "401".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::AuthError);
@@ -577,7 +654,8 @@ mod tests {
     fn test_detect_auth_error_403() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "403".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "403".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::AuthError);
@@ -597,7 +675,8 @@ mod tests {
     fn test_detect_rate_limit_429() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "429".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::RateLimit);
@@ -617,10 +696,14 @@ mod tests {
     fn test_detect_network_timeout_504() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "504".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "504".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::NetworkTimeout);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::NetworkTimeout
+        );
     }
 
     #[test]
@@ -630,17 +713,24 @@ mod tests {
         call.error = Some("request timeout".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::NetworkTimeout);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::NetworkTimeout
+        );
     }
 
     #[test]
     fn test_detect_service_unavailable_503() {
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "503".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "503".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ServiceUnavailable);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ServiceUnavailable
+        );
     }
 
     #[test]
@@ -650,7 +740,10 @@ mod tests {
         call.error = Some("model is overloaded".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ServiceUnavailable);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ServiceUnavailable
+        );
     }
 
     #[test]
@@ -687,7 +780,8 @@ mod tests {
         // SSE 流有正常终止标志（finish_reason=stop）不应被判为截断
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 2_000_000_000;
         call.response.messages = vec![OutputMessage {
             role: "assistant".to_string(),
@@ -696,7 +790,11 @@ mod tests {
             finish_reason: Some("stop".to_string()),
         }];
         let events = detector.detect(&call);
-        assert!(events.iter().all(|e| e.interruption_type != InterruptionType::SseTruncated));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated)
+        );
     }
 
     #[test]
@@ -704,7 +802,8 @@ mod tests {
         // SSE 流 finish_reason=tool_calls 是正常终止
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 2_000_000_000;
         call.response.messages = vec![OutputMessage {
             role: "assistant".to_string(),
@@ -713,7 +812,11 @@ mod tests {
             finish_reason: Some("tool_calls".to_string()),
         }];
         let events = detector.detect(&call);
-        assert!(events.iter().all(|e| e.interruption_type != InterruptionType::SseTruncated));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated)
+        );
     }
 
     #[test]
@@ -721,7 +824,8 @@ mod tests {
         // 401 应被归类为 AuthError 而非 LlmError
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "401".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "401".to_string());
         call.error = Some("unauthorized".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
@@ -733,7 +837,8 @@ mod tests {
         // 429 应被归类为 RateLimit 而非 LlmError
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "429".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::RateLimit);
@@ -744,10 +849,14 @@ mod tests {
         // 验证从 call.response.raw_body 读取响应体（非 metadata）
         let detector = InterruptionDetector::default();
         let mut call = make_base_call();
-        call.metadata.insert("status_code".to_string(), "400".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
         call.response.raw_body = Some("context_length_exceeded".to_string());
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].interruption_type, InterruptionType::ContextOverflow);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 }

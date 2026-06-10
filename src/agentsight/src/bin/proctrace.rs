@@ -7,8 +7,8 @@
 use agentsight::config;
 use agentsight::parser::ProcTraceParser;
 use agentsight::probes::proctrace::ProcTrace;
-use structopt::StructOpt;
 use std::time::Duration;
+use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "proctrace", about = "Trace process execution and output")]
@@ -16,11 +16,11 @@ pub struct Command {
     /// Enable verbose/debug output
     #[structopt(short, long)]
     verbose: bool,
-    
+
     /// Target PID to trace (optional, trace all if not specified)
     #[structopt(short, long)]
     pid: Option<u32>,
-    
+
     /// Filter by UID
     #[structopt(long)]
     uid: Option<u32>,

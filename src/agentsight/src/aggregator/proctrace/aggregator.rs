@@ -2,10 +2,10 @@
 //!
 //! Aggregates process events (exec, stdout, exit) by PID into complete process lifecycles.
 
-use std::collections::HashMap;
-use crate::probes::proctrace::VariableEvent;
-use crate::parser::proctrace::{ParsedProcEvent, ProcEventType};
 use super::process::AggregatedProcess;
+use crate::parser::proctrace::{ParsedProcEvent, ProcEventType};
+use crate::probes::proctrace::VariableEvent;
+use std::collections::HashMap;
 
 /// Process Event Aggregator - aggregates process events by PID
 #[derive(Debug, Clone)]
@@ -28,24 +28,30 @@ impl ProcessEventAggregator {
     /// None otherwise.
     pub fn process_event(&mut self, event: &VariableEvent) -> Option<AggregatedProcess> {
         match event {
-            VariableEvent::Exec { header, filename, args } => {
+            VariableEvent::Exec {
+                header,
+                filename,
+                args,
+            } => {
                 let pid = header.pid;
-                let aggregated = self.aggregates
-                    .entry(pid)
-                    .or_insert_with(|| {
-                        AggregatedProcess::new(
-                            pid,
-                            header.tid,
-                            header.ppid,
-                            header.ptid,
-                            event.comm_str(),
-                            header.timestamp_ns,
-                        )
-                    });
+                let aggregated = self.aggregates.entry(pid).or_insert_with(|| {
+                    AggregatedProcess::new(
+                        pid,
+                        header.tid,
+                        header.ppid,
+                        header.ptid,
+                        event.comm_str(),
+                        header.timestamp_ns,
+                    )
+                });
                 aggregated.add_exec(filename.clone(), args.clone(), header.timestamp_ns);
                 None
             }
-            VariableEvent::Stdout { header, fd, payload } => {
+            VariableEvent::Stdout {
+                header,
+                fd,
+                payload,
+            } => {
                 let pid = header.pid;
                 if let Some(aggregated) = self.aggregates.get_mut(&pid) {
                     if *fd == 2 {
@@ -71,7 +77,10 @@ impl ProcessEventAggregator {
 
     /// Process multiple events
     pub fn process_events(&mut self, events: &[VariableEvent]) -> Vec<AggregatedProcess> {
-        events.iter().filter_map(|e| self.process_event(e)).collect()
+        events
+            .iter()
+            .filter_map(|e| self.process_event(e))
+            .collect()
     }
 
     /// Process a parsed process event
@@ -81,18 +90,16 @@ impl ProcessEventAggregator {
     pub fn process_parsed_event(&mut self, event: &ParsedProcEvent) -> Option<AggregatedProcess> {
         match event.event_type {
             ProcEventType::Exec => {
-                let aggregated = self.aggregates
-                    .entry(event.pid)
-                    .or_insert_with(|| {
-                        AggregatedProcess::new(
-                            event.pid,
-                            event.tid,
-                            event.ppid,
-                            event.ptid,
-                            event.comm.clone(),
-                            event.timestamp_ns,
-                        )
-                    });
+                let aggregated = self.aggregates.entry(event.pid).or_insert_with(|| {
+                    AggregatedProcess::new(
+                        event.pid,
+                        event.tid,
+                        event.ppid,
+                        event.ptid,
+                        event.comm.clone(),
+                        event.timestamp_ns,
+                    )
+                });
                 if let Some(ref args) = event.args {
                     let filename = event.comm.clone();
                     aggregated.add_exec(filename, args.clone(), event.timestamp_ns);
@@ -120,7 +127,10 @@ impl ProcessEventAggregator {
 
     /// Get all incomplete aggregations (running processes)
     pub fn get_incomplete(&self) -> Vec<&AggregatedProcess> {
-        self.aggregates.values().filter(|agg| !agg.is_complete).collect()
+        self.aggregates
+            .values()
+            .filter(|agg| !agg.is_complete)
+            .collect()
     }
 
     /// Clear all aggregations

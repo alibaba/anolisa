@@ -1,7 +1,7 @@
 //! Utility functions for token data extraction
 
-use serde_json::Value;
 use super::Provider;
+use serde_json::Value;
 
 /// Detect provider from API endpoint path and/or JSON content
 ///
@@ -163,7 +163,10 @@ mod tests {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "Hello"}]
         });
-        let provider = detect_provider("/compatible-mode/v1/chat/completions", Some(&openai_request));
+        let provider = detect_provider(
+            "/compatible-mode/v1/chat/completions",
+            Some(&openai_request),
+        );
         assert_eq!(provider, Some(Provider::OpenAI));
 
         // Compatible mode path with Anthropic format JSON
@@ -173,7 +176,10 @@ mod tests {
             "system": "You are Claude",
             "messages": [{"role": "user", "content": "Hello"}]
         });
-        let provider = detect_provider("/compatible-mode/v1/chat/completions", Some(&anthropic_request));
+        let provider = detect_provider(
+            "/compatible-mode/v1/chat/completions",
+            Some(&anthropic_request),
+        );
         assert_eq!(provider, Some(Provider::Anthropic));
     }
 

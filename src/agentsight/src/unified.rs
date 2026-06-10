@@ -22,8 +22,8 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::aggregator::Aggregator;
 use crate::analyzer::Analyzer;
@@ -213,16 +213,15 @@ impl AgentSight {
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
-        let mut probes =
-            Probes::new_with_cgroup_filter(
-                &[],
-                config.target_uid,
-                config.enable_filewatch,
-                enable_udpdns,
-                &tcp_targets,
-                config.cgroup_filter_enabled,
-            )
-            .context("Failed to create probes")?;
+        let mut probes = Probes::new_with_cgroup_filter(
+            &[],
+            config.target_uid,
+            config.enable_filewatch,
+            enable_udpdns,
+            &tcp_targets,
+            config.cgroup_filter_enabled,
+        )
+        .context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -230,7 +229,8 @@ impl AgentSight {
         // Seed cgroup_filter map with pre-configured cgroup inode IDs
         if config.cgroup_filter_enabled && !config.cgroup_ids.is_empty() {
             for &cg_id in &config.cgroup_ids {
-                probes.add_traced_cgroup(cg_id)
+                probes
+                    .add_traced_cgroup(cg_id)
                     .context("Failed to register cgroup_id")?;
                 log::info!("Registered cgroup_id {}", cg_id);
             }
@@ -626,14 +626,19 @@ impl AgentSight {
                             if let std::net::IpAddr::V4(ipv4) = addr.ip() {
                                 log::info!(
                                     "[UDP-DNS] Adding http target {} → {}",
-                                    dns_event.domain, ipv4
+                                    dns_event.domain,
+                                    ipv4
                                 );
                                 let target = crate::config::TcpTarget {
                                     ip: Some(ipv4),
                                     port: None,
                                 };
                                 if let Err(e) = self.probes.add_tcp_target(&target) {
-                                    log::warn!("[UDP-DNS] Failed to add tcp target {}: {}", ipv4, e);
+                                    log::warn!(
+                                        "[UDP-DNS] Failed to add tcp target {}: {}",
+                                        ipv4,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -641,7 +646,8 @@ impl AgentSight {
                     Err(e) => {
                         log::warn!(
                             "[UDP-DNS] DNS resolve failed for http domain {}: {}",
-                            dns_event.domain, e
+                            dns_event.domain,
+                            e
                         );
                     }
                 }
@@ -671,7 +677,10 @@ impl AgentSight {
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
-                        t.agent = self.pid_agent_name_cache.get(&t.pid).cloned()
+                        t.agent = self
+                            .pid_agent_name_cache
+                            .get(&t.pid)
+                            .cloned()
                             .or_else(|| Some(t.comm.clone()));
                     }
                 }
@@ -860,7 +869,10 @@ impl AgentSight {
     fn check_pending_logtail(&mut self) {
         if let Ok(mut guard) = self.pending_logtail.try_lock() {
             if let Some(exporter) = guard.take() {
-                log::info!("Registering dynamically-activated LogtailExporter: '{}'", exporter.name());
+                log::info!(
+                    "Registering dynamically-activated LogtailExporter: '{}'",
+                    exporter.name()
+                );
                 self.genai_exporters.push(exporter);
             }
         }
@@ -879,7 +891,7 @@ impl AgentSight {
         encryption_pem: Option<String>,
         trace_enabled: bool,
     ) {
-        use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event as NotifyEvent, EventKind};
+        use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
         let watch_path = config_path.clone();
         std::thread::Builder::new()
@@ -924,9 +936,10 @@ impl AgentSight {
                     }
 
                     // Filter by filename
-                    let is_target = event.paths.iter().any(|p| {
-                        p.file_name().map(|f| f.to_os_string()) == target_filename
-                    });
+                    let is_target = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|f| f.to_os_string()) == target_filename);
                     if !is_target {
                         continue;
                     }
@@ -1061,26 +1074,36 @@ impl AgentSight {
                                         cid,
                                         ie.interruption_type.as_str(),
                                     );
-                                    if count >= 5 && ie.interruption_type != crate::interruption::InterruptionType::RetryStorm {
-                                        let storm_event = crate::interruption::InterruptionEvent::new(
-                                            crate::interruption::InterruptionType::RetryStorm,
-                                            ie.session_id.clone(),
-                                            ie.trace_id.clone(),
-                                            ie.conversation_id.clone(),
-                                            ie.call_id.clone(),
-                                            ie.pid,
-                                            ie.agent_name.clone(),
-                                            llm_call.end_timestamp_ns as i64,
-                                            Some(serde_json::json!({
-                                                "repeated_type": ie.interruption_type.as_str(),
-                                                "count": count,
-                                            })),
-                                        );
-                                        if !istore.exists_for_conversation(cid, &crate::interruption::InterruptionType::RetryStorm, None) {
+                                    if count >= 5
+                                        && ie.interruption_type
+                                            != crate::interruption::InterruptionType::RetryStorm
+                                    {
+                                        let storm_event =
+                                            crate::interruption::InterruptionEvent::new(
+                                                crate::interruption::InterruptionType::RetryStorm,
+                                                ie.session_id.clone(),
+                                                ie.trace_id.clone(),
+                                                ie.conversation_id.clone(),
+                                                ie.call_id.clone(),
+                                                ie.pid,
+                                                ie.agent_name.clone(),
+                                                llm_call.end_timestamp_ns as i64,
+                                                Some(serde_json::json!({
+                                                    "repeated_type": ie.interruption_type.as_str(),
+                                                    "count": count,
+                                                })),
+                                            );
+                                        if !istore.exists_for_conversation(
+                                            cid,
+                                            &crate::interruption::InterruptionType::RetryStorm,
+                                            None,
+                                        ) {
                                             let _ = istore.insert(&storm_event);
                                             log::warn!(
                                                 "RetryStorm detected: {} × {:?} in conversation {}",
-                                                count, ie.interruption_type, cid
+                                                count,
+                                                ie.interruption_type,
+                                                cid
                                             );
                                         }
                                     }
@@ -1136,10 +1159,13 @@ impl AgentSight {
                                     &recent,
                                 ) {
                                     let _ = istore.insert(&loop_event);
-                                    crate::genai::logtail::export_interruption_events(std::slice::from_ref(&loop_event));
+                                    crate::genai::logtail::export_interruption_events(
+                                        std::slice::from_ref(&loop_event),
+                                    );
                                     log::warn!(
                                         "DeadLoop detected in conversation {}: {:?}",
-                                        cid, loop_event.detail
+                                        cid,
+                                        loop_event.detail
                                     );
 
                                     // ── Auto-kill 止血 ──
@@ -1149,30 +1175,44 @@ impl AgentSight {
                                             if let Some(pid) = loop_event.pid {
                                                 log::error!(
                                                     "DeadLoop auto-kill: escalating to SIGKILL for pid {} (conversation={}, detections={})",
-                                                    pid, cid, new_count
+                                                    pid,
+                                                    cid,
+                                                    new_count
                                                 );
                                                 let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
                                                 if ret != 0 {
                                                     let err = std::io::Error::last_os_error();
-                                                    log::error!("DeadLoop auto-kill: SIGKILL failed for pid {}: {}", pid, err);
+                                                    log::error!(
+                                                        "DeadLoop auto-kill: SIGKILL failed for pid {}: {}",
+                                                        pid,
+                                                        err
+                                                    );
                                                 }
                                             }
                                         } else if new_count == self.deadloop_kill_after_count {
                                             if let Some(pid) = loop_event.pid {
                                                 log::error!(
                                                     "DeadLoop auto-kill: sending SIGTERM to pid {} (conversation={}, detections={})",
-                                                    pid, cid, new_count
+                                                    pid,
+                                                    cid,
+                                                    new_count
                                                 );
                                                 let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
                                                 if ret != 0 {
                                                     let err = std::io::Error::last_os_error();
-                                                    log::error!("DeadLoop auto-kill: SIGTERM failed for pid {}: {}", pid, err);
+                                                    log::error!(
+                                                        "DeadLoop auto-kill: SIGTERM failed for pid {}: {}",
+                                                        pid,
+                                                        err
+                                                    );
                                                 }
                                             }
                                         } else {
                                             log::warn!(
                                                 "DeadLoop auto-kill: detection {}/{} for conversation {}, waiting...",
-                                                new_count, self.deadloop_kill_after_count, cid
+                                                new_count,
+                                                self.deadloop_kill_after_count,
+                                                cid
                                             );
                                         }
                                     }
@@ -1203,7 +1243,13 @@ impl AgentSight {
         use crate::genai::GenAIBuilder;
 
         // Track persisted pending calls: (pid, call_id, session_id, agent_name, conversation_id)
-        let mut persisted_pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = Vec::new();
+        let mut persisted_pending: Vec<(
+            u32,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = Vec::new();
 
         for (conn_id, state) in drained {
             // Destructure to capture both request AND sse_events
@@ -1414,7 +1460,9 @@ impl AgentSight {
         // than the HealthChecker (30s cycle in serve process).
         if !persisted_pending.is_empty() {
             if let Some(ref istore) = self.interruption_store {
-                use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+                use crate::interruption::{
+                    InterruptionEvent, InterruptionType, was_pid_oom_killed,
+                };
 
                 let now_ns = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1427,13 +1475,16 @@ impl AgentSight {
                         continue; // already checked this PID
                     }
                     if was_pid_oom_killed(*pid as i32) {
-                        let call_ids: Vec<&str> = persisted_pending.iter()
+                        let call_ids: Vec<&str> = persisted_pending
+                            .iter()
                             .filter(|(p, _, _, _, _)| *p == *pid)
                             .map(|(_, c, _, _, _)| c.as_str())
                             .collect();
                         log::info!(
                             "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
-                            pid, agent_name.as_deref().unwrap_or("unknown"), call_ids
+                            pid,
+                            agent_name.as_deref().unwrap_or("unknown"),
+                            call_ids
                         );
                         let detail = serde_json::json!({
                             "pid": pid,
@@ -1454,14 +1505,24 @@ impl AgentSight {
                             Some(detail),
                         );
                         if let Err(e) = istore.insert(&event) {
-                            log::warn!("[DrainCheck] Failed to record OOM agent_crash for pid={}: {}", pid, e);
+                            log::warn!(
+                                "[DrainCheck] Failed to record OOM agent_crash for pid={}: {}",
+                                pid,
+                                e
+                            );
                         } else {
                             log::info!("[DrainCheck] Recorded OOM agent_crash for pid={}", pid);
                         }
                         // Mark all pending calls for this PID as interrupted
                         if let Some(ref store) = self.genai_sqlite_store {
-                            if let Err(e) = store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash") {
-                                log::warn!("[DrainCheck] Failed to mark pending interrupted for pid={}: {}", pid, e);
+                            if let Err(e) =
+                                store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
+                            {
+                                log::warn!(
+                                    "[DrainCheck] Failed to mark pending interrupted for pid={}: {}",
+                                    pid,
+                                    e
+                                );
                             }
                         }
                     }

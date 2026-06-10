@@ -81,7 +81,9 @@ impl LoopDetector {
         occurred_at_ns: i64,
         recent_calls: &[RecentCallSummary],
     ) -> Option<InterruptionEvent> {
-        let min_threshold = self.config.tool_sequence_repeat_threshold
+        let min_threshold = self
+            .config
+            .tool_sequence_repeat_threshold
             .min(self.config.similar_output_repeat_threshold);
         if recent_calls.len() < min_threshold {
             return None;
@@ -90,24 +92,39 @@ impl LoopDetector {
         // Rule 1: Tool Sequence Repetition
         if let Some(detail) = self.detect_tool_sequence_loop(recent_calls) {
             return Some(self.build_event(
-                conversation_id, session_id, agent_name, pid, occurred_at_ns,
-                "tool_sequence_repetition", detail,
+                conversation_id,
+                session_id,
+                agent_name,
+                pid,
+                occurred_at_ns,
+                "tool_sequence_repetition",
+                detail,
             ));
         }
 
         // Rule 2: Output Similarity Loop
         if let Some(detail) = self.detect_output_similarity_loop(recent_calls) {
             return Some(self.build_event(
-                conversation_id, session_id, agent_name, pid, occurred_at_ns,
-                "output_similarity_loop", detail,
+                conversation_id,
+                session_id,
+                agent_name,
+                pid,
+                occurred_at_ns,
+                "output_similarity_loop",
+                detail,
             ));
         }
 
         // Rule 3: Token Burn Without Progress
         if let Some(detail) = self.detect_token_burn(recent_calls) {
             return Some(self.build_event(
-                conversation_id, session_id, agent_name, pid, occurred_at_ns,
-                "token_burn_no_progress", detail,
+                conversation_id,
+                session_id,
+                agent_name,
+                pid,
+                occurred_at_ns,
+                "token_burn_no_progress",
+                detail,
             ));
         }
 
@@ -119,10 +136,7 @@ impl LoopDetector {
     /// Only considers calls that actually have tool_call outputs (ignores pure-text
     /// responses). This handles architectures like OpenClaw where each tool call
     /// is followed by a text summary call.
-    fn detect_tool_sequence_loop(
-        &self,
-        calls: &[RecentCallSummary],
-    ) -> Option<serde_json::Value> {
+    fn detect_tool_sequence_loop(&self, calls: &[RecentCallSummary]) -> Option<serde_json::Value> {
         let threshold = self.config.tool_sequence_repeat_threshold;
 
         // Filter to only calls that have tool calls (ignore pure-text responses)
@@ -203,10 +217,7 @@ impl LoopDetector {
     /// Only considers calls that have text output (ignores pure tool_call responses).
     /// This handles architectures like OpenClaw where tool calls and text responses
     /// alternate — we check the text responses for repetitive content with growing context.
-    fn detect_token_burn(
-        &self,
-        calls: &[RecentCallSummary],
-    ) -> Option<serde_json::Value> {
+    fn detect_token_burn(&self, calls: &[RecentCallSummary]) -> Option<serde_json::Value> {
         let threshold = self.config.similar_output_repeat_threshold;
 
         // Filter to only calls that have text output (ignore pure tool_call responses)
@@ -223,7 +234,9 @@ impl LoopDetector {
         let tail = &text_bearing[text_bearing.len().saturating_sub(threshold)..];
 
         // Check: input_tokens strictly increasing
-        let input_increasing = tail.windows(2).all(|w| w[1].input_tokens > w[0].input_tokens);
+        let input_increasing = tail
+            .windows(2)
+            .all(|w| w[1].input_tokens > w[0].input_tokens);
         if !input_increasing {
             return None;
         }
@@ -261,7 +274,10 @@ impl LoopDetector {
     ) -> InterruptionEvent {
         let mut detail = detail_extra;
         if let Some(obj) = detail.as_object_mut() {
-            obj.insert("rule".to_string(), serde_json::Value::String(rule.to_string()));
+            obj.insert(
+                "rule".to_string(),
+                serde_json::Value::String(rule.to_string()),
+            );
         }
         InterruptionEvent::new(
             InterruptionType::DeadLoop,
@@ -368,13 +384,21 @@ mod tests {
             make_call(vec!["read_file", "search"], "output b", 200),
             make_call(vec!["read_file", "search"], "output c", 300),
         ];
-        let result = detector.detect("conv-1", Some("sess-1"), Some("agent"), Some(123), 1000, &calls);
+        let result = detector.detect(
+            "conv-1",
+            Some("sess-1"),
+            Some("agent"),
+            Some(123),
+            1000,
+            &calls,
+        );
         assert!(result.is_some());
         let event = result.unwrap();
         assert_eq!(event.interruption_type, InterruptionType::DeadLoop);
         assert_eq!(event.severity, super::super::types::Severity::Critical);
         assert_eq!(event.conversation_id, Some("conv-1".to_string()));
-        let detail: serde_json::Value = serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         assert_eq!(detail["rule"], "tool_sequence_repetition");
     }
 
@@ -403,11 +427,19 @@ mod tests {
             make_call(vec!["read_file"], "reading file...", 500),
             make_call(vec![], "Here is the content yet again.", 600),
         ];
-        let result = detector.detect("conv-1", Some("sess-1"), Some("agent"), Some(123), 1000, &calls);
+        let result = detector.detect(
+            "conv-1",
+            Some("sess-1"),
+            Some("agent"),
+            Some(123),
+            1000,
+            &calls,
+        );
         // Rule 1 should trigger: 3 tool-bearing calls all have ["read_file"]
         assert!(result.is_some());
         let event = result.unwrap();
-        let detail: serde_json::Value = serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         assert_eq!(detail["rule"], "tool_sequence_repetition");
         assert_eq!(detail["repeated_tools"], serde_json::json!(["read_file"]));
     }
@@ -416,14 +448,27 @@ mod tests {
     fn test_output_similarity_loop_detected() {
         let detector = LoopDetector::default();
         let calls = vec![
-            make_call(vec![], "The quick brown fox jumps over the lazy dog repeatedly", 100),
-            make_call(vec![], "The quick brown fox jumps over the lazy dog repeatedly", 200),
-            make_call(vec![], "The quick brown fox jumps over the lazy dog repeatedly", 300),
+            make_call(
+                vec![],
+                "The quick brown fox jumps over the lazy dog repeatedly",
+                100,
+            ),
+            make_call(
+                vec![],
+                "The quick brown fox jumps over the lazy dog repeatedly",
+                200,
+            ),
+            make_call(
+                vec![],
+                "The quick brown fox jumps over the lazy dog repeatedly",
+                300,
+            ),
         ];
         let result = detector.detect("conv-1", None, None, None, 1000, &calls);
         assert!(result.is_some());
         let event = result.unwrap();
-        let detail: serde_json::Value = serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         assert_eq!(detail["rule"], "output_similarity_loop");
     }
 
@@ -454,11 +499,12 @@ mod tests {
         let result = detector.detect("conv-1", None, None, None, 1000, &calls);
         assert!(result.is_some());
         let event = result.unwrap();
-        let detail: serde_json::Value = serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         // Rule 2 fires first (output similarity) since tool_sequence threshold is raised
         assert!(
             detail["rule"] == "output_similarity_loop"
-            || detail["rule"] == "token_burn_no_progress"
+                || detail["rule"] == "token_burn_no_progress"
         );
     }
 
@@ -491,22 +537,30 @@ mod tests {
         });
         let similar_text = "The file does not exist, I will try a different approach to find it";
         let calls = vec![
-            make_call(vec!["read_file"], "", 18000),   // tool_call, no text
-            make_call(vec![], similar_text, 18100),     // text response
-            make_call(vec!["read_file"], "", 18200),   // tool_call, no text
-            make_call(vec![], similar_text, 18300),     // text response
-            make_call(vec!["read_file"], "", 18400),   // tool_call, no text
-            make_call(vec![], similar_text, 18500),     // text response
+            make_call(vec!["read_file"], "", 18000), // tool_call, no text
+            make_call(vec![], similar_text, 18100),  // text response
+            make_call(vec!["read_file"], "", 18200), // tool_call, no text
+            make_call(vec![], similar_text, 18300),  // text response
+            make_call(vec!["read_file"], "", 18400), // tool_call, no text
+            make_call(vec![], similar_text, 18500),  // text response
         ];
-        let result = detector.detect("conv-1", Some("sess-1"), Some("agent"), Some(123), 1000, &calls);
+        let result = detector.detect(
+            "conv-1",
+            Some("sess-1"),
+            Some("agent"),
+            Some(123),
+            1000,
+            &calls,
+        );
         assert!(result.is_some());
         let event = result.unwrap();
-        let detail: serde_json::Value = serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         // Should detect either output_similarity_loop (Rule 2) or token_burn (Rule 3)
         // Rule 2 also filters text-bearing calls, so it may fire first
         assert!(
             detail["rule"] == "output_similarity_loop"
-            || detail["rule"] == "token_burn_no_progress"
+                || detail["rule"] == "token_burn_no_progress"
         );
     }
 
@@ -552,10 +606,15 @@ mod tests {
 
     #[test]
     fn test_jaccard_cjk_near_identical() {
-        let a = "根据分析，该数据集包含1000条记录，其中异常值占比约3.2%，建议进一步清洗后重新统计。";
-        let b = "根据分析，该数据集包含1000条记录，其中异常值占比约3.5%，建议进一步清洗后重新统计。";
+        let a =
+            "根据分析，该数据集包含1000条记录，其中异常值占比约3.2%，建议进一步清洗后重新统计。";
+        let b =
+            "根据分析，该数据集包含1000条记录，其中异常值占比约3.5%，建议进一步清洗后重新统计。";
         let sim = jaccard_similarity(a, b);
-        assert!(sim > 0.8, "CJK near-identical text should score >0.8, got {sim:.4}");
+        assert!(
+            sim > 0.8,
+            "CJK near-identical text should score >0.8, got {sim:.4}"
+        );
     }
 
     #[test]
@@ -563,7 +622,10 @@ mod tests {
         let a = "今天天气非常好适合出门散步";
         let b = "量子计算机可以解决复杂问题";
         let sim = jaccard_similarity(a, b);
-        assert!(sim < 0.2, "Different CJK text should score <0.2, got {sim:.4}");
+        assert!(
+            sim < 0.2,
+            "Different CJK text should score <0.2, got {sim:.4}"
+        );
     }
 
     #[test]
@@ -572,6 +634,9 @@ mod tests {
             "analyze the key statistics of this dataset",
             "analyze the main statistics of this dataset",
         );
-        assert!(sim > 0.7, "English similarity should still work, got {sim:.4}");
+        assert!(
+            sim > 0.7,
+            "English similarity should still work, got {sim:.4}"
+        );
     }
 }
