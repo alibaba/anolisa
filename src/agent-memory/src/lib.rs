@@ -20,6 +20,7 @@
 pub mod audit;
 pub mod cgroup;
 pub mod config;
+pub mod consolidation;
 pub mod embedding;
 pub mod error;
 pub mod git_repo;

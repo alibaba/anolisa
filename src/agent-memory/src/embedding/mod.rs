@@ -35,7 +35,7 @@ pub trait EmbeddingProvider: Send + Sync {
 
 /// Configuration for the embedding backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "backend", rename_all = "lowercase")]
+#[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
 pub enum EmbeddingConfig {
     /// No embedding — only BM25 keyword search is available.
     #[serde(rename = "none")]

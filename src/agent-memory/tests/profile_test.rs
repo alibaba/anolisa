@@ -85,7 +85,7 @@ async fn recv(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdou
 }
 
 // 11 Tier A + 3 Tier B + 3 snapshot + 2 git = 19
-const TOTAL_TOOLS: usize = 19;
+const TOTAL_TOOLS: usize = 20;
 const TIER_B_COUNT: usize = 3;
 
 #[tokio::test]

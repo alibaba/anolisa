@@ -315,6 +315,16 @@ impl MemoryMcpServer {
             .map(|hash| format!("reverted {path} (commit {hash})"))
             .map_err(|e| fmt_err("mem_revert failed", e))
     }
+
+    // ---- Consolidation (auto + manual trigger) ----
+
+    #[tool(
+        description = "Manually trigger memory consolidation: analyse the current session's audit log and extract atomic facts (L1 memories). Auto-consolidation also runs on shutdown. Returns the number of facts extracted."
+    )]
+    async fn mem_consolidate(&self) -> ToolResult {
+        let n = self.svc.consolidate();
+        Ok(format!("consolidation complete: {n} facts written"))
+    }
 }
 
 rmcp::tool_box!(MemoryMcpServer {
@@ -337,6 +347,7 @@ rmcp::tool_box!(MemoryMcpServer {
     mem_snapshot_restore,
     mem_log,
     mem_revert,
+    mem_consolidate,
 } memory_tool_box);
 
 impl ServerHandler for MemoryMcpServer {

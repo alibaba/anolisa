@@ -383,3 +383,33 @@ async fn promote_e2e_workflow() {
 
     agent.cleanup().await;
 }
+
+#[tokio::test]
+async fn mem_consolidate_triggers_and_reports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut agent = McpAgent::spawn(tmp.path(), &[]).await;
+
+    // Write a couple of files so consolidation has something to analyse.
+    agent
+        .call(
+            "mem_write",
+            json!({"path": "notes/a.md", "content": "hello consolidation"}),
+        )
+        .await;
+    agent
+        .call(
+            "mem_write",
+            json!({"path": "notes/b.md", "content": "more facts here"}),
+        )
+        .await;
+    // Read one back to create an audit trail with sufficient entries.
+    agent.call("mem_read", json!({"path": "notes/a.md"})).await;
+
+    let text = agent.call("mem_consolidate", json!({})).await;
+    assert!(
+        text.contains("consolidation complete"),
+        "consolidate result: {text}"
+    );
+
+    agent.cleanup().await;
+}

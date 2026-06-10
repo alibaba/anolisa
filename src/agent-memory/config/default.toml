@@ -40,3 +40,18 @@ backend = "none"
 # api_key  = ""        # only for openai
 # model    = ""
 # base_url = ""
+
+# ── Size limits ─────────────────────────────────────────────────
+# Maximum bytes for a single mem_read / mem_write / mem_append call.
+# Override via env: MEMORY_MAX_READ_BYTES, MEMORY_MAX_WRITE_BYTES,
+# MEMORY_MAX_APPEND_BYTES.
+max_read_bytes   = 1_048_576   #  1 MiB
+max_write_bytes  = 16_777_216  # 16 MiB
+max_append_bytes = 4_194_304   #  4 MiB
+
+# ── Consolidation ───────────────────────────────────────────────
+# Auto-extract L1 atomic facts from session audit logs on shutdown.
+[memory.consolidation]
+enabled        = true
+max_facts      = 20
+min_tool_calls = 3

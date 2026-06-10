@@ -159,6 +159,12 @@ async fn run_mcp_server(config: AppConfig) -> Result<()> {
         },
     }
 
+    // Run automatic memory consolidation before discarding the session.
+    // Consolidation must happen BEFORE try_end_session because it reads
+    // the session log which gets destroyed when the session is discarded.
+    tracing::info!("running memory consolidation...");
+    svc.consolidate();
+
     // Best-effort cleanup: remove the session scratch dir if config says so.
     let action = svc.config.memory.session.end_action;
     svc.try_end_session(action);

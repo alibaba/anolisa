@@ -31,6 +31,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mem_snapshot_restore",
     "mem_log",
     "mem_revert",
+    "mem_consolidate",
 ];
 
 async fn spawn_with_dir(
