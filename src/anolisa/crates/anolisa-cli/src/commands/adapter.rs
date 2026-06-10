@@ -25,6 +25,9 @@
 //! 3. **Symlink guard** — refuses to follow symlinks.
 //! 4. **Directory guard** — refuses to `remove_file` a directory.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -109,6 +112,11 @@ struct InstallPlan {
     dest: String,
     detected: bool,
     detect_reason: String,
+    /// Framework CLI registration command that real execution would run
+    /// after extracting the plugin (e.g. `openclaw plugins install …`).
+    /// `None` for frameworks wired in without a CLI step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    register_command: Option<String>,
 }
 
 /// JSON output for successful adapter install.
@@ -211,96 +219,30 @@ fn handle_scan(ctx: &CliContext) -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 
 /// Install an adapter for `component` into `framework`.
+///
+/// The adapter spec is read from the **published** artifact's embedded
+/// `.anolisa/component.toml` (not the dev-tree catalog), so `source`/`dest`
+/// and the version come from what was actually shipped. After the plugin
+/// directory is extracted into the ANOLISA datadir, frameworks that register
+/// through their own CLI (e.g. OpenClaw) are wired in by invoking that CLI —
+/// a bare file copy is not loaded by OpenClaw.
 fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<(), CliError> {
     let command = format!("adapter install {component} {framework}");
-    let catalog = common::load_bundled_catalog(ctx, &command)?;
-
-    let comp = catalog
-        .component(component)
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: command.clone(),
-            reason: format!("component '{component}' not found in catalog"),
-        })?;
-
-    let adapter = comp
-        .adapters
-        .iter()
-        .find(|a| a.framework.as_deref() == Some(framework))
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: command.clone(),
-            reason: format!("no adapter for framework '{framework}' in component '{component}'"),
-        })?;
-
     let layout = common::resolve_layout(ctx);
-    let dest_template = adapter.dest.as_deref().unwrap_or_default();
-    let expanded_dest =
-        expand_layout_placeholders(dest_template, &layout, &[("component", component)]).map_err(
-            |err| CliError::InvalidArgument {
-                command: command.clone(),
-                reason: format!("failed to expand adapter dest: {err}"),
-            },
-        )?;
 
-    let detect_result = detect_framework(adapter);
-    if !detect_result.detected && !ctx.quiet {
-        eprintln!(
-            "warning: framework '{framework}' not detected on this host: {}",
-            detect_result.reason
-        );
-    }
-
-    validate_owned_path(&layout, &expanded_dest).map_err(|err| CliError::InvalidArgument {
-        command: command.clone(),
-        reason: format!(
-            "adapter destination '{}' failed path safety check: {err}",
-            expanded_dest.display()
-        ),
-    })?;
-
-    let plan = InstallPlan {
-        component: component.to_string(),
-        framework: framework.to_string(),
-        source: adapter.source.clone(),
-        dest: expanded_dest.display().to_string(),
-        detected: detect_result.detected,
-        detect_reason: detect_result.reason.clone(),
-    };
-
-    if ctx.dry_run {
-        if ctx.json {
-            return render_json(&command, plan);
-        }
-
-        println!("adapter install plan (dry-run):");
-        println!("  component:     {}", plan.component);
-        println!("  framework:     {}", plan.framework);
-        println!(
-            "  source:        {}",
-            plan.source.as_deref().unwrap_or("<none>")
-        );
-        println!("  dest:          {}", plan.dest);
-        println!("  detected:      {}", plan.detected);
-        println!("  detect_reason: {}", plan.detect_reason);
-        return Ok(());
-    }
-
-    // -- Real execution: resolve artifact, download, install, write state/log --
-
-    let started_at = now_iso8601();
-    let adapter_name = format!("{component}/{framework}");
-    let version = comp.component.version.clone();
-
-    // Resolve artifact from distribution index.
+    // Resolve artifact from the distribution index. Version-agnostic: pick
+    // the highest semver published for this component/platform — the
+    // published artifact, not the dev-tree catalog, is authoritative.
     let dist_index =
         common::load_distribution_index(ctx, &command)?.ok_or_else(|| CliError::Runtime {
             command: command.clone(),
             reason: "no distribution index available — cannot resolve artifact".to_string(),
         })?;
 
-    let entry = resolve_adapter_artifact(&dist_index, component, &version, ctx, &command)?;
+    let entry = resolve_adapter_artifact(&dist_index, component, None, ctx, &command)?;
 
-    // Adapter install only supports tar_gz — a raw binary artifact has no
-    // source-path structure to map into a directory-typed dest.
+    // Adapter install only supports tar_gz — we must read the embedded
+    // manifest and map a source directory into a directory-typed dest.
     if entry.artifact_type != ArtifactType::TarGz {
         return Err(CliError::Runtime {
             command,
@@ -318,7 +260,8 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         ),
     })?;
 
-    // Download artifact to cache.
+    // Download artifact to cache. Done before the dry-run branch too, so the
+    // displayed source/dest come from the real embedded manifest.
     let cache = DownloadCache::new(layout.cache_dir.clone());
     let downloaded = cache
         .fetch(&entry.url, Some(sha256))
@@ -326,6 +269,110 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
             command: command.clone(),
             reason: format!("failed to download artifact: {err}"),
         })?;
+
+    // Read the published install contract embedded in the artifact and take
+    // the adapter spec from there (source = the in-tar path, version = the
+    // shipped version).
+    let manifest =
+        anolisa_core::install_runner::read_embedded_component_manifest(&downloaded.cached_path)
+            .map_err(|err| CliError::Runtime {
+                command: command.clone(),
+                reason: format!("failed to read embedded component manifest: {err}"),
+            })?
+            .ok_or_else(|| CliError::Runtime {
+                command: command.clone(),
+                reason: format!(
+                    "published artifact for '{component}' has no embedded .anolisa/component.toml — cannot resolve adapters"
+                ),
+            })?;
+
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref() == Some(framework))
+        .ok_or_else(|| CliError::InvalidArgument {
+            command: command.clone(),
+            reason: format!(
+                "no adapter for framework '{framework}' in published component '{component}'"
+            ),
+        })?;
+
+    let version = manifest.component.version.clone();
+    let adapter_name = format!("{component}/{framework}");
+
+    let dest_template = adapter.dest.as_deref().unwrap_or_default();
+    let expanded_dest =
+        expand_layout_placeholders(dest_template, &layout, &[("component", component)]).map_err(
+            |err| CliError::InvalidArgument {
+                command: command.clone(),
+                reason: format!("failed to expand adapter dest: {err}"),
+            },
+        )?;
+
+    validate_owned_path(&layout, &expanded_dest).map_err(|err| CliError::InvalidArgument {
+        command: command.clone(),
+        reason: format!(
+            "adapter destination '{}' failed path safety check: {err}",
+            expanded_dest.display()
+        ),
+    })?;
+
+    let detect_result = detect_framework(adapter);
+
+    // A framework that registers via its own CLI cannot be wired in when the
+    // framework is absent — fail fast before extracting anything.
+    if framework_needs_cli(framework) && !detect_result.detected {
+        return Err(CliError::Runtime {
+            command,
+            reason: format!(
+                "framework '{framework}' not detected ({}) — cannot register the adapter via its CLI",
+                detect_result.reason
+            ),
+        });
+    }
+    if !detect_result.detected && !ctx.quiet {
+        eprintln!(
+            "warning: framework '{framework}' not detected on this host: {}",
+            detect_result.reason
+        );
+    }
+
+    let register_invocation = openclaw_install_for(framework, &expanded_dest);
+
+    if ctx.dry_run {
+        let plan = InstallPlan {
+            component: component.to_string(),
+            framework: framework.to_string(),
+            source: adapter.source.clone(),
+            dest: expanded_dest.display().to_string(),
+            detected: detect_result.detected,
+            detect_reason: detect_result.reason.clone(),
+            register_command: register_invocation.as_ref().map(|i| i.display_command()),
+        };
+
+        if ctx.json {
+            return render_json(&command, plan);
+        }
+
+        println!("adapter install plan (dry-run):");
+        println!("  component:     {}", plan.component);
+        println!("  framework:     {}", plan.framework);
+        println!(
+            "  source:        {}",
+            plan.source.as_deref().unwrap_or("<none>")
+        );
+        println!("  dest:          {}", plan.dest);
+        println!("  detected:      {}", plan.detected);
+        println!("  detect_reason: {}", plan.detect_reason);
+        if let Some(cmd) = &plan.register_command {
+            println!("  register:      {cmd}");
+        }
+        return Ok(());
+    }
+
+    // -- Real execution: extract, register via framework CLI, write state/log --
+
+    let started_at = now_iso8601();
 
     // Construct source→dest file mapping.
     let files = vec![ResolvedInstallFile {
@@ -362,6 +409,27 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         })?;
 
     // From this point, files are on disk — any failure must roll them back.
+
+    // Register the adapter into its framework via the framework's own CLI
+    // (OpenClaw loads plugins from its registry, not from a dropped dir).
+    if let Some(inv) = &register_invocation {
+        if !ctx.quiet {
+            println!(
+                "registering adapter into {framework}: {}",
+                inv.display_command()
+            );
+        }
+        if let Err(err) = run_openclaw(inv, ctx.quiet) {
+            rollback_installed_files(&outcome.files);
+            return Err(CliError::Runtime {
+                command,
+                reason: format!(
+                    "extracted adapter files but {framework} CLI registration failed (rolled back): {}",
+                    err.message()
+                ),
+            });
+        }
+    }
 
     let owned_files: Vec<OwnedFile> = outcome
         .files
@@ -490,10 +558,14 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
 }
 
 /// Resolve the artifact entry for a component from the distribution index.
+///
+/// `version = None` lets the index pick the highest published semver for the
+/// host platform — adapter install pins to whatever was actually shipped
+/// rather than a version read from the dev-tree catalog.
 fn resolve_adapter_artifact(
     dist_index: &DistributionIndex,
     component: &str,
-    version: &str,
+    version: Option<&str>,
     ctx: &CliContext,
     command: &str,
 ) -> Result<anolisa_core::DistributionEntry, CliError> {
@@ -501,7 +573,7 @@ fn resolve_adapter_artifact(
     let preferred = [ArtifactType::TarGz];
     let query = ResolveQuery {
         component,
-        version: Some(version),
+        version,
         channel: None,
         install_mode: ctx.install_mode.as_str(),
         os: &env.os,
@@ -514,6 +586,209 @@ fn resolve_adapter_artifact(
         command: command.to_string(),
         reason: format!("failed to resolve artifact for '{component}': {err}"),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Framework CLI registration (OpenClaw)
+// ---------------------------------------------------------------------------
+
+/// True when `framework` is wired in by invoking its own CLI rather than by a
+/// bare file copy. OpenClaw loads plugins from its managed registry
+/// (`openclaw plugins install`), so a dropped directory alone is not loaded.
+fn framework_needs_cli(framework: &str) -> bool {
+    framework == "openclaw"
+}
+
+/// A resolved OpenClaw CLI invocation. Built purely (the only env read is
+/// `OPENCLAW_BIN`) so the argv/env contract — mirroring
+/// `openclaw/scripts/install.sh` — can be unit-tested without spawning.
+struct OpenclawInvocation {
+    /// Executable to run (`OPENCLAW_BIN` override, else `openclaw`).
+    program: String,
+    /// Arguments, e.g. `plugins install <dest> --force …`.
+    args: Vec<String>,
+    /// `OPENCLAW_STATE_DIR` value set on the child; `OPENCLAW_HOME` is unset.
+    state_dir: PathBuf,
+    /// Directories prepended to `PATH` before spawning.
+    path_prepend: Vec<PathBuf>,
+}
+
+impl OpenclawInvocation {
+    /// Human-readable form for dry-run/preview output.
+    fn display_command(&self) -> String {
+        let mut s = format!(
+            "OPENCLAW_STATE_DIR={} {}",
+            self.state_dir.display(),
+            self.program
+        );
+        for a in &self.args {
+            s.push(' ');
+            s.push_str(a);
+        }
+        s
+    }
+}
+
+/// Why an OpenClaw CLI invocation failed.
+enum OpenclawError {
+    /// The binary was not found on `PATH`.
+    NotFound,
+    /// The process failed to spawn for another reason.
+    Spawn(String),
+    /// The process ran but exited non-zero.
+    Exit(String),
+}
+
+impl OpenclawError {
+    fn message(&self) -> String {
+        match self {
+            OpenclawError::NotFound => "openclaw CLI not found on PATH".to_string(),
+            OpenclawError::Spawn(s) => s.clone(),
+            OpenclawError::Exit(s) => s.clone(),
+        }
+    }
+}
+
+/// `OPENCLAW_BIN` override, else `openclaw`.
+fn openclaw_bin() -> String {
+    std::env::var("OPENCLAW_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "openclaw".to_string())
+}
+
+/// Resolve the OpenClaw home (also the state dir): `OPENCLAW_HOME`, else
+/// `$HOME/.openclaw`. Trailing slashes are trimmed to match the script.
+fn openclaw_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("OPENCLAW_HOME") {
+        let s = h.to_string_lossy();
+        let trimmed = s.trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".openclaw"))
+}
+
+/// PATH prefix dirs, mirroring `install.sh`:
+/// `$HOME/.local/bin`, `<state_dir>/bin`, `/usr/local/bin`.
+fn openclaw_path_prepend(home: &Path, user_home: Option<&Path>) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(uh) = user_home {
+        v.push(uh.join(".local/bin"));
+    }
+    v.push(home.join("bin"));
+    v.push(PathBuf::from("/usr/local/bin"));
+    v
+}
+
+/// Build the `openclaw plugins install <dest> …` invocation. Pure.
+fn build_openclaw_install(
+    program: &str,
+    dest: &Path,
+    home: &Path,
+    user_home: Option<&Path>,
+) -> OpenclawInvocation {
+    OpenclawInvocation {
+        program: program.to_string(),
+        args: vec![
+            "plugins".to_string(),
+            "install".to_string(),
+            dest.display().to_string(),
+            "--force".to_string(),
+            "--dangerously-force-unsafe-install".to_string(),
+        ],
+        state_dir: home.to_path_buf(),
+        path_prepend: openclaw_path_prepend(home, user_home),
+    }
+}
+
+/// Build the `openclaw plugins uninstall <plugin_id> --force` invocation. Pure.
+///
+/// `--force` skips OpenClaw's interactive `[y/N]` confirmation — required
+/// because anolisa drives the CLI non-interactively (no TTY). Mirrors the
+/// official `openclaw/scripts/uninstall.sh` contract.
+fn build_openclaw_uninstall(
+    program: &str,
+    plugin_id: &str,
+    home: &Path,
+    user_home: Option<&Path>,
+) -> OpenclawInvocation {
+    OpenclawInvocation {
+        program: program.to_string(),
+        args: vec![
+            "plugins".to_string(),
+            "uninstall".to_string(),
+            plugin_id.to_string(),
+            "--force".to_string(),
+        ],
+        state_dir: home.to_path_buf(),
+        path_prepend: openclaw_path_prepend(home, user_home),
+    }
+}
+
+/// The install invocation for `framework`, or `None` when not CLI-registered.
+fn openclaw_install_for(framework: &str, dest: &Path) -> Option<OpenclawInvocation> {
+    if framework != "openclaw" {
+        return None;
+    }
+    let home = openclaw_home()?;
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    Some(build_openclaw_install(
+        &openclaw_bin(),
+        dest,
+        &home,
+        user_home.as_deref(),
+    ))
+}
+
+/// The uninstall invocation for `framework`, or `None` when not CLI-registered.
+fn openclaw_uninstall_for(framework: &str, plugin_id: &str) -> Option<OpenclawInvocation> {
+    if framework != "openclaw" {
+        return None;
+    }
+    let home = openclaw_home()?;
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    Some(build_openclaw_uninstall(
+        &openclaw_bin(),
+        plugin_id,
+        &home,
+        user_home.as_deref(),
+    ))
+}
+
+/// Spawn an OpenClaw CLI invocation, replicating the env contract from
+/// `openclaw/scripts/install.sh` (unset `OPENCLAW_HOME`, set
+/// `OPENCLAW_STATE_DIR`, prepend PATH) without executing the script itself.
+fn run_openclaw(inv: &OpenclawInvocation, quiet: bool) -> Result<(), OpenclawError> {
+    let mut cmd = Command::new(&inv.program);
+    cmd.args(&inv.args);
+    cmd.env_remove("OPENCLAW_HOME");
+    cmd.env("OPENCLAW_STATE_DIR", &inv.state_dir);
+
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = inv.path_prepend.clone();
+    paths.extend(std::env::split_paths(&existing));
+    if let Ok(joined) = std::env::join_paths(&paths) {
+        cmd.env("PATH", joined);
+    }
+    if quiet {
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+    }
+
+    match cmd.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(OpenclawError::Exit(format!(
+            "'{}' exited with {status}",
+            inv.program
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OpenclawError::NotFound),
+        Err(e) => Err(OpenclawError::Spawn(format!(
+            "failed to run '{}': {e}",
+            inv.program
+        ))),
+    }
 }
 
 /// Load installed state, mapping errors to CliError::Runtime. Called inside
@@ -604,6 +879,9 @@ fn handle_remove(
                 adapter_name,
                 color.muted("(dry-run)")
             );
+            if let Some(inv) = openclaw_uninstall_for(framework, component) {
+                println!("{} {}", color.label("would run:"), inv.display_command());
+            }
             if !would_remove.is_empty() {
                 println!("{}", color.label("would remove:"));
                 for p in &would_remove {
@@ -638,6 +916,32 @@ fn handle_remove(
             reason: format!("adapter '{adapter_name}' is not installed"),
         })?
         .clone();
+
+    // Symmetric framework de-registration: unwire from the framework's CLI
+    // before deleting the local copy. A missing framework binary means there
+    // is nothing to unregister (not fatal); a real uninstall failure is
+    // retryable, so we keep state and bail.
+    if let Some(inv) = openclaw_uninstall_for(framework, component) {
+        match run_openclaw(&inv, ctx.quiet) {
+            Ok(()) => {}
+            Err(OpenclawError::NotFound) => {
+                if !ctx.quiet {
+                    eprintln!(
+                        "warning: openclaw CLI not found — skipping plugin uninstall for {adapter_name}"
+                    );
+                }
+            }
+            Err(err) => {
+                return Err(CliError::Runtime {
+                    command: command_str.clone(),
+                    reason: format!(
+                        "framework de-registration failed (state kept so removal can be retried): {}",
+                        err.message()
+                    ),
+                });
+            }
+        }
+    }
 
     let mut removed: Vec<String> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -908,7 +1212,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        let err = handle_remove("tokenless", "openclaw", false, &ctx)
+        let err = handle_remove("tokenless", "cosh", false, &ctx)
             .expect_err("must error for unknown adapter");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("not installed"));
@@ -925,7 +1229,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        let err = handle_remove("tokenless", "openclaw", true, &ctx).expect_err("purge must error");
+        let err = handle_remove("tokenless", "cosh", true, &ctx).expect_err("purge must error");
         assert_eq!(err.code(), "NOT_IMPLEMENTED");
     }
 
@@ -943,7 +1247,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![OwnedFile {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
@@ -960,7 +1264,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx).expect("dry-run must succeed");
+        handle_remove("tokenless", "cosh", false, &ctx).expect("dry-run must succeed");
 
         assert!(owned.exists(), "dry-run must not delete files");
         let after_bytes = std::fs::read(&state_path).expect("read after");
@@ -981,7 +1285,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![OwnedFile {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
@@ -997,14 +1301,14 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx).expect("remove must succeed");
+        handle_remove("tokenless", "cosh", false, &ctx).expect("remove must succeed");
 
         assert!(!owned.exists(), "owned file must be removed");
 
         let after = InstalledState::load(&state_path).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Adapter, "tokenless/openclaw")
+                .find_object(ObjectKind::Adapter, "tokenless/cosh")
                 .is_none(),
             "adapter object must be dropped"
         );
@@ -1035,7 +1339,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![
                 OwnedFile {
                     path: removable.clone(),
@@ -1058,7 +1362,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        let err = handle_remove("tokenless", "openclaw", false, &ctx)
+        let err = handle_remove("tokenless", "cosh", false, &ctx)
             .expect_err("remove must fail when a file cannot be deleted");
 
         std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
@@ -1079,7 +1383,7 @@ mod tests {
         let after = InstalledState::load(&state_path).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Adapter, "tokenless/openclaw")
+                .find_object(ObjectKind::Adapter, "tokenless/cosh")
                 .is_some(),
             "adapter state must remain so remove can be retried"
         );
@@ -1099,7 +1403,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![OwnedFile {
                 path: ghost,
                 owner: FileOwner::Anolisa,
@@ -1115,7 +1419,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx)
+        handle_remove("tokenless", "cosh", false, &ctx)
             .expect("remove must succeed for missing files");
     }
 
@@ -1135,7 +1439,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![
                 OwnedFile {
                     path: external.clone(),
@@ -1158,7 +1462,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx).expect("remove must succeed");
+        handle_remove("tokenless", "cosh", false, &ctx).expect("remove must succeed");
 
         assert!(external.exists(), "external file must not be deleted");
         assert!(!owned.exists(), "owned file must be deleted");
@@ -1178,7 +1482,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![OwnedFile {
                 path: outside.clone(),
                 owner: FileOwner::Anolisa,
@@ -1194,7 +1498,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx).expect("remove must succeed");
+        handle_remove("tokenless", "cosh", false, &ctx).expect("remove must succeed");
 
         assert!(outside.exists(), "file outside roots must not be deleted");
     }
@@ -1217,7 +1521,7 @@ mod tests {
 
         let mut state = InstalledState::default();
         state.upsert_object(adapter_object(
-            "tokenless/openclaw",
+            "tokenless/cosh",
             vec![OwnedFile {
                 path: link.clone(),
                 owner: FileOwner::Anolisa,
@@ -1233,7 +1537,7 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        handle_remove("tokenless", "openclaw", false, &ctx).expect("remove must succeed");
+        handle_remove("tokenless", "cosh", false, &ctx).expect("remove must succeed");
 
         assert!(link.is_symlink(), "symlink must not be removed");
         assert!(target.exists(), "symlink target must not be removed");
@@ -1258,6 +1562,72 @@ mod tests {
         )
         .expect_err("list must return not implemented");
         assert_eq!(err.code(), "NOT_IMPLEMENTED");
+    }
+
+    // -- openclaw CLI invocation construction (pure, no spawn) --------------
+
+    #[test]
+    fn framework_needs_cli_is_openclaw_only() {
+        assert!(framework_needs_cli("openclaw"));
+        assert!(!framework_needs_cli("cosh"));
+        assert!(!framework_needs_cli("hermes"));
+    }
+
+    #[test]
+    fn build_openclaw_install_mirrors_install_sh_contract() {
+        let inv = build_openclaw_install(
+            "openclaw",
+            std::path::Path::new("/data/adapters/tokenless/openclaw"),
+            std::path::Path::new("/home/u/.openclaw"),
+            Some(std::path::Path::new("/home/u")),
+        );
+        assert_eq!(inv.program, "openclaw");
+        assert_eq!(
+            inv.args,
+            vec![
+                "plugins".to_string(),
+                "install".to_string(),
+                "/data/adapters/tokenless/openclaw".to_string(),
+                "--force".to_string(),
+                "--dangerously-force-unsafe-install".to_string(),
+            ]
+        );
+        // OPENCLAW_STATE_DIR == home; OPENCLAW_HOME is unset at spawn time.
+        assert_eq!(inv.state_dir, PathBuf::from("/home/u/.openclaw"));
+        // PATH prefix order matches install.sh: ~/.local/bin, <state>/bin,
+        // /usr/local/bin.
+        assert_eq!(
+            inv.path_prepend,
+            vec![
+                PathBuf::from("/home/u/.local/bin"),
+                PathBuf::from("/home/u/.openclaw/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ]
+        );
+        let shown = inv.display_command();
+        assert!(shown.contains("OPENCLAW_STATE_DIR=/home/u/.openclaw"));
+        assert!(shown.contains("plugins install /data/adapters/tokenless/openclaw"));
+        assert!(shown.contains("--dangerously-force-unsafe-install"));
+    }
+
+    #[test]
+    fn build_openclaw_uninstall_targets_plugin_id() {
+        let inv = build_openclaw_uninstall(
+            "openclaw",
+            "tokenless",
+            std::path::Path::new("/home/u/.openclaw"),
+            Some(std::path::Path::new("/home/u")),
+        );
+        assert_eq!(
+            inv.args,
+            vec![
+                "plugins".to_string(),
+                "uninstall".to_string(),
+                "tokenless".to_string(),
+                "--force".to_string(),
+            ]
+        );
+        assert_eq!(inv.state_dir, PathBuf::from("/home/u/.openclaw"));
     }
 
     // =========================================================================
@@ -1308,8 +1678,26 @@ mod tests {
         ) -> (CliContext, String) {
             let layout = FsLayout::system(Some(tmp.to_path_buf()));
 
-            // Build tar.gz artifact.
-            let tar_bytes = build_tar_gz(tar_entries);
+            // Build tar.gz artifact. The fixture embeds a published install
+            // contract (`.anolisa/component.toml`) declaring a `cosh` adapter so
+            // `handle_install` reads source/dest/version from the artifact — not
+            // from the dev-tree catalog. `cosh` is a non-CLI framework, so no
+            // real `openclaw` binary is ever spawned during the test.
+            let embedded = format!(
+                "[component]\n\
+                 name = \"{component}\"\n\
+                 version = \"{version}\"\n\
+                 \n\
+                 [[adapters]]\n\
+                 framework = \"cosh\"\n\
+                 kind = \"third-party\"\n\
+                 plugin_id = \"{component}\"\n\
+                 source = \"target/release/cosh-ext/\"\n\
+                 dest = \"{{datadir}}/adapters/{component}/cosh/\"\n",
+            );
+            let mut entries: Vec<(&str, &[u8])> = tar_entries.to_vec();
+            entries.push((".anolisa/component.toml", embedded.as_bytes()));
+            let tar_bytes = build_tar_gz(&entries);
             let tar_sha = sha256_hex(&tar_bytes);
             let artifact_dir = tmp.join("artifacts");
             fs::create_dir_all(&artifact_dir).unwrap();
@@ -1362,8 +1750,7 @@ sha256 = "{tar_sha}"
                     ("target/release/cosh-ext/dist/index.js", index_js),
                 ],
                 "tokenless",
-                // Must match the tokenless manifest's component.version
-                &tokenless_version(),
+                TEST_VERSION,
             );
 
             handle_install(&ctx, "tokenless", "cosh").expect("install must succeed");
@@ -1411,7 +1798,7 @@ sha256 = "{tar_sha}"
                 tmp.path(),
                 &[("target/release/cosh-ext/plugin.json", plugin_json)],
                 "tokenless",
-                &tokenless_version(),
+                TEST_VERSION,
             );
 
             handle_install(&ctx, "tokenless", "cosh").expect("install must succeed");
@@ -1463,7 +1850,7 @@ os = "{os}"
 arch = "{arch}"
 install_modes = ["system"]
 "#,
-                version = tokenless_version(),
+                version = TEST_VERSION,
                 os = env.os,
                 arch = env.arch,
             );
@@ -1526,7 +1913,7 @@ arch = "{arch}"
 install_modes = ["system"]
 sha256 = "{wrong_sha}"
 "#,
-                version = tokenless_version(),
+                version = TEST_VERSION,
                 os = env.os,
                 arch = env.arch,
                 wrong_sha = "0".repeat(64),
@@ -1566,7 +1953,7 @@ sha256 = "{wrong_sha}"
                 tmp.path(),
                 &[("target/release/cosh-ext/plugin.json", b"new-data")],
                 "tokenless",
-                &tokenless_version(),
+                TEST_VERSION,
             );
 
             // Pre-create the dest file to trigger DestExists.
@@ -1624,7 +2011,7 @@ arch = "{arch}"
 install_modes = ["system"]
 sha256 = "{sha}"
 "#,
-                version = tokenless_version(),
+                version = TEST_VERSION,
                 os = env.os,
                 arch = env.arch,
                 sha = "0".repeat(64),
@@ -1667,7 +2054,7 @@ sha256 = "{sha}"
                 tmp.path(),
                 &[("target/release/cosh-ext/plugin.json", plugin_json)],
                 "tokenless",
-                &tokenless_version(),
+                TEST_VERSION,
             );
 
             // Write a corrupted installed.toml so load_installed_state fails.
@@ -1687,17 +2074,11 @@ sha256 = "{sha}"
             );
         }
 
-        /// Read the tokenless component version from the dev-tree manifest so
-        /// the test fixtures automatically match.
-        fn tokenless_version() -> String {
-            let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../manifests/runtime/tokenless.toml");
-            let content = fs::read_to_string(&manifest_path).expect("read tokenless manifest");
-            let table: toml::Table = toml::from_str(&content).expect("parse tokenless manifest");
-            table["component"]["version"]
-                .as_str()
-                .expect("component.version must be string")
-                .to_string()
-        }
+        /// Fixed published version for the fixtures. Decoupled from
+        /// `manifests/runtime/tokenless.toml`: adapter install resolves the
+        /// shipped artifact by highest semver, so the index entry and the
+        /// embedded manifest only need to agree with each other, not with the
+        /// dev-tree catalog.
+        const TEST_VERSION: &str = "0.5.0";
     }
 }

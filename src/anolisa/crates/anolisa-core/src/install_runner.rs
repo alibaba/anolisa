@@ -161,6 +161,61 @@ pub enum InstallError {
     /// Archive stream could not be decoded or read.
     #[error("archive read error: {0}")]
     Archive(String),
+
+    /// Embedded `.anolisa/component.toml` is not valid UTF-8 or could not be
+    /// parsed as a component manifest.
+    #[error("embedded component manifest could not be parsed: {0}")]
+    EmbeddedManifestParse(String),
+}
+
+/// Extract and parse the published install contract embedded in a tar.gz
+/// artifact at `.anolisa/component.toml`.
+///
+/// Returns `Ok(None)` when the archive has no such entry. Entry paths are
+/// compared after stripping any leading `./` (tar created with `-C dir .`
+/// prefixes every path that way).
+///
+/// This manifest is byte-identical to the registry `meta.toml` (contract
+/// I3). Adapter install reads it so the `source`/`dest`/`version` it acts on
+/// come from the *published* artifact rather than the dev-tree catalog,
+/// which may carry stale build-path sources and lagging versions.
+///
+/// # Errors
+/// [`InstallError::Io`] when the archive cannot be opened or read;
+/// [`InstallError::Archive`] when gzip/tar decoding fails;
+/// [`InstallError::EmbeddedManifestParse`] when the entry is not valid
+/// component-manifest TOML.
+pub fn read_embedded_component_manifest(
+    artifact: &Path,
+) -> Result<Option<crate::manifest::ComponentManifest>, InstallError> {
+    let io_err = |source: std::io::Error| InstallError::Io {
+        path: artifact.to_path_buf(),
+        source,
+    };
+    let archive_err = |e: std::io::Error| InstallError::Archive(e.to_string());
+
+    let file = File::open(artifact).map_err(io_err)?;
+    let gz = GzDecoder::new(file);
+    let mut archive = Archive::new(gz);
+    for entry in archive.entries().map_err(archive_err)? {
+        let mut entry = entry.map_err(archive_err)?;
+        // Scope the path borrow so `read_to_end` can take `&mut entry`.
+        let is_manifest = {
+            let path = entry.path().map_err(archive_err)?;
+            let normalized = path.strip_prefix("./").unwrap_or(&path);
+            normalized == Path::new(".anolisa/component.toml")
+        };
+        if is_manifest {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(io_err)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
+            let manifest = crate::manifest::ComponentManifest::from_toml_str(&text)
+                .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
+            return Ok(Some(manifest));
+        }
+    }
+    Ok(None)
 }
 
 /// Stateless installer bound to an [`FsLayout`] for ANOLISA-owned-root

@@ -48,5 +48,5 @@ url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/
 os = "linux"
 arch = "x86_64"
 install_modes = ["user", "system"]
-sha256 = "29e56bb6f30aa0097a6d9e91da18076a389945054d527c82b58429e8fd71f69f"
-size = 8110156
+sha256 = "73428694c5077f61e106836f1cf44b1f016677ef2e0af377908e0037377469d2"
+size = 8110269
