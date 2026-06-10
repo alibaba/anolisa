@@ -24,12 +24,12 @@ pub mod lifecycle;
 pub mod lock;
 pub mod manifest;
 pub mod path_safety;
+pub mod register;
 pub mod registry;
 pub mod sandbox_install;
 pub mod self_update;
 pub mod service;
 pub mod state;
-pub mod subscription;
 pub mod transaction;
 pub mod upload;
 
@@ -71,6 +71,10 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{ComponentManifest, DistributionSelector, HealthSpec};
+pub use register::{
+    ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
+    SubscriptionError, current_operator, require_root,
+};
 pub use registry::Registry;
 pub use self_update::{
     ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,
@@ -85,10 +89,6 @@ pub use state::{
     BackupRecord, ExternalModifiedFile, FileOwner, HealthEntry, InstallMode, InstalledObject,
     InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, STATE_SCHEMA_VERSION,
     ServiceRef, StateError, SubscriptionScope,
-};
-pub use subscription::{
-    ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
-    SubscriptionError, current_operator, require_root,
 };
 pub use transaction::{
     JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,

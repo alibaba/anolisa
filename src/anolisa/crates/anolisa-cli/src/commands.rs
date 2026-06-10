@@ -112,9 +112,9 @@ pub enum CapabilityCommands {
 /// Tier 2 — independent management surfaces.
 #[derive(Subcommand)]
 pub enum ManagementCommands {
-    /// Register for token collection, or query registration status (requires root/sudo)
+    /// Join the Agentic OS Co-Build Program (requires root/sudo)
     Register(register::RegisterArgs),
-    /// Withdraw consent and stop token upload (requires root/sudo)
+    /// Leave the Agentic OS Co-Build Program (requires root/sudo)
     Unregister(register::UnregisterArgs),
     /// Manage agent-framework adapters
     Adapter(adapter::AdapterArgs),

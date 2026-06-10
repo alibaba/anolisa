@@ -21,7 +21,7 @@ pub struct RegisterArgs {
 
 #[derive(Subcommand)]
 pub enum RegisterCommands {
-    /// Show token collection registration status
+    /// Show registration status
     Status {
         /// Output machine-readable JSON
         #[arg(long)]
