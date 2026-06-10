@@ -299,6 +299,18 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
 
     let entry = resolve_adapter_artifact(&dist_index, component, &version, ctx, &command)?;
 
+    // Adapter install only supports tar_gz — a raw binary artifact has no
+    // source-path structure to map into a directory-typed dest.
+    if entry.artifact_type != ArtifactType::TarGz {
+        return Err(CliError::Runtime {
+            command,
+            reason: format!(
+                "adapter install requires a tar_gz artifact, got '{}'",
+                artifact_type_wire(&entry.artifact_type)
+            ),
+        });
+    }
+
     let sha256 = entry.sha256.as_deref().ok_or_else(|| CliError::Runtime {
         command: command.clone(),
         reason: format!(
@@ -316,33 +328,40 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         })?;
 
     // Construct source→dest file mapping.
-    let artifact_type_str = artifact_type_wire(&entry.artifact_type);
     let files = vec![ResolvedInstallFile {
         source: adapter.source.clone(),
         dest: expanded_dest.clone(),
         mode: None,
     }];
 
-    // Acquire lock for state mutation.
+    // Acquire lock, then load state inside the lock so a concurrent writer
+    // cannot be overwritten and so state-load failures happen before file copy.
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.clone(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
 
+    let mut state = load_state_for_install(ctx, &command)?;
+
+    // Generate operation_id after lock acquisition with nanosecond precision
+    // to avoid collisions between concurrent processes.
+    let lock_ts = Utc::now();
+    let operation_id = format!(
+        "op-adapter-install-{}-{}",
+        lock_ts.format("%Y%m%d%H%M%S"),
+        lock_ts.timestamp_subsec_nanos()
+    );
+
     // Execute file copy.
     let runner = InstallRunner::new(&layout);
     let outcome = runner
-        .install_files(artifact_type_str, &downloaded.cached_path, &files)
+        .install_files("tar_gz", &downloaded.cached_path, &files)
         .map_err(|err| CliError::Runtime {
             command: command.clone(),
             reason: format!("install failed: {err}"),
         })?;
 
-    // Write state. On failure, clean up installed files.
-    let operation_id = format!(
-        "op-adapter-install-{}",
-        started_at.replace([':', '-', 'T', 'Z'], "")
-    );
+    // From this point, files are on disk — any failure must roll them back.
 
     let owned_files: Vec<OwnedFile> = outcome
         .files
@@ -380,7 +399,6 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         health: Vec::new(),
     };
 
-    let mut state = common::load_installed_state(ctx, &command)?;
     state.install_mode = match ctx.install_mode {
         crate::context::InstallMode::System => StateInstallMode::System,
         crate::context::InstallMode::User => StateInstallMode::User,
@@ -400,7 +418,7 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         rollback_installed_files(&outcome.files);
         return Err(CliError::Runtime {
             command,
-            reason: format!("failed to save state (files rolled back): {err}"),
+            reason: format!("failed to save state; attempted best-effort rollback of installed files (some may remain on disk): {err}"),
         });
     }
 
@@ -478,7 +496,7 @@ fn resolve_adapter_artifact(
     command: &str,
 ) -> Result<anolisa_core::DistributionEntry, CliError> {
     let env = anolisa_env::EnvService::detect();
-    let preferred = [ArtifactType::TarGz, ArtifactType::Binary];
+    let preferred = [ArtifactType::TarGz];
     let query = ResolveQuery {
         component,
         version: Some(version),
@@ -487,12 +505,25 @@ fn resolve_adapter_artifact(
         os: &env.os,
         arch: &env.arch,
         libc: env.libc.as_deref(),
-        pkg_base: None,
+        pkg_base: env.pkg_base.as_deref(),
         preferred_types: &preferred,
     };
     dist_index.resolve(&query).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to resolve artifact for '{component}': {err}"),
+    })
+}
+
+/// Load installed state, mapping errors to CliError::Runtime. Called inside
+/// the lock and before file copy so a corrupted state file doesn't leave
+/// orphan adapter files on disk.
+fn load_state_for_install(
+    ctx: &CliContext,
+    command: &str,
+) -> Result<anolisa_core::InstalledState, CliError> {
+    common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to load installed state: {err}"),
     })
 }
 
@@ -1474,6 +1505,97 @@ sha256 = "{wrong_sha}"
                     .find_object(ObjectKind::Adapter, "tokenless/cosh")
                     .is_none(),
                 "no state when dest exists"
+            );
+        }
+
+        // -- install: binary-only entry rejected for adapter install -------------
+
+        #[test]
+        fn install_rejects_binary_artifact_type() {
+            let tmp = tempdir().expect("tmpdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            fs::create_dir_all(&layout.state_dir).unwrap();
+            fs::create_dir_all(&layout.cache_dir).unwrap();
+
+            // Write a distribution index with only a binary entry.
+            let dist_dir = layout.manifests_overlay.join("distribution-index");
+            fs::create_dir_all(&dist_dir).unwrap();
+            let env = anolisa_env::EnvService::detect();
+            let index_content = format!(
+                r#"schema_version = 1
+
+[[entries]]
+component = "tokenless"
+version = "{version}"
+channel = "stable"
+artifact_type = "binary"
+backend = "binary"
+url = "file:///nonexistent/tokenless"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+                version = tokenless_version(),
+                os = env.os,
+                arch = env.arch,
+                sha = "0".repeat(64),
+            );
+            fs::write(dist_dir.join("index.toml"), &index_content).unwrap();
+
+            let ctx = ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            );
+            let err = handle_install(&ctx, "tokenless", "cosh")
+                .expect_err("must reject binary artifact type");
+            assert_eq!(err.code(), "EXECUTION_FAILED");
+            assert!(
+                err.reason().contains("tar_gz"),
+                "error should mention tar_gz requirement: {}",
+                err.reason()
+            );
+
+            // No state or files left.
+            let state_path = layout.state_dir.join("installed.toml");
+            let state = InstalledState::load(&state_path).expect("load state");
+            assert!(
+                state
+                    .find_object(ObjectKind::Adapter, "tokenless/cosh")
+                    .is_none(),
+                "no state on binary rejection"
+            );
+        }
+
+        // -- install: corrupted state file rejected without leaving files ---------
+
+        #[test]
+        fn install_corrupted_state_does_not_leave_files() {
+            let tmp = tempdir().expect("tmpdir");
+            let plugin_json = br#"{"name":"tokenless"}"#;
+            let (ctx, _sha) = setup_env(
+                tmp.path(),
+                &[("target/release/cosh-ext/plugin.json", plugin_json)],
+                "tokenless",
+                &tokenless_version(),
+            );
+
+            // Write a corrupted installed.toml so load_installed_state fails.
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let state_path = layout.state_dir.join("installed.toml");
+            fs::write(&state_path, b"this is not valid toml [[[[").unwrap();
+
+            let err =
+                handle_install(&ctx, "tokenless", "cosh").expect_err("must reject corrupted state");
+            assert_eq!(err.code(), "EXECUTION_FAILED");
+
+            // No adapter files written (state load happens before file copy).
+            let dest_root = layout.datadir.join("adapters/tokenless/cosh");
+            assert!(
+                !dest_root.join("plugin.json").exists(),
+                "no adapter files when state is corrupted"
             );
         }
 
