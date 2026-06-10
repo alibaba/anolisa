@@ -418,7 +418,9 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         rollback_installed_files(&outcome.files);
         return Err(CliError::Runtime {
             command,
-            reason: format!("failed to save state; attempted best-effort rollback of installed files (some may remain on disk): {err}"),
+            reason: format!(
+                "failed to save state; attempted best-effort rollback of installed files (some may remain on disk): {err}"
+            ),
         });
     }
 
@@ -640,6 +642,7 @@ fn handle_remove(
     let mut removed: Vec<String> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut remove_errors: Vec<String> = Vec::new();
 
     for file in &adapter_obj.files {
         if file.owner != FileOwner::Anolisa {
@@ -690,6 +693,7 @@ fn handle_remove(
         if let Err(err) = std::fs::remove_file(&file.path) {
             let msg = format!("failed to remove {}: {err}", file.path.display());
             warnings.push(msg);
+            remove_errors.push(format!("{} ({err})", file.path.display()));
             skipped.push(SkippedFile {
                 path: file.path.display().to_string(),
                 reason: format!("remove_file failed: {err}"),
@@ -697,6 +701,17 @@ fn handle_remove(
         } else {
             removed.push(file.path.display().to_string());
         }
+    }
+
+    if !remove_errors.is_empty() {
+        let details = remove_errors.join(", ");
+        return Err(CliError::Runtime {
+            command: command_str,
+            reason: format!(
+                "failed to remove {count} adapter file(s); state kept so removal can be retried: {details}",
+                count = remove_errors.len(),
+            ),
+        });
     }
 
     // Update state — set metadata from ctx in case this is a fresh file.
@@ -995,6 +1010,79 @@ mod tests {
         );
 
         assert!(layout.central_log.exists(), "central log must be written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_file_failure_keeps_state_for_retry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+
+        let removable = layout.bin_dir.join("removable-adapter-file");
+        std::fs::write(&removable, b"removable").expect("write removable");
+
+        let locked_dir = layout.bin_dir.join("locked-dir");
+        std::fs::create_dir_all(&locked_dir).expect("mkdir locked dir");
+        let blocked = locked_dir.join("blocked-adapter-file");
+        std::fs::write(&blocked, b"blocked").expect("write blocked");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make locked dir read-only");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object(
+            "tokenless/openclaw",
+            vec![
+                OwnedFile {
+                    path: removable.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: None,
+                },
+                OwnedFile {
+                    path: blocked.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: None,
+                },
+            ],
+        ));
+        let state_path = layout.state_dir.join("installed.toml");
+        state.save(&state_path).expect("save state");
+
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        let err = handle_remove("tokenless", "openclaw", false, &ctx)
+            .expect_err("remove must fail when a file cannot be deleted");
+
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore locked dir permissions");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("state kept"),
+            "error should explain retryable state retention: {}",
+            err.reason()
+        );
+        assert!(
+            !removable.exists(),
+            "files removed before the failure stay removed"
+        );
+        assert!(blocked.exists(), "failed file must remain on disk");
+
+        let after = InstalledState::load(&state_path).expect("reload state");
+        assert!(
+            after
+                .find_object(ObjectKind::Adapter, "tokenless/openclaw")
+                .is_some(),
+            "adapter state must remain so remove can be retried"
+        );
     }
 
     // -- remove: idempotent for already-deleted files -----------------------
