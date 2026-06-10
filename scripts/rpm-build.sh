@@ -374,6 +374,8 @@ build_agentsight() {
 
     # Copy relevant files
     cp -rp "${SIGHT_DIR}/target/release/agentsight" "$pkg_dir/" 2>/dev/null || warn "Binary missing"
+    [ -f "${SIGHT_DIR}/scripts/agentsight.service" ] && cp "${SIGHT_DIR}/scripts/agentsight.service" "$pkg_dir/"
+    [ -f "${SIGHT_DIR}/scripts/agentsight-start.sh" ] && cp "${SIGHT_DIR}/scripts/agentsight-start.sh" "$pkg_dir/agentsight-start"
     [ -f "${SIGHT_DIR}/README.md" ] && cp "${SIGHT_DIR}/README.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/README_CN.md" ] && cp "${SIGHT_DIR}/README_CN.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
