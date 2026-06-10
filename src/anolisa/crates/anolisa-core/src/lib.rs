@@ -4,6 +4,7 @@
 //! distribution indexes, environment facts, and filesystem layout, then use
 //! these APIs to plan, execute, audit, and roll back lifecycle operations.
 
+pub mod adapter;
 pub mod backup;
 pub mod capability;
 pub mod catalog;
@@ -33,6 +34,7 @@ pub mod subscription;
 pub mod transaction;
 pub mod upload;
 
+pub use adapter::{AdapterError, DetectResult, detect_framework, expand_layout_placeholders};
 pub use backup::{BackupEntry, BackupSet};
 pub use capability::{CapabilityError, CapabilityResolver, ResolvedPlan};
 pub use catalog::{Catalog, CatalogError, CatalogLayers};
