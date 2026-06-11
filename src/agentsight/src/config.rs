@@ -424,8 +424,19 @@ pub struct AgentsightConfig {
     pub purge_interval: u64,
 
     // --- Trace Control ---
-    /// Whether trace collection is enabled (false = service alive but idle)
-    /// JSON field name: "traceEnabled"
+    /// Controls whether SLS-uploaded `LLMCall` records carry conversation
+    /// content fields (`gen_ai.input.messages`, `gen_ai.output.messages`,
+    /// `gen_ai.system_instructions`).
+    ///
+    /// * `false` (default): only token / model / provider / timing metadata
+    ///   is uploaded; conversation bodies are dropped at the SLS layer.
+    /// * `true`: full conversation content is uploaded.
+    ///
+    /// This flag does **not** stop the agent itself; eBPF probes, local
+    /// SQLite persistence and token metering keep running regardless.
+    /// Local SQLite always stores full content; this only controls SLS.
+    ///
+    /// JSON field name: `traceEnabled`.
     pub trace_enabled: bool,
 
     // --- Probe Configuration ---
@@ -517,7 +528,10 @@ impl Default for AgentsightConfig {
             purge_interval: DEFAULT_PURGE_INTERVAL,
 
             // Trace control defaults
-            trace_enabled: true,
+            // Default = false (privacy-safe): SLS uploads carry only token /
+            // model / timing metadata. Conversation content is opt-in via
+            // explicit `"traceEnabled": true` in the config file.
+            trace_enabled: false,
 
             // Probe defaults
             target_uid: None,
@@ -981,6 +995,37 @@ mod tests {
         assert!(!config.cgroup_filter_enabled);
         assert_eq!(config.retention_days, 30);
         assert_eq!(config.purge_interval, 1000);
+    }
+
+    /// `traceEnabled` is **off** by default (privacy-safe). Conversation
+    /// content fields are dropped from SLS uploads unless the config file
+    /// explicitly sets `"traceEnabled": true`. This test locks that default
+    /// so it cannot silently regress.
+    #[test]
+    fn test_trace_enabled_default_is_false() {
+        let config = AgentsightConfig::new();
+        assert!(
+            !config.trace_enabled,
+            "AgentsightConfig::new() must default trace_enabled=false to keep \
+             SLS uploads free of conversation content unless explicitly opted in"
+        );
+    }
+
+    /// Loading a config that omits `traceEnabled` must NOT flip the default
+    /// (the field is `Option<bool>` and only overrides when `Some`).
+    #[test]
+    fn test_load_from_json_missing_trace_enabled_keeps_default_false() {
+        let mut config = AgentsightConfig::new();
+        config.load_from_json("{}").unwrap();
+        assert!(!config.trace_enabled);
+    }
+
+    /// Explicit `"traceEnabled": true` opts into uploading conversation content.
+    #[test]
+    fn test_load_from_json_explicit_trace_enabled_true() {
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(r#"{"traceEnabled": true}"#).unwrap();
+        assert!(config.trace_enabled);
     }
 
     #[test]
