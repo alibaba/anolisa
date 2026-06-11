@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- add --json output to stats summary
+- implement unified tool categorization and 3-layer compression strategy
+- add rtk grep fallback pattern fix patch
+- add rtk pytest error report patch
+
 ## 0.5.0
 
 - add Hermes adapter runner

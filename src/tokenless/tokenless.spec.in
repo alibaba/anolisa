@@ -405,6 +405,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jun 11 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.5.1-1
+- feat(tokenless): add --json output to stats summary
+- fix(tokenless): implement unified tool categorization and 3-layer compression strategy
+- fix(tokenless): add rtk grep fallback pattern fix patch
+- fix(tokenless): add rtk pytest error report patch
+
 * Mon Jun 08 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.5.0-1
 - feat(tokenless): add Claude Code adapter plugin
 - feat(tokenless): add codex adapter plugin
