@@ -47,6 +47,14 @@ LOONGSHIELD_REINFORCE_FIXED = """\
 \x1b[32m[INFO  14:30:06]\x1b[0m engine.lua:292: SEHarden Finished. 0 passed, 1 fixed, 0 failed, 0 manual, 0 dry-run-pending / 1 total.
 """
 
+LOONGSHIELD_REINFORCE_MIXED_FAIL_AND_FIXED = """\
+  \x1b[1;31mFAIL\x1b[0m [e2e.strict_banner] Ensure fixture SSH banner is configured
+    \x1b[33mreason:\x1b[0m actual: nil
+\x1b[32m[INFO  14:30:05]\x1b[0m engine.lua:292: [e2e.max_auth_tries] FIXED: Ensure fixture MaxAuthTries is hardened
+\x1b[33m[WARN  14:30:06]\x1b[0m engine.lua:186: [fs.udf_disabled] FAIL: Ensure mounting of udf is disabled
+\x1b[32m[INFO  14:30:07]\x1b[0m engine.lua:292: SEHarden Finished. 0 passed, 2 fixed, 1 failed, 0 manual, 0 dry-run-pending / 3 total.
+"""
+
 LOONGSHIELD_DRYRUN = """\
 \x1b[32m[INFO  14:30:01]\x1b[0m engine.lua:298: [fs.cramfs_blacklist] DRY-RUN: would apply cramfs blacklist
 \x1b[32m[INFO  14:30:02]\x1b[0m engine.lua:298: [svc.chronyd_enable] DRY-RUN: would enable chronyd
@@ -325,6 +333,49 @@ class TestHardeningExecute(unittest.TestCase):
                     "status": "FIXED",
                     "message": "Ensure fixture MaxAuthTries is hardened",
                 }
+            ],
+        )
+
+    @patch("agent_sec_cli.security_middleware.backends.hardening.subprocess.run")
+    @patch("agent_sec_cli.security_middleware.backends.hardening.shutil.which")
+    def test_reinforce_distinguishes_verbose_fail_from_legacy_fail(
+        self, mock_which, mock_run
+    ):
+        mock_which.return_value = "/usr/bin/loongshield"
+        mock_run.return_value = _mock_proc(
+            LOONGSHIELD_REINFORCE_MIXED_FAIL_AND_FIXED, 1
+        )
+
+        result = self.backend.execute(
+            self.ctx, args=["--reinforce", "--verbose", "--config", "agentos_baseline"]
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.data["fixed"], 2)
+        self.assertEqual(result.data["failed"], 1)
+        self.assertEqual(
+            result.data["failures"],
+            [
+                {
+                    "rule_id": "e2e.strict_banner",
+                    "status": "FAIL",
+                    "message": "Ensure fixture SSH banner is configured",
+                }
+            ],
+        )
+        self.assertEqual(
+            result.data["fixed_items"],
+            [
+                {
+                    "rule_id": "e2e.max_auth_tries",
+                    "status": "FIXED",
+                    "message": "Ensure fixture MaxAuthTries is hardened",
+                },
+                {
+                    "rule_id": "fs.udf_disabled",
+                    "status": "FAIL",
+                    "message": "Ensure mounting of udf is disabled",
+                },
             ],
         )
 

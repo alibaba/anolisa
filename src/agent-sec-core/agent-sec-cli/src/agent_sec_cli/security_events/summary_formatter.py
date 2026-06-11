@@ -228,7 +228,7 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
         # Include fixed count from reinforce operations in compliance calculation
         fixed_count = 0
         for e in reinforcements:
-            if e.result == "succeeded":
+            if _has_hardening_stats(e):
                 reinf_result = _get_result(e)
                 fixed_count += reinf_result.get("fixed", 0)
 

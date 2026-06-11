@@ -283,6 +283,89 @@ class TestHardeningSummary:
         assert "Latest scan failed" not in output
         assert "agent-sec-cli harden --reinforce" in output
 
+    def test_failed_reinforce_with_stats_contributes_fixed_count(self):
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {
+                        "args": ["--scan", "--config", "agentos_baseline", "--verbose"]
+                    },
+                    "result": {
+                        "mode": "scan",
+                        "config": "agentos_baseline",
+                        "passed": 20,
+                        "failed": 3,
+                        "total": 23,
+                        "failures": [
+                            {
+                                "rule_id": "SEC-001",
+                                "status": "FAIL",
+                                "message": "issue",
+                            }
+                        ],
+                        "fixed": 0,
+                        "manual": 0,
+                        "dry_run_pending": 0,
+                        "fixed_items": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(10),
+            ),
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {
+                        "args": [
+                            "--reinforce",
+                            "--config",
+                            "agentos_baseline",
+                            "--verbose",
+                        ]
+                    },
+                    "result": {
+                        "mode": "reinforce",
+                        "config": "agentos_baseline",
+                        "passed": 20,
+                        "failed": 1,
+                        "total": 23,
+                        "failures": [
+                            {
+                                "rule_id": "SEC-003",
+                                "status": "FAIL",
+                                "message": "still failing",
+                            }
+                        ],
+                        "fixed": 2,
+                        "manual": 0,
+                        "dry_run_pending": 0,
+                        "fixed_items": [
+                            {
+                                "rule_id": "SEC-001",
+                                "status": "FIXED",
+                                "message": "fixed",
+                            },
+                            {
+                                "rule_id": "SEC-002",
+                                "status": "FIXED",
+                                "message": "fixed",
+                            },
+                        ],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert "Reinforcements:   1 (succeeded: 0, failed: 1)" in output
+        assert "Compliance: 22/23 rules passed (20 passed + 2 fixed, 95.7%)" in output
+
 
 # ---------------------------------------------------------------------------
 # Test: asset verify summary
