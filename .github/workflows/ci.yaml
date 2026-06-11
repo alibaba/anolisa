@@ -551,7 +551,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
-          components: llvm-tools-preview
+          components: 'rustfmt, llvm-tools-preview'
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
