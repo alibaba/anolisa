@@ -574,24 +574,24 @@ jobs:
 
       - name: Generate coverage summary
         if: always()
-        shell: bash
+        shell: python3 {0}
         run: |
-          COV_FILE="src/agentsight/coverage.xml"
-          if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
-            {
-              echo "### agentsight (Rust) Test Coverage"
-              echo ""
-              echo "| Metric | Coverage | Detail |"
-              echo "|--------|----------|--------|"
-              echo "| Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### agentsight coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          import xml.etree.ElementTree as ET, os, pathlib
+          cov = pathlib.Path("src/agentsight/coverage.xml")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+          with open(summary, "a") as f:
+              if cov.exists():
+                  root = ET.parse(cov).getroot()
+                  rate = float(root.get("line-rate", "0"))
+                  valid = root.get("lines-valid", "0")
+                  covered = root.get("lines-covered", "0")
+                  pct = f"{rate * 100:.1f}"
+                  f.write("### agentsight (Rust) Test Coverage\n\n")
+                  f.write("| Metric | Coverage | Detail |\n")
+                  f.write("|--------|----------|--------|\n")
+                  f.write(f"| Line Coverage | **{pct}%** | {covered}/{valid} lines |\n")
+              else:
+                  f.write("### agentsight coverage report not found\n")
 
       - name: Upload coverage artifact
         if: always()
