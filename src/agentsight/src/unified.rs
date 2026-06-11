@@ -458,6 +458,10 @@ impl AgentSight {
                 config.encryption_public_key.clone(),
                 config.trace_enabled,
             );
+            // Spawn token-collector watcher to bridge ilogtail SLS_LOG_PATH into
+            // runtime.sls_logtail_path. Triggered by /etc/anolisa/enable_token_collector
+            // file presence; cleared when the file is removed.
+            Self::start_token_collector_watcher(cfg_path.clone());
         }
 
         // Spawn background thread that marks stale PENDING calls as 'interrupted'.
@@ -994,6 +998,174 @@ impl AgentSight {
                 log::info!("Config watcher exiting");
             })
             .ok();
+    }
+
+    /// Start a background thread that polls `/etc/anolisa/enable_token_collector`
+    /// every second.
+    ///
+    /// When the trigger file exists, parses `SLS_LOG_PATH` from
+    /// `/etc/anolisa/ilogtail.cfg` and writes it to `runtime.sls_logtail_path`
+    /// in the agentsight config file. When the trigger file is removed, clears
+    /// `runtime.sls_logtail_path` (sets it to empty string).
+    ///
+    /// The actual SLS activation is then handled by `start_config_watcher`, which
+    /// reacts to the resulting config file change.
+    fn start_token_collector_watcher(config_path: PathBuf) {
+        const ENABLE_FILE: &str = "/etc/anolisa/enable_token_collector";
+        const LOGTAIL_CFG: &str = "/etc/anolisa/ilogtail.cfg";
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+        std::thread::Builder::new()
+            .name("token-collector-watcher".to_string())
+            .spawn(move || {
+                log::info!(
+                    "Token-collector watcher started (enable_file={}, logtail_cfg={}, target={:?})",
+                    ENABLE_FILE, LOGTAIL_CFG, config_path
+                );
+
+                // Last applied state to avoid redundant writes:
+                //   None             — initial / unknown
+                //   Some(Some(path)) — last wrote enabled with this path
+                //   Some(None)       — last wrote disabled
+                let mut last_state: Option<Option<String>> = None;
+
+                loop {
+                    std::thread::sleep(POLL_INTERVAL);
+
+                    let enabled = Path::new(ENABLE_FILE).exists();
+
+                    let desired: Option<String> = if enabled {
+                        match Self::read_logtail_sls_path(LOGTAIL_CFG) {
+                            Some(p) => Some(p),
+                            None => {
+                                if last_state != Some(None) {
+                                    log::warn!(
+                                        "token-collector enabled but SLS_LOG_PATH missing/empty in {}",
+                                        LOGTAIL_CFG
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    if last_state.as_ref() == Some(&desired) {
+                        continue;
+                    }
+
+                    match Self::write_runtime_sls_path(&config_path, desired.as_deref()) {
+                        Ok(false) => {
+                            last_state = Some(desired);
+                        }
+                        Ok(true) => {
+                            match &desired {
+                                Some(p) => log::info!(
+                                    "token-collector enabled: set runtime.sls_logtail_path={:?}",
+                                    p
+                                ),
+                                None => log::info!(
+                                    "token-collector disabled: cleared runtime.sls_logtail_path"
+                                ),
+                            }
+                            last_state = Some(desired);
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "token-collector failed to update {:?}: {}",
+                                config_path, e
+                            );
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Parse `SLS_LOG_PATH=...` from a logtail.cfg-style key=value file.
+    /// Returns the value with surrounding quotes stripped, or None if the key
+    /// is absent or the value is empty.
+    fn read_logtail_sls_path(cfg_path: &str) -> Option<String> {
+        let content = match std::fs::read_to_string(cfg_path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::debug!("token-collector: failed to read {}: {}", cfg_path, e);
+                return None;
+            }
+        };
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(2, '=');
+            let key = parts.next()?.trim();
+            if key != "SLS_LOG_PATH" {
+                continue;
+            }
+            let raw = parts.next()?.trim();
+            // Strip optional surrounding single/double quotes.
+            let value = raw.trim_matches(|c| c == '"' || c == '\'').trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+        None
+    }
+
+    /// Update `runtime.sls_logtail_path` in the JSON config file.
+    ///
+    /// * `new_path = Some(p)` — set the path to `p`.
+    /// * `new_path = None`    — clear the path (set to empty string).
+    ///
+    /// Returns `Ok(true)` if the file was rewritten, `Ok(false)` if the field
+    /// already matched the desired value (no write performed). Other JSON fields
+    /// are preserved untouched.
+    fn write_runtime_sls_path(
+        config_path: &Path,
+        new_path: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("read config {:?}", config_path))?;
+        let mut value: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("parse JSON {:?}", config_path))?;
+
+        let root = value
+            .as_object_mut()
+            .context("agentsight config root must be a JSON object")?;
+        let runtime_entry = root
+            .entry("runtime".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let runtime = runtime_entry
+            .as_object_mut()
+            .context("runtime field must be a JSON object")?;
+
+        let target = new_path.unwrap_or("");
+        let current = runtime
+            .get("sls_logtail_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if current == target {
+            return Ok(false);
+        }
+        runtime.insert(
+            "sls_logtail_path".to_string(),
+            serde_json::Value::String(target.to_string()),
+        );
+
+        // Pretty-print preserving field order (preserve_order feature).
+        let mut new_content = serde_json::to_string_pretty(&value)
+            .context("serialize updated config")?;
+        new_content.push('\n');
+
+        // Direct write so the existing config-watcher sees IN_CLOSE_WRITE
+        // and re-loads runtime.sls_logtail_path.
+        std::fs::write(config_path, new_content.as_bytes())
+            .with_context(|| format!("write config {:?}", config_path))?;
+        Ok(true)
     }
 
     /// Install an FFI event sender for C API mode.
@@ -1754,5 +1926,242 @@ impl AgentSight {
 impl Drop for AgentSight {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Generate a unique temp directory for each test invocation.
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("agentsight-tc-{}-{}-{}", pid, tag, n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    // ────── read_logtail_sls_path ──────
+
+    #[test]
+    fn test_read_logtail_sls_path_basic() {
+        let dir = unique_tmp_dir("read-basic");
+        let cfg = dir.join("ilogtail.cfg");
+        std::fs::write(&cfg, "SLS_LOG_PATH=/var/log/sls/agentsight.log\n").unwrap();
+        let v = AgentSight::read_logtail_sls_path(cfg.to_str().unwrap());
+        assert_eq!(v, Some("/var/log/sls/agentsight.log".to_string()));
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_double_quoted() {
+        let dir = unique_tmp_dir("read-dq");
+        let cfg = dir.join("ilogtail.cfg");
+        std::fs::write(&cfg, "SLS_LOG_PATH=\"/var/log/sls/a.log\"\n").unwrap();
+        assert_eq!(
+            AgentSight::read_logtail_sls_path(cfg.to_str().unwrap()),
+            Some("/var/log/sls/a.log".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_single_quoted() {
+        let dir = unique_tmp_dir("read-sq");
+        let cfg = dir.join("ilogtail.cfg");
+        std::fs::write(&cfg, "SLS_LOG_PATH='/tmp/x.log'\n").unwrap();
+        assert_eq!(
+            AgentSight::read_logtail_sls_path(cfg.to_str().unwrap()),
+            Some("/tmp/x.log".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_empty_value() {
+        let dir = unique_tmp_dir("read-empty");
+        let cfg = dir.join("ilogtail.cfg");
+        std::fs::write(&cfg, "SLS_LOG_PATH=\"\"\n").unwrap();
+        assert_eq!(AgentSight::read_logtail_sls_path(cfg.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_skip_comments_and_other_keys() {
+        let dir = unique_tmp_dir("read-mixed");
+        let cfg = dir.join("ilogtail.cfg");
+        let content = "\
+# comment line
+OTHER_KEY=value
+SLS_LOG_PATH=/data/logs/agent.log
+EXTRA=foo
+";
+        std::fs::write(&cfg, content).unwrap();
+        assert_eq!(
+            AgentSight::read_logtail_sls_path(cfg.to_str().unwrap()),
+            Some("/data/logs/agent.log".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_missing_key() {
+        let dir = unique_tmp_dir("read-miss");
+        let cfg = dir.join("ilogtail.cfg");
+        std::fs::write(&cfg, "OTHER=1\n").unwrap();
+        assert_eq!(AgentSight::read_logtail_sls_path(cfg.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn test_read_logtail_sls_path_file_missing() {
+        let path = "/nonexistent-dir/agentsight-test/ilogtail.cfg";
+        assert_eq!(AgentSight::read_logtail_sls_path(path), None);
+    }
+
+    // ────── write_runtime_sls_path ──────
+
+    fn make_sample_config(dir: &Path) -> PathBuf {
+        let cfg = dir.join("agentsight.json");
+        let content = r#"{
+  "runtime": { "sls_logtail_path": "" },
+  "deadloop": { "enabled": false, "kill_after_count": 3 },
+  "https": [{ "rule": ["dashscope.aliyuncs.com"] }],
+  "cmdline": { "allow": [{ "rule": ["claude*"], "agent_name": "Claude" }] }
+}
+"#;
+        std::fs::write(&cfg, content).unwrap();
+        cfg
+    }
+
+    #[test]
+    fn test_write_runtime_sls_path_set_value() {
+        let dir = unique_tmp_dir("write-set");
+        let cfg = make_sample_config(&dir);
+
+        let changed = AgentSight::write_runtime_sls_path(&cfg, Some("/var/log/sls/x.log")).unwrap();
+        assert!(changed, "should write when value differs");
+
+        // Verify config file content
+        let c = std::fs::read_to_string(&cfg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(
+            parsed["runtime"]["sls_logtail_path"].as_str(),
+            Some("/var/log/sls/x.log")
+        );
+        // Other fields preserved
+        assert_eq!(
+            parsed["deadloop"]["kill_after_count"].as_u64(),
+            Some(3)
+        );
+        assert!(parsed["cmdline"]["allow"].is_array());
+        assert_eq!(parsed["https"][0]["rule"][0], "dashscope.aliyuncs.com");
+    }
+
+    #[test]
+    fn test_write_runtime_sls_path_clear() {
+        let dir = unique_tmp_dir("write-clear");
+        let cfg = dir.join("agentsight.json");
+        std::fs::write(
+            &cfg,
+            r#"{"runtime":{"sls_logtail_path":"/old/path.log"},"deadloop":{"enabled":true}}"#,
+        )
+        .unwrap();
+
+        let changed = AgentSight::write_runtime_sls_path(&cfg, None).unwrap();
+        assert!(changed);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["runtime"]["sls_logtail_path"].as_str(), Some(""));
+        assert_eq!(parsed["deadloop"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_write_runtime_sls_path_idempotent_same_value() {
+        let dir = unique_tmp_dir("write-idem");
+        let cfg = make_sample_config(&dir);
+        let mtime1 = std::fs::metadata(&cfg).unwrap().modified().unwrap();
+
+        // First write: empty -> empty (no-op)
+        let changed = AgentSight::write_runtime_sls_path(&cfg, None).unwrap();
+        assert!(!changed, "writing same empty value should be no-op");
+
+        let mtime2 = std::fs::metadata(&cfg).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "file should not be touched when value matches");
+    }
+
+    #[test]
+    fn test_write_runtime_sls_path_creates_runtime_section() {
+        let dir = unique_tmp_dir("write-no-rt");
+        let cfg = dir.join("agentsight.json");
+        // Config without runtime section
+        std::fs::write(&cfg, r#"{"deadloop":{"enabled":false}}"#).unwrap();
+
+        let changed = AgentSight::write_runtime_sls_path(&cfg, Some("/p.log")).unwrap();
+        assert!(changed);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["runtime"]["sls_logtail_path"].as_str(), Some("/p.log"));
+    }
+
+    #[test]
+    fn test_write_runtime_sls_path_invalid_root_errors() {
+        let dir = unique_tmp_dir("write-bad");
+        let cfg = dir.join("agentsight.json");
+        // Root is an array, not an object — must reject
+        std::fs::write(&cfg, r#"[1,2,3]"#).unwrap();
+        assert!(AgentSight::write_runtime_sls_path(&cfg, Some("/p.log")).is_err());
+    }
+
+    // ────── end-to-end simulation (no thread, exercise the same logic) ──────
+
+    /// Simulate the watcher's decision loop without spawning a thread:
+    /// trigger present → write enabled path; trigger removed → clear path.
+    #[test]
+    fn test_watcher_logic_end_to_end() {
+        let dir = unique_tmp_dir("e2e");
+        let cfg = make_sample_config(&dir);
+        let logtail_cfg = dir.join("ilogtail.cfg");
+        let enable_file = dir.join("enable_token_collector");
+
+        // Step 1: trigger present + logtail.cfg has SLS_LOG_PATH
+        std::fs::write(&logtail_cfg, "SLS_LOG_PATH=/var/log/sls/agent.log\n").unwrap();
+        std::fs::write(&enable_file, b"").unwrap();
+
+        let enabled = enable_file.exists();
+        let desired: Option<String> = if enabled {
+            AgentSight::read_logtail_sls_path(logtail_cfg.to_str().unwrap())
+        } else {
+            None
+        };
+        assert_eq!(desired, Some("/var/log/sls/agent.log".to_string()));
+        let changed = AgentSight::write_runtime_sls_path(&cfg, desired.as_deref()).unwrap();
+        assert!(changed);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            parsed["runtime"]["sls_logtail_path"].as_str(),
+            Some("/var/log/sls/agent.log")
+        );
+
+        // Step 2: trigger removed → clear
+        std::fs::remove_file(&enable_file).unwrap();
+        let enabled = enable_file.exists();
+        let desired: Option<String> = if enabled {
+            AgentSight::read_logtail_sls_path(logtail_cfg.to_str().unwrap())
+        } else {
+            None
+        };
+        assert!(desired.is_none());
+        let changed = AgentSight::write_runtime_sls_path(&cfg, desired.as_deref()).unwrap();
+        assert!(changed);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["runtime"]["sls_logtail_path"].as_str(), Some(""));
+
+        // Step 3: trigger removed again → no-op
+        let changed = AgentSight::write_runtime_sls_path(&cfg, None).unwrap();
+        assert!(!changed);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
