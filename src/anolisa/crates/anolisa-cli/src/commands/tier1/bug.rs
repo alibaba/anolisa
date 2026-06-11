@@ -7,9 +7,9 @@
 use clap::Parser;
 use serde::Serialize;
 
-use anolisa_core::{CentralLog, LogFilter, LogRecord, Severity};
+use anolisa_core::{CentralLog, LogFilter, LogRecord, ObjectKind, Severity};
 
-use crate::commands::{common, tier1::list};
+use crate::commands::common;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -150,48 +150,35 @@ fn collect_capabilities(
     capability: Option<&str>,
     ctx: &CliContext,
 ) -> Result<Vec<CapabilitySummary>, CliError> {
-    let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
     let state = common::load_installed_state(ctx, COMMAND)?;
-    let rows = list::build_rows(
-        &catalog,
-        &state,
-        &list::ListArgs {
-            available: false,
-            enabled: false,
-        },
-    );
-    capability_summaries(&rows, capability)
-}
+    let all: Vec<CapabilitySummary> = state
+        .objects
+        .iter()
+        .filter(|o| o.kind == ObjectKind::Capability)
+        .map(|o| CapabilitySummary {
+            name: o.name.clone(),
+            status: common::object_status_str(o.status).to_string(),
+            installed_version: Some(o.version.clone()),
+        })
+        .collect();
 
-fn capability_summaries(
-    rows: &[list::Row],
-    capability: Option<&str>,
-) -> Result<Vec<CapabilitySummary>, CliError> {
-    let filtered: Vec<&list::Row> = match capability {
+    match capability {
         Some(name) => {
-            let matches: Vec<&list::Row> = rows.iter().filter(|row| row.name == name).collect();
+            let matches: Vec<CapabilitySummary> =
+                all.into_iter().filter(|s| s.name == name).collect();
             if matches.is_empty() {
                 return Err(CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!("unknown capability '{name}'"),
                 });
             }
-            matches
+            Ok(matches)
         }
-        None => rows
-            .iter()
-            .filter(|row| common::status_is_enabled(&row.status))
-            .collect(),
-    };
-
-    Ok(filtered
-        .into_iter()
-        .map(|row| CapabilitySummary {
-            name: row.name.clone(),
-            status: row.status.clone(),
-            installed_version: row.installed_version.clone(),
-        })
-        .collect())
+        None => Ok(all
+            .into_iter()
+            .filter(|s| common::status_is_enabled(&s.status))
+            .collect()),
+    }
 }
 
 fn collect_recent_logs(
@@ -402,14 +389,35 @@ fn is_value_boundary(ch: char) -> bool {
 mod tests {
     use super::*;
 
-    fn row(name: &str, status: &str, version: Option<&str>) -> list::Row {
-        list::Row {
+    fn make_summary(name: &str, status: &str, version: Option<&str>) -> CapabilitySummary {
+        CapabilitySummary {
             name: name.to_string(),
-            summary: String::new(),
-            priority: "stable".to_string(),
             status: status.to_string(),
             installed_version: version.map(|v| v.to_string()),
-            available: true,
+        }
+    }
+
+    fn filter_summaries(
+        all: &[CapabilitySummary],
+        capability: Option<&str>,
+    ) -> Result<Vec<CapabilitySummary>, CliError> {
+        match capability {
+            Some(name) => {
+                let matches: Vec<CapabilitySummary> =
+                    all.iter().filter(|s| s.name == name).cloned().collect();
+                if matches.is_empty() {
+                    return Err(CliError::InvalidArgument {
+                        command: COMMAND.to_string(),
+                        reason: format!("unknown capability '{name}'"),
+                    });
+                }
+                Ok(matches)
+            }
+            None => Ok(all
+                .iter()
+                .filter(|s| common::status_is_enabled(&s.status))
+                .cloned()
+                .collect()),
         }
     }
 
@@ -436,13 +444,13 @@ mod tests {
 
     #[test]
     fn default_capability_report_includes_enabled_rows_only() {
-        let rows = vec![
-            row("agent-observability", "installed", Some("0.1.0")),
-            row("sandbox", "disabled", Some("0.1.0")),
-            row("tokenless", "not_installed", None),
+        let all = vec![
+            make_summary("agent-observability", "installed", Some("0.1.0")),
+            make_summary("sandbox", "disabled", Some("0.1.0")),
+            make_summary("tokenless", "not_installed", None),
         ];
 
-        let caps = capability_summaries(&rows, None).expect("summaries");
+        let caps = filter_summaries(&all, None).expect("summaries");
 
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].name, "agent-observability");
@@ -450,9 +458,9 @@ mod tests {
 
     #[test]
     fn capability_filter_keeps_requested_row_even_when_disabled() {
-        let rows = vec![row("sandbox", "disabled", Some("0.1.0"))];
+        let all = vec![make_summary("sandbox", "disabled", Some("0.1.0"))];
 
-        let caps = capability_summaries(&rows, Some("sandbox")).expect("summaries");
+        let caps = filter_summaries(&all, Some("sandbox")).expect("summaries");
 
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].status, "disabled");
@@ -460,9 +468,9 @@ mod tests {
 
     #[test]
     fn capability_filter_rejects_unknown_name() {
-        let rows = vec![row("sandbox", "installed", Some("0.1.0"))];
+        let all = vec![make_summary("sandbox", "installed", Some("0.1.0"))];
 
-        let err = capability_summaries(&rows, Some("missing")).expect_err("unknown capability");
+        let err = filter_summaries(&all, Some("missing")).expect_err("unknown capability");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("unknown capability"));

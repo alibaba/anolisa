@@ -1,39 +1,14 @@
-//! `anolisa list` — enumerate capabilities from the bundled `Catalog`,
-//! overlay [`InstalledState`], and render.
+//! `anolisa list` — list available components from a remote catalog.
 //!
-//! P1-E1 wiring: this is the first read-only Tier-1 command beyond `logs`
-//! to leave the `NOT_IMPLEMENTED` placeholder behind. Behavior:
+//! Fetches a JSON component declaration file (v1 schema) from a
+//! configurable URL, maps each entry to a [`Row`], and renders as a
+//! human table or `--json` envelope.
 //!
-//! 1. Load the bundled catalog via [`crate::commands::common::load_bundled_catalog`].
-//! 2. Load `installed.toml` via [`crate::commands::common::load_installed_state`]
-//!    (missing file ⇒ `Default`, fresh-install case).
-//! 3. For every capability, project a [`Row`] carrying name, summary, priority,
-//!    real status string, installed version (if any), and `available`.
-//!    - `status` is the same `installed | degraded | disabled | failed |
-//!      adopted | not_installed` vocabulary used by `status` (shared via
-//!      [`crate::commands::common::object_status_str`]). The previous
-//!      `installed: bool` shape conflated `Disabled` / `Failed` / `Adopted`
-//!      with `Installed`, which is wrong.
-//!    - `available` is hard-coded to `true` for E1 — env-fact gating lands with
-//!      the capability resolver / `EnvFacts` wiring.
-//! 4. Apply `--enabled` (only actively-serving rows: `installed | degraded |
-//!    adopted` — `disabled` and `failed` are excluded) and `--available`
-//!    (no-op for now; flag is still honored so a future env-facts pass
-//!    changes only the predicate). Both flags ⇒ intersection.
-//! 5. Render JSON envelope via [`render_json`] when `ctx.json`, else a
-//!    plain table on stdout (suppressed under `ctx.quiet`).
-//!
-//! Schema-field decisions:
-//! - `summary` ← `capability.description` (no dedicated `summary` field
-//!   exists in the manifest v2 schema).
-//! - `priority` ← `capability.stability` (no `priority` field exists; we
-//!   surface the stability tag — "stable" by default — until the manifest
-//!   schema grows a real priority axis).
+//! Local installation detection is stubbed: every component reports
+//! `not_installed`. `--enabled` therefore always returns an empty list.
 
 use clap::Parser;
-use serde::Serialize;
-
-use anolisa_core::{Catalog, InstalledState, ObjectKind};
+use serde::{Deserialize, Serialize};
 
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
@@ -44,349 +19,349 @@ const COMMAND: &str = "list";
 
 #[derive(Parser)]
 pub struct ListArgs {
-    /// Show only capabilities available on this machine
+    /// Show only components marked as available
     #[arg(long)]
     pub available: bool,
-    /// Show only currently enabled (installed) capabilities
+    /// Show only currently installed components
     #[arg(long)]
     pub enabled: bool,
 }
 
-/// Projection of a `Catalog` capability + `InstalledState` overlay. Kept
-/// `Serialize` so the same struct feeds the `--json` envelope and the
-/// human renderer.
-///
-/// `status` is the authoritative install state (`installed | degraded |
-/// disabled | failed | adopted | not_installed`) — JSON consumers should
-/// branch on this rather than re-deriving a boolean.
+// ── Deserialization types for the v1 component catalog JSON ─────────
+
+#[derive(Debug, Deserialize)]
+struct ComponentCatalogV1 {
+    schema_version: u32,
+    #[serde(default)]
+    components: Vec<ComponentEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct ComponentEntry {
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    backends: Option<Vec<BackendEntry>>,
+    #[serde(default)]
+    platforms: Option<Vec<PlatformEntry>>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackendEntry {
+    #[serde(rename = "type")]
+    backend_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct PlatformEntry {
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default)]
+    distros: Option<Vec<String>>,
+}
+
+// ── Wire / JSON output types ───────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Row {
     pub name: String,
+    pub display_name: String,
     pub summary: String,
-    pub priority: String,
+    pub category: String,
+    pub version: String,
+    pub backends: Vec<String>,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_version: Option<String>,
     pub available: bool,
 }
 
 #[derive(Serialize)]
 struct ListPayload {
-    capabilities: Vec<Row>,
+    components: Vec<Row>,
 }
 
+// ── Handler ────────────────────────────────────────────────────────
+
 pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
-    let state = common::load_installed_state(ctx, COMMAND)?;
-    let rows = build_rows(&catalog, &state, &args);
+    let url = common::resolve_catalog_url(ctx, COMMAND)?;
+    let bytes = common::fetch_catalog_bytes(&url, COMMAND)?;
+    let catalog = parse_catalog(&bytes)?;
+    let rows = build_rows(&catalog, &args)?;
 
     if ctx.json {
-        return render_json(COMMAND, ListPayload { capabilities: rows });
+        return render_json(COMMAND, ListPayload { components: rows });
     }
 
     if !ctx.quiet {
-        render_human(&rows, ctx.verbose, ctx.no_color);
+        render_human(&rows, ctx.no_color);
     }
     Ok(())
 }
 
-/// Pure helper: combine catalog + installed state + filter flags into a
-/// row list. Lives outside `handle` so unit tests can exercise it
-/// without mocking [`CliContext`].
-pub(crate) fn build_rows(catalog: &Catalog, state: &InstalledState, args: &ListArgs) -> Vec<Row> {
-    catalog
-        .list_capabilities()
-        .into_iter()
-        .map(|cap| {
-            let installed_obj = state.find_object(ObjectKind::Capability, &cap.capability.name);
-            let status = installed_obj
-                .map(|o| common::object_status_str(o.status).to_string())
-                .unwrap_or_else(|| "not_installed".to_string());
-            let installed_version = installed_obj.map(|o| o.version.clone());
-            // TODO(owner: cli-planning, when: EnvFacts resolver is wired):
-            // report env-fact-based availability. For E1 every capability is
-            // reported as available so CLI plumbing stays exercisable.
-            let available = true;
+fn parse_catalog(bytes: &[u8]) -> Result<ComponentCatalogV1, CliError> {
+    let catalog: ComponentCatalogV1 =
+        serde_json::from_slice(bytes).map_err(|err| CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!("failed to parse component catalog JSON: {err}"),
+        })?;
+
+    if catalog.schema_version != 1 {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "unsupported component catalog schema_version {}; expected 1",
+                catalog.schema_version
+            ),
+        });
+    }
+
+    for entry in &catalog.components {
+        if entry.name.trim().is_empty() {
+            return Err(CliError::InvalidArgument {
+                command: COMMAND.to_string(),
+                reason: "component catalog contains an entry with an empty name".to_string(),
+            });
+        }
+    }
+
+    Ok(catalog)
+}
+
+fn build_rows(catalog: &ComponentCatalogV1, args: &ListArgs) -> Result<Vec<Row>, CliError> {
+    if args.enabled {
+        return Ok(Vec::new());
+    }
+
+    let rows: Vec<Row> = catalog
+        .components
+        .iter()
+        .map(|entry| {
+            let backends: Vec<String> = entry
+                .backends
+                .as_ref()
+                .map(|bs| bs.iter().map(|b| b.backend_type.clone()).collect())
+                .unwrap_or_default();
+            let available = entry.status.as_deref() == Some("available");
             Row {
-                name: cap.capability.name.clone(),
-                summary: cap.capability.description.clone(),
-                priority: cap.capability.stability.clone(),
-                status,
-                installed_version,
+                name: entry.name.clone(),
+                display_name: entry
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| entry.name.clone()),
+                summary: entry.summary.clone().unwrap_or_default(),
+                category: entry.category.clone().unwrap_or_default(),
+                version: entry.version.clone().unwrap_or_default(),
+                backends,
+                status: "not_installed".to_string(),
                 available,
             }
         })
-        .filter(|row| !args.enabled || common::status_is_enabled(&row.status))
         .filter(|row| !args.available || row.available)
-        .collect()
+        .collect();
+
+    Ok(rows)
 }
 
-fn render_human(rows: &[Row], verbose: bool, no_color: bool) {
+fn render_human(rows: &[Row], no_color: bool) {
     let color = Palette::new(no_color);
+    if rows.is_empty() {
+        println!("{}", color.muted("no components found"));
+        return;
+    }
     println!(
         "{}",
         color.header(format!(
-            "{:<28} {:<10} {:<14} {}",
-            "NAME", "PRIORITY", "STATUS", "VERSION"
+            "{:<24} {:<16} {:<10} {:<12} {}",
+            "NAME", "CATEGORY", "VERSION", "BACKEND", "STATUS"
         ))
     );
     for row in rows {
-        let version = row.installed_version.as_deref().unwrap_or("-");
+        let backend_str = if row.backends.is_empty() {
+            "-".to_string()
+        } else {
+            row.backends.join(",")
+        };
         println!(
-            "{:<28} {:<10} {:<14} {}",
+            "{:<24} {:<16} {:<10} {:<12} {}",
             row.name,
-            row.priority,
+            row.category,
+            row.version,
+            backend_str,
             color.status(pad_right(&row.status, 14)),
-            version,
         );
-        if verbose && !row.summary.is_empty() {
-            println!("    {}", color.muted(&row.summary));
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    use anolisa_core::manifest::{CapabilityManifest, CapabilityMeta, EnvRequirements};
-    use anolisa_core::{
-        Catalog, CatalogLayers, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
-        SubscriptionScope,
-    };
-    use std::collections::BTreeMap;
-
-    fn make_cap(name: &str, description: &str) -> CapabilityManifest {
-        CapabilityManifest {
-            schema_version: 2,
-            capability: CapabilityMeta {
-                name: name.to_string(),
-                description: description.to_string(),
-                layer: "tier1-capability".to_string(),
-                stability: "stable".to_string(),
-            },
-            components: Vec::new(),
-            default_features: Vec::new(),
-            env_requirements: EnvRequirements::default(),
-        }
-    }
-
-    fn make_catalog(caps: Vec<CapabilityManifest>) -> Catalog {
-        let mut capabilities = BTreeMap::new();
-        for cap in caps {
-            capabilities.insert(cap.capability.name.clone(), cap);
-        }
-        Catalog {
-            capabilities,
-            components: BTreeMap::new(),
-            layers: CatalogLayers::bundled_only(PathBuf::from("/dev/null")),
-        }
-    }
-
-    fn make_installed(name: &str, version: &str) -> InstalledObject {
-        make_object(name, version, ObjectStatus::Installed)
-    }
-
-    fn make_object(name: &str, version: &str, status: ObjectStatus) -> InstalledObject {
-        InstalledObject {
-            kind: ObjectKind::Capability,
-            name: name.to_string(),
-            version: version.to_string(),
-            status,
-            manifest_digest: None,
-            distribution_source: None,
-            installed_at: "2026-06-01T00:00:00Z".to_string(),
-            last_operation_id: None,
-            managed: true,
-            adopted: false,
-            subscription_scope: SubscriptionScope::None,
-            enabled_features: Vec::new(),
-            component_refs: Vec::new(),
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        }
+    fn sample_catalog_json() -> &'static str {
+        r#"{
+            "schema_version": 1,
+            "generated_at": "2026-06-11T00:00:00Z",
+            "channel": "stable",
+            "components": [
+                {
+                    "name": "agentsight",
+                    "display_name": "AgentSight",
+                    "summary": "Agent behavior tracing and token attribution",
+                    "category": "observability",
+                    "version": "0.1.4",
+                    "status": "available",
+                    "backends": [
+                        {"type": "oss", "url": "https://example.com/agentsight.tar.gz", "sha256": "abc"},
+                        {"type": "rpm", "repo_url": "https://repo.example.com", "package": "anolisa-agentsight"}
+                    ],
+                    "platforms": [{"os": "linux", "arch": "x86_64", "distros": ["alinux3"]}],
+                    "tags": ["agent", "trace"]
+                },
+                {
+                    "name": "tokenless",
+                    "display_name": "Tokenless",
+                    "summary": "Token compression runtime",
+                    "category": "runtime",
+                    "version": "0.2.0",
+                    "status": "deprecated",
+                    "backends": [{"type": "oss", "url": "https://example.com/tokenless.tar.gz"}],
+                    "tags": ["token"]
+                }
+            ]
+        }"#
     }
 
     #[test]
-    fn empty_catalog_yields_no_rows() {
-        let catalog = make_catalog(Vec::new());
-        let state = InstalledState::default();
+    fn parse_v1_catalog_builds_rows() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("valid v1 JSON");
         let args = ListArgs {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &state, &args);
+        let rows = build_rows(&catalog, &args).expect("build_rows");
+        assert_eq!(rows.len(), 2);
+
+        let sight = &rows[0];
+        assert_eq!(sight.name, "agentsight");
+        assert_eq!(sight.display_name, "AgentSight");
+        assert_eq!(
+            sight.summary,
+            "Agent behavior tracing and token attribution"
+        );
+        assert_eq!(sight.category, "observability");
+        assert_eq!(sight.version, "0.1.4");
+        assert_eq!(sight.backends, vec!["oss", "rpm"]);
+        assert_eq!(sight.status, "not_installed");
+        assert!(sight.available);
+
+        let token = &rows[1];
+        assert_eq!(token.name, "tokenless");
+        assert_eq!(token.backends, vec!["oss"]);
+        assert!(!token.available);
+    }
+
+    #[test]
+    fn schema_version_mismatch_errors() {
+        let json = r#"{"schema_version": 2, "components": []}"#;
+        let err = parse_catalog(json.as_bytes()).expect_err("must reject schema v2");
+        assert!(err.reason().contains("schema_version 2"));
+    }
+
+    #[test]
+    fn available_filter_keeps_only_available() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: true,
+            enabled: false,
+        };
+        let rows = build_rows(&catalog, &args).expect("build_rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "agentsight");
+        assert!(rows[0].available);
+    }
+
+    #[test]
+    fn enabled_stub_returns_empty() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: true,
+        };
+        let rows = build_rows(&catalog, &args).expect("build_rows");
         assert!(rows.is_empty());
     }
 
     #[test]
-    fn empty_state_marks_every_capability_not_installed() {
-        let catalog = make_catalog(vec![
-            make_cap("agent-observability", "Agent behavior tracing"),
-            make_cap("tokenless", "Token compression"),
-        ]);
-        let state = InstalledState::default();
+    fn json_payload_uses_components_key() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
         let args = ListArgs {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &state, &args);
-        assert_eq!(rows.len(), 2);
-        for row in &rows {
-            assert_eq!(row.status, "not_installed");
-            assert!(row.installed_version.is_none());
-            assert!(row.available);
-        }
-        // Catalog is a BTreeMap keyed by name, so order is alphabetical.
-        assert_eq!(rows[0].name, "agent-observability");
-        assert_eq!(rows[1].name, "tokenless");
+        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let payload = ListPayload { components: rows };
+        let json_str = serde_json::to_string(&payload).expect("serialize");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
+        assert!(val.get("components").is_some());
+        assert!(val.get("capabilities").is_none());
     }
 
     #[test]
-    fn installed_state_populates_version_for_matching_capability() {
-        let catalog = make_catalog(vec![
-            make_cap("agent-observability", "Agent behavior tracing"),
-            make_cap("tokenless", "Token compression"),
-        ]);
-        let mut state = InstalledState::default();
-        state.upsert_object(make_installed("agent-observability", "0.1.0"));
+    fn empty_name_rejected() {
+        let json = r#"{"schema_version": 1, "components": [{"name": ""}]}"#;
+        let err = parse_catalog(json.as_bytes()).expect_err("must reject empty name");
+        assert!(err.reason().contains("empty name"));
+    }
 
+    #[test]
+    fn unknown_backend_type_preserved() {
+        let json = r#"{
+            "schema_version": 1,
+            "components": [{
+                "name": "test",
+                "backends": [{"type": "custom-repo"}]
+            }]
+        }"#;
+        let catalog = parse_catalog(json.as_bytes()).expect("parse");
         let args = ListArgs {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &state, &args);
-        assert_eq!(rows.len(), 2);
-        let cap = rows
-            .iter()
-            .find(|r| r.name == "agent-observability")
-            .unwrap();
-        assert_eq!(cap.status, "installed");
-        assert_eq!(cap.installed_version.as_deref(), Some("0.1.0"));
-        let other = rows.iter().find(|r| r.name == "tokenless").unwrap();
-        assert_eq!(other.status, "not_installed");
-        assert!(other.installed_version.is_none());
+        let rows = build_rows(&catalog, &args).expect("build_rows");
+        assert_eq!(rows[0].backends, vec!["custom-repo"]);
     }
 
     #[test]
-    fn enabled_filter_keeps_only_installed_rows() {
-        let catalog = make_catalog(vec![
-            make_cap("agent-observability", "Agent behavior tracing"),
-            make_cap("tokenless", "Token compression"),
-        ]);
-        let mut state = InstalledState::default();
-        state.upsert_object(make_installed("agent-observability", "0.1.0"));
-
+    fn missing_optional_fields_use_defaults() {
+        let json = r#"{"schema_version": 1, "components": [{"name": "minimal"}]}"#;
+        let catalog = parse_catalog(json.as_bytes()).expect("parse");
         let args = ListArgs {
             available: false,
-            enabled: true,
+            enabled: false,
         };
-        let rows = build_rows(&catalog, &state, &args);
+        let rows = build_rows(&catalog, &args).expect("build_rows");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "agent-observability");
-        assert_eq!(rows[0].status, "installed");
-    }
-
-    /// `--enabled` must exclude `Disabled` and `Failed` even though those
-    /// objects still exist in `InstalledState`. Regression for the bug
-    /// where `installed = installed_obj.is_some()` flagged every state row
-    /// as "installed" regardless of lifecycle.
-    #[test]
-    fn enabled_filter_excludes_disabled_and_failed() {
-        let catalog = make_catalog(vec![
-            make_cap("agent-observability", "tracing"),
-            make_cap("tokenless", "compression"),
-            make_cap("ws-ckpt", "checkpoint"),
-            make_cap("sandbox", "isolation"),
-        ]);
-        let mut state = InstalledState::default();
-        state.upsert_object(make_object(
-            "agent-observability",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-        state.upsert_object(make_object("tokenless", "0.2.0", ObjectStatus::Disabled));
-        state.upsert_object(make_object("ws-ckpt", "0.3.0", ObjectStatus::Failed));
-        state.upsert_object(make_object("sandbox", "0.4.0", ObjectStatus::Adopted));
-
-        let args = ListArgs {
-            available: false,
-            enabled: true,
-        };
-        let rows = build_rows(&catalog, &state, &args);
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert!(names.contains(&"agent-observability"));
-        assert!(names.contains(&"sandbox"));
-        assert!(
-            !names.contains(&"tokenless"),
-            "disabled must not pass --enabled"
-        );
-        assert!(
-            !names.contains(&"ws-ckpt"),
-            "failed must not pass --enabled"
-        );
-        assert_eq!(rows.len(), 2);
-    }
-
-    /// Status strings must round-trip the full ObjectStatus vocabulary so
-    /// human + JSON consumers can branch on the real state, not on a
-    /// collapsed boolean.
-    #[test]
-    fn status_string_matches_object_status() {
-        let catalog = make_catalog(vec![
-            make_cap("a", ""),
-            make_cap("b", ""),
-            make_cap("c", ""),
-            make_cap("d", ""),
-            make_cap("e", ""),
-        ]);
-        let mut state = InstalledState::default();
-        state.upsert_object(make_object("a", "1", ObjectStatus::Installed));
-        state.upsert_object(make_object("b", "1", ObjectStatus::Partial));
-        state.upsert_object(make_object("c", "1", ObjectStatus::Disabled));
-        state.upsert_object(make_object("d", "1", ObjectStatus::Failed));
-        state.upsert_object(make_object("e", "1", ObjectStatus::Adopted));
-
-        let args = ListArgs {
-            available: false,
-            enabled: false,
-        };
-        let rows = build_rows(&catalog, &state, &args);
-        let by_name = |n: &str| {
-            rows.iter()
-                .find(|r| r.name == n)
-                .map(|r| r.status.as_str())
-                .unwrap()
-        };
-        assert_eq!(by_name("a"), "installed");
-        assert_eq!(by_name("b"), "degraded");
-        assert_eq!(by_name("c"), "disabled");
-        assert_eq!(by_name("d"), "failed");
-        assert_eq!(by_name("e"), "adopted");
-    }
-
-    #[test]
-    fn available_and_enabled_intersect() {
-        let catalog = make_catalog(vec![
-            make_cap("agent-observability", "Agent behavior tracing"),
-            make_cap("tokenless", "Token compression"),
-        ]);
-        let mut state = InstalledState::default();
-        state.upsert_object(make_installed("tokenless", "0.2.0"));
-
-        let args = ListArgs {
-            available: true,
-            enabled: true,
-        };
-        let rows = build_rows(&catalog, &state, &args);
-        // available is always true today, so the intersection is just the
-        // installed set — but the flag must still be honored.
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "tokenless");
-        assert_eq!(rows[0].status, "installed");
-        assert!(rows[0].available);
+        let row = &rows[0];
+        assert_eq!(row.name, "minimal");
+        assert_eq!(row.display_name, "minimal");
+        assert!(row.summary.is_empty());
+        assert!(row.category.is_empty());
+        assert!(row.version.is_empty());
+        assert!(row.backends.is_empty());
+        assert_eq!(row.status, "not_installed");
+        assert!(!row.available);
     }
 }

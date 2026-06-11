@@ -6,7 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anolisa_core::{Catalog, CatalogLayers, DistributionIndex, InstalledState, ObjectStatus};
+use serde::Deserialize;
+
+use anolisa_core::{
+    Catalog, CatalogLayers, DistributionIndex, FetchFailure, HttpFetch, InstalledState,
+    ObjectStatus, UreqFetch,
+};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::context::{CliContext, InstallMode};
@@ -160,6 +165,93 @@ fn distribution_index_path(layout: &FsLayout) -> Option<PathBuf> {
     let manifests_root = packaged_manifests_root(layout).or_else(dev_tree_manifests)?;
     let candidate = manifests_root.join(DIST_INDEX_SUBDIR).join(DIST_INDEX_FILE);
     candidate.is_file().then_some(candidate)
+}
+
+// ── Component catalog URL resolution ────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+struct ConfigFileForCatalog {
+    catalog: Option<CatalogTableRaw>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CatalogTableRaw {
+    url: Option<String>,
+}
+
+/// Resolve the component catalog URL.
+///
+/// Resolution order (first non-empty wins):
+///   1. `$ANOLISA_CATALOG_URL` env var
+///   2. `[catalog] url` in `etc_dir/config.toml`
+///
+/// Returns `CliError::InvalidArgument` when neither source provides a URL.
+pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<String, CliError> {
+    if let Ok(url) = std::env::var("ANOLISA_CATALOG_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let layout = resolve_layout(ctx);
+    let config_path = layout.etc_dir.join("config.toml");
+    match std::fs::read_to_string(&config_path) {
+        Ok(content) => {
+            let parsed: ConfigFileForCatalog =
+                toml::from_str(&content).map_err(|e| CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!("invalid config at {}: {e}", config_path.display()),
+                })?;
+            if let Some(url) = parsed.catalog.and_then(|c| c.url) {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("failed to read config at {}: {e}", config_path.display()),
+            });
+        }
+    }
+
+    Err(CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "catalog url is not configured; set ANOLISA_CATALOG_URL or [catalog].url in {}",
+            config_path.display()
+        ),
+    })
+}
+
+/// Fetch raw bytes from a catalog URL.
+///
+/// Supports `file://` (local filesystem) and `http(s)://` (via `UreqFetch`).
+pub fn fetch_catalog_bytes(url: &str, command: &str) -> Result<Vec<u8>, CliError> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to read catalog from {url}: {err}"),
+        });
+    }
+
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return UreqFetch::default()
+            .get(url)
+            .map_err(|err: FetchFailure| CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("failed to fetch catalog from {url}: {err}"),
+            });
+    }
+
+    Err(CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!("unsupported catalog URL scheme: {url}"),
+    })
 }
 
 /// Wire-friendly label for an [`ObjectStatus`] value. Shared between the
