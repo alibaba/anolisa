@@ -441,6 +441,11 @@ impl Transaction {
     /// Copy bytes from `rollback.source` to `rollback.dest`. If
     /// `rollback.sha256` is set, the source bytes are verified first;
     /// a mismatch returns [`TransactionError::Rollback`].
+    ///
+    /// A backup that is itself a symlink (a managed `FileKind::Symlink`
+    /// entry backed up as a link) is restored by recreating an identical
+    /// link at `dest` — its bytes are never read through, so `sha256` is
+    /// not applicable and is ignored.
     pub fn restore_file(&self, rollback: &RollbackAction) -> Result<(), TransactionError> {
         if rollback.kind != RollbackActionKind::RestoreFile {
             return Err(TransactionError::Rollback(format!(
@@ -455,6 +460,27 @@ impl Transaction {
             .dest
             .as_ref()
             .ok_or_else(|| TransactionError::Rollback("restore_file: missing dest".to_string()))?;
+
+        let meta = fs::symlink_metadata(source)
+            .map_err(|err| TransactionError::Io(source.clone(), err))?;
+        if meta.file_type().is_symlink() {
+            let referent =
+                fs::read_link(source).map_err(|err| TransactionError::Io(source.clone(), err))?;
+            if let Some(parent) = dest.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent)
+                    .map_err(|err| TransactionError::Io(parent.to_path_buf(), err))?;
+            }
+            match fs::remove_file(dest) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(TransactionError::Io(dest.clone(), err)),
+            }
+            std::os::unix::fs::symlink(&referent, dest)
+                .map_err(|err| TransactionError::Io(dest.clone(), err))?;
+            return Ok(());
+        }
 
         let bytes = fs::read(source).map_err(|err| TransactionError::Io(source.clone(), err))?;
         if let Some(expected) = &rollback.sha256 {
@@ -933,6 +959,29 @@ journal_path = "/tmp/x.journal.toml"
             TransactionError::Rollback(_) => {}
             other => panic!("expected Rollback, got {other:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_file_recreates_symlink_backup_as_link() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let tx = Transaction::begin("uninstall", state_path, &journal_dir).expect("begin");
+
+        let referent = tmp.path().join("libexec/rtk");
+        std_fs::create_dir_all(referent.parent().expect("parent")).expect("mkdir");
+        std_fs::write(&referent, b"rtk bytes").expect("seed referent");
+        let backup = tmp.path().join("backup/0.bak");
+        std_fs::create_dir_all(backup.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&referent, &backup).expect("seed backup link");
+        let dest = tmp.path().join("bin/rtk");
+
+        let rb = RollbackAction::restore_file(backup, dest.clone(), None);
+        tx.restore_file(&rb).expect("restore_file");
+
+        let meta = std_fs::symlink_metadata(&dest).expect("dest exists");
+        assert!(meta.file_type().is_symlink(), "dest must be a link");
+        assert_eq!(std_fs::read_link(&dest).expect("read_link"), referent);
     }
 
     #[test]

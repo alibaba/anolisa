@@ -51,6 +51,7 @@ dependencies = [
  "thiserror",
  "toml",
  "unicode-width",
+ "ureq",
 ]
 
 [[package]]

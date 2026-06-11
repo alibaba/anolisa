@@ -16,6 +16,7 @@ version = "0.1.0"
 status = "installed" # installed | partial | disabled | failed | adopted
 manifest_digest = "sha256:replace-with-manifest-digest"
 distribution_source = "builtin"
+install_backend = "raw"
 installed_at = "2026-06-01T10:00:00Z"
 last_operation_id = "op-20260601-001"
 managed = true

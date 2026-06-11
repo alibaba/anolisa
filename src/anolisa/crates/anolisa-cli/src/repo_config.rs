@@ -9,9 +9,9 @@
 //!   no cross-backend fallback, so the origin of an installed component
 //!   is always deterministic.
 //! * **`base_url` is a directory root**, never a file. The per-backend
-//!   convention decides what lives under it (raw derives the index and
-//!   artifact locations from it — see *Placeholders* below; yum hands it
-//!   to dnf; npm treats it as the registry API root).
+//!   convention decides what lives under it: raw treats it as the
+//!   `v1/` distribution root containing `index.toml`; yum hands it to
+//!   dnf; npm treats it as the registry API root.
 //! * **Variables** `$os` / `$arch` / `$basearch` / `$releasever` /
 //!   `$channel` substitute into `base_url` only. Values come from host
 //!   detection and can be overridden in `[vars]`; an unknown or unset
@@ -20,15 +20,12 @@
 //! * **Schemes**: `file://` and `https://` always allowed; `http://`
 //!   requires `insecure = true` on the entry; query strings and
 //!   fragments are rejected.
-//! * **Placeholders** (raw): `base_url` may itself be the artifact
-//!   *directory template*, carrying `{component}` / `{version}` / `{os}`
-//!   / `{arch}` / `{libc}` placeholders filled at download time from the
-//!   resolved index row ([`raw_artifact_url`]); the index lives at the
-//!   static prefix before the first placeholder ([`raw_index_url`]). A
-//!   placeholder-free `base_url` is a plain root: index at
-//!   `<base_url>/v1/index.toml`, artifacts from
-//!   [`DEFAULT_RAW_ARTIFACT_DIR`]. So the publish layout is
-//!   configuration, not code.
+//! * **Raw layout**: the repository path layout is code-owned. Index rows
+//!   with empty `url` resolve to
+//!   `<base_url>/{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}{ext}`.
+//!   Older configs that still include `{component}` placeholders in
+//!   `base_url` are tolerated by using the static prefix before the first
+//!   placeholder as the raw root.
 //!
 //! Discovery order (first hit wins):
 //!
@@ -67,9 +64,8 @@ pub const REPO_CONFIG_SCHEMA_VERSION: u32 = 1;
 /// rendered artifact directory for index rows that omit `url`.
 pub const RAW_ARTIFACT_FILENAME: &str = "{component}-{version}-{os}-{arch}{ext}";
 
-/// Artifact directory layout assumed under `<base_url>/v1/` when a raw
-/// `base_url` is a plain directory root (no `{placeholders}`).
-pub const DEFAULT_RAW_ARTIFACT_DIR: &str = "{component}/{version}/{os}/{arch}";
+/// Code-owned artifact directory layout under a raw `base_url`.
+pub const RAW_ARTIFACT_DIR: &str = "{component}/{version}/{os}/{arch}";
 
 /// Backend names this binary knows how to drive (or will: yum/npm are
 /// configuration-valid before their executors land so a site can stage
@@ -138,15 +134,16 @@ pub enum RepoConfigError {
     )]
     UnsetVariable { backend: String, name: String },
 
-    /// `base_url` referenced a `{placeholder}` outside the supported set
-    /// (`component`, `version`, `os`, `arch`, `libc`, `ext`).
-    #[error("backend '{backend}': base_url references unknown placeholder '{{{name}}}'")]
+    /// Raw layout rendering referenced a `{placeholder}` outside the
+    /// supported set (`component`, `version`, `os`, `arch`, `libc`, `ext`).
+    #[error("backend '{backend}': raw artifact layout references unknown placeholder '{{{name}}}'")]
     UnknownPlaceholder { backend: String, name: String },
 
-    /// `base_url` referenced a supported placeholder the resolved index
-    /// row carries no value for (e.g. `{libc}` on a libc-less row).
+    /// Raw layout rendering referenced a supported placeholder the
+    /// resolved index row carries no value for (e.g. `{libc}` on a
+    /// libc-less row).
     #[error(
-        "backend '{backend}': base_url references '{{{name}}}' but the resolved index entry has no value for it"
+        "backend '{backend}': raw artifact layout references '{{{name}}}' but the resolved index entry has no value for it"
     )]
     UnsetPlaceholder { backend: String, name: String },
 }
@@ -466,59 +463,48 @@ fn substitute_vars(
     Ok(out)
 }
 
-/// Static prefix of a raw `base_url`: everything before the path segment
-/// holding the first `{placeholder}` (trailing slash trimmed), plus
-/// whether the URL is a template at all. A placeholder-free `base_url`
-/// is returned whole — it is a plain directory root.
-fn template_root(base_url: &str) -> (&str, bool) {
-    match base_url.find('{') {
-        None => (base_url.trim_end_matches('/'), false),
-        Some(brace) => {
-            let cut = base_url[..brace].rfind('/').unwrap_or(0);
-            (base_url[..cut].trim_end_matches('/'), true)
-        }
+/// Raw distribution root, i.e. the directory containing `index.toml`.
+///
+/// New configs should point `base_url` directly at that root, usually a
+/// `.../v1/` URL. Two legacy forms are accepted during migration:
+/// `.../{component}/{version}/{os}/{arch}/` is reduced to the static prefix
+/// before `{component}`, and parent roots without a trailing `/v1` get `/v1`
+/// appended.
+fn raw_root(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if let Some(brace) = trimmed.find('{') {
+        let cut = trimmed[..brace].rfind('/').unwrap_or(0);
+        return trimmed[..cut].trim_end_matches('/').to_string();
+    }
+    if trimmed.rsplit('/').next() == Some("v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
     }
 }
 
-/// Index location for a raw backend. Template `base_url`s carry their
-/// version root in the static prefix (`.../v1/{component}/...` → index at
-/// `.../v1/index.toml`); plain roots get the conventional `/v1/` appended.
+/// Index location for a raw backend. `base_url` is the raw distribution
+/// root containing `index.toml`.
 pub fn raw_index_url(base_url: &str) -> String {
-    let (root, is_template) = template_root(base_url);
-    if is_template {
-        format!("{root}/index.toml")
-    } else {
-        format!("{root}/v1/index.toml")
-    }
+    format!("{}/index.toml", raw_root(base_url))
 }
 
 /// Root that repo-relative index-row `url`s join onto. Same prefix the
 /// index itself lives under, so a mirrored tree stays self-contained.
 pub fn raw_relative_root(base_url: &str) -> String {
-    let (root, is_template) = template_root(base_url);
-    if is_template {
-        root.to_string()
-    } else {
-        format!("{root}/v1")
-    }
+    raw_root(base_url)
 }
 
-/// Artifact URL for an index row that omits `url`: render the `base_url`
-/// directory template from the resolved row's fields and append the
-/// conventional file name ([`RAW_ARTIFACT_FILENAME`]). A plain-root
-/// `base_url` falls back to the default directory layout
-/// ([`DEFAULT_RAW_ARTIFACT_DIR`]) under `<base_url>/v1/`.
+/// Artifact URL for an index row that omits `url`: append the code-owned
+/// artifact directory layout ([`RAW_ARTIFACT_DIR`]) and conventional file
+/// name ([`RAW_ARTIFACT_FILENAME`]) under the raw distribution root.
 pub fn raw_artifact_url(
     backend: &str,
     base_url: &str,
     values: &BTreeMap<&str, Option<String>>,
 ) -> Result<String, RepoConfigError> {
-    let (root, is_template) = template_root(base_url);
-    let dir_template = if is_template {
-        base_url.trim_end_matches('/').to_string()
-    } else {
-        format!("{root}/v1/{DEFAULT_RAW_ARTIFACT_DIR}")
-    };
+    let root = raw_root(base_url);
+    let dir_template = format!("{root}/{RAW_ARTIFACT_DIR}");
     let dir = render_placeholders(backend, &dir_template, values)?;
     let file = render_placeholders(backend, RAW_ARTIFACT_FILENAME, values)?;
     Ok(format!("{}/{file}", dir.trim_end_matches('/')))
@@ -828,11 +814,29 @@ base_url = "https://example.com/$typo_var/repo"
         ])
     }
 
-    /// A template-form `base_url` (the bundled default's shape) puts the
-    /// index at the static prefix and renders artifact URLs in place —
-    /// this pins the publish contract the shipped binary derives URLs from.
+    /// A raw `base_url` points at the distribution root that contains
+    /// `index.toml`; the artifact directory layout is code-owned.
     #[test]
-    fn template_base_url_derives_index_and_artifact_urls() {
+    fn raw_v1_root_derives_index_and_artifact_urls() {
+        let base = "https://mirror.example.com/anolisa-releases/anolisa/v1/";
+        assert_eq!(
+            raw_index_url(base),
+            "https://mirror.example.com/anolisa-releases/anolisa/v1/index.toml"
+        );
+        assert_eq!(
+            raw_relative_root(base),
+            "https://mirror.example.com/anolisa-releases/anolisa/v1"
+        );
+        let url = raw_artifact_url("raw", base, &artifact_values(None)).expect("render");
+        assert_eq!(
+            url,
+            "https://mirror.example.com/anolisa-releases/anolisa/v1/tokenless/0.5.0/linux/x86_64/tokenless-0.5.0-linux-x86_64.tar.gz"
+        );
+    }
+
+    /// A legacy template-form `base_url` is reduced to its static v1 root.
+    #[test]
+    fn legacy_template_base_url_uses_static_prefix() {
         let base = "https://mirror.example.com/anolisa-releases/anolisa/v1/{component}/{version}/{os}/{arch}/";
         assert_eq!(
             raw_index_url(base),
@@ -849,10 +853,10 @@ base_url = "https://example.com/$typo_var/repo"
         );
     }
 
-    /// A plain-root `base_url` keeps the legacy convention: `/v1/` is
-    /// appended for the index and the default directory layout applies.
+    /// A parent-root `base_url` keeps the legacy convention: `/v1/` is
+    /// appended for the index and code-owned artifact layout.
     #[test]
-    fn plain_base_url_falls_back_to_default_layout() {
+    fn parent_base_url_falls_back_to_v1_layout() {
         let base = "file:///srv/repo";
         assert_eq!(raw_index_url(base), "file:///srv/repo/v1/index.toml");
         assert_eq!(raw_relative_root(base), "file:///srv/repo/v1");
@@ -866,23 +870,19 @@ base_url = "https://example.com/$typo_var/repo"
     /// Unknown placeholders are hard errors, and `{libc}` is valid only
     /// when the resolved row carries a libc selector.
     #[test]
-    fn placeholder_errors_unknown_name_and_unset_libc() {
-        let err = raw_artifact_url("raw", "file:///srv/repo/{typo}/", &artifact_values(None))
-            .expect_err("must reject");
+    fn render_placeholders_errors_unknown_name_and_unset_libc() {
+        let err = render_placeholders("raw", "{typo}", &artifact_values(None))
+            .expect_err("must reject unknown placeholder");
         assert!(matches!(
             err,
             RepoConfigError::UnknownPlaceholder { name, .. } if name == "typo"
         ));
 
-        let libc_base = "file:///srv/repo/v1/{component}/{version}/{os}/{arch}/{libc}/";
-        let url =
-            raw_artifact_url("raw", libc_base, &artifact_values(Some("musl"))).expect("render");
-        assert_eq!(
-            url,
-            "file:///srv/repo/v1/tokenless/0.5.0/linux/x86_64/musl/tokenless-0.5.0-linux-x86_64.tar.gz"
-        );
-        let err =
-            raw_artifact_url("raw", libc_base, &artifact_values(None)).expect_err("must reject");
+        let rendered =
+            render_placeholders("raw", "{libc}", &artifact_values(Some("musl"))).expect("render");
+        assert_eq!(rendered, "musl");
+        let err = render_placeholders("raw", "{libc}", &artifact_values(None))
+            .expect_err("must reject unset placeholder");
         assert!(matches!(
             err,
             RepoConfigError::UnsetPlaceholder { name, .. } if name == "libc"

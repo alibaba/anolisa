@@ -23,6 +23,8 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
+use crate::manifest::FileKind;
+
 /// Wire-form `artifact_type` strings the install runner understands today.
 ///
 /// Single source of truth shared with `contract_lint` so a new entry in
@@ -48,12 +50,17 @@ pub struct InstalledFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedInstallFile {
     /// Optional archive entry path. `None` means match by destination
-    /// basename for backward-compatible manifests.
+    /// basename for backward-compatible manifests. For
+    /// [`FileKind::Symlink`] entries this is the link's referent — an
+    /// absolute layout-expanded path, not an archive member.
     pub source: Option<String>,
     /// Absolute destination after layout-template substitution.
     pub dest: PathBuf,
     /// Optional Unix file mode from the component manifest, e.g. `"0644"`.
     pub mode: Option<String>,
+    /// File role; [`FileKind::Symlink`] entries are created after the
+    /// regular files instead of being extracted from the artifact.
+    pub kind: FileKind,
 }
 
 impl ResolvedInstallFile {
@@ -64,6 +71,7 @@ impl ResolvedInstallFile {
             source: None,
             dest,
             mode: None,
+            kind: FileKind::Data,
         }
     }
 }
@@ -85,6 +93,13 @@ pub enum InstallError {
     /// Manifest resolved to no destination files.
     #[error("manifest must declare at least one destination file")]
     NoDestinations,
+
+    /// Symlink layout entry lacks a `source` (the link referent).
+    #[error("symlink destination '{path}' declares no source (link referent)")]
+    SymlinkMissingSource {
+        /// Symlink destination with no referent to point at.
+        path: PathBuf,
+    },
 
     /// Raw binary artifacts can only map to one installed destination.
     #[error("'binary' install requires exactly one manifest dest, got {0}")]
@@ -275,14 +290,72 @@ impl<'a> InstallRunner<'a> {
         if files.is_empty() {
             return Err(InstallError::NoDestinations);
         }
-        match artifact_type {
-            "binary" => {
-                self.validate_install_targets(files)?;
-                self.install_binary(cached_artifact, files)
-            }
-            "tar_gz" => self.install_tar_gz(cached_artifact, files),
-            other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
+        // Symlink entries never touch the artifact: split them out, install
+        // the regular files, then create the links — referents that point at
+        // freshly installed files exist by the time the link is made.
+        let (links, regular): (Vec<_>, Vec<_>) = files
+            .iter()
+            .cloned()
+            .partition(|f| f.kind == FileKind::Symlink);
+        self.validate_symlink_entries(&links)?;
+        if regular.is_empty() {
+            // A links-only manifest has no use for the downloaded artifact —
+            // treat it as the same defect as declaring no files at all.
+            return Err(InstallError::NoDestinations);
         }
+        let mut outcome = match artifact_type {
+            "binary" => {
+                self.validate_install_targets(&regular)?;
+                self.install_binary(cached_artifact, &regular)
+            }
+            "tar_gz" => self.install_tar_gz(cached_artifact, &regular),
+            other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
+        }?;
+        for link in &links {
+            outcome.files.push(create_symlink(link)?);
+        }
+        Ok(outcome)
+    }
+
+    /// Up-front checks for symlink entries, run before any byte lands so a
+    /// rejected link cannot leave a half-finished install: referent
+    /// declared and ANOLISA-owned, destination ANOLISA-owned and vacant.
+    fn validate_symlink_entries(&self, links: &[ResolvedInstallFile]) -> Result<(), InstallError> {
+        let mut seen = BTreeSet::new();
+        for link in links {
+            let referent =
+                link.source
+                    .as_deref()
+                    .ok_or_else(|| InstallError::SymlinkMissingSource {
+                        path: link.dest.clone(),
+                    })?;
+            // A link must not point outside the owned roots any more than a
+            // regular file may be written there.
+            self.validate_dest(Path::new(referent))?;
+            self.validate_dest(&link.dest)?;
+            if !seen.insert(link.dest.clone()) {
+                return Err(InstallError::DuplicateDestination {
+                    path: link.dest.clone(),
+                });
+            }
+            // Same fresh-install rule as regular destinations, with
+            // symlink_metadata so an existing broken link is still refused.
+            match fs::symlink_metadata(&link.dest) {
+                Ok(_) => {
+                    return Err(InstallError::DestExists {
+                        path: link.dest.clone(),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(InstallError::Io {
+                        path: link.dest.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn install_binary(
@@ -329,6 +402,7 @@ impl<'a> InstallRunner<'a> {
                             source: Some(key.clone()),
                             dest: file.dest.join(relative),
                             mode: file.mode.clone(),
+                            kind: file.kind,
                         },
                         bytes.clone(),
                     ));
@@ -531,6 +605,48 @@ fn archive_key_from_path(path: &Path) -> Result<Option<String>, InstallError> {
     } else {
         Ok(Some(parts.join("/")))
     }
+}
+
+/// Create one validated symlink entry and hash what it resolves to.
+///
+/// The recorded sha256 is the *referent's* content (a `fs::read` of the
+/// link follows it), so integrity checks that re-hash owned paths see the
+/// same digest whether they visit the link or the file it points at. A
+/// referent that does not exist fails here: installing a dangling
+/// convenience link would be a manifest defect, not a usable install.
+fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallError> {
+    // Validated in validate_symlink_entries; unreachable here.
+    let referent = link
+        .source
+        .as_deref()
+        .ok_or_else(|| InstallError::SymlinkMissingSource {
+            path: link.dest.clone(),
+        })?;
+    if let Some(parent) = link.dest.parent() {
+        fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::os::unix::fs::symlink(referent, &link.dest).map_err(|source| InstallError::Io {
+        path: link.dest.clone(),
+        source,
+    })?;
+    let bytes = match fs::read(&link.dest) {
+        Ok(b) => b,
+        Err(source) => {
+            // Don't leave a dangling link behind the error.
+            let _ = fs::remove_file(&link.dest);
+            return Err(InstallError::Io {
+                path: PathBuf::from(referent),
+                source,
+            });
+        }
+    };
+    Ok(InstalledFile {
+        path: link.dest.clone(),
+        sha256: format!("{:x}", Sha256::digest(&bytes)),
+    })
 }
 
 fn write_dest_atomic(
@@ -838,6 +954,7 @@ mod tests {
                     source: Some("target/release/source-name".to_string()),
                     dest: dest.clone(),
                     mode: None,
+                    kind: FileKind::Data,
                 }],
             )
             .expect("install ok");
@@ -873,6 +990,7 @@ mod tests {
                     source: Some("target/release/openclaw-plugin/".to_string()),
                     dest: dest_root.clone(),
                     mode: Some("0644".to_string()),
+                    kind: FileKind::Data,
                 }],
             )
             .expect("install ok");
@@ -917,6 +1035,7 @@ mod tests {
                     source: Some("share/config.toml".to_string()),
                     dest: dest.clone(),
                     mode: Some("0644".to_string()),
+                    kind: FileKind::Data,
                 }],
             )
             .expect("install ok");
@@ -1253,5 +1372,192 @@ mod tests {
         assert!(matches!(err, InstallError::ExternalPath { .. }));
         let leaked = layout.bin_dir.join("foo");
         assert!(!leaked.exists(), "must not extract before validating dest");
+    }
+
+    fn symlink_entry(referent: &Path, dest: PathBuf) -> ResolvedInstallFile {
+        ResolvedInstallFile {
+            source: Some(referent.to_string_lossy().into_owned()),
+            dest,
+            mode: None,
+            kind: FileKind::Symlink,
+        }
+    }
+
+    #[test]
+    fn symlink_created_after_regular_files_with_referent_hash() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let payload: &[u8] = b"rtk-bytes";
+        let gz = build_tar_gz(&[("libexec/anolisa/tokenless/rtk", payload)]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let referent = layout.libexec_dir.join("tokenless").join("rtk");
+        let link_dest = layout.bin_dir.join("rtk");
+        let files = vec![
+            ResolvedInstallFile {
+                source: Some("libexec/anolisa/tokenless/rtk".into()),
+                dest: referent.clone(),
+                mode: Some("0755".into()),
+                kind: FileKind::Data,
+            },
+            symlink_entry(&referent, link_dest.clone()),
+        ];
+
+        let outcome = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect("install ok");
+
+        assert!(fs::symlink_metadata(&link_dest).unwrap().is_symlink());
+        assert_eq!(fs::read_link(&link_dest).unwrap(), referent);
+        // Both entries are recorded and the link's digest is the referent's
+        // content, matching what an integrity re-hash of the path would see.
+        let link_file = outcome
+            .files
+            .iter()
+            .find(|f| f.path == link_dest)
+            .expect("link recorded in outcome");
+        assert_eq!(link_file.sha256, sha256_of(payload));
+    }
+
+    #[test]
+    fn symlink_without_source_rejected_before_any_write() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"foo-bytes")]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let regular_dest = layout.bin_dir.join("foo");
+        let link_dest = layout.bin_dir.join("foo-link");
+        let files = vec![
+            ResolvedInstallFile::dest_only(regular_dest.clone()),
+            ResolvedInstallFile {
+                source: None,
+                dest: link_dest.clone(),
+                mode: None,
+                kind: FileKind::Symlink,
+            },
+        ];
+
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must error");
+        match err {
+            InstallError::SymlinkMissingSource { path } => assert_eq!(path, link_dest),
+            other => panic!("expected SymlinkMissingSource, got {other:?}"),
+        }
+        assert!(!regular_dest.exists(), "must validate links before writing");
+    }
+
+    #[test]
+    fn symlink_dest_exists_rejected_even_for_broken_link() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"foo-bytes")]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let referent = layout.bin_dir.join("foo");
+        let link_dest = layout.bin_dir.join("foo-link");
+        fs::create_dir_all(link_dest.parent().unwrap()).unwrap();
+        // Pre-existing *broken* link: plain exists() would miss it.
+        std::os::unix::fs::symlink(layout.bin_dir.join("missing"), &link_dest).unwrap();
+
+        let files = vec![
+            ResolvedInstallFile::dest_only(referent),
+            symlink_entry(&layout.bin_dir.join("foo"), link_dest.clone()),
+        ];
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must error");
+        match err {
+            InstallError::DestExists { path } => assert_eq!(path, link_dest),
+            other => panic!("expected DestExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn symlink_referent_outside_owned_roots_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"foo-bytes")]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let external = outside.path().join("victim");
+        let files = vec![
+            ResolvedInstallFile::dest_only(layout.bin_dir.join("foo")),
+            symlink_entry(&external, layout.bin_dir.join("foo-link")),
+        ];
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must error");
+        match err {
+            InstallError::ExternalPath { path } => assert_eq!(path, external),
+            other => panic!("expected ExternalPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn symlink_dangling_referent_rejected_and_link_removed() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"foo-bytes")]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        // Referent is owned but nothing installs it: the link would dangle.
+        let referent = layout.libexec_dir.join("tokenless").join("missing");
+        let link_dest = layout.bin_dir.join("missing-link");
+        let files = vec![
+            ResolvedInstallFile::dest_only(layout.bin_dir.join("foo")),
+            symlink_entry(&referent, link_dest.clone()),
+        ];
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must error");
+        match err {
+            InstallError::Io { path, .. } => assert_eq!(path, referent),
+            other => panic!("expected Io on referent, got {other:?}"),
+        }
+        assert!(
+            fs::symlink_metadata(&link_dest).is_err(),
+            "dangling link must not be left behind"
+        );
+    }
+
+    #[test]
+    fn links_only_manifest_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(cache.path(), "x", b"x");
+
+        let files = vec![symlink_entry(
+            &layout.bin_dir.join("foo"),
+            layout.bin_dir.join("foo-link"),
+        )];
+        let err = runner
+            .install_files("binary", &cached, &files)
+            .expect_err("must error");
+        assert!(matches!(err, InstallError::NoDestinations));
     }
 }

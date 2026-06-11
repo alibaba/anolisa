@@ -1,8 +1,8 @@
-//! `anolisa uninstall <CAPABILITY>` (with optional `--purge`).
+//! `anolisa uninstall <COMPONENT>` (with optional `--purge`).
 //!
-//! The CLI face of [`anolisa_core::execute_plan`] for the
-//! [`LifecycleOperation::Uninstall`] / [`LifecycleOperation::Purge`]
-//! verbs. Two surfaces:
+//! The CLI face of [`anolisa_core::execute_plan`] for direct component
+//! teardown. The legacy capability path is retained as a fallback while
+//! the capability concept is being removed. Two surfaces:
 //!
 //!   * `--dry-run` — render the [`LifecyclePlan`] (human or JSON) and
 //!     return without touching the filesystem.
@@ -43,7 +43,7 @@ use clap::Parser;
 
 use anolisa_core::{
     CapabilityManifestsView, LifecycleError, LifecycleOperation, LifecycleOutcome, LifecyclePlan,
-    execute_plan,
+    LifecycleTargetKind, ObjectKind, execute_plan,
 };
 
 use crate::color::Palette;
@@ -55,8 +55,9 @@ const COMMAND: &str = "uninstall";
 
 #[derive(Parser)]
 pub struct UninstallArgs {
-    /// Capability to uninstall
-    pub capability: String,
+    /// Component to uninstall; legacy capability names are accepted as fallback
+    #[arg(value_name = "COMPONENT")]
+    pub component: String,
     /// Also remove ANOLISA-owned config / cache / state fragments
     #[arg(long)]
     pub purge: bool,
@@ -71,23 +72,41 @@ pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     } else {
         LifecycleOperation::Uninstall
     };
-    let command = format!("{} {}", operation.as_str(), args.capability);
+    let target = args.component.as_str();
+    let command = format!("{} {}", operation.as_str(), target);
 
     // Load installed state to plan against. Missing state is the same
-    // as "capability not installed" — surface that as INVALID_ARGUMENT
-    // so the user sees the right exit code (matches disable behavior).
+    // as "target not installed" — surface that as INVALID_ARGUMENT so
+    // the user sees the right exit code (matches disable behavior).
     let installed = common::load_installed_state(ctx, COMMAND)?;
+    let target_kind = if installed
+        .find_object(ObjectKind::Component, target)
+        .is_some()
+        || installed
+            .find_object(ObjectKind::Capability, target)
+            .is_none()
+    {
+        LifecycleTargetKind::Component
+    } else {
+        LifecycleTargetKind::Capability
+    };
     let plan = match operation {
-        LifecycleOperation::Uninstall => LifecyclePlan::for_uninstall(
-            &args.capability,
-            &installed,
-            &CapabilityManifestsView::empty(),
-        ),
-        LifecycleOperation::Purge => LifecyclePlan::for_purge(
-            &args.capability,
-            &installed,
-            &CapabilityManifestsView::empty(),
-        ),
+        LifecycleOperation::Uninstall => match target_kind {
+            LifecycleTargetKind::Component => {
+                LifecyclePlan::for_component_uninstall(target, &installed)
+            }
+            LifecycleTargetKind::Capability => {
+                LifecyclePlan::for_uninstall(target, &installed, &CapabilityManifestsView::empty())
+            }
+        },
+        LifecycleOperation::Purge => match target_kind {
+            LifecycleTargetKind::Component => {
+                LifecyclePlan::for_component_purge(target, &installed)
+            }
+            LifecycleTargetKind::Capability => {
+                LifecyclePlan::for_purge(target, &installed, &CapabilityManifestsView::empty())
+            }
+        },
         // Disable goes through `anolisa disable`; the executor refuses
         // here but this branch keeps the match total without leaking
         // the surface.
@@ -149,6 +168,12 @@ fn lifecycle_err_to_cli(command: &str, err: LifecycleError) -> CliError {
             command: command.to_string(),
             reason: format!(
                 "capability '{capability}' is not installed — nothing to uninstall (run `anolisa status` to see what is installed)",
+            ),
+        },
+        LifecycleError::ComponentNotInstalled { component } => CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is not installed — nothing to uninstall (run `anolisa status` to see what is installed)",
             ),
         },
         LifecycleError::UnsupportedOperation { op } => CliError::Runtime {
@@ -389,12 +414,27 @@ mod tests {
         }
     }
 
-    fn args(capability: &str, purge: bool) -> UninstallArgs {
+    fn args(component: &str, purge: bool) -> UninstallArgs {
         UninstallArgs {
-            capability: capability.to_string(),
+            component: component.to_string(),
             purge,
             force: false,
         }
+    }
+
+    #[test]
+    fn uninstall_help_names_positional_component() {
+        let mut cmd = <UninstallArgs as clap::CommandFactory>::command();
+        let help = cmd.render_help().to_string();
+
+        assert!(
+            help.contains("<COMPONENT>"),
+            "uninstall help must expose a component-first positional name: {help}"
+        );
+        assert!(
+            !help.contains("<CAPABILITY>"),
+            "uninstall help must not expose the legacy capability positional name: {help}"
+        );
     }
 
     /// Asking to uninstall a capability that is not installed must
@@ -526,6 +566,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -549,6 +590,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -599,6 +641,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uninstall_execute_on_installed_component_removes_owned_files_and_succeeds() {
+        use anolisa_core::{
+            FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
+        };
+        use anolisa_platform::fs_layout::FsLayout;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        let owned = layout.bin_dir.join("agentsight");
+        std::fs::write(&owned, b"binary").expect("write owned");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "agentsight".to_string(),
+            version: "0.2.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![OwnedFile {
+                path: owned.clone(),
+                owner: FileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+            }],
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        let state_path = layout.state_dir.join("installed.toml");
+        state.save(&state_path).expect("seed state save");
+
+        handle(
+            args("agentsight", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect("component uninstall execute must succeed");
+
+        assert!(
+            !owned.exists(),
+            "ANOLISA-owned file must be removed by component uninstall",
+        );
+
+        let after = InstalledState::load(&state_path).expect("reload state");
+        assert!(
+            after
+                .find_object(ObjectKind::Component, "agentsight")
+                .is_none(),
+            "component object must be dropped from installed.toml",
+        );
+        assert!(
+            layout.central_log.exists(),
+            "component uninstall must append a central-log record",
+        );
+    }
+
     /// Purge stays gated until manifest-driven config/cache/state
     /// discovery lands. Pins that the gate text mentions purge and
     /// steers users at `--dry-run` / the uninstall subset, and that no
@@ -625,6 +739,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -648,6 +763,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,

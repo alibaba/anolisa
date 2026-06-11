@@ -88,9 +88,17 @@ impl InstallLock {
     }
 
     /// Explicitly release the lock. Dropping also releases it via the
-    /// `Drop` impl on `File`/`fs2`, but callers can be explicit.
+    /// [`Drop`] implementation, but callers can be explicit.
     pub fn release(self) {
         // Best-effort: ignore unlock errors (drop will retry).
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // Release before closing the fd so immediate same-process handoff
+        // does not depend on platform-specific close-time lock behavior.
         let _ = FileExt::unlock(&self.file);
     }
 }
@@ -156,5 +164,17 @@ mod tests {
         let first = InstallLock::acquire(&path).expect("first acquire should succeed");
         first.release();
         let _second = InstallLock::acquire(&path).expect("re-acquire after release should succeed");
+    }
+
+    #[test]
+    fn drop_lets_subsequent_acquire_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anolisa.lock");
+
+        {
+            let _first = InstallLock::acquire(&path).expect("first acquire should succeed");
+        }
+
+        let _second = InstallLock::acquire(&path).expect("re-acquire after drop should succeed");
     }
 }

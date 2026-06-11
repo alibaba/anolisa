@@ -1669,6 +1669,7 @@ fn write_installed_state(
         status: ObjectStatus::Installed,
         manifest_digest: None,
         distribution_source: None,
+        install_backend: None,
         installed_at: now.clone(),
         last_operation_id: Some(op_id.clone()),
         managed: true,

@@ -12,16 +12,36 @@
 //! transaction with component updates. Self-update is reachable via
 //! both `anolisa update self` and `anolisa self update`.
 
+use std::io::Read;
+use std::path::Path;
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 
 use crate::color::Palette;
+use crate::commands::common;
 use crate::context::CliContext;
+use crate::repo_config::RepoConfig;
 use crate::response::{self, CliError};
 
 const CLI_CHANGELOG_URL: &str = "https://agentic-os.sh/#anolisa-cli-changelog";
+
+/// TEMPORARY bootstrap: published copy of `templates/repo.toml`.
+///
+/// Until install/register provisions the user-editable repo config,
+/// `anolisa update` downloads this copy when `<etc_dir>/repo.toml` is
+/// absent, so a host that has only the CLI binary still ends up with the
+/// production backend configuration. Remove once repo.toml provisioning
+/// moves into the install/register flow.
+const DEFAULT_REPO_CONFIG_URL: &str =
+    "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/repo.toml";
+
+/// Hard cap on the downloaded config size; repo.toml is a few KiB, so
+/// anything larger is a misconfigured URL, not a config.
+const MAX_REPO_CONFIG_BYTES: u64 = 256 * 1024;
 
 /// Arguments for the unified update command surface.
 #[derive(Parser)]
@@ -57,6 +77,7 @@ pub enum UpdateCommands {
 /// Returns [`CliError`] when the selected update operation fails or is not
 /// implemented yet.
 pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
+    bootstrap_repo_config(ctx);
     match args.command {
         UpdateCommands::SelfBin => handle_self_update(ctx),
         UpdateCommands::Runtime { target } => Err(CliError::not_implemented_with_hint(
@@ -68,6 +89,84 @@ pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
             "update planner / distribution resolver not implemented yet",
         )),
     }
+}
+
+/// TEMPORARY: make sure the user-editable repo config exists before any
+/// update operation runs (see [`DEFAULT_REPO_CONFIG_URL`]).
+///
+/// Best-effort by design: every failure mode (network down, bad TOML,
+/// unwritable etc dir) degrades to a stderr warning — `update self` and
+/// component updates must not be blocked by config bootstrap. The
+/// download is validated as a parseable [`RepoConfig`] before anything
+/// lands on disk, and the write is tmp + rename so a crash cannot leave
+/// a half-written config behind.
+fn bootstrap_repo_config(ctx: &CliContext) {
+    let layout = common::resolve_layout(ctx);
+    let dest = layout.etc_dir.join("repo.toml");
+    if dest.exists() {
+        return;
+    }
+    let url = std::env::var("ANOLISA_REPO_CONFIG_URL")
+        .unwrap_or_else(|_| DEFAULT_REPO_CONFIG_URL.to_string());
+    if ctx.dry_run {
+        if !ctx.quiet && !ctx.json {
+            println!(
+                "would download repo config from {url} to {} (not present locally)",
+                dest.display()
+            );
+        }
+        return;
+    }
+    match fetch_and_write_repo_config(&url, &dest) {
+        Ok(()) => {
+            if !ctx.quiet && !ctx.json {
+                let color = Palette::new(ctx.no_color);
+                println!(
+                    "{} repo config was missing — downloaded {} to {}",
+                    color.ok("✓"),
+                    url,
+                    color.path(dest.display().to_string()),
+                );
+            }
+        }
+        Err(reason) => {
+            eprintln!("warning: repo config bootstrap skipped: {reason}");
+        }
+    }
+}
+
+/// Download, validate, and atomically install the repo config at `dest`.
+fn fetch_and_write_repo_config(url: &str, dest: &Path) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .build();
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|err| format!("fetch {url}: {err}"))?;
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(MAX_REPO_CONFIG_BYTES)
+        .read_to_string(&mut body)
+        .map_err(|err| format!("read {url}: {err}"))?;
+
+    // Refuse to install bytes that the CLI itself cannot parse — a bad
+    // published config must not break every subsequent command.
+    RepoConfig::from_toml_str(&body).map_err(|err| format!("downloaded config invalid: {err}"))?;
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create {}: {err}", parent.display()))?;
+    }
+    let tmp = dest.with_extension("toml.tmp");
+    std::fs::write(&tmp, &body).map_err(|err| format!("write {}: {err}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).map_err(|err| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename to {}: {err}", dest.display())
+    })?;
+    Ok(())
 }
 
 /// Execute CLI self-update: fetch release manifest, compare versions,
@@ -192,6 +291,49 @@ fn render_json_outcome(outcome: &SelfUpdateOutcome, dry_run: bool) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve one HTTP response on an ephemeral port and return its URL.
+    fn serve_once(body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Write;
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        format!("http://{addr}/repo.toml")
+    }
+
+    #[test]
+    fn bootstrap_fetch_writes_valid_config() {
+        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/v1/\"\n";
+        let url = serve_once(body);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("etc/repo.toml");
+
+        fetch_and_write_repo_config(&url, &dest).expect("bootstrap ok");
+        assert_eq!(std::fs::read_to_string(&dest).expect("read dest"), body);
+        assert!(!dest.with_extension("toml.tmp").exists());
+    }
+
+    #[test]
+    fn bootstrap_fetch_refuses_unparseable_config() {
+        let url = serve_once("this is not a repo config");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("etc/repo.toml");
+
+        let err = fetch_and_write_repo_config(&url, &dest).expect_err("must refuse");
+        assert!(err.contains("invalid"), "unexpected error: {err}");
+        assert!(!dest.exists(), "invalid config must not land on disk");
+    }
 
     #[test]
     fn json_dry_run_reports_available_but_not_updated() {

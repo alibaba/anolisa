@@ -85,7 +85,7 @@ pub enum CapabilityCommands {
     List(tier1::list::ListArgs),
     /// Install a component from a configured backend (raw today; yum/npm planned)
     Install(tier1::install::InstallArgs),
-    /// Uninstall a component (removes ANOLISA-owned files); `--purge` also drops config
+    /// Uninstall a component; legacy capability names are accepted as fallback
     Uninstall(tier1::uninstall::UninstallArgs),
     /// Show component health
     Status(tier1::status::StatusArgs),

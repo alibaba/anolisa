@@ -182,6 +182,12 @@ pub struct InstalledObject {
     /// Distribution entry URL or backend-specific source that supplied bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution_source: Option<String>,
+    /// Backend that resolved and installed this object.
+    ///
+    /// Install refuses a later attempt through a different backend so a
+    /// component's provenance stays deterministic across updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_backend: Option<String>,
     /// RFC3339 UTC timestamp when this object entered state.
     pub installed_at: String,
     /// Last operation that changed this object, shared with central log rows.
@@ -496,6 +502,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: Some("sha256:abc".to_string()),
             distribution_source: Some("builtin".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: now_iso8601(),
             last_operation_id: Some("op-1".to_string()),
             managed: true,
@@ -815,6 +822,7 @@ mod tests {
         let mut obj = sample_object(ObjectKind::Component, "agentsight", "0.1.0");
         obj.manifest_digest = None;
         obj.distribution_source = None;
+        obj.install_backend = None;
         obj.last_operation_id = None;
         state.upsert_object(obj);
 
@@ -826,6 +834,10 @@ mod tests {
         assert!(
             !rendered.contains("distribution_source"),
             "None distribution_source must be skipped"
+        );
+        assert!(
+            !rendered.contains("install_backend"),
+            "None install_backend must be skipped"
         );
         assert!(
             !rendered.contains("last_operation_id"),

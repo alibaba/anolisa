@@ -379,6 +379,7 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         source: adapter.source.clone(),
         dest: expanded_dest.clone(),
         mode: None,
+        kind: anolisa_core::FileKind::Data,
     }];
 
     // Acquire lock, then load state inside the lock so a concurrent writer
@@ -454,6 +455,7 @@ fn handle_install(ctx: &CliContext, component: &str, framework: &str) -> Result<
         status: ObjectStatus::Installed,
         manifest_digest: None,
         distribution_source: Some(entry.url.clone()),
+        install_backend: Some(entry.backend.clone()),
         installed_at: started_at.clone(),
         last_operation_id: Some(operation_id.clone()),
         managed: true,
@@ -1187,6 +1189,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: None,
             managed: true,

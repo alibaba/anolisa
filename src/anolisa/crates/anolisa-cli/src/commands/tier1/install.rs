@@ -6,9 +6,7 @@
 //! (`--backend` > `default_backend`), base_url variable substitution, and
 //! package-name mapping (`--package` > `package_map` > scope > component
 //! name) — feeds the **raw** backend executor: fetch the distribution index
-//! (location derived from `base_url` via [`raw_index_url`] — template form
-//! puts it at the static prefix, plain root at `<base_url>/v1/index.toml`),
-//! resolve an artifact, download it with
+//! from the raw repository root, resolve an artifact, download it with
 //! mandatory sha256 verification, install the manifest-declared files, and
 //! record state plus a central-log audit entry. `yum` / `npm` backends are
 //! selectable but their executors are NOT_IMPLEMENTED.
@@ -27,11 +25,11 @@ use anolisa_core::install_runner::{InstallRunner, ResolvedInstallFile, SUPPORTED
 use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
-    FileOwner, InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
-    OperationRecord, OwnedFile, ServiceRef,
+    FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
+    ObjectStatus, OperationRecord, OwnedFile, ServiceRef,
 };
 use anolisa_core::{
-    ArtifactType, ComponentManifest, DistributionEntry, DistributionIndex, ResolveQuery,
+    ArtifactType, ComponentManifest, DistributionEntry, DistributionIndex, FileKind, ResolveQuery,
     expand_layout_placeholders,
 };
 use anolisa_platform::fs_layout::FsLayout;
@@ -48,7 +46,7 @@ use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "install";
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 // `--version` here means the *component* version (the `cargo install`
 // convention), so the auto-generated CLI-version flag must be disabled
 // to free the name. `anolisa --version` still works at the top level.
@@ -187,6 +185,9 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     };
     let package = repo_config.package_name(backend, &component, args.package.as_deref());
 
+    let installed = common::load_installed_state(ctx, COMMAND)?;
+    ensure_component_backend_compatible(&installed, &component, backend_name, COMMAND)?;
+
     // Backend gate: only raw can execute today. The selection above already
     // validated the name/configuration, so this is purely "executor missing".
     if backend_name != "raw" {
@@ -320,10 +321,10 @@ fn resolve_raw(
         ));
     }
 
-    // Three URL forms, most-mirror-friendly first: an omitted url renders
-    // the base_url directory template from the resolved row, a repo-relative
-    // url resolves against the index directory (self-contained mirrors), and
-    // an absolute url is used as-is (escape hatch for off-repo artifacts).
+    // Three URL forms, most-mirror-friendly first: an omitted url uses the
+    // code-owned raw layout, a repo-relative url resolves against the index
+    // directory (self-contained mirrors), and an absolute url is used as-is
+    // (escape hatch for off-repo artifacts).
     let artifact_url = if entry.url.is_empty() {
         let values = std::collections::BTreeMap::from([
             ("component", Some(entry.component.clone())),
@@ -336,7 +337,7 @@ fn resolve_raw(
         raw_artifact_url(&backend, &base_url, &values).map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "cannot derive artifact URL for '{package}' {} from base_url template: {err}",
+                "cannot derive artifact URL for '{package}' {} from raw repository layout: {err}",
                 entry.version
             ),
         })?
@@ -401,10 +402,34 @@ fn resolve_manifest_files(
                 dest.display()
             ),
         })?;
+        // A symlink's source is its referent — a layout template like the
+        // dest, not an archive path. Expand and bound-check it the same way.
+        let source = match (spec.kind, spec.source.as_deref()) {
+            (FileKind::Symlink, Some(template)) => {
+                let referent =
+                    expand_layout_placeholders(template, layout, &[("component", component)])
+                        .map_err(|err| CliError::Runtime {
+                            command: COMMAND.to_string(),
+                            reason: format!(
+                                "failed to expand symlink referent '{template}': {err}"
+                            ),
+                        })?;
+                validate_owned_path(layout, &referent).map_err(|err| CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "symlink referent '{}' failed path safety check: {err}",
+                        referent.display()
+                    ),
+                })?;
+                Some(referent.to_string_lossy().into_owned())
+            }
+            _ => spec.source.clone(),
+        };
         files.push(ResolvedInstallFile {
-            source: spec.source.clone(),
+            source,
             dest,
             mode: spec.mode.clone(),
+            kind: spec.kind,
         });
     }
     Ok(files)
@@ -449,6 +474,7 @@ fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    ensure_component_backend_compatible(&state, &resolved.component, &resolved.backend, command)?;
 
     // Nanosecond suffix avoids collisions between near-simultaneous
     // processes that serialize on the lock within the same second.
@@ -507,6 +533,7 @@ fn execute_raw(
         // an unverified digest would overstate what install checked.
         manifest_digest: None,
         distribution_source: Some(resolved.artifact_url.clone()),
+        install_backend: Some(resolved.backend.clone()),
         installed_at: started_at.clone(),
         last_operation_id: Some(operation_id.clone()),
         managed: true,
@@ -596,6 +623,51 @@ fn execute_raw(
         render_result(&payload, ctx.no_color);
     }
     Ok(())
+}
+
+fn ensure_component_backend_compatible(
+    state: &InstalledState,
+    component: &str,
+    requested_backend: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let Some(obj) = state.find_object(ObjectKind::Component, component) else {
+        return Ok(());
+    };
+
+    match installed_backend_label(obj) {
+        Some(installed_backend) if installed_backend == requested_backend => Ok(()),
+        Some(installed_backend) => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is already installed via backend '{installed_backend}'; reinstalling it via backend '{requested_backend}' is not allowed — uninstall it first or use backend '{installed_backend}'",
+            ),
+        }),
+        None => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is already installed but its install backend is unknown; uninstall it before installing via backend '{requested_backend}'",
+            ),
+        }),
+    }
+}
+
+fn installed_backend_label(obj: &InstalledObject) -> Option<&str> {
+    obj.install_backend
+        .as_deref()
+        .or_else(|| infer_backend_from_distribution_source(obj.distribution_source.as_deref()))
+}
+
+fn infer_backend_from_distribution_source(source: Option<&str>) -> Option<&'static str> {
+    let source = source?;
+    if source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("file://")
+    {
+        Some("raw")
+    } else {
+        None
+    }
 }
 
 fn render_plan(ctx: &CliContext, resolved: &ResolvedInstall) -> Result<(), CliError> {
@@ -809,7 +881,7 @@ mod tests {
 
     /// Lay out a local file:// raw repo containing one binary artifact for
     /// `agentsight` targeting the *detected* host os/arch, and return the
-    /// repo's base_url. Uses a repo-relative artifact URL to also exercise
+    /// repo's raw v1 root. Uses a repo-relative artifact URL to also exercise
     /// the relative-URL join.
     fn write_local_repo(root: &Path) -> String {
         let v1 = root.join("v1");
@@ -841,12 +913,13 @@ sha256 = "{sha}"
             arch = env.arch,
         );
         std::fs::write(v1.join("index.toml"), index).expect("write index");
-        format!("file://{}", root.display())
+        format!("file://{}", v1.display())
     }
 
     /// Like [`write_local_repo`], but the index row omits `url` and the
     /// artifact sits at the conventional publish path
-    /// `v1/{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}`.
+    /// `{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}`
+    /// under the raw v1 root.
     fn write_conventional_repo(root: &Path) -> String {
         let env = anolisa_env::EnvService::detect();
         let artifact_dir = root
@@ -880,7 +953,7 @@ sha256 = "{sha}"
             arch = env.arch,
         );
         std::fs::write(root.join("v1/index.toml"), index).expect("write index");
-        format!("file://{}", root.display())
+        format!("file://{}", root.join("v1").display())
     }
 
     #[test]
@@ -1036,6 +1109,11 @@ base_url = "https://example.com/yum-repo"
                 .is_some_and(|u| u.starts_with(&repo_url)),
             "distribution_source must record the resolved artifact URL"
         );
+        assert_eq!(
+            obj.install_backend.as_deref(),
+            Some("raw"),
+            "install_backend must record the selected backend"
+        );
         assert!(
             obj.services.iter().all(|s| !s.enabled),
             "install must not mark services enabled"
@@ -1044,10 +1122,71 @@ base_url = "https://example.com/yum-repo"
         assert!(state.operations[0].id.starts_with("op-install-"));
     }
 
-    /// An index row without `url` installs from the convention-derived
-    /// location `<base_url>/v1/{component}/{version}/{os}/{arch}/` with the
-    /// `{component}-{version}-{os}-{arch}{ext}` file name (plain-root form
-    /// of the base_url template).
+    #[test]
+    fn install_existing_component_with_different_backend_is_invalid_argument() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let layout = FsLayout::system(Some(prefix.clone()));
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://example.com/anolisa"
+
+[backends.yum]
+base_url = "https://example.com/yum-repo"
+"#,
+        )
+        .expect("write repo.toml");
+
+        let mut state = anolisa_core::InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "agentsight".to_string(),
+            version: "0.2.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///repo/v1/agentsight-bin".to_string()),
+            install_backend: Some("raw".to_string()),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("save state");
+
+        let mut a = args("agentsight");
+        a.backend = Some("yum".to_string());
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("already installed via backend 'raw'")
+                && err.reason().contains("backend 'yum'"),
+            "reason must explain backend conflict: {}",
+            err.reason()
+        );
+    }
+
+    /// An index row without `url` installs from the code-owned raw layout
+    /// under the raw v1 root.
     #[test]
     fn install_derives_artifact_url_from_convention_when_index_omits_url() {
         let tmp = tempdir().expect("tmpdir");
@@ -1071,7 +1210,7 @@ base_url = "https://example.com/yum-repo"
             obj.distribution_source.as_deref(),
             Some(
                 format!(
-                    "{repo_url}/v1/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}",
+                    "{repo_url}/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}",
                     os = env.os,
                     arch = env.arch
                 )
@@ -1081,11 +1220,10 @@ base_url = "https://example.com/yum-repo"
         );
     }
 
-    /// A template-form repo URL (placeholders in the path, the bundled
-    /// default's shape) finds the index at the static prefix and renders
-    /// the artifact URL from the resolved row.
+    /// A legacy template-form repo URL still resolves by taking the static
+    /// prefix before `{component}` as the raw v1 root.
     #[test]
-    fn install_resolves_through_template_form_repo_url() {
+    fn install_resolves_legacy_template_form_repo_url() {
         let tmp = tempdir().expect("tmpdir");
         let prefix = tmp.path().join("sys");
         let repo_root = tmp.path().join("repo");
@@ -1121,7 +1259,7 @@ base_url = "https://example.com/yum-repo"
                 )
                 .as_str()
             ),
-            "distribution_source must record the template-rendered URL"
+            "distribution_source must record the convention-derived URL"
         );
     }
 

@@ -71,8 +71,8 @@ pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     CapabilityManifestsView, ComponentLifecyclePlan, FileAction, FileActionKind,
     FileOwner as LifecycleFileOwner, HookAction, LifecycleError, LifecycleMode, LifecycleOperation,
-    LifecycleOutcome, LifecyclePhase, LifecyclePlan, RiskLevel, ServiceAction, ServiceActionKind,
-    execute_plan,
+    LifecycleOutcome, LifecyclePhase, LifecyclePlan, LifecycleTargetKind, RiskLevel, ServiceAction,
+    ServiceActionKind, execute_plan,
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec};

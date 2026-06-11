@@ -286,6 +286,12 @@ pub enum FileKind {
     Config,
     /// Shared library.
     Library,
+    /// Symbolic link created at install time. `source` is the link's
+    /// referent (a layout-template path like `{libexecdir}/tokenless/rtk`,
+    /// expanded at resolve time — NOT an archive member), `target`/`dest`
+    /// is where the link is created. `mode` is ignored: symlink
+    /// permissions are meaningless on Linux.
+    Symlink,
 }
 
 /// One file mapping in an install contract.
@@ -621,6 +627,10 @@ struct InstallFileRaw {
     source: Option<String>,
     #[serde(default)]
     mode: Option<String>,
+    /// Optional `type` so legacy `[install]` manifests can declare
+    /// symlinks; absent defaults to `Data`, keeping old files byte-stable.
+    #[serde(default, rename = "type")]
+    kind: FileKind,
 }
 
 #[derive(Deserialize, Default)]
@@ -758,8 +768,8 @@ impl From<ComponentManifestRaw> for ComponentManifest {
         // Prefer the minimal-schema `[component.layout]`; fall back to the
         // legacy top-level `[install]` for not-yet-migrated manifests. The
         // minimal `target` key maps onto the internal `dest`; nested
-        // service/capabilities arrive in T2.7. Legacy `[install]` files carry
-        // no `type`, so they default to `FileKind::Data`.
+        // service/capabilities arrive in T2.7. Legacy `[install]` files may
+        // carry `type` (e.g. symlink entries); absent defaults to `Data`.
         let install = if let Some(layout) = layout_raw {
             let files = layout
                 .files
@@ -788,7 +798,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                             source: f.source,
                             dest: f.dest,
                             mode: f.mode,
-                            kind: FileKind::Data,
+                            kind: f.kind,
                         })
                         .filter(|f| f.install_path().is_some())
                         .collect();
@@ -1469,6 +1479,45 @@ mod tests {
         assert_eq!(m.install.files[0].kind, FileKind::Executable);
         // No `type` key → defaults to Data.
         assert_eq!(m.install.files[1].kind, FileKind::Data);
+    }
+
+    /// `type = "symlink"` parses in both schemas: minimal layout files and
+    /// legacy `[[install.files]]` (catalog manifests).
+    #[test]
+    fn symlink_file_kind_parses_in_both_schemas() {
+        let minimal = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+
+            [component.layout]
+            [[component.layout.files]]
+            source = "{libexecdir}/tokenless/rtk"
+            target = "{bindir}/rtk"
+            type = "symlink"
+        "#,
+        )
+        .expect("parse minimal");
+        assert_eq!(minimal.install.files[0].kind, FileKind::Symlink);
+
+        let legacy = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "tokenless"
+            version = "0.5.0"
+
+            [install]
+            modes = ["user"]
+
+            [[install.files]]
+            source = "{libexecdir}/tokenless/rtk"
+            dest = "{bindir}/rtk"
+            type = "symlink"
+        "#,
+        )
+        .expect("parse legacy");
+        assert_eq!(legacy.install.files[0].kind, FileKind::Symlink);
     }
 
     #[test]

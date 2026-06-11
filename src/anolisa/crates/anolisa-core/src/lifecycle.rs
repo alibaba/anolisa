@@ -277,12 +277,25 @@ pub struct LifecyclePhase {
     pub rollback_hint: Option<String>,
 }
 
-/// The full lifecycle plan for one capability invocation.
+/// Installed-state object vocabulary targeted by a lifecycle plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleTargetKind {
+    /// Legacy capability target; uninstall follows its component refs.
+    Capability,
+    /// Direct component target used by `anolisa install` / `uninstall`.
+    Component,
+}
+
+/// The full lifecycle plan for one installed object invocation.
 #[derive(Debug, Clone, Serialize)]
 pub struct LifecyclePlan {
     /// Lifecycle verb requested by the user.
     pub operation: LifecycleOperation,
-    /// Capability the plan targets.
+    /// Installed-state object kind this plan targets.
+    pub target_kind: LifecycleTargetKind,
+    /// Target name. Kept as `capability` on the wire for compatibility with
+    /// existing lifecycle JSON; component plans store the component name here.
     pub capability: String,
     /// Per-component plan slices.
     pub components: Vec<ComponentLifecyclePlan>,
@@ -314,7 +327,12 @@ impl LifecyclePlan {
         installed_state: &InstalledState,
         _manifests: &CapabilityManifestsView<'_>,
     ) -> Self {
-        Self::build(LifecycleOperation::Disable, capability, installed_state)
+        Self::build(
+            LifecycleOperation::Disable,
+            LifecycleTargetKind::Capability,
+            capability,
+            installed_state,
+        )
     }
 
     /// Build an `Uninstall` plan: every `OwnedFile` whose owner is
@@ -325,7 +343,12 @@ impl LifecyclePlan {
         installed_state: &InstalledState,
         _manifests: &CapabilityManifestsView<'_>,
     ) -> Self {
-        Self::build(LifecycleOperation::Uninstall, capability, installed_state)
+        Self::build(
+            LifecycleOperation::Uninstall,
+            LifecycleTargetKind::Capability,
+            capability,
+            installed_state,
+        )
     }
 
     /// Build a `Purge` plan: `Uninstall` + remove ANOLISA-owned
@@ -336,18 +359,58 @@ impl LifecyclePlan {
         installed_state: &InstalledState,
         _manifests: &CapabilityManifestsView<'_>,
     ) -> Self {
-        Self::build(LifecycleOperation::Purge, capability, installed_state)
+        Self::build(
+            LifecycleOperation::Purge,
+            LifecycleTargetKind::Capability,
+            capability,
+            installed_state,
+        )
+    }
+
+    /// Build an `Uninstall` plan for a component installed directly through
+    /// `anolisa install`.
+    pub fn for_component_uninstall(component: &str, installed_state: &InstalledState) -> Self {
+        Self::build(
+            LifecycleOperation::Uninstall,
+            LifecycleTargetKind::Component,
+            component,
+            installed_state,
+        )
+    }
+
+    /// Build a `Purge` plan for a component target. Execution remains gated
+    /// by the same purge guard as capability plans.
+    pub fn for_component_purge(component: &str, installed_state: &InstalledState) -> Self {
+        Self::build(
+            LifecycleOperation::Purge,
+            LifecycleTargetKind::Component,
+            component,
+            installed_state,
+        )
     }
 
     fn build(
         operation: LifecycleOperation,
-        capability: &str,
+        target_kind: LifecycleTargetKind,
+        target: &str,
         installed_state: &InstalledState,
     ) -> Self {
-        let cap_obj = installed_state.find_object(ObjectKind::Capability, capability);
-        let component_refs: Vec<String> = cap_obj
-            .map(|c| c.component_refs.clone())
-            .unwrap_or_default();
+        let target_obj = match target_kind {
+            LifecycleTargetKind::Capability => {
+                installed_state.find_object(ObjectKind::Capability, target)
+            }
+            LifecycleTargetKind::Component => {
+                installed_state.find_object(ObjectKind::Component, target)
+            }
+        };
+        let component_refs: Vec<String> = match target_kind {
+            LifecycleTargetKind::Capability => target_obj
+                .map(|c| c.component_refs.clone())
+                .unwrap_or_default(),
+            LifecycleTargetKind::Component => target_obj
+                .map(|_| vec![target.to_string()])
+                .unwrap_or_default(),
+        };
 
         let mut components: Vec<ComponentLifecyclePlan> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
@@ -380,7 +443,7 @@ impl LifecyclePlan {
             });
         }
 
-        let phases = build_phases(operation, capability, &components);
+        let phases = build_phases(operation, target, &components);
 
         let requires_privilege = match operation {
             LifecycleOperation::Disable => false,
@@ -395,15 +458,21 @@ impl LifecyclePlan {
             LifecycleOperation::Purge => RiskLevel::High,
         };
 
-        if cap_obj.is_none() {
-            warnings.push(format!(
-                "capability '{capability}' is not installed — plan is empty",
-            ));
+        if target_obj.is_none() {
+            warnings.push(match target_kind {
+                LifecycleTargetKind::Capability => {
+                    format!("capability '{target}' is not installed — plan is empty")
+                }
+                LifecycleTargetKind::Component => {
+                    format!("component '{target}' is not installed — plan is empty")
+                }
+            });
         }
 
         Self {
             operation,
-            capability: capability.to_string(),
+            target_kind,
+            capability: target.to_string(),
             components,
             phases,
             risk,
@@ -700,7 +769,8 @@ pub struct LifecycleOutcome {
     pub operation_id: String,
     /// Lifecycle verb that was executed.
     pub operation: LifecycleOperation,
-    /// Capability targeted by the operation.
+    /// Target name. Kept as `capability` for the existing lifecycle wire
+    /// shape; component uninstall stores the component name here.
     pub capability: String,
     /// Paths actually removed by this op (only populated for
     /// `Uninstall` / `Purge`).
@@ -708,8 +778,8 @@ pub struct LifecycleOutcome {
     /// Files the plan flagged as `Refuse` (external) or `Keep` — i.e.
     /// not deleted, surfaced so the CLI can render an honest summary.
     pub skipped_files: Vec<PathBuf>,
-    /// Whether the capability object was removed from
-    /// `installed.toml` (vs. marked disabled).
+    /// Whether the target object was removed from `installed.toml`
+    /// (vs. marked disabled).
     pub state_object_removed: bool,
     /// Non-fatal warnings raised AFTER the destructive ops succeeded.
     ///
@@ -738,6 +808,13 @@ pub enum LifecycleError {
     CapabilityNotInstalled {
         /// Requested capability name.
         capability: String,
+    },
+    /// Component is absent from `installed.toml`; direct component uninstall
+    /// cannot infer files or services to remove.
+    #[error("component '{component}' is not installed")]
+    ComponentNotInstalled {
+        /// Requested component name.
+        component: String,
     },
     /// Executor does not implement this lifecycle verb.
     #[error("operation '{op}' is not supported by this executor")]
@@ -922,7 +999,7 @@ fn check_destructive_execute_gate(plan: &LifecyclePlan) -> Result<(), LifecycleE
     Err(LifecycleError::ExecuteGated {
         reason: "purge execute is gated pending manifest-driven config/cache/state \
                  discovery; run with --dry-run to preview the plan, or use \
-                 `anolisa uninstall <cap>` for the file-removal subset"
+                 `anolisa uninstall <component>` for the file-removal subset"
             .to_string(),
     })
 }
@@ -934,23 +1011,42 @@ fn execute_uninstall_or_purge(
     install_mode: &str,
 ) -> Result<LifecycleOutcome, LifecycleError> {
     let state_path = layout.state_dir.join("installed.toml");
-    let capability_name = plan.capability.as_str();
+    let target_name = plan.capability.as_str();
 
     // Step 1 — best-effort pre-lock typo check, symmetric with
     // execute_disable. The preflight is read-only.
     if let Ok(preflight) = InstalledState::load(&state_path) {
-        if preflight
-            .find_object(ObjectKind::Capability, capability_name)
-            .is_none()
-        {
-            return Err(LifecycleError::CapabilityNotInstalled {
-                capability: capability_name.to_string(),
-            });
+        match plan.target_kind {
+            LifecycleTargetKind::Capability => {
+                if preflight
+                    .find_object(ObjectKind::Capability, target_name)
+                    .is_none()
+                {
+                    return Err(LifecycleError::CapabilityNotInstalled {
+                        capability: target_name.to_string(),
+                    });
+                }
+            }
+            LifecycleTargetKind::Component => {
+                if preflight
+                    .find_object(ObjectKind::Component, target_name)
+                    .is_none()
+                {
+                    return Err(LifecycleError::ComponentNotInstalled {
+                        component: target_name.to_string(),
+                    });
+                }
+            }
         }
     } else {
-        return Err(LifecycleError::CapabilityNotInstalled {
-            capability: capability_name.to_string(),
-        });
+        return match plan.target_kind {
+            LifecycleTargetKind::Capability => Err(LifecycleError::CapabilityNotInstalled {
+                capability: target_name.to_string(),
+            }),
+            LifecycleTargetKind::Component => Err(LifecycleError::ComponentNotInstalled {
+                component: target_name.to_string(),
+            }),
+        };
     }
 
     // Step 1.5 — Purge stays gated pending manifest-driven discovery.
@@ -975,25 +1071,59 @@ fn execute_uninstall_or_purge(
             return Err(LifecycleError::State { source });
         }
     };
-    let cap_obj = match state.find_object(ObjectKind::Capability, capability_name) {
-        Some(o) => o.clone(),
-        None => {
-            drop(lock);
-            return Err(LifecycleError::CapabilityNotInstalled {
-                capability: capability_name.to_string(),
-            });
+    let component_refs = match plan.target_kind {
+        LifecycleTargetKind::Capability => {
+            let cap_obj = match state.find_object(ObjectKind::Capability, target_name) {
+                Some(o) => o.clone(),
+                None => {
+                    drop(lock);
+                    return Err(LifecycleError::CapabilityNotInstalled {
+                        capability: target_name.to_string(),
+                    });
+                }
+            };
+            cap_obj.component_refs.clone()
+        }
+        LifecycleTargetKind::Component => {
+            if state
+                .find_object(ObjectKind::Component, target_name)
+                .is_none()
+            {
+                drop(lock);
+                return Err(LifecycleError::ComponentNotInstalled {
+                    component: target_name.to_string(),
+                });
+            }
+            vec![target_name.to_string()]
         }
     };
-    let component_refs = cap_obj.component_refs.clone();
+    let dependent_capabilities: Vec<String> = match plan.target_kind {
+        LifecycleTargetKind::Capability => Vec::new(),
+        LifecycleTargetKind::Component => state
+            .objects
+            .iter()
+            .filter(|o| {
+                o.kind == ObjectKind::Capability
+                    && o.component_refs.iter().any(|c| c == target_name)
+            })
+            .map(|o| o.name.clone())
+            .collect(),
+    };
 
-    let live_plan = match plan.operation {
-        LifecycleOperation::Uninstall => {
-            LifecyclePlan::for_uninstall(capability_name, &state, &CapabilityManifestsView::empty())
+    let live_plan = match (plan.operation, plan.target_kind) {
+        (LifecycleOperation::Uninstall, LifecycleTargetKind::Capability) => {
+            LifecyclePlan::for_uninstall(target_name, &state, &CapabilityManifestsView::empty())
         }
-        LifecycleOperation::Purge => {
-            LifecyclePlan::for_purge(capability_name, &state, &CapabilityManifestsView::empty())
+        (LifecycleOperation::Uninstall, LifecycleTargetKind::Component) => {
+            LifecyclePlan::for_component_uninstall(target_name, &state)
         }
-        LifecycleOperation::Disable => {
+        (LifecycleOperation::Purge, LifecycleTargetKind::Capability) => {
+            LifecyclePlan::for_purge(target_name, &state, &CapabilityManifestsView::empty())
+        }
+        (LifecycleOperation::Purge, LifecycleTargetKind::Component) => {
+            LifecyclePlan::for_component_purge(target_name, &state)
+        }
+        (LifecycleOperation::Disable, _) => {
             drop(lock);
             return Err(LifecycleError::UnsupportedOperation { op: "disable" });
         }
@@ -1003,12 +1133,15 @@ fn execute_uninstall_or_purge(
     // installed capability is preserved (its files stay on disk and the
     // component object itself is not dropped). Without this, uninstalling
     // capability A would silently break capability B.
-    let shared_components: std::collections::HashSet<String> = state
-        .objects
-        .iter()
-        .filter(|o| o.kind == ObjectKind::Capability && o.name != capability_name)
-        .flat_map(|o| o.component_refs.iter().cloned())
-        .collect();
+    let shared_components: std::collections::HashSet<String> = match plan.target_kind {
+        LifecycleTargetKind::Capability => state
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Capability && o.name != target_name)
+            .flat_map(|o| o.component_refs.iter().cloned())
+            .collect(),
+        LifecycleTargetKind::Component => std::collections::HashSet::new(),
+    };
 
     // Step 4 — open a Transaction inside the lock. Begin snapshots
     // installed.toml bytes, mints the operation_id, and writes an empty
@@ -1024,13 +1157,22 @@ fn execute_uninstall_or_purge(
     };
     let operation_id = tx.operation_id.clone();
     let started_at = tx.started_at.clone();
-    let command = format!("{} {capability_name}", plan.operation.as_str());
+    let command = format!("{} {target_name}", plan.operation.as_str());
 
-    let mut objects: Vec<String> = Vec::with_capacity(1 + component_refs.len());
-    objects.push(capability_name.to_string());
-    for c in &component_refs {
-        objects.push(c.clone());
-    }
+    let objects: Vec<String> = match plan.target_kind {
+        LifecycleTargetKind::Capability => {
+            let mut objects = Vec::with_capacity(1 + component_refs.len());
+            objects.push(target_name.to_string());
+            objects.extend(component_refs.iter().cloned());
+            objects
+        }
+        LifecycleTargetKind::Component => {
+            let mut objects = Vec::with_capacity(1 + dependent_capabilities.len());
+            objects.push(target_name.to_string());
+            objects.extend(dependent_capabilities.iter().cloned());
+            objects
+        }
+    };
 
     let central = CentralLog::open(layout.central_log.clone());
 
@@ -1243,11 +1385,11 @@ fn execute_uninstall_or_purge(
                     let backup_path = backup_root.join(format!("{backup_idx}.bak"));
                     backup_idx += 1;
                     match prepare_backup(&f.path, &backup_path) {
-                        Ok(Some(sha)) => {
+                        Ok(Some(artifact)) => {
                             let rb = RollbackAction::restore_file(
                                 backup_path.clone(),
                                 f.path.clone(),
-                                Some(sha),
+                                artifact.into_sha256(),
                             );
                             let step = TransactionStep::planned(
                                 "remove_file",
@@ -1422,11 +1564,11 @@ fn execute_uninstall_or_purge(
                     let backup_path = backup_root.join(format!("{backup_idx}.bak"));
                     backup_idx += 1;
                     match prepare_backup(&f.path, &backup_path) {
-                        Ok(Some(sha)) => {
+                        Ok(Some(artifact)) => {
                             let rb = RollbackAction::restore_file(
                                 backup_path.clone(),
                                 f.path.clone(),
-                                Some(sha),
+                                artifact.into_sha256(),
                             );
                             let step = TransactionStep::planned(
                                 "remove_config",
@@ -1514,15 +1656,26 @@ fn execute_uninstall_or_purge(
         }
     }
 
-    // Step 7 — drop the capability and every NON-shared component
-    // object. Shared components stay so the other capabilities still
-    // referencing them remain consistent.
-    for comp in &component_refs {
-        if !shared_components.contains(comp) {
-            let _ = state.remove_object(ObjectKind::Component, comp);
+    // Step 7 — drop state objects. Capability uninstall preserves shared
+    // components; direct component uninstall removes the component and any
+    // legacy capability objects that still point at it so state has no
+    // dangling component refs after the component is gone.
+    match plan.target_kind {
+        LifecycleTargetKind::Capability => {
+            for comp in &component_refs {
+                if !shared_components.contains(comp) {
+                    let _ = state.remove_object(ObjectKind::Component, comp);
+                }
+            }
+            state.remove_object(ObjectKind::Capability, target_name);
+        }
+        LifecycleTargetKind::Component => {
+            let _ = state.remove_object(ObjectKind::Component, target_name);
+            for capability in &dependent_capabilities {
+                let _ = state.remove_object(ObjectKind::Capability, capability);
+            }
         }
     }
-    state.remove_object(ObjectKind::Capability, capability_name);
 
     let finished_at_utc = Utc::now();
     let finished_at = finished_at_utc.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -1634,7 +1787,7 @@ fn execute_uninstall_or_purge(
     Ok(LifecycleOutcome {
         operation_id,
         operation: plan.operation,
-        capability: capability_name.to_string(),
+        capability: target_name.to_string(),
         removed_files,
         skipped_files,
         state_object_removed: true,
@@ -1678,29 +1831,85 @@ fn finalize_journal_with_warnings(
     warnings
 }
 
-/// Compute sha256 of `src` and copy it to `backup`. `Ok(None)` means the
-/// source did not exist (idempotent skip); `Ok(Some(sha))` means the
-/// backup is in place and the sha is the source's content hash. Any
-/// other IO failure surfaces as [`LifecycleError::Filesystem`].
+/// What [`prepare_backup`] wrote at the backup path.
+#[derive(Debug)]
+enum BackupArtifact {
+    /// Regular file copied byte-for-byte; sha256 of those bytes.
+    File {
+        /// Content hash recorded on the `RestoreFile` rollback action.
+        sha256: String,
+    },
+    /// Symlink reproduced as an identical link. The referent is never
+    /// read through, so there is no byte hash to verify on restore.
+    Symlink,
+}
+
+impl BackupArtifact {
+    /// Hash to record on the rollback action; `None` for symlinks.
+    fn into_sha256(self) -> Option<String> {
+        match self {
+            Self::File { sha256 } => Some(sha256),
+            Self::Symlink => None,
+        }
+    }
+}
+
 /// Copy `src` to `backup` while streaming sha256 over the bytes.
 ///
 /// The backup path is the rollback's single source of truth — every
 /// `RestoreFile` step replays bytes from here, so this write must be at
 /// least as hardened as install:
 ///
-///   * Source open with `O_NOFOLLOW` (Unix) — a symlink at `src` would
-///     otherwise cause us to back up the *target* of the symlink under
-///     the attacker's control.
+///   * A symlink at `src` (a managed `FileKind::Symlink` entry) is backed
+///     up as a *link*: the referent path is reproduced, never read
+///     through — bytes behind a link must not be copied as if they
+///     belonged to the owned file. Regular files still open with
+///     `O_NOFOLLOW` so a link racing in after the metadata check fails
+///     the open instead of being followed.
 ///   * Backup leaf opened with `create_new` (+ `O_NOFOLLOW` on Unix) so
 ///     a pre-placed symlink or stale file at the backup path fails the
-///     open instead of being followed or overwritten.
+///     open instead of being followed or overwritten (`symlink(2)` gives
+///     the same EEXIST guarantee on the link branch).
 ///   * Streaming read+hash so a multi-GB owned file does not have to fit
 ///     in RAM, and so the on-disk bytes match the recorded sha exactly.
 ///
 /// Returns `Ok(None)` only if `src` is `NotFound`; other errors are
 /// surfaced as [`LifecycleError::Filesystem`].
-fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<String>, LifecycleError> {
+fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact>, LifecycleError> {
     use std::io::{Read, Write};
+
+    match fs::symlink_metadata(src) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let referent = fs::read_link(src).map_err(|source| LifecycleError::Filesystem {
+                path: src.to_path_buf(),
+                source,
+            })?;
+            if let Some(parent) = backup.parent()
+                && !parent.as_os_str().is_empty()
+                && let Err(source) = fs::create_dir_all(parent)
+            {
+                return Err(LifecycleError::Filesystem {
+                    path: parent.to_path_buf(),
+                    source,
+                });
+            }
+            std::os::unix::fs::symlink(&referent, backup).map_err(|source| {
+                LifecycleError::Filesystem {
+                    path: backup.to_path_buf(),
+                    source,
+                }
+            })?;
+            return Ok(Some(BackupArtifact::Symlink));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(LifecycleError::Filesystem {
+                path: src.to_path_buf(),
+                source,
+            });
+        }
+    }
 
     let mut src_opts = fs::OpenOptions::new();
     src_opts.read(true);
@@ -1783,7 +1992,7 @@ fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<String>, Lifecycle
     for b in out {
         sha.push_str(&format!("{b:02x}"));
     }
-    Ok(Some(sha))
+    Ok(Some(BackupArtifact::File { sha256: sha }))
 }
 
 fn record_skipped_step(
@@ -2037,6 +2246,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -2071,6 +2281,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -2394,6 +2605,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -2916,6 +3128,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -2935,6 +3148,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -3016,6 +3230,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -3039,6 +3254,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            install_backend: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,
@@ -3163,12 +3379,13 @@ mod tests {
         assert_eq!(std_fs::read(&victim).expect("read victim"), b"untouched");
     }
 
-    /// A symlink at the source path must fail to open instead of
-    /// dereferencing — otherwise we would back up the *target* of the
-    /// symlink, recording its sha as if it belonged to the owned file.
+    /// A symlink at the source path is backed up as a *link* — the
+    /// referent path is reproduced and its bytes are never read through,
+    /// so a link pointing at content outside the owned roots cannot leak
+    /// those bytes into the backup as if they belonged to the owned file.
     #[test]
     #[cfg(unix)]
-    fn prepare_backup_refuses_symlink_at_source() {
+    fn prepare_backup_copies_symlink_as_link() {
         let tmp = tempdir().expect("tempdir");
         let target = tmp.path().join("target");
         std_fs::write(&target, b"target bytes").expect("write target");
@@ -3176,12 +3393,37 @@ mod tests {
         std::os::unix::fs::symlink(&target, &src).expect("plant src symlink");
         let backup = tmp.path().join("backup.bak");
 
-        let err = prepare_backup(&src, &backup).expect_err("must refuse symlink at src");
+        let artifact = prepare_backup(&src, &backup)
+            .expect("backup ok")
+            .expect("src exists");
         assert!(
-            matches!(err, LifecycleError::Filesystem { ref path, .. } if path == &src),
-            "expected Filesystem error pointing at src, got {err:?}",
+            artifact.into_sha256().is_none(),
+            "symlink backup must not record a byte hash"
         );
-        assert!(!backup.exists(), "no backup file may be created");
+        let meta = std_fs::symlink_metadata(&backup).expect("backup exists");
+        assert!(meta.file_type().is_symlink(), "backup must be a link");
+        assert_eq!(std_fs::read_link(&backup).expect("read_link"), target);
+    }
+
+    /// A pre-placed file at the backup leaf must fail the symlink backup
+    /// the same way `create_new` protects the regular-file branch.
+    #[test]
+    #[cfg(unix)]
+    fn prepare_backup_symlink_refuses_existing_backup_leaf() {
+        let tmp = tempdir().expect("tempdir");
+        let target = tmp.path().join("target");
+        std_fs::write(&target, b"target bytes").expect("write target");
+        let src = tmp.path().join("src");
+        std::os::unix::fs::symlink(&target, &src).expect("plant src symlink");
+        let backup = tmp.path().join("backup.bak");
+        std_fs::write(&backup, b"stale").expect("write stale backup");
+
+        let err = prepare_backup(&src, &backup).expect_err("must refuse existing backup leaf");
+        assert!(
+            matches!(err, LifecycleError::Filesystem { ref path, .. } if path == &backup),
+            "expected Filesystem error pointing at backup leaf, got {err:?}",
+        );
+        assert_eq!(std_fs::read(&backup).expect("read backup"), b"stale");
     }
 
     /// Once `state.save` and the `succeeded` log have landed, the
@@ -3260,7 +3502,9 @@ mod tests {
 
         let sha = prepare_backup(&src, &backup)
             .expect("backup ok")
-            .expect("expected sha for existing src");
+            .expect("expected sha for existing src")
+            .into_sha256()
+            .expect("regular file backup records a sha");
 
         let mut hasher = Sha256::new();
         hasher.update(&payload);

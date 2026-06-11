@@ -64,11 +64,9 @@ pub struct DistributionEntry {
     pub backend: String,
     /// Fetch URL. Resolved rows become live downloads during execute.
     ///
-    /// Optional when the published artifact follows the repo's layout
-    /// convention — consumers that know the repo's base_url render it as
-    /// a directory template (`anolisa-cli` repo.toml `base_url`
-    /// placeholders) filled with this entry's fields. Empty means
-    /// "derive"; consumers without a base_url must treat empty as a hard
+    /// Optional when the published artifact follows the raw repository
+    /// layout convention. Empty means "derive from the consumer's repo
+    /// root"; consumers without such a root must treat empty as a hard
     /// error rather than guessing.
     #[serde(default)]
     pub url: String,

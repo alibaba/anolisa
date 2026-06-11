@@ -510,10 +510,31 @@ pub fn execute_enable(
             .resolved_files
             .iter()
             .enumerate()
-            .map(|(idx, dest)| ResolvedInstallFile {
-                source: c.files.get(idx).and_then(|file| file.source.clone()),
-                dest: PathBuf::from(dest),
-                mode: c.files.get(idx).and_then(|file| file.mode.clone()),
+            .map(|(idx, dest)| {
+                let spec = c.files.get(idx);
+                let kind = spec.map(|file| file.kind).unwrap_or_default();
+                let mut source = spec.and_then(|file| file.source.clone());
+                // A symlink's source is its referent — a layout template
+                // like the dest, not an archive path. Expand it the same
+                // way; an expansion failure leaves the braces in place and
+                // the runner rejects it as UnresolvedTemplate.
+                if kind == crate::manifest::FileKind::Symlink {
+                    source = source.map(|s| {
+                        crate::adapter::expand_layout_placeholders(
+                            &s,
+                            layout,
+                            &[("component", c.name.as_str())],
+                        )
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(s)
+                    });
+                }
+                ResolvedInstallFile {
+                    source,
+                    dest: PathBuf::from(dest),
+                    mode: spec.and_then(|file| file.mode.clone()),
+                    kind,
+                }
             })
             .collect();
         let outcome =
@@ -665,6 +686,7 @@ pub fn execute_enable(
                 .and_then(|a| a.meta_sha256.as_ref())
                 .map(|d| format!("sha256:{d}")),
             distribution_source: c.artifact.as_ref().map(|a| a.url.clone()),
+            install_backend: c.artifact.as_ref().map(|a| a.backend.clone()),
             installed_at: finished_at.clone(),
             last_operation_id: Some(operation_id.clone()),
             managed: true,
@@ -705,6 +727,7 @@ pub fn execute_enable(
         },
         manifest_digest: None,
         distribution_source: None,
+        install_backend: None,
         installed_at: finished_at.clone(),
         last_operation_id: Some(operation_id.clone()),
         managed: true,

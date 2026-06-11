@@ -397,6 +397,65 @@ fn lint_install_files(
                 ));
             }
         }
+
+        if file.kind == crate::manifest::FileKind::Symlink {
+            lint_symlink_entry(capability, name, idx, file, layout, findings);
+        }
+    }
+}
+
+/// Symlink-specific checks: both ends must be declared, and the referent
+/// (`source`) is a layout-template path that must land under an
+/// ANOLISA-owned root — a link may not point outside any more than a
+/// regular file may be written there.
+fn lint_symlink_entry(
+    capability: &str,
+    name: &str,
+    idx: usize,
+    file: &crate::manifest::InstallFileSpec,
+    layout: &FsLayout,
+    findings: &mut Vec<LintFinding>,
+) {
+    if file.dest.is_none() {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_SYMLINK_MISSING_DEST",
+            format!("component '{name}' install.files[{idx}] is a symlink without a dest (link location)"),
+        ));
+    }
+    let Some(referent) = file.source.as_deref() else {
+        findings.push(LintFinding::error(
+            capability,
+            Some(name),
+            "E_SYMLINK_MISSING_SOURCE",
+            format!("component '{name}' install.files[{idx}] is a symlink without a source (link referent)"),
+        ));
+        return;
+    };
+    let rendered = render_install_path(referent, layout);
+    match validate_owned_path(layout, std::path::Path::new(&rendered)) {
+        Ok(()) => {}
+        Err(PathBoundaryError::External { .. }) => {
+            findings.push(LintFinding::error(
+                capability,
+                Some(name),
+                "E_INSTALL_PATH_OUT_OF_BOUNDS",
+                format!(
+                    "component '{name}' symlink referent '{referent}' resolves to '{rendered}' which is not under an ANOLISA-owned root"
+                ),
+            ));
+        }
+        Err(PathBoundaryError::Traversal { .. }) => {
+            findings.push(LintFinding::error(
+                capability,
+                Some(name),
+                "E_INSTALL_PATH_TRAVERSAL",
+                format!(
+                    "component '{name}' symlink referent '{referent}' contains a '.' or '..' segment after layout substitution"
+                ),
+            ));
+        }
     }
 }
 
@@ -913,6 +972,87 @@ mod tests {
         let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
         assert!(codes.contains(&"E_INSTALL_PATH_TRAVERSAL"));
         assert!(has_errors(&findings));
+    }
+
+    #[test]
+    fn symlink_without_source_or_dest_is_an_error() {
+        let cap = cap_with("c", vec!["x".to_string()], "");
+        let comp = comp_with(
+            "x",
+            "1.0.0",
+            vec!["user".to_string()],
+            vec![
+                InstallFileSpec {
+                    kind: FileKind::Symlink,
+                    source: None,
+                    dest: Some("{bindir}/rtk".to_string()),
+                    mode: None,
+                },
+                InstallFileSpec {
+                    kind: FileKind::Symlink,
+                    source: Some("{libexecdir}/tokenless/rtk".to_string()),
+                    dest: None,
+                    mode: None,
+                },
+            ],
+        );
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"E_SYMLINK_MISSING_SOURCE"));
+        assert!(codes.contains(&"E_SYMLINK_MISSING_DEST"));
+        assert!(has_errors(&findings));
+    }
+
+    #[test]
+    fn symlink_referent_outside_owned_root_is_an_error() {
+        let cap = cap_with("c", vec!["x".to_string()], "");
+        let comp = comp_with(
+            "x",
+            "1.0.0",
+            vec!["user".to_string()],
+            vec![InstallFileSpec {
+                kind: FileKind::Symlink,
+                source: Some("/usr/bin/python3".to_string()),
+                dest: Some("{bindir}/rtk".to_string()),
+                mode: None,
+            }],
+        );
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"E_INSTALL_PATH_OUT_OF_BOUNDS"));
+        assert!(has_errors(&findings));
+    }
+
+    #[test]
+    fn symlink_with_owned_referent_passes() {
+        let cap = cap_with("c", vec!["x".to_string()], "");
+        let comp = comp_with(
+            "x",
+            "1.0.0",
+            vec!["user".to_string()],
+            vec![
+                InstallFileSpec {
+                    kind: FileKind::Executable,
+                    source: None,
+                    dest: Some("{libexecdir}/tokenless/rtk".to_string()),
+                    mode: Some("0755".to_string()),
+                },
+                InstallFileSpec {
+                    kind: FileKind::Symlink,
+                    source: Some("{libexecdir}/tokenless/rtk".to_string()),
+                    dest: Some("{bindir}/rtk".to_string()),
+                    mode: None,
+                },
+            ],
+        );
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let findings = lint_capability(&catalog, &empty_index(), &user_layout(), "c");
+        assert!(
+            !has_errors(&findings),
+            "expected no errors, got: {findings:?}"
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ thiserror.workspace = true
 console.workspace = true
 unicode-width.workspace = true
 dirs.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
