@@ -280,7 +280,9 @@ impl<'a> InstallRunner<'a> {
     ///
     /// Fails when the artifact type is unsupported, any destination is
     /// unsafe or already exists, the cache cannot be read, or an archive
-    /// lacks a requested entry.
+    /// lacks a requested entry. If a later write step fails after earlier
+    /// paths were created, the runner best-effort removes the paths it
+    /// created before returning the original error.
     pub fn install_files(
         &self,
         artifact_type: &str,
@@ -312,7 +314,13 @@ impl<'a> InstallRunner<'a> {
             other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
         }?;
         for link in &links {
-            outcome.files.push(create_symlink(link)?);
+            match create_symlink(link) {
+                Ok(installed) => outcome.files.push(installed),
+                Err(err) => {
+                    rollback_installed_files(&outcome.files);
+                    return Err(err);
+                }
+            }
         }
         Ok(outcome)
     }
@@ -432,8 +440,13 @@ impl<'a> InstallRunner<'a> {
 
         let mut out = Vec::with_capacity(expanded.len());
         for (file, bytes) in expanded {
-            let installed = write_dest_atomic(&file.dest, &bytes, file.mode.as_deref())?;
-            out.push(installed);
+            match write_dest_atomic(&file.dest, &bytes, file.mode.as_deref()) {
+                Ok(installed) => out.push(installed),
+                Err(err) => {
+                    rollback_installed_files(&out);
+                    return Err(err);
+                }
+            }
         }
         Ok(InstallOutcome { files: out })
     }
@@ -649,11 +662,20 @@ fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallEr
     })
 }
 
+fn rollback_installed_files(files: &[InstalledFile]) {
+    for file in files.iter().rev() {
+        let _ = fs::remove_file(&file.path);
+    }
+}
+
 fn write_dest_atomic(
     dest: &Path,
     bytes: &[u8],
     mode: Option<&str>,
 ) -> Result<InstalledFile, InstallError> {
+    #[cfg(unix)]
+    let parsed_mode = parse_unix_mode(mode, dest)?;
+
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
@@ -670,13 +692,15 @@ fn write_dest_atomic(
     };
     #[cfg(unix)]
     {
-        let mode = parse_unix_mode(mode, dest)?;
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(mode);
-        fs::set_permissions(&tmp, perms).map_err(|source| InstallError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
+        let perms = std::fs::Permissions::from_mode(parsed_mode);
+        if let Err(source) = fs::set_permissions(&tmp, perms) {
+            let _ = fs::remove_file(&tmp);
+            return Err(InstallError::Io {
+                path: tmp.clone(),
+                source,
+            });
+        }
     }
     fs::rename(&tmp, dest).map_err(|source| {
         let _ = fs::remove_file(&tmp);
@@ -1045,6 +1069,35 @@ mod tests {
     }
 
     #[test]
+    fn invalid_mode_rejected_without_tmp_sibling() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(cache.path(), "tool", b"tool-bytes");
+
+        let dest = layout.bin_dir.join("tool");
+        let err = runner
+            .install_files(
+                "binary",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: None,
+                    dest: dest.clone(),
+                    mode: Some("not-octal".to_string()),
+                    kind: FileKind::Data,
+                }],
+            )
+            .expect_err("must reject invalid mode");
+        match err {
+            InstallError::InvalidMode { path, .. } => assert_eq!(path, dest),
+            other => panic!("expected InvalidMode, got {other:?}"),
+        }
+        assert!(!dest.exists(), "destination must not be created");
+        assert!(!tmp_sibling(&dest).exists(), "tmp sibling must be cleaned");
+    }
+
+    #[test]
     fn tar_gz_install_missing_entry_reports_basename() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
@@ -1326,10 +1379,14 @@ mod tests {
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
 
-        let gz = build_tar_gz(&[("bin/agentsight", b"new-bytes")]);
+        let gz = build_tar_gz(&[
+            ("bin/first", b"first-bytes"),
+            ("bin/agentsight", b"new-bytes"),
+        ]);
         let cached = cache.path().join("payload.tar.gz");
         fs::write(&cached, &gz).unwrap();
 
+        let first_dest = layout.bin_dir.join("first");
         let dest = layout.bin_dir.join("agentsight");
         fs::create_dir_all(dest.parent().unwrap()).unwrap();
         let outside_target = outside.path().join("victim");
@@ -1342,7 +1399,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_target, &tmp_plant).unwrap();
 
         let err = runner
-            .install("tar_gz", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, &[first_dest.clone(), dest.clone()])
             .expect_err("must refuse to write through symlinked tmp");
         match err {
             InstallError::Io { path, .. } => assert_eq!(path, tmp_plant),
@@ -1352,6 +1409,10 @@ mod tests {
         let victim_bytes = fs::read(&outside_target).expect("external file readable");
         assert_eq!(victim_bytes, b"untouched-bytes");
         assert!(!dest.exists());
+        assert!(
+            !first_dest.exists(),
+            "earlier tar_gz writes must roll back when a later write fails"
+        );
     }
 
     #[test]
@@ -1526,8 +1587,9 @@ mod tests {
         // Referent is owned but nothing installs it: the link would dangle.
         let referent = layout.libexec_dir.join("tokenless").join("missing");
         let link_dest = layout.bin_dir.join("missing-link");
+        let regular_dest = layout.bin_dir.join("foo");
         let files = vec![
-            ResolvedInstallFile::dest_only(layout.bin_dir.join("foo")),
+            ResolvedInstallFile::dest_only(regular_dest.clone()),
             symlink_entry(&referent, link_dest.clone()),
         ];
         let err = runner
@@ -1540,6 +1602,10 @@ mod tests {
         assert!(
             fs::symlink_metadata(&link_dest).is_err(),
             "dangling link must not be left behind"
+        );
+        assert!(
+            !regular_dest.exists(),
+            "regular files written before the failed link must be rolled back"
         );
     }
 
