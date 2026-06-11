@@ -404,6 +404,48 @@ impl MemoryMcpServer {
         crate::tools::memory_task::memory_task_close(&self.svc, &id, reason.as_deref())
             .map_err(|e| fmt_err("task_close failed", e))
     }
+
+    #[tool(
+        description = "Export the memory store to AMA (Anolisa Memory Archive) JSON. Optional category and source filters."
+    )]
+    async fn mem_export(
+        &self,
+        #[tool(param)] category: Option<String>,
+        #[tool(param)] source: Option<String>,
+    ) -> ToolResult {
+        let filter = crate::tools::memory_export::ExportFilter {
+            category,
+            source,
+            include_tasks: true,
+        };
+        crate::tools::memory_export::memory_export(&self.svc, &filter)
+            .map_err(|e| fmt_err("export failed", e))
+    }
+
+    #[tool(
+        description = "Import memories from AMA JSON. Strategy: 'skip-existing' (default) or 'overwrite'. Set dry_run=true for preview."
+    )]
+    async fn mem_import(
+        &self,
+        #[tool(param)] json_data: String,
+        #[tool(param)] strategy: Option<String>,
+        #[tool(param)] dry_run: Option<bool>,
+    ) -> ToolResult {
+        let strat = match strategy.as_deref().unwrap_or("skip-existing") {
+            "overwrite" => crate::tools::memory_import::ImportStrategy::Overwrite,
+            "skip-existing" => crate::tools::memory_import::ImportStrategy::SkipExisting,
+            other => {
+                return Err(format!("unknown strategy: {other}"));
+            }
+        };
+        crate::tools::memory_import::memory_import(
+            &self.svc,
+            &json_data,
+            strat,
+            dry_run.unwrap_or(false),
+        )
+        .map_err(|e| fmt_err("import failed", e))
+    }
 }
 
 rmcp::tool_box!(MemoryMcpServer {
@@ -432,6 +474,8 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_task_resume,
     memory_task_list,
     memory_task_close,
+    mem_export,
+    mem_import,
 } memory_tool_box);
 
 impl ServerHandler for MemoryMcpServer {
