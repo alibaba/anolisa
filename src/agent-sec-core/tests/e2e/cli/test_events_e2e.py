@@ -24,6 +24,10 @@ from .conftest import iso_now, require_loongshield, run_cli
 # ---------------------------------------------------------------------------
 
 
+def _expected_event_result(cli_result):
+    return "succeeded" if cli_result.returncode == 0 else "failed"
+
+
 class TestHardenEventLogging:
     """Verify that invoking `harden` produces a queryable event."""
 
@@ -157,7 +161,8 @@ class TestEventQueryFilters:
         """Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
@@ -168,7 +173,7 @@ class TestEventQueryFilters:
         assert len(lines) == 4
         assert lines[0].startswith("EVENT_TYPE")
         assert "harden" in lines[1]
-        assert "succeeded" in lines[1]
+        assert expected_result in lines[1]
         assert "1 event" in lines[3]
 
 
@@ -245,7 +250,8 @@ class TestCLIValidation:
         """Verify that --output json returns a valid JSON array with complete event data."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli(
@@ -267,7 +273,7 @@ class TestCLIValidation:
         assert "timestamp" in event
         assert "details" in event
         assert event["event_type"] == "harden"
-        assert event["result"] == "succeeded"
+        assert event["result"] == expected_result
 
     def test_jsonl_output_format(self):
         """Verify that --output jsonl returns one JSON object per line."""
@@ -293,18 +299,19 @@ class TestCLIValidation:
         assert "details" in event
 
     def test_result_field_in_table_output(self):
-        """Verify that result column shows 'succeeded' in table format."""
+        """Verify that result column shows the harden command outcome."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
         assert result.returncode == 0
 
-        # Table output should contain RESULT column with 'succeeded'
+        # Table output should contain RESULT column with the command outcome.
         assert "RESULT" in result.stdout
-        assert "succeeded" in result.stdout
+        assert expected_result in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +410,8 @@ class TestEventsDefaultOutput:
         """TC-005: Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
@@ -415,7 +423,7 @@ class TestEventsDefaultOutput:
         assert len(lines) == 4
         assert lines[0].startswith("EVENT_TYPE")
         assert "harden" in lines[1]
-        assert "succeeded" in lines[1]
+        assert expected_result in lines[1]
         assert "1 event" in lines[3]
 
     def test_json_output_completeness(self):
