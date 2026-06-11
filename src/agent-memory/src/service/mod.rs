@@ -180,8 +180,13 @@ impl MemoryService {
         crate::tools::memory_search(self, query, top_k, mode, category, agent_scope)
     }
 
-    pub fn memory_observe(&self, content: &str, hint: Option<&str>) -> Result<String> {
-        crate::tools::memory_observe(self, content, hint)
+    pub fn memory_observe(
+        &self,
+        content: &str,
+        hint: Option<&str>,
+        memory_type: Option<&str>,
+    ) -> Result<String> {
+        crate::tools::memory_observe(self, content, hint, memory_type)
     }
 
     pub fn memory_get_context(&self, max_tokens: usize) -> Result<String> {

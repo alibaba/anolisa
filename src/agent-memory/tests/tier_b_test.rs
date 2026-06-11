@@ -157,7 +157,7 @@ fn search_returns_chinese_hits() {
 fn observe_creates_under_observed() {
     let (_tmp, svc) = setup();
     let path = svc
-        .memory_observe("an interesting fact", Some("learning"))
+        .memory_observe("an interesting fact", Some("learning"), None)
         .unwrap();
 
     assert!(path.starts_with("notes/observed/"));
@@ -172,7 +172,7 @@ fn observe_creates_under_observed() {
 fn observe_then_search_finds_it() {
     let (tmp, svc) = setup();
     let obs_path = svc
-        .memory_observe("the elephant likes peanuts", None)
+        .memory_observe("the elephant likes peanuts", None, None)
         .unwrap();
 
     // README + observed file = at least 2

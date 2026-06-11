@@ -238,15 +238,16 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Tier B: record an observation. The OS picks notes/observed/<ulid>.md and writes a small frontmatter + body. Returns the relative path so you can later mem_read or mem_edit it."
+        description = "Tier B: record an observation with optional type classification. Types: 'user' (preferences/profile), 'feedback' (behavior corrections), 'project' (decisions/status), 'reference' (external resource pointers). Only store non-derivable information — code patterns and file structure can be retrieved in real-time. Returns the relative path."
     )]
     async fn memory_observe(
         &self,
         #[tool(param)] content: String,
         #[tool(param)] hint: Option<String>,
+        #[tool(param)] r#type: Option<String>,
     ) -> ToolResult {
         self.svc
-            .memory_observe(&content, hint.as_deref())
+            .memory_observe(&content, hint.as_deref(), r#type.as_deref())
             .map(|path| format!("observed at {path}"))
             .map_err(|e| fmt_err("observe failed", e))
     }
