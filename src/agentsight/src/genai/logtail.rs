@@ -25,12 +25,21 @@ static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLo
 
 /// 设置动态 Logtail 输出路径（线程安全）。
 ///
-/// 由 config watcher 在检测到 `runtime.sls_logtail_path` 变更时调用。
-/// 设置后，`logtail_path()` 将在 env 未设置时返回此路径。
+/// 由 config watcher 在检测到 `runtime.sls_logtail_path` 变更时调用：
+/// * 非空字符串 → 设置/更新动态路径，启用 SLS 上传；
+/// * 空字符串    → 清空动态路径，已激活的 `LogtailExporter`（`dynamic=true`）
+///   下次 `export()` 时检测到 `logtail_path() == None` 直接跳过，实现可逆暂停。
 pub fn set_dynamic_logtail_path(path: &str) {
     if let Ok(mut guard) = DYNAMIC_LOGTAIL_PATH.write() {
-        *guard = Some(path.to_string());
-        log::info!("Dynamic logtail path set: {}", path);
+        if path.is_empty() {
+            if guard.is_some() {
+                log::info!("Dynamic logtail path cleared (SLS uploads paused)");
+            }
+            *guard = None;
+        } else {
+            *guard = Some(path.to_string());
+            log::info!("Dynamic logtail path set: {}", path);
+        }
     }
 }
 
@@ -72,6 +81,11 @@ pub struct LogtailExporter {
     /// `gen_ai.input.messages` 与 `gen_ai.output.messages` 对话内容字段被丢弃；
     /// token 数量、模型、提供商等元数据仍照常上传。
     trace_enabled: bool,
+    /// 是否使用动态路径（来自 `runtime.sls_logtail_path` 配置）。
+    /// 为 `true` 时每次 `export()` 调用 `logtail_path()` 取最新路径，
+    /// 路径为空（被清空）则丢弃本批次，实现可逆的"暂停 / 恢复"语义；
+    /// 为 `false` 时（环境变量启动模式）始终写入构造时锁定的 `path`。
+    dynamic: bool,
 }
 
 impl LogtailExporter {
@@ -99,7 +113,7 @@ impl LogtailExporter {
         if !trace_enabled {
             log::info!("Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
         }
-        Some(LogtailExporter { path, encryptor, trace_enabled })
+        Some(LogtailExporter { path, encryptor, trace_enabled, dynamic: false })
     }
 
     /// 从显式路径创建 Logtail 导出器（用于运行时动态激活）
@@ -117,7 +131,7 @@ impl LogtailExporter {
         if !trace_enabled {
             log::info!("Logtail exporter (dynamic): traceEnabled=false, conversation content fields will NOT be uploaded");
         }
-        LogtailExporter { path, encryptor, trace_enabled }
+        LogtailExporter { path, encryptor, trace_enabled, dynamic: true }
     }
 
     /// 返回导出文件路径
@@ -126,7 +140,26 @@ impl LogtailExporter {
     }
 
     /// 将扁平化记录批量写入文件（append 模式）
+    ///
+    /// `dynamic=true` 时每次重新调用 `logtail_path()` 取最新路径；
+    /// 若动态路径已被 `set_dynamic_logtail_path("")` 清空（暂停语义），
+    /// 直接丢弃本批次，不报错。
     fn write_batch(&self, events: &[GenAISemanticEvent]) {
+        let target_path: PathBuf = if self.dynamic {
+            match logtail_path() {
+                Some(p) if !p.is_empty() => {
+                    let p = PathBuf::from(p);
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    p
+                }
+                _ => return, // 动态路径已清空 → 暂停状态，丢弃本批次
+            }
+        } else {
+            self.path.clone()
+        };
+
         let records = events_to_flat_records(events, self.encryptor.as_ref(), self.trace_enabled);
         if records.is_empty() {
             return;
@@ -135,11 +168,11 @@ impl LogtailExporter {
         let file = match OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)
+            .open(&target_path)
         {
             Ok(f) => f,
             Err(e) => {
-                log::warn!("Failed to open logtail file {:?}: {}", self.path, e);
+                log::warn!("Failed to open logtail file {:?}: {}", target_path, e);
                 return;
             }
         };

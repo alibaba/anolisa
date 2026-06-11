@@ -775,12 +775,19 @@ impl AgentsightConfig {
     }
 }
 
-/// Parse `runtime.sls_logtail_path` from a JSON config string.
+/// Parse `runtime.sls_logtail_path` from a JSON config string (tri-state).
 ///
-/// Returns `Some(path)` if the runtime section has a non-empty `sls_logtail_path`;
-/// returns `None` otherwise or on parse failure. Used by the config watcher to
-/// detect runtime changes without a full config reload.
-pub fn parse_runtime_sls_path(json: &str) -> Option<String> {
+/// Returns:
+/// * `None`               — field is absent or JSON parse failed (no signal).
+/// * `Some(None)`         — field is present but empty / whitespace-only
+///                          → **deactivation** signal (pause SLS uploads).
+/// * `Some(Some(path))`   — field is present and non-empty (after trim)
+///                          → **activation / re-activation** signal.
+///
+/// Used by the config watcher to react to runtime hot-reload changes
+/// (delete `/etc/anolisa/enable_token_collector` → empty string → pause;
+/// re-create the trigger with a non-empty `SLS_LOG_PATH` → resume).
+pub fn parse_runtime_sls_path(json: &str) -> Option<Option<String>> {
     #[derive(serde::Deserialize)]
     struct Partial {
         #[serde(default)]
@@ -791,9 +798,9 @@ pub fn parse_runtime_sls_path(json: &str) -> Option<String> {
     let path = rt.sls_logtail_path?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        None
+        Some(None)
     } else {
-        Some(trimmed.to_string())
+        Some(Some(trimmed.to_string()))
     }
 }
 
@@ -1158,25 +1165,28 @@ mod tests {
         let json = r#"{"runtime": {"sls_logtail_path": "/var/log/sls/agentsight.log"}}"#;
         assert_eq!(
             parse_runtime_sls_path(json),
-            Some("/var/log/sls/agentsight.log".to_string())
+            Some(Some("/var/log/sls/agentsight.log".to_string()))
         );
     }
 
     #[test]
     fn test_parse_runtime_sls_path_empty() {
         let json = r#"{"runtime": {"sls_logtail_path": ""}}"#;
-        assert_eq!(parse_runtime_sls_path(json), None);
+        // Empty string is now a deactivation signal (Some(None)), not absence (None).
+        assert_eq!(parse_runtime_sls_path(json), Some(None));
     }
 
     #[test]
     fn test_parse_runtime_sls_path_whitespace_only() {
         let json = r#"{"runtime": {"sls_logtail_path": "   "}}"#;
-        assert_eq!(parse_runtime_sls_path(json), None);
+        // Whitespace-only is treated as empty → deactivation signal.
+        assert_eq!(parse_runtime_sls_path(json), Some(None));
     }
 
     #[test]
     fn test_parse_runtime_sls_path_missing_section() {
         let json = r#"{"cmdline": {"allow": []}}"#;
+        // Field absent → no signal at all.
         assert_eq!(parse_runtime_sls_path(json), None);
     }
 

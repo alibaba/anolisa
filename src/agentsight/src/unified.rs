@@ -873,10 +873,16 @@ impl AgentSight {
 
     /// Start a background thread that watches the config file for changes.
     ///
-    /// When `runtime.sls_logtail_path` becomes non-empty and SLS has not yet been
-    /// activated, this thread validates uid, sets the dynamic logtail path, creates
-    /// a LogtailExporter, and deposits it into `pending_logtail` for the main loop
-    /// to pick up.
+    /// React to `runtime.sls_logtail_path` (tri-state, see
+    /// [`crate::config::parse_runtime_sls_path`]):
+    /// * `Some(Some(path))` — non-empty path: validate uid, set dynamic logtail
+    ///   path; on first activation create a `LogtailExporter` and deposit it
+    ///   into `pending_logtail`; on re-activation just swap the dynamic path
+    ///   (the already-registered exporter picks it up at next `export()`).
+    /// * `Some(None)` — empty path: clear the dynamic path so the registered
+    ///   `LogtailExporter` (which is `dynamic=true`) skips its next `export()`
+    ///   batch, effectively pausing SLS uploads. Reversible.
+    /// * `None` — field missing / parse error: ignore.
     fn start_config_watcher(
         config_path: PathBuf,
         sls_activated: Arc<AtomicBool>,
@@ -936,11 +942,6 @@ impl AgentSight {
                         continue;
                     }
 
-                    // Already activated? Skip.
-                    if sls_activated.load(Ordering::SeqCst) {
-                        continue;
-                    }
-
                     // Re-read config file
                     let content = match std::fs::read_to_string(&watch_path) {
                         Ok(c) => c,
@@ -950,49 +951,67 @@ impl AgentSight {
                         }
                     };
 
-                    // Parse runtime.sls_logtail_path
-                    let new_path = match crate::config::parse_runtime_sls_path(&content) {
-                        Some(p) => p,
+                    // Tri-state parse:
+                    //   None              — field missing/parse error → no-op
+                    //   Some(None)        — empty string → deactivation signal
+                    //   Some(Some(path))  — non-empty   → activation/re-activation
+                    match crate::config::parse_runtime_sls_path(&content) {
                         None => continue,
-                    };
+                        Some(None) => {
+                            // Pause SLS uploads. Idempotent: only act if currently active.
+                            if sls_activated.swap(false, Ordering::SeqCst) {
+                                crate::genai::logtail::set_dynamic_logtail_path("");
+                                log::info!(
+                                    "Config watcher: SLS Logtail deactivated \
+                                     (runtime.sls_logtail_path cleared)"
+                                );
+                            }
+                        }
+                        Some(Some(new_path)) => {
+                            log::info!(
+                                "Config watcher: detected runtime.sls_logtail_path = {:?}",
+                                new_path
+                            );
 
-                    log::info!(
-                        "Config watcher: detected runtime.sls_logtail_path = {:?}",
-                        new_path
-                    );
+                            // Validate uid (strong check: abort process on failure)
+                            let uid = crate::genai::instance_id::get_owner_account_id();
+                            if uid.is_empty() {
+                                log::error!(
+                                    "Config watcher: SLS activation requested but uid fetch failed. \
+                                     Terminating process."
+                                );
+                                std::process::exit(1);
+                            }
 
-                    // Validate uid (strong check: abort process on failure)
-                    let uid = crate::genai::instance_id::get_owner_account_id();
-                    if uid.is_empty() {
-                        log::error!(
-                            "Config watcher: SLS activation requested but uid fetch failed. \
-                             Terminating process."
-                        );
-                        std::process::exit(1);
+                            // Update dynamic path; the already-registered exporter
+                            // (if any) will pick this up on the next export() call.
+                            crate::genai::logtail::set_dynamic_logtail_path(&new_path);
+
+                            // First-time activation: build an exporter and post it
+                            // to the mailbox for the main loop to register.
+                            if !sls_activated.swap(true, Ordering::SeqCst) {
+                                let exporter = LogtailExporter::new_with_path(
+                                    &new_path,
+                                    encryption_pem.as_deref(),
+                                    trace_enabled,
+                                );
+                                log::info!(
+                                    "Config watcher: LogtailExporter created (path={}, uid={})",
+                                    new_path,
+                                    uid
+                                );
+                                if let Ok(mut guard) = pending_logtail.lock() {
+                                    *guard = Some(Box::new(exporter));
+                                }
+                                log::info!("Config watcher: SLS Logtail activated dynamically");
+                            } else {
+                                log::info!(
+                                    "Config watcher: SLS Logtail re-activated with path={}",
+                                    new_path
+                                );
+                            }
+                        }
                     }
-
-                    // Set dynamic path so logtail_path() returns it
-                    crate::genai::logtail::set_dynamic_logtail_path(&new_path);
-
-                    // Create exporter and deposit into mailbox
-                    let exporter = LogtailExporter::new_with_path(
-                        &new_path,
-                        encryption_pem.as_deref(),
-                        trace_enabled,
-                    );
-                    log::info!(
-                        "Config watcher: LogtailExporter created (path={}, uid={})",
-                        new_path,
-                        uid
-                    );
-
-                    if let Ok(mut guard) = pending_logtail.lock() {
-                        *guard = Some(Box::new(exporter));
-                    }
-
-                    // Mark activated (irreversible)
-                    sls_activated.store(true, Ordering::SeqCst);
-                    log::info!("Config watcher: SLS Logtail activated dynamically");
                 }
 
                 log::info!("Config watcher exiting");
