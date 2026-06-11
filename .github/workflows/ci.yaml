@@ -52,7 +52,7 @@ jobs:
   # =========================================================================
   detect-changes:
     name: Detect Changes
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     outputs:
       copilot_shell: ${{ steps.changes.outputs.copilot_shell }}
       agent_sec_core: ${{ steps.changes.outputs.agent_sec_core }}
@@ -161,7 +161,7 @@ jobs:
     name: Build copilot-shell
     needs: detect-changes
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -205,7 +205,7 @@ jobs:
     name: Test copilot-shell/cli
     needs: [detect-changes, build-copilot-shell]
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -235,7 +235,7 @@ jobs:
     name: Test copilot-shell/core
     needs: [detect-changes, build-copilot-shell]
     if: needs.detect-changes.outputs.copilot_shell == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -268,7 +268,7 @@ jobs:
     name: Test agent-sec-core
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -542,7 +542,7 @@ jobs:
     name: Test agentsight
     needs: detect-changes
     if: needs.detect-changes.outputs.agentsight == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -573,7 +573,7 @@ jobs:
     name: Test tokenless
     needs: detect-changes
     if: needs.detect-changes.outputs.tokenless == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -608,7 +608,7 @@ jobs:
     name: Test ws-ckpt
     needs: detect-changes
     if: needs.detect-changes.outputs.ws_ckpt == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -647,7 +647,7 @@ jobs:
     name: Test agent-memory
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_memory == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
@@ -687,7 +687,7 @@ jobs:
     name: Test anolisa
     needs: detect-changes
     if: needs.detect-changes.outputs.anolisa == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 

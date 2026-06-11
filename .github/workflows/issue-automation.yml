@@ -32,7 +32,7 @@ permissions:
 jobs:
   triage:
     name: 🏷️ Auto Triage
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, ubuntu-any]
     env:
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}

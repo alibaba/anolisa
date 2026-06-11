@@ -16,7 +16,7 @@ permissions:
 jobs:
   build-rpm:
     name: Build agent-sec-core RPM
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:

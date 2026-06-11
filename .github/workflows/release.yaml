@@ -22,7 +22,7 @@ jobs:
   # =========================================================================
   package:
     name: Package ${{ github.ref_name }}
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     outputs:
       component: ${{ steps.parse.outputs.component }}
       version: ${{ steps.parse.outputs.version }}
@@ -94,7 +94,7 @@ jobs:
     name: Publish ${{ needs.package.outputs.tag }}
     needs: package
     environment: release
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
         with:

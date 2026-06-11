@@ -24,7 +24,7 @@ jobs:
   # ===========================================================================
   versions:
     name: Calculate Versions
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     outputs:
       cosh-version: ${{ steps.cosh.outputs.version }}
       skill-version: ${{ steps.skill.outputs.version }}
@@ -129,7 +129,7 @@ jobs:
   # ===========================================================================
   package-cosh:
     name: "Package: copilot-shell"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +144,7 @@ jobs:
 
   package-skill:
     name: "Package: os-skills"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -161,7 +161,7 @@ jobs:
 
   package-tokenless:
     name: "Package: tokenless"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -176,7 +176,7 @@ jobs:
 
   package-ws-ckpt:
     name: "Package: ws-ckpt"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -199,7 +199,7 @@ jobs:
 
   package-agent-memory:
     name: "Package: agent-memory"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -223,7 +223,7 @@ jobs:
   # TODO: uncomment when agentsight is integrated
   # package-sight:
   #   name: "Package: agentsight"
-  #   runs-on: ubuntu-22.04
+  #   runs-on: [self-hosted, ubuntu]
   #   needs: versions
   #   steps:
   #     - uses: actions/checkout@v4
@@ -238,7 +238,7 @@ jobs:
 
   package-sec-core:
     name: "Package: agent-sec-core"
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs: versions
     if: needs.versions.outputs.sec-core-ref != ''
     steps:
@@ -370,7 +370,7 @@ jobs:
   # ===========================================================================
   docker-build-push:
     name: Build & Push Docker Image
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     needs:
       - versions
       - rpm-cosh

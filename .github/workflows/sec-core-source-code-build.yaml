@@ -24,10 +24,10 @@ jobs:
             runner: ubuntu-22.04
             container: ''
           - name: Alinux4
-            runner: ubuntu-22.04
+            runner: ubuntu
             container: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     name: Source Build (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: [self-hosted, Linux, X64, "${{ matrix.runner }}"]
     container: ${{ matrix.container || '' }}
     steps:
       - name: Configure mirrors and install base tools (Alinux4)

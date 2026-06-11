@@ -33,7 +33,7 @@ on:
 jobs:
   build-rpm:
     name: "Build"
-    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    runs-on: [self-hosted, Linux, "${{ inputs.arch == 'arm64' && 'ARM64' || 'X64' }}", "${{ inputs.arch == 'arm64' && 'ubuntu-any' || 'ubuntu' }}"]
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:

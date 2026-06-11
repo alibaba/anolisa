@@ -37,7 +37,7 @@ jobs:
   # =========================================================================
   package-preview:
     name: Packaging Preview ${{ inputs.component }}-${{ inputs.version }}
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
 
