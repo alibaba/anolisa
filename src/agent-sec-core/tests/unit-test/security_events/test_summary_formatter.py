@@ -242,6 +242,47 @@ class TestHardeningSummary:
         # Latest harden failed -> needs_attention (not critical)
         assert "Needs attention" in output
 
+    def test_failed_scan_with_stats_still_shows_compliance(self):
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {
+                        "args": ["--scan", "--config", "agentos_baseline", "--verbose"]
+                    },
+                    "result": {
+                        "mode": "scan",
+                        "config": "agentos_baseline",
+                        "passed": 20,
+                        "failed": 3,
+                        "total": 23,
+                        "failures": [
+                            {
+                                "rule_id": "SEC-001",
+                                "status": "FAIL",
+                                "message": "issue",
+                            }
+                        ],
+                        "fixed": 0,
+                        "manual": 0,
+                        "dry_run_pending": 0,
+                        "fixed_items": [],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            )
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert "Scans performed:  1 (succeeded: 0, failed: 1)" in output
+        assert "Latest scan result:" in output
+        assert "Compliance: 20/23 rules passed (87.0%)" in output
+        assert "Latest scan failed" not in output
+        assert "agent-sec-cli harden --reinforce" in output
+
 
 # ---------------------------------------------------------------------------
 # Test: asset verify summary
@@ -912,6 +953,38 @@ class TestSuggestionsEdgeCases:
             ),
         ]
         output = format_summary(events, "last 24 hours")
+        assert "agent-sec-cli harden --reinforce" not in output
+
+    def test_no_reinforce_suggestion_when_failed_harden_has_parser_failure(self):
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {"args": ["--scan"]},
+                    "result": {
+                        "mode": "scan",
+                        "passed": 22,
+                        "failed": 1,
+                        "total": 23,
+                        "failures": [
+                            {
+                                "rule_id": "",
+                                "status": "UNKNOWN",
+                                "message": "Summary reports non-pass rules but details failed.",
+                            }
+                        ],
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            )
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert "Compliance: 22/23 rules passed" in output
+        assert "Latest scan failed" not in output
         assert "agent-sec-cli harden --reinforce" not in output
 
     def test_no_suggestion_when_no_hardening_events(self):
