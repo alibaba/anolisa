@@ -60,6 +60,7 @@ def post_action(
         event = SecurityEvent(
             event_type=ctx.action,
             category=_category_for(ctx.action),
+            result="succeeded" if result.success else "failed",
             details=details,
             trace_id=ctx.trace_id,
             session_id=ctx.session_id,

@@ -31,11 +31,16 @@ logger = logging.getLogger(__name__)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _RULE_STATUS_RE = re.compile(
-    r"\[(?P<rule_id>[\w.]+)\]\s+"
-    r"(?P<status>FAIL|FAILED|FAILED-TO-FIX|ERROR|ENFORCE-ERROR|DRY-RUN|MANUAL|SKIP):\s*"
+    r"\[(?P<rule_id>[^\]\s]+)\]\s+"
+    r"(?P<status>FAIL|FAILED|FIXED|FAILED-TO-FIX|ERROR|ENFORCE-ERROR|DRY-RUN|MANUAL|SKIP):\s*"
     r"(?P<message>.+?)\s*$"
 )
-_ENGINE_ERROR_RE = re.compile(r"Engine\s+Error:\s*(?P<message>.+?)\s*$")
+_VERBOSE_RULE_STATUS_RE = re.compile(
+    r"^\s*(?P<status>PASS|FAIL)\s+\[(?P<rule_id>[^\]\s]+)\]\s+" r"(?P<message>.+?)\s*$"
+)
+_ENGINE_ERROR_RE = re.compile(
+    r"(?:\[(?P<rule_id>[^\]\s]+)\]\s+)?Engine\s+Error:\s*" r"(?P<message>.+?)\s*$"
+)
 
 
 def _strip_ansi(text: str) -> str:
@@ -43,17 +48,38 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _parse_rule_status_line(line: str) -> dict[str, str] | None:
+    """Parse supported loongshield per-rule status line formats."""
+    match = _RULE_STATUS_RE.search(line)
+    if match:
+        return {
+            "rule_id": match.group("rule_id"),
+            "status": match.group("status"),
+            "message": match.group("message").strip(),
+        }
+
+    match = _VERBOSE_RULE_STATUS_RE.search(line)
+    if not match or match.group("status") == "PASS":
+        return None
+
+    return {
+        "rule_id": match.group("rule_id"),
+        "status": match.group("status"),
+        "message": match.group("message").strip(),
+    }
+
+
 class HardeningBackend(BaseBackend):
     """Execute `loongshield seharden` and keep structured hardening results."""
 
     _SUMMARY_RE = re.compile(
-        r"SEHarden\s+Finished\.\s*"
+        r"(?:SEHarden\s+Finished\.|Summary:)\s*"
         r"(?P<passed>\d+)\s+passed,\s*"
         r"(?P<fixed>\d+)\s+fixed,\s*"
         r"(?P<failed>\d+)\s+failed,\s*"
         r"(?P<manual>\d+)\s+manual,\s*"
         r"(?P<dry_run_pending>\d+)\s+dry-run-pending\s*/\s*"
-        r"(?P<total>\d+)\s+total\."
+        r"(?P<total>\d+)\s+total\.?"
     )
 
     def execute(
@@ -255,36 +281,39 @@ class HardeningBackend(BaseBackend):
 
         entries: list[dict[str, str]] = []
         for line in clean_output.splitlines():
-            match = _RULE_STATUS_RE.search(line)
+            match = _parse_rule_status_line(line)
             if match:
-                entries.append(
-                    {
-                        "rule_id": match.group("rule_id"),
-                        "status": match.group("status"),
-                        "message": match.group("message").strip(),
-                    }
-                )
+                entries.append(match)
                 continue
 
             engine_match = _ENGINE_ERROR_RE.search(line)
             if engine_match:
                 entries.append(
                     {
-                        "rule_id": "",
+                        "rule_id": engine_match.group("rule_id") or "",
                         "status": "Engine Error",
                         "message": engine_match.group("message").strip(),
                     }
                 )
 
         mode = data.get("mode")
-        fixed_statuses = frozenset({"FAIL", "FAILED"})
+        fixed_statuses = frozenset({"FIXED"})
+        legacy_fixed_statuses = frozenset({"FAIL", "FAILED"})
+        all_fixed_statuses = fixed_statuses | legacy_fixed_statuses
         if mode == "reinforce":
             data["failures"] = [
-                entry for entry in entries if entry["status"] not in fixed_statuses
+                entry for entry in entries if entry["status"] not in all_fixed_statuses
             ]
-            data["fixed_items"] = [
+            fixed_items = [
                 entry for entry in entries if entry["status"] in fixed_statuses
             ]
+            if not fixed_items:
+                fixed_items = [
+                    entry
+                    for entry in entries
+                    if entry["status"] in legacy_fixed_statuses
+                ]
+            data["fixed_items"] = fixed_items
         else:
             data["failures"] = entries
 
