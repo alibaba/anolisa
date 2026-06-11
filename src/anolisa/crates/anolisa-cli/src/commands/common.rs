@@ -6,8 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
 use anolisa_core::{
     Catalog, CatalogLayers, DistributionIndex, FetchFailure, HttpFetch, InstalledState,
     ObjectStatus, UreqFetch,
@@ -16,6 +14,7 @@ use anolisa_platform::fs_layout::FsLayout;
 
 use crate::context::{CliContext, InstallMode};
 use crate::packaged;
+use crate::repo_config::{HostVars, RepoConfig, raw_relative_root};
 use crate::response::CliError;
 
 /// Subdirectory under `datadir` and `etc_dir` where capability/component
@@ -169,24 +168,14 @@ fn distribution_index_path(layout: &FsLayout) -> Option<PathBuf> {
 
 // ── Component catalog URL resolution ────────────────────────────────
 
-#[derive(Debug, Default, Deserialize)]
-struct ConfigFileForCatalog {
-    catalog: Option<CatalogTableRaw>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CatalogTableRaw {
-    url: Option<String>,
-}
-
 /// Resolve the component catalog URL.
 ///
 /// Resolution order (first non-empty wins):
 ///   1. `$ANOLISA_CATALOG_URL` env var
-///   2. `[catalog] url` in `etc_dir/config.toml`
+///   2. `[backends.raw].base_url` in `repo.toml`, plus `/catalog.json`
 ///
-/// Returns `Ok(None)` when neither source provides a URL. A present but
-/// malformed config file is still an error so operators can fix it.
+/// `repo.toml` follows its own discovery chain, including the embedded
+/// default, so upgraded hosts do not need a pre-existing local config file.
 pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<Option<String>, CliError> {
     if let Ok(url) = std::env::var("ANOLISA_CATALOG_URL") {
         let trimmed = url.trim();
@@ -196,31 +185,32 @@ pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<Option<Str
     }
 
     let layout = resolve_layout(ctx);
-    let config_path = layout.etc_dir.join("config.toml");
-    match std::fs::read_to_string(&config_path) {
-        Ok(content) => {
-            let parsed: ConfigFileForCatalog =
-                toml::from_str(&content).map_err(|e| CliError::InvalidArgument {
-                    command: command.to_string(),
-                    reason: format!("invalid config at {}: {e}", config_path.display()),
-                })?;
-            if let Some(url) = parsed.catalog.and_then(|c| c.url) {
-                let trimmed = url.trim();
-                if !trimmed.is_empty() {
-                    return Ok(Some(trimmed.to_string()));
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(CliError::Runtime {
+    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!("failed to resolve component catalog from repo.toml: {err}"),
+    })?;
+    let (backend_name, backend) =
+        repo_config
+            .select_backend(Some("raw"))
+            .map_err(|err| CliError::InvalidArgument {
                 command: command.to_string(),
-                reason: format!("failed to read config at {}: {e}", config_path.display()),
-            });
-        }
-    }
-
-    Ok(None)
+                reason: format!("failed to resolve component catalog from repo.toml: {err}"),
+            })?;
+    let env = anolisa_env::EnvService::detect();
+    let host = HostVars {
+        os: env.os,
+        arch: env.arch,
+    };
+    let base_url = repo_config
+        .resolved_base_url(backend_name, backend, &host)
+        .map_err(|err| CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!("failed to resolve component catalog from repo.toml: {err}"),
+        })?;
+    Ok(Some(format!(
+        "{}/catalog.json",
+        raw_relative_root(&base_url)
+    )))
 }
 
 /// Fetch raw bytes from a catalog URL.
@@ -274,6 +264,7 @@ pub(crate) fn status_is_enabled(status_label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     /// `object_status_str` must cover every variant of `ObjectStatus` and
     /// produce the exact wire vocabulary the spec promises. If a new variant
     /// is added, this test forces us to extend the mapping.

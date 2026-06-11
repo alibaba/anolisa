@@ -115,9 +115,9 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 }
 
 fn render_missing_catalog(ctx: &CliContext) -> Result<(), CliError> {
-    let config_path = common::resolve_layout(ctx).etc_dir.join("config.toml");
+    let config_path = common::resolve_layout(ctx).etc_dir.join("repo.toml");
     let warning = format!(
-        "component catalog is not configured; set ANOLISA_CATALOG_URL or add [catalog].url to {}",
+        "component catalog is not configured; set ANOLISA_CATALOG_URL or configure [backends.raw].base_url in {}",
         config_path.display()
     );
 
@@ -146,7 +146,7 @@ fn render_missing_catalog(ctx: &CliContext) -> Result<(), CliError> {
         println!("  {}", color.label("config:"));
         println!("    {}", config_path.display());
         println!("  {}", color.label("hint:"));
-        println!("    set ANOLISA_CATALOG_URL or add [catalog].url to config.toml");
+        println!("    set ANOLISA_CATALOG_URL or configure [backends.raw].base_url in repo.toml");
     }
     Ok(())
 }
