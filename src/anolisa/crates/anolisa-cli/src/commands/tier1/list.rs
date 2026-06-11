@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
 use crate::context::CliContext;
-use crate::response::{CliError, render_json};
+use crate::response::{CliError, CliResponse, SCHEMA_VERSION, render_json};
 
 const COMMAND: &str = "list";
 
@@ -97,7 +97,9 @@ struct ListPayload {
 // ── Handler ────────────────────────────────────────────────────────
 
 pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let url = common::resolve_catalog_url(ctx, COMMAND)?;
+    let Some(url) = common::resolve_catalog_url(ctx, COMMAND)? else {
+        return render_missing_catalog(ctx);
+    };
     let bytes = common::fetch_catalog_bytes(&url, COMMAND)?;
     let catalog = parse_catalog(&bytes)?;
     let rows = build_rows(&catalog, &args)?;
@@ -108,6 +110,43 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     if !ctx.quiet {
         render_human(&rows, ctx.no_color);
+    }
+    Ok(())
+}
+
+fn render_missing_catalog(ctx: &CliContext) -> Result<(), CliError> {
+    let config_path = common::resolve_layout(ctx).etc_dir.join("config.toml");
+    let warning = format!(
+        "component catalog is not configured; set ANOLISA_CATALOG_URL or add [catalog].url to {}",
+        config_path.display()
+    );
+
+    if ctx.json {
+        let response = CliResponse {
+            ok: true,
+            schema_version: SCHEMA_VERSION,
+            command: COMMAND.to_string(),
+            data: Some(ListPayload {
+                components: Vec::new(),
+            }),
+            warnings: vec![warning],
+            error: None,
+        };
+        let s = serde_json::to_string_pretty(&response).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to serialize JSON response: {err}"),
+        })?;
+        println!("{s}");
+        return Ok(());
+    }
+
+    if !ctx.quiet {
+        let color = Palette::new(ctx.no_color);
+        println!("{}", color.muted("no component catalog configured"));
+        println!("  {}", color.label("config:"));
+        println!("    {}", config_path.display());
+        println!("  {}", color.label("hint:"));
+        println!("    set ANOLISA_CATALOG_URL or add [catalog].url to config.toml");
     }
     Ok(())
 }

@@ -185,12 +185,13 @@ struct CatalogTableRaw {
 ///   1. `$ANOLISA_CATALOG_URL` env var
 ///   2. `[catalog] url` in `etc_dir/config.toml`
 ///
-/// Returns `CliError::InvalidArgument` when neither source provides a URL.
-pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<String, CliError> {
+/// Returns `Ok(None)` when neither source provides a URL. A present but
+/// malformed config file is still an error so operators can fix it.
+pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<Option<String>, CliError> {
     if let Ok(url) = std::env::var("ANOLISA_CATALOG_URL") {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
+            return Ok(Some(trimmed.to_string()));
         }
     }
 
@@ -206,7 +207,7 @@ pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<String, Cl
             if let Some(url) = parsed.catalog.and_then(|c| c.url) {
                 let trimmed = url.trim();
                 if !trimmed.is_empty() {
-                    return Ok(trimmed.to_string());
+                    return Ok(Some(trimmed.to_string()));
                 }
             }
         }
@@ -219,13 +220,7 @@ pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<String, Cl
         }
     }
 
-    Err(CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!(
-            "catalog url is not configured; set ANOLISA_CATALOG_URL or [catalog].url in {}",
-            config_path.display()
-        ),
-    })
+    Ok(None)
 }
 
 /// Fetch raw bytes from a catalog URL.
