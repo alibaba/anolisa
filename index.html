@@ -408,7 +408,7 @@ h1 span{color:var(--accent-light)}
 
 <section class="hero">
   <div class="wrap">
-    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.4</div>
+    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.5</div>
     <h1><span>&gt;_</span> ANOLISA</h1>
     <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
     <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
@@ -488,7 +488,39 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-4">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-5">
+          <div class="release-meta">
+            <div class="release-version">0.1.5</div>
+            <div class="release-date">2026-06-11</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><strong>Component catalog listing</strong>: <code>anolisa list</code> now reads a v1 JSON component catalog from <code>ANOLISA_CATALOG_URL</code> or <code>[catalog].url</code>, supports <code>file://</code> and <code>http(s)://</code> sources, and renders component-oriented JSON under <code>components</code> (#850)</li>
+              <li><strong>Component-first raw install</strong>: <code>anolisa install &lt;component&gt;</code> now resolves <code>repo.toml</code> backend configuration, selects the <code>raw</code> backend, downloads sha256-verified artifacts through the distribution index, installs manifest-declared files and symlinks, records installed state, and writes central-log audit records (#852)</li>
+              <li><strong>Component lifecycle plumbing</strong>: <code>anolisa uninstall</code> now understands component-first installed state while preserving legacy capability fallback; installed state records backend provenance, and cross-backend reinstalls are rejected until the component is uninstalled first (#852)</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li>Simplified the top-level CLI command surface around component-first workflows, removing obsolete exposed capability commands and regrouping help output around <code>list</code>, <code>install</code>, <code>uninstall</code>, <code>status</code>, <code>doctor</code>, <code>logs</code>, <code>restart</code>, <code>update</code>, and adapter/management surfaces (#850)</li>
+              <li>Decoupled bug report collection from the old <code>list</code> row builder so bug reports no longer depend on capability catalog rendering internals (#850)</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa list</code> now treats a missing catalog URL as an empty successful list with a config hint, while malformed catalog config remains an explicit error (#850)</li>
+              <li>Raw installs now roll back files, tar.gz multi-file writes, symlinks, and temporary siblings if a later install step fails before state is persisted (#852)</li>
+              <li>Enable dry-run smoke coverage now uses a temporary system prefix so registry cache and config lookups do not touch host paths during tests (#834)</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-4">
           <div class="release-meta">
             <div class="release-version">0.1.4</div>
             <div class="release-date">2026-06-10</div>
@@ -521,7 +553,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-3">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-3">
           <div class="release-meta">
             <div class="release-version">0.1.3</div>
             <div class="release-date">2026-06-09</div>
@@ -544,7 +576,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-2">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-2">
           <div class="release-meta">
             <div class="release-version">0.1.2</div>
             <div class="release-date">2026-06-08</div>
@@ -566,7 +598,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-1">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-1">
           <div class="release-meta">
             <div class="release-version">0.1.1</div>
             <div class="release-date">2026-06-07</div>
@@ -587,44 +619,6 @@ h1 span{color:var(--accent-light)}
             <h3>Fixed</h3>
             <ul>
               <li>Replace <code>sed</code> with bash parameter expansion in install script for improved portability and correctness</li>
-            </ul>
-          </div>
-          </div>
-        </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-0">
-          <div class="release-meta">
-            <div class="release-version">0.1.0</div>
-            <div class="release-date">2026-06-04</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Release</h3>
-            <ul>
-              <li>Initial alpha release of the ANOLISA CLI.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><strong>Workspace scaffold</strong>: Cargo workspace with five crates (anolisa-cli, anolisa-core, anolisa-env, anolisa-build, anolisa-platform)</li>
-              <li><strong>CLI command surface</strong>: <code>env</code>, <code>list</code>, <code>status</code>, <code>logs</code>, <code>enable</code>, <code>disable</code>, <code>uninstall</code>, <code>restart</code>, <code>update</code>, <code>info</code>, <code>doctor</code> commands via clap derive</li>
-              <li><strong>Environment detection</strong>: Stateless <code>EnvService</code> probing OS, arch, libc, kernel, distro family, BTF, CAP_BPF, container runtime, and user identity with graceful degradation</li>
-              <li><strong>Capability lifecycle engine</strong>: Plan-then-execute semantics for enable/disable/uninstall/purge with journaled transactions, sha256 verification, central audit log, and exclusive install lock</li>
-              <li><strong>Execution policy</strong>: TOML-driven capability graduation gate allowing new capabilities to ship without code changes</li>
-              <li><strong>Manifest system</strong>: Declarative TOML manifests for capabilities, components (runtime + osbase), and distribution index with multi-arch artifact resolution</li>
-              <li><strong>Installer</strong>: <code>install-anolisa.sh</code> supporting three modes (from-local, auto-checkout, URL-fetch) with staging-then-promote flow, checksum verification, <code>--strict</code> audit, and <code>--dry-run</code></li>
-              <li><strong>Demo scripts</strong>: End-to-end smoke tests for agent-observability (enable/disable/uninstall) and token-optimization lifecycle</li>
-              <li><strong>Schema templates</strong>: Seven TOML templates documenting canonical manifest schemas for all entity types</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Known limitations</h3>
-            <ul>
-              <li>Linux-only for real-execute paths (darwin hosts can <code>--dry-run</code> only)</li>
-              <li>Distribution index carries placeholder sha256 (P1-J operations pending)</li>
-              <li>No signature verification, no rpm/deb backend yet</li>
-              <li><code>update</code> command returns NOT_IMPLEMENTED</li>
             </ul>
           </div>
           </div>
