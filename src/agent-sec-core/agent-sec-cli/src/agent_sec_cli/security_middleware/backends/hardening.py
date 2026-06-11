@@ -56,6 +56,7 @@ def _parse_rule_status_line(line: str) -> dict[str, str] | None:
             "rule_id": match.group("rule_id"),
             "status": match.group("status"),
             "message": match.group("message").strip(),
+            "_source": "legacy",
         }
 
     match = _VERBOSE_RULE_STATUS_RE.search(line)
@@ -66,6 +67,16 @@ def _parse_rule_status_line(line: str) -> dict[str, str] | None:
         "rule_id": match.group("rule_id"),
         "status": match.group("status"),
         "message": match.group("message").strip(),
+        "_source": "verbose",
+    }
+
+
+def _public_entry(entry: dict[str, str]) -> dict[str, str]:
+    """Return a parsed rule entry without internal parser metadata."""
+    return {
+        "rule_id": entry["rule_id"],
+        "status": entry["status"],
+        "message": entry["message"],
     }
 
 
@@ -293,29 +304,40 @@ class HardeningBackend(BaseBackend):
                         "rule_id": engine_match.group("rule_id") or "",
                         "status": "Engine Error",
                         "message": engine_match.group("message").strip(),
+                        "_source": "engine",
                     }
                 )
 
         mode = data.get("mode")
-        fixed_statuses = frozenset({"FIXED"})
+        fixed_statuses = {"FIXED"}
         legacy_fixed_statuses = frozenset({"FAIL", "FAILED"})
-        all_fixed_statuses = fixed_statuses | legacy_fixed_statuses
         if mode == "reinforce":
-            data["failures"] = [
-                entry for entry in entries if entry["status"] not in all_fixed_statuses
-            ]
-            fixed_items = [
-                entry for entry in entries if entry["status"] in fixed_statuses
-            ]
-            if not fixed_items:
-                fixed_items = [
-                    entry
-                    for entry in entries
-                    if entry["status"] in legacy_fixed_statuses
-                ]
+            fixed_rule_ids = {
+                entry["rule_id"]
+                for entry in entries
+                if entry["status"] in fixed_statuses
+            }
+            failures: list[dict[str, str]] = []
+            fixed_items: list[dict[str, str]] = []
+            for entry in entries:
+                status = entry["status"]
+                source = entry.get("_source")
+                rule_id = entry["rule_id"]
+                if status in fixed_statuses:
+                    fixed_items.append(_public_entry(entry))
+                elif status in legacy_fixed_statuses and source == "legacy":
+                    if rule_id not in fixed_rule_ids:
+                        fixed_items.append(_public_entry(entry))
+                elif status in legacy_fixed_statuses and source == "verbose":
+                    if rule_id not in fixed_rule_ids:
+                        failures.append(_public_entry(entry))
+                else:
+                    failures.append(_public_entry(entry))
+
+            data["failures"] = failures
             data["fixed_items"] = fixed_items
         else:
-            data["failures"] = entries
+            data["failures"] = [_public_entry(entry) for entry in entries]
 
         reported_nonpass = (
             data.get("failed", 0)
