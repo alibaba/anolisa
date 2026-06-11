@@ -545,10 +545,16 @@ jobs:
     runs-on: [self-hosted, ubuntu]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -560,11 +566,87 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config
           sudo apt-get install -y perl
 
-      - name: Run tests
+      - name: Run tests with coverage
         run: |
-          rustup component add rustfmt
           cd src/agentsight
-          cargo test
+          cargo llvm-cov --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+
+      - name: Generate coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agentsight/coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### agentsight (Rust) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### agentsight coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsight-coverage
+          path: src/agentsight/coverage.xml
+          retention-days: 30
+
+      - name: Install diff-cover
+        if: github.event_name == 'pull_request'
+        run: pip install diff-cover
+
+      - name: Incremental coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          COMPARE_BRANCH: "origin/${{ github.base_ref }}"
+        run: |
+          cd src/agentsight
+          THRESHOLD=80
+          GATE_FAILED=false
+          echo "=== Diff-cover: comparing against $COMPARE_BRANCH ==="
+          DIFF_OUTPUT=$(diff-cover coverage.xml --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+          echo "$DIFF_OUTPUT"
+
+          PCT=$(echo "$DIFF_OUTPUT" | grep -oP 'Coverage:\s*\K[0-9.]+(?=%)' || echo "N/A")
+          TOTAL=$(echo "$DIFF_OUTPUT" | grep -oP 'Total:\s+\K[0-9]+' || echo "-")
+          MISSING=$(echo "$DIFF_OUTPUT" | grep -oP 'Missing:\s*\K[0-9]+' || echo "-")
+
+          {
+            echo "### Incremental Coverage Gate (agentsight)"
+            echo ""
+            echo "| New Code Coverage | Total New Lines | Missing | Threshold |"
+            echo "|-------------------|-----------------|---------|-----------|"
+            echo "| ${PCT}% | ${TOTAL} | ${MISSING} | ${THRESHOLD}% |"
+            if [ "${GATE_FAILED:-}" = "true" ]; then
+              echo ""
+              echo "> **Gate FAILED**: New code coverage is below ${THRESHOLD}%. Please add tests for uncovered changes."
+              echo ""
+              echo "<details><summary>Uncovered files (click to expand)</summary>"
+              echo ""
+              echo '```'
+              echo "$DIFF_OUTPUT" | grep -E '^\S.*Missing lines' || true
+              echo '```'
+              echo "</details>"
+            else
+              echo ""
+              echo "> **Gate PASSED**: All new code meets the ${THRESHOLD}% coverage threshold."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${GATE_FAILED:-}" = "true" ]; then
+            echo "::error::Incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
+            exit 1
+          fi
 
   # =========================================================================
   # Step 6: Test tokenless

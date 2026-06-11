@@ -69,6 +69,24 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
 	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
 
+# =============================================================================
+# TEST & QUALITY
+# =============================================================================
+
+.PHONY: test
+test: ## Run unit tests (fast, no coverage)
+	cd $(CURDIR) && cargo test
+
+.PHONY: test-coverage
+test-coverage: ## Run unit tests with coverage (same as CI)
+	cd $(CURDIR) && cargo llvm-cov --cobertura --output-path coverage.xml \
+		--ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+
+.PHONY: coverage
+coverage: ## Generate HTML coverage report (opens browser)
+	cd $(CURDIR) && cargo llvm-cov --html --output-dir coverage-html --open \
+		--ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+
 .PHONY: help
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

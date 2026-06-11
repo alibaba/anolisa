@@ -115,6 +115,45 @@ agentsight/
 cargo test                    # 运行所有测试
 cargo test --lib              # 仅库测试
 cargo test -p agentsight -- <test_name>  # 运行特定测试
+make test                     # 等效于 cargo test
+```
+
+### 代码覆盖率
+
+```bash
+make coverage                 # 生成 HTML 覆盖率报告并打开浏览器
+make coverage-xml             # 生成 Cobertura XML 报告 (coverage.xml)
+```
+
+需要安装 `cargo-llvm-cov`：
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+```
+
+### CI 质量门禁
+
+CI (`ci.yaml` 的 `test-agentsight` job) 对每次 PR 执行以下检查：
+
+| 检查项 | 命令 | 失败条件 |
+|--------|------|----------|
+| 单元测试 | `cargo test`（通过 `cargo llvm-cov`） | 任何测试失败 |
+| 增量覆盖率 | `diff-cover --fail-under=80` | 新增/修改代码行覆盖率 < 80% |
+
+覆盖率报告在 CI 运行结果页的 **Step Summary** 中可见，完整的 Cobertura XML 可从 **Artifacts** 下载。
+
+本地提交前建议运行：
+```bash
+make test                     # 快速单元测试（无覆盖率）
+make test-coverage            # 带覆盖率的测试（与 CI 一致，生成 coverage.xml）
+make coverage                 # 生成 HTML 覆盖率报告并打开浏览器
+```
+
+如需本地复现 diff-cover 增量门禁：
+```bash
+make test-coverage
+pip install diff-cover
+diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
 ```
 
 ### 前端类型检查
