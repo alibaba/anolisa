@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-06-11
+
+### Added
+
+- **Component catalog listing**: `anolisa list` now reads a v1 JSON
+  component catalog from `ANOLISA_CATALOG_URL` or `[catalog].url`, supports
+  `file://` and `http(s)://` sources, and renders component-oriented JSON
+  under `components` (#850)
+- **Component-first raw install**: `anolisa install <component>` now resolves
+  `repo.toml` backend configuration, selects the `raw` backend, downloads
+  sha256-verified artifacts through the distribution index, installs
+  manifest-declared files and symlinks, records installed state, and writes
+  central-log audit records (#852)
+- **Component lifecycle plumbing**: `anolisa uninstall` now understands
+  component-first installed state while preserving legacy capability fallback;
+  installed state records backend provenance, and cross-backend reinstalls are
+  rejected until the component is uninstalled first (#852)
+
+### Changed
+
+- Simplified the top-level CLI command surface around component-first
+  workflows, removing obsolete exposed capability commands and regrouping help
+  output around `list`, `install`, `uninstall`, `status`, `doctor`, `logs`,
+  `restart`, `update`, and adapter/management surfaces (#850)
+- Decoupled bug report collection from the old `list` row builder so bug
+  reports no longer depend on capability catalog rendering internals (#850)
+
+### Fixed
+
+- `anolisa list` now treats a missing catalog URL as an empty successful list
+  with a config hint, while malformed catalog config remains an explicit error
+  (#850)
+- Raw installs now roll back files, tar.gz multi-file writes, symlinks, and
+  temporary siblings if a later install step fails before state is persisted
+  (#852)
+- Enable dry-run smoke coverage now uses a temporary system prefix so registry
+  cache and config lookups do not touch host paths during tests (#834)
+
 ## [0.1.4] - 2026-06-10
 
 ### Added
@@ -160,6 +198,38 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.5] - 2026-06-11
+
+### 新增
+
+- **组件目录列表**：`anolisa list` 现在从 `ANOLISA_CATALOG_URL` 或
+  `[catalog].url` 读取 v1 JSON component catalog，支持 `file://` 和
+  `http(s)://` 来源，并在 JSON 输出中以 `components` 返回组件列表 (#850)
+- **组件优先的 raw 安装**：`anolisa install <component>` 现在会解析
+  `repo.toml` 后端配置，选择 `raw` 后端，通过 distribution index 下载并校验
+  sha256，安装 manifest 声明的文件和 symlink，记录 installed state，并写入
+  central-log 审计记录 (#852)
+- **组件生命周期接线**：`anolisa uninstall` 现在理解组件优先的 installed
+  state，同时保留旧 capability 卸载回退；installed state 会记录安装后端来源，
+  跨后端重装会被拒绝，用户需先卸载再切换后端 (#852)
+
+### 变更
+
+- 顶层 CLI 命令面调整为组件优先流程，移除已过时的 exposed capability 命令，
+  并围绕 `list`、`install`、`uninstall`、`status`、`doctor`、`logs`、
+  `restart`、`update` 以及 adapter/management 管理面重新分组帮助输出 (#850)
+- bug report 收集不再依赖旧 `list` row builder，避免诊断报告耦合 capability
+  catalog 渲染内部实现 (#850)
+
+### 修复
+
+- `anolisa list` 现在在未配置 catalog URL 时返回带配置提示的空成功列表；
+  malformed catalog config 仍然作为显式错误返回 (#850)
+- raw 安装在持久化 state 前若后续步骤失败，现在会回滚已写入文件、tar.gz
+  多文件写入、symlink 和临时 sibling 文件 (#852)
+- enable dry-run 冒烟测试现在使用临时 system prefix，避免 registry cache 和
+  config 查找触碰宿主机路径 (#834)
 
 ## [0.1.4] - 2026-06-10
 
