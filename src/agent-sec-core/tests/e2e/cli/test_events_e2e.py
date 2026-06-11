@@ -31,6 +31,10 @@ def _run_harden_and_expected_event_result() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _expected_event_result(cli_result):
+    return "succeeded" if cli_result.returncode == 0 else "failed"
+
+
 class TestHardenEventLogging:
     """Verify that invoking `harden` produces a queryable event."""
 
@@ -164,7 +168,8 @@ class TestEventQueryFilters:
         """Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        expected_result = _run_harden_and_expected_event_result()
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
@@ -252,7 +257,8 @@ class TestCLIValidation:
         """Verify that --output json returns a valid JSON array with complete event data."""
         since = iso_now()
         time.sleep(0.05)
-        expected_result = _run_harden_and_expected_event_result()
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli(
@@ -300,16 +306,17 @@ class TestCLIValidation:
         assert "details" in event
 
     def test_result_field_in_table_output(self):
-        """Verify that table output shows the ActionResult-derived result."""
+        """Verify that result column shows the harden command outcome."""
         since = iso_now()
         time.sleep(0.05)
-        expected_result = _run_harden_and_expected_event_result()
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
         assert result.returncode == 0
 
-        # Table output should contain RESULT column with the recorded result.
+        # Table output should contain RESULT column with the command outcome.
         assert "RESULT" in result.stdout
         assert expected_result in result.stdout
 
@@ -410,7 +417,8 @@ class TestEventsDefaultOutput:
         """TC-005: Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        expected_result = _run_harden_and_expected_event_result()
+        harden_result = run_cli("harden")
+        expected_result = _expected_event_result(harden_result)
         time.sleep(0.1)
 
         result = run_cli("events", "--event-type", "harden", "--since", since)
