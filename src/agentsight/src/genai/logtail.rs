@@ -78,7 +78,8 @@ pub struct LogtailExporter {
     encryptor: Option<MessageEncryptor>,
     /// 轨迹采集开关（对应 agentsight.json 的 `traceEnabled`）。
     /// 为 `false` 时，LLMCall 上传记录中的
-    /// `gen_ai.input.messages` 与 `gen_ai.output.messages` 对话内容字段被丢弃；
+    /// `gen_ai.system_instructions`、`gen_ai.input.messages`、
+    /// `gen_ai.output.messages` 等对话内容字段被丢弃；
     /// token 数量、模型、提供商等元数据仍照常上传。
     trace_enabled: bool,
     /// 是否使用动态路径（来自 `runtime.sls_logtail_path` 配置）。
@@ -111,7 +112,7 @@ impl LogtailExporter {
             log::info!("Logtail exporter: encryption disabled (no public key configured)");
         }
         if !trace_enabled {
-            log::info!("Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
+            log::info!("Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
         }
         Some(LogtailExporter { path, encryptor, trace_enabled, dynamic: false })
     }
@@ -129,7 +130,7 @@ impl LogtailExporter {
             log::info!("Logtail exporter (dynamic): encryption disabled (no public key configured)");
         }
         if !trace_enabled {
-            log::info!("Logtail exporter (dynamic): traceEnabled=false, conversation content fields will NOT be uploaded");
+            log::info!("Logtail exporter (dynamic): traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded");
         }
         LogtailExporter { path, encryptor, trace_enabled, dynamic: true }
     }
@@ -218,7 +219,8 @@ impl GenAIExporter for LogtailExporter {
 /// 敏感消息字段（system_instructions/input.messages/output.messages）使用混合加密保护。
 ///
 /// `trace_enabled=false` 时跳过 LLMCall 中的对话内容字段
-/// (`gen_ai.input.messages` 与 `gen_ai.output.messages`)，token 数量等元数据仍上传。
+/// (`gen_ai.system_instructions`、`gen_ai.input.messages`、
+/// `gen_ai.output.messages`)，token 数量等元数据仍上传。
 pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&MessageEncryptor>, trace_enabled: bool) -> Vec<BTreeMap<String, String>> {
     let hostname = instance_id::get_instance_id();
     let uid = instance_id::get_owner_account_id();
@@ -304,13 +306,17 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&
                 m.insert("gen_ai.output.type".to_string(), "text".to_string());
 
                 // ── gen_ai.system_instructions (system role messages) ──
-                let system_msgs: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
-                    .filter(|msg| msg.role == "system")
-                    .collect();
-                if !system_msgs.is_empty() {
-                    if let Ok(json) = serde_json::to_string(&system_msgs) {
-                        m.insert("gen_ai.system_instructions".to_string(),
-                            MessageEncryptor::maybe_encrypt(encryptor, &json));
+                // 受 trace_enabled 控制：system prompt 通常包含产品业务逻辑、
+                // 工具说明等敏感配置，traceEnabled=false 时同样不上传。
+                if trace_enabled {
+                    let system_msgs: Vec<&super::semantic::InputMessage> = call.request.messages.iter()
+                        .filter(|msg| msg.role == "system")
+                        .collect();
+                    if !system_msgs.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&system_msgs) {
+                            m.insert("gen_ai.system_instructions".to_string(),
+                                MessageEncryptor::maybe_encrypt(encryptor, &json));
+                        }
                     }
                 }
 
@@ -614,11 +620,12 @@ mod tests {
 
     #[test]
     fn test_trace_enabled_true_includes_messages() {
-        // 默认轨迹开启：input.messages 与 output.messages 均上传
+        // 默认轨迹开启：system_instructions、input.messages、output.messages 均上传
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
         let records = events_to_flat_records(&[event], None, true);
         assert_eq!(records.len(), 1);
         let r = &records[0];
+        assert!(r.contains_key("gen_ai.system_instructions"), "system_instructions should be uploaded when traceEnabled=true");
         assert!(r.contains_key("gen_ai.input.messages"), "input.messages should be uploaded when traceEnabled=true");
         assert!(r.contains_key("gen_ai.output.messages"), "output.messages should be uploaded when traceEnabled=true");
         // token 数量元数据也应存在
@@ -628,11 +635,13 @@ mod tests {
 
     #[test]
     fn test_trace_enabled_false_drops_messages_keeps_token_metadata() {
-        // 轨迹关闭：input.messages 与 output.messages 不上传，token 数量仍保留
+        // 轨迹关闭：system_instructions、input.messages、output.messages 均不上传，
+        // token 数量等元数据仍保留
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
         let records = events_to_flat_records(&[event], None, false);
         assert_eq!(records.len(), 1);
         let r = &records[0];
+        assert!(!r.contains_key("gen_ai.system_instructions"), "system_instructions must NOT be uploaded when traceEnabled=false");
         assert!(!r.contains_key("gen_ai.input.messages"), "input.messages must NOT be uploaded when traceEnabled=false");
         assert!(!r.contains_key("gen_ai.output.messages"), "output.messages must NOT be uploaded when traceEnabled=false");
 
@@ -643,11 +652,11 @@ mod tests {
         assert_eq!(r.get("gen_ai.request.model").map(String::as_str), Some("gpt-4"));
         assert_eq!(r.get("agentsight.pid").map(String::as_str), Some("42"));
         assert_eq!(r.get("agentsight.duration_ns").map(String::as_str), Some("4000"));
-        // 所有名为 gen_ai.*.messages 的字段都应被过滤
+        // 不允许任何对话内容字段泄漏：包括 .messages 结尾的字段以及 system_instructions
         for key in r.keys() {
             assert!(
-                !key.ends_with(".messages") || key == "gen_ai.system_instructions",
-                "unexpected message field leaked when traceEnabled=false: {}",
+                !key.ends_with(".messages") && key != "gen_ai.system_instructions",
+                "unexpected conversation-content field leaked when traceEnabled=false: {}",
                 key,
             );
         }
