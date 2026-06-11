@@ -261,7 +261,9 @@ class TestCoshHookSubprocess:
         self._mock_stdin(monkeypatch)
 
         def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="segfault")
+            return subprocess.CompletedProcess(
+                args, returncode=1, stdout="", stderr="segfault"
+            )
 
         monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
         prompt_scanner_hook.main()
@@ -273,7 +275,9 @@ class TestCoshHookSubprocess:
         self._mock_stdin(monkeypatch)
 
         def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, returncode=0, stdout="not-json", stderr="")
+            return subprocess.CompletedProcess(
+                args, returncode=0, stdout="not-json", stderr=""
+            )
 
         monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
         prompt_scanner_hook.main()
