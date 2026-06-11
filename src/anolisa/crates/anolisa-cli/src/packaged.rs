@@ -26,7 +26,7 @@
 //! `cargo run` from the source tree falls through every probe (the
 //! debug binary lives under `target/debug/` which has no sibling
 //! `share/anolisa/`), at which point the dev-tree fallback in
-//! [`crate::commands::common`] / [`crate::execution_policy`] takes
+//! [`crate::commands::common`] takes
 //! over. That dev-tree fallback is the reason this helper returns
 //! `Option<PathBuf>` rather than panicking.
 

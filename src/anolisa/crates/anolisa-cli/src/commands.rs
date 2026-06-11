@@ -12,8 +12,6 @@ pub mod tier1;
 pub mod adapter;
 pub mod osbase;
 pub mod register;
-pub mod runtime;
-pub mod self_;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -79,50 +77,41 @@ pub enum Commands {
     Management(ManagementCommands),
 }
 
-/// Tier 1 — everyday capability verbs.
+/// Primary commands — component lifecycle and operations.
 #[derive(Subcommand)]
 pub enum CapabilityCommands {
-    /// Generate a bug report with diagnostic information
-    Bug(tier1::bug::BugArgs),
-    /// List capabilities and their availability / enable status
+    /// List available components from remote catalog
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
-    /// Enable one or more capabilities
-    Enable(tier1::enable::EnableArgs),
-    /// Disable a capability or one of its features
-    Disable(tier1::disable::DisableArgs),
-    /// Uninstall a capability (removes ANOLISA-owned files); `--purge` also drops config
+    /// Install a component
+    Install(tier1::install::InstallArgs),
+    /// Uninstall a component (removes ANOLISA-owned files); `--purge` also drops config
     Uninstall(tier1::uninstall::UninstallArgs),
-    /// Show capability health
+    /// Show component health
     Status(tier1::status::StatusArgs),
-    /// Diagnose capability issues
+    /// Diagnose component issues
     Doctor(tier1::doctor::DoctorArgs),
-    /// Central log query (operation/audit + component-reported logs)
+    /// Query logs, optionally filtered by component and level
     Logs(tier1::logs::LogsArgs),
-    /// Restart the capability's underlying service
+    /// Restart a component's service
     Restart(tier1::restart::RestartArgs),
-    /// Show environment detection results
-    Env(tier1::env::EnvArgs),
-    /// One-shot summary: anolisa version + enabled capabilities + components
-    Info(tier1::info::InfoArgs),
-    /// Update self, runtime components, or everything ANOLISA-managed
+    /// Update anolisa itself (no args) or a specific component
     Update(tier1::update::UpdateArgs),
+    /// Manage component-to-framework adapters
+    Adapter(adapter::AdapterArgs),
 }
 
-/// Tier 2 — independent management surfaces.
+/// Management commands.
 #[derive(Subcommand)]
 pub enum ManagementCommands {
     /// Join the Agentic OS Co-Build Program (requires root/sudo)
     Register(register::RegisterArgs),
     /// Leave the Agentic OS Co-Build Program (requires root/sudo)
     Unregister(register::UnregisterArgs),
-    /// Manage agent-framework adapters
-    Adapter(adapter::AdapterArgs),
-    /// Manage anolisa CLI itself
-    #[command(name = "self")]
-    SelfCmd(self_::SelfArgs),
-    /// Manage runtime-layer components directly
-    Runtime(runtime::RuntimeArgs),
+    /// Show environment detection results
+    Env(tier1::env::EnvArgs),
+    /// Generate a bug report
+    Bug(tier1::bug::BugArgs),
     /// Manage OS base layer (kernel / sandbox / security)
     Osbase(osbase::OsbaseArgs),
 }
@@ -172,7 +161,7 @@ fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> S
         .unwrap_or(0)
         .max(4); // "help" length
 
-    let mut out = String::from("Capability Commands:\n");
+    let mut out = String::from("Commands:\n");
     for (display, about) in cap {
         let _ = writeln!(out, "  {display:<longest$}  {about}");
     }
@@ -199,25 +188,21 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     validate_global_args(ctx)?;
     match cli.command {
         Commands::Capability(cmd) => match cmd {
-            CapabilityCommands::Bug(args) => tier1::bug::handle(args, ctx),
             CapabilityCommands::List(args) => tier1::list::handle(args, ctx),
-            CapabilityCommands::Enable(args) => tier1::enable::handle(args, ctx),
-            CapabilityCommands::Disable(args) => tier1::disable::handle(args, ctx),
+            CapabilityCommands::Install(args) => tier1::install::handle(args, ctx),
             CapabilityCommands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
             CapabilityCommands::Status(args) => tier1::status::handle(args, ctx),
             CapabilityCommands::Doctor(args) => tier1::doctor::handle(args, ctx),
             CapabilityCommands::Logs(args) => tier1::logs::handle(args, ctx),
             CapabilityCommands::Restart(args) => tier1::restart::handle(args, ctx),
-            CapabilityCommands::Env(args) => tier1::env::handle(args, ctx),
-            CapabilityCommands::Info(args) => tier1::info::handle(args, ctx),
             CapabilityCommands::Update(args) => tier1::update::handle(args, ctx),
+            CapabilityCommands::Adapter(args) => adapter::handle(args, ctx),
         },
         Commands::Management(cmd) => match cmd {
             ManagementCommands::Register(args) => register::handle_register_group(args, ctx),
             ManagementCommands::Unregister(args) => register::handle_unregister_cmd(args, ctx),
-            ManagementCommands::Adapter(args) => adapter::handle(args, ctx),
-            ManagementCommands::SelfCmd(args) => self_::handle(args, ctx),
-            ManagementCommands::Runtime(args) => runtime::handle(args, ctx),
+            ManagementCommands::Env(args) => tier1::env::handle(args, ctx),
+            ManagementCommands::Bug(args) => tier1::bug::handle(args, ctx),
             ManagementCommands::Osbase(args) => osbase::handle(args, ctx),
         },
     }

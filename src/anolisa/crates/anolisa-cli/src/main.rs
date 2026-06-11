@@ -1,7 +1,6 @@
 mod color;
 mod commands;
 mod context;
-mod execution_policy;
 mod packaged;
 mod response;
 
