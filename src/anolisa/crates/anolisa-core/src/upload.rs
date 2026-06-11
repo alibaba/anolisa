@@ -23,7 +23,7 @@ const DEFAULT_SLS_ACCOUNT_ID_B64: &str = "MTgwODA3ODk1MDc3MDI2NA==";
 /// Configurable parameters for ilogtail upload
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
-    /// SLS primary account ID (written to /etc/ilogtail/users/<id>)
+    /// SLS primary account ID (written to `/etc/ilogtail/users/<id>`)
     pub sls_account_id: String,
     /// user_defined_id tag list (written to /etc/ilogtail/user_defined_id)
     pub user_defined_ids: Vec<String>,

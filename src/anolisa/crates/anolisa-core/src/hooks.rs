@@ -275,12 +275,15 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
 
     let started = Instant::now();
     let timeout = Duration::from_secs(u64::from(spec.timeout_secs.max(1)));
-    let mut child = match Command::new(&spec.script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    // spawn_retry_etxtbsy: hook scripts are files ANOLISA itself wrote;
+    // a concurrent fork elsewhere can hold the write descriptor for a
+    // moment and fail exec with ETXTBSY.
+    let mut child = match crate::process::spawn_retry_etxtbsy(
+        Command::new(&spec.script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    ) {
         Ok(c) => c,
         Err(err) => {
             return HookOutcome {

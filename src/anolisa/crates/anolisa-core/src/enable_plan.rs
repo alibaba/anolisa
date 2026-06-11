@@ -877,6 +877,30 @@ fn plan_component(ctx: &mut PlanComponentCtx<'_>, name: &str) -> ComponentPlan {
                 };
             }
 
+            // Convention-derived URLs (empty `url`) need the repo base_url,
+            // which the capability planner does not carry — only `anolisa
+            // install` can join them. Block instead of letting an empty URL
+            // surface later as a baffling download error.
+            if entry.url.is_empty() {
+                return ComponentPlan {
+                    name: comp.component.name.clone(),
+                    manifest_version: Some(comp.component.version.clone()),
+                    status: PlanStatus::Blocked,
+                    blocked_reason: Some(format!(
+                        "resolved artifact for component '{}' omits its url (convention-layout row) — only `anolisa install` can derive it",
+                        comp.component.name,
+                    )),
+                    artifact: Some(artifact_plan_from(&entry)),
+                    services: comp.install.services.clone(),
+                    files: comp.install.files.clone(),
+                    resolved_files,
+                    capabilities: comp.install.capabilities.clone(),
+                    requires_privilege,
+                    env_requirements: comp.env_requirements.clone(),
+                    health_check: health_check.clone(),
+                };
+            }
+
             // Resolved-artifact safety gate.
             //
             // The lint pass emits W_UNSUPPORTED_ARTIFACT_TYPE for sibling
@@ -1742,6 +1766,53 @@ mod tests {
         assert!(comp_plan.artifact.is_some(), "artifact should be surfaced");
         let reason = comp_plan.blocked_reason.as_deref().unwrap_or("");
         assert!(reason.contains("sha256"), "reason names sha256: {reason}");
+    }
+
+    /// Convention-layout rows (empty `url`) need the repo base_url to derive
+    /// the artifact location; the capability planner has none → Blocked.
+    #[test]
+    fn empty_url_marks_component_blocked() {
+        let cap = make_cap(
+            "agent-observability",
+            vec!["agentsight".to_string()],
+            vec!["linux".to_string()],
+            vec!["x86_64".to_string()],
+        );
+        let comp = make_component(
+            "agentsight",
+            "0.2.0",
+            vec!["system".to_string()],
+            Vec::new(),
+        );
+        let catalog = make_catalog(vec![cap], vec![comp]);
+        let mut entry = agentsight_entry(
+            "0.2.0",
+            ArtifactType::Rpm,
+            "rpm",
+            vec!["system".to_string()],
+            "linux",
+            "x86_64",
+            Some("anolis23".to_string()),
+        );
+        entry.url = String::new();
+        let index = make_index(vec![entry]);
+        let env = make_env("linux", "x86_64");
+        let layout = make_layout();
+        let plan = plan_enable(
+            &catalog,
+            &index,
+            &env,
+            "system",
+            &layout,
+            "agent-observability",
+        )
+        .expect("plan");
+        assert_eq!(plan.status, PlanStatus::Blocked);
+        let comp_plan = &plan.components[0];
+        assert_eq!(comp_plan.status, PlanStatus::Blocked);
+        let reason = comp_plan.blocked_reason.as_deref().unwrap_or("");
+        assert!(reason.contains("omits its url"), "reason: {reason}");
+        assert!(reason.contains("anolisa install"), "reason: {reason}");
     }
 
     #[test]

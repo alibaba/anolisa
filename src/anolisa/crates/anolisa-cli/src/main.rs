@@ -2,6 +2,7 @@ mod color;
 mod commands;
 mod context;
 mod packaged;
+mod repo_config;
 mod response;
 
 use std::process::ExitCode;

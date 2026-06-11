@@ -83,7 +83,7 @@ pub enum CapabilityCommands {
     /// List available components from remote catalog
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
-    /// Install a component
+    /// Install a component from a configured backend (raw today; yum/npm planned)
     Install(tier1::install::InstallArgs),
     /// Uninstall a component (removes ANOLISA-owned files); `--purge` also drops config
     Uninstall(tier1::uninstall::UninstallArgs),

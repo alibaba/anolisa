@@ -26,6 +26,7 @@ pub mod lifecycle;
 pub mod lock;
 pub mod manifest;
 pub mod path_safety;
+pub mod process;
 pub mod register;
 pub mod registry;
 pub mod sandbox_install;

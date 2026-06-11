@@ -63,6 +63,14 @@ pub struct DistributionEntry {
     /// Backend hint for the install runner: "rpm" | "deb" | "tar" | "oci" | "file" | ...
     pub backend: String,
     /// Fetch URL. Resolved rows become live downloads during execute.
+    ///
+    /// Optional when the published artifact follows the repo's layout
+    /// convention — consumers that know the repo's base_url render it as
+    /// a directory template (`anolisa-cli` repo.toml `base_url`
+    /// placeholders) filled with this entry's fields. Empty means
+    /// "derive"; consumers without a base_url must treat empty as a hard
+    /// error rather than guessing.
+    #[serde(default)]
     pub url: String,
     /// OS selector: "linux" | "darwin" | ...
     pub os: String,
@@ -710,5 +718,23 @@ mod tests {
         "#;
         let index = DistributionIndex::from_toml_str(toml_str).expect("parse");
         assert_eq!(index.entries[0].artifact_type, ArtifactType::TarGz);
+    }
+
+    #[test]
+    fn entry_without_url_parses_as_empty_for_convention_layout() {
+        let toml_str = r#"
+            schema_version = 1
+            [[entries]]
+            component = "tokenless"
+            version = "0.5.0"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "raw"
+            os = "linux"
+            arch = "x86_64"
+            install_modes = ["system"]
+        "#;
+        let index = DistributionIndex::from_toml_str(toml_str).expect("parse");
+        assert_eq!(index.entries[0].url, "");
     }
 }

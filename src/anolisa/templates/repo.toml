@@ -1,0 +1,84 @@
+# ANOLISA repository configuration (schema v1).
+#
+# Declares the install backends `anolisa install` can resolve components
+# from, and which backend is used by default. One configuration table per
+# backend. Selection chain: `--backend` (CLI, one-off) > `default_backend`.
+# There is NO cross-backend fallback: when the selected backend cannot
+# resolve a component, install fails instead of silently trying others,
+# so where an installed component came from is always deterministic.
+#
+# base_url rules:
+#
+#   * It is a directory root, not a file. What lives under it is a
+#     per-backend convention: raw → the client appends `/v1/index.toml`;
+#     yum → handed to dnf as-is (must contain `repodata/`); npm → the
+#     registry API root.
+#   * It may reference `$os`, `$arch`, `$basearch`, `$releasever`,
+#     `$channel`. Values come from host detection, overridable in
+#     `[vars]`. Referencing an unknown or unset variable is a hard
+#     error — never a silent pass-through.
+#   * Schemes: `file://` and `https://` are always allowed. `http://`
+#     requires `insecure = true` on the backend entry. No query string
+#     or fragment.
+#
+# Per-component package names default to the component name itself
+# (npm additionally applies `scope`). Site-local deviations go in the
+# backend's `package_map`; one-off overrides use `install --package`.
+
+schema_version = 1
+
+# Backend used when `--backend` is not passed on the CLI.
+default_backend = "raw"
+
+[vars]
+channel = "stable"
+
+# raw — tar.gz/binary artifacts resolved through the ANOLISA
+# distribution index.
+#
+# base_url is the artifact *directory template*. For every index row
+# that omits `url`, the client renders the template from the resolved
+# row and appends the conventional file name
+# `{component}-{version}-{os}-{arch}{ext}`:
+#
+#   {component}  backend-native package name (the index key)
+#   {version}    resolved artifact version
+#   {os} {arch}  target selectors from the row
+#   {libc}       row's libc selector (error if referenced but unset)
+#   {ext}        from artifact_type: .tar.gz / .zip / .rpm / .deb;
+#                empty for binary/file
+#
+# The distribution index lives at `<static prefix>/index.toml`, where
+# the static prefix is everything before the first `{placeholder}`
+# (here: .../anolisa/v1/). A base_url without placeholders is a plain
+# directory root: the index is at `<base_url>/v1/index.toml` and
+# artifacts derive from the default layout
+# `v1/{component}/{version}/{os}/{arch}/`.
+#
+# Rows may still carry a repo-relative `url` (joined onto the static
+# prefix) or an absolute `url` as an escape hatch — an explicit url
+# always wins over the template. The index itself stays mandatory
+# either way: it is the version list and sha256 manifest — resolution
+# and verification never run on URL guessing.
+[backends.raw]
+base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/{component}/{version}/{os}/{arch}/"
+cache_ttl_secs = 3600
+offline_fallback = true
+
+# yum — resolution/install delegated to dnf against this repo.
+# Example, disabled until the yum backend lands:
+#
+# [backends.yum]
+# base_url=http://mirrors.cloud.aliyuncs.com/alinux/$releasever/os/$basearch/os/
+# enabled=1
+# gpgcheck=1
+# gpgkey=http://mirrors.cloud.aliyuncs.com/alinux/$releasever/RPM-GPG-KEY-ALINUX-4
+#
+# [backends.yum.package_map]
+# agentsight = "anolis-agentsight"
+
+# npm — Node-ecosystem components.
+#
+# [backends.npm]
+# base_url = "https://registry.npmjs.org"
+# scope = "@anolisa"

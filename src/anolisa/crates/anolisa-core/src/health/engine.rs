@@ -371,13 +371,16 @@ fn spawn_and_wait(exe: &Path, args: &[&str], capture: bool, timeout: Duration) -
     } else {
         Stdio::null()
     };
-    let mut child = match Command::new(exe)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(stdout_cfg)
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    // spawn_retry_etxtbsy: health probes exec binaries ANOLISA installed;
+    // a concurrent fork elsewhere can hold the write descriptor for a
+    // moment and fail exec with ETXTBSY.
+    let mut child = match crate::process::spawn_retry_etxtbsy(
+        Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(stdout_cfg)
+            .stderr(Stdio::null()),
+    ) {
         Ok(c) => c,
         Err(err) => return SpawnResult::SpawnError(err),
     };
