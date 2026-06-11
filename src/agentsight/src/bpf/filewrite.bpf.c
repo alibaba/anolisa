@@ -49,17 +49,9 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
 
-    // Only monitor traced processes
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
+    u64 cg_id;
+    if (!traced_pid_cgroup_gate_allow(pid, &cg_id))
         return 0;
-
-    u64 cg_id = get_cgroup_id_compat();
-#ifndef NO_CGROUP_FILTER
-    if (filter_cgroup_enabled &&
-        !bpf_map_lookup_elem(&cgroup_filter, &cg_id))
-        return 0;
-#endif
 
     // Extract filename from file->f_path.dentry->d_name.name (basename)
     // Check early so we can skip non-.jsonl files before reserving ringbuf
@@ -99,7 +91,7 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     // Fill metadata
     event->source = EVENT_SOURCE_FILEWRITE;
     event->timestamp_ns = bpf_ktime_get_ns();
-    event->pid = ns_pid;
+    event->pid = current_ns_pid();
     event->tid = (u32)pid_tgid;
     event->uid = bpf_get_current_uid_gid();
     event->write_size = (u32)count;

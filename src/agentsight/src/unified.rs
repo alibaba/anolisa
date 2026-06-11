@@ -564,6 +564,18 @@ impl AgentSight {
         self.probes.detach_ssl_probes(pid);
     }
 
+    /// Add a cgroup inode id to the shared BPF cgroup_filter map at runtime.
+    /// Delegates to the underlying `Probes` instance.
+    pub fn add_traced_cgroup(&mut self, cgroup_id: u64) -> anyhow::Result<()> {
+        self.probes.add_traced_cgroup(cgroup_id)
+    }
+
+    /// Remove a cgroup inode id from the shared BPF cgroup_filter map at runtime.
+    /// Delegates to the underlying `Probes` instance.
+    pub fn remove_traced_cgroup(&mut self, cgroup_id: u64) -> anyhow::Result<()> {
+        self.probes.remove_traced_cgroup(cgroup_id)
+    }
+
     /// Try to receive and process the next event (non-blocking)
     /// Returns None if no event is available
     pub fn try_process(&mut self) -> Option<u64> {

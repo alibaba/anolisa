@@ -73,26 +73,13 @@ int trace_execve_enter(struct sys_enter_execve_args *args)
     ppid = BPF_CORE_READ(task, real_parent, tgid);
     ptid = BPF_CORE_READ(task, real_parent, pid);
 
-    // Check if we should trace this process:
-    // Trace if parent process (ppid) is in traced_processes
-    // This captures new child processes spawned by tracked processes
+    // Admit exec if parent is traced OR (when cgroup filter is on) task is in an allowed cgroup
     u32 value = 1;
-    u8 *ppid_traced = bpf_map_lookup_elem(&traced_processes, &ppid);
-
-    if (ppid_traced) {
-        // cgroup-level gate: drop child if parent's cgroup is not in filter
-        u64 cg_id = get_cgroup_id_compat();
-#ifndef NO_CGROUP_FILTER
-        if (filter_cgroup_enabled &&
-            !bpf_map_lookup_elem(&cgroup_filter, &cg_id))
-            return 0;
-#endif
-        // Also track in child_pids for stdout capture
-        bpf_map_update_elem(&child_pids, &pid, &value, BPF_ANY);
-    } else {
-        // Parent is not in the trace list - skip
+    u64 cg_id;
+    if (!traced_pid_cgroup_gate_allow(ppid, &cg_id))
         return 0;
-    }
+
+    bpf_map_update_elem(&child_pids, &pid, &value, BPF_ANY);
 
     // Get scratch space for building event (avoids stack overflow)
     u32 scratch_key = 0;

@@ -27,16 +27,9 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
 
-    // Only monitor traced processes
-    u32 ns_pid = is_pid_traced(pid);
-    if (!ns_pid)
+    u64 cg_id;
+    if (!traced_pid_cgroup_gate_allow(pid, &cg_id))
         return 0;
-    u64 cg_id = get_cgroup_id_compat();
-#ifndef NO_CGROUP_FILTER
-    if (filter_cgroup_enabled &&
-        !bpf_map_lookup_elem(&cgroup_filter, &cg_id))
-        return 0;
-#endif
 
     // Reserve space in ring buffer
     struct filewatch_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
@@ -76,7 +69,7 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     // Fill remaining event fields
     event->source = EVENT_SOURCE_FILEWATCH;
     event->timestamp_ns = bpf_ktime_get_ns();
-    event->pid = ns_pid;
+    event->pid = current_ns_pid();
     event->tid = (u32)pid_tgid;
     event->uid = bpf_get_current_uid_gid();
     event->flags = (s32)ctx->args[2];

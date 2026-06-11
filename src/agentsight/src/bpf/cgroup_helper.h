@@ -176,4 +176,34 @@ static __always_inline u64 get_cgroup_id_compat(void)
     return __read_kn_id(kn);
 }
 
+/*
+ * traced_pid_cgroup_gate_allow — shared "PID listed OR cgroup allowed" admission.
+ *
+ * Include `common.h` *before* this header so `traced_processes`, `filter_cgroup_enabled`,
+ * `cgroup_filter`, and `NO_CGROUP_FILTER` are defined.
+ *
+ * @traced_map_pid: key into `traced_processes` (e.g. current tgid for syscalls,
+ *                  parent tgid for execve-enter lineage checks).
+ * @cg_id_out: filled with get_cgroup_id_compat() for **current task** (event payloads).
+ * Returns 1 to continue the probe, 0 to drop.
+ */
+static __always_inline int traced_pid_cgroup_gate_allow(u32 traced_map_pid, u64 *cg_id_out)
+{
+    /* Reuse is_pid_traced() dual-lookup: host_pid first, then ns_pid fallback.
+     * This preserves container scenarios where user-space registers ns_pid. */
+    int pid_allow = is_pid_traced(traced_map_pid) ? 1 : 0;
+
+    u64 cg_id = get_cgroup_id_compat();
+
+    *cg_id_out = cg_id;
+
+#ifndef NO_CGROUP_FILTER
+    if (!filter_cgroup_enabled)
+        return pid_allow;
+    return pid_allow || (bpf_map_lookup_elem(&cgroup_filter, &cg_id) ? 1 : 0);
+#else
+    return pid_allow;
+#endif
+}
+
 #endif /* CGROUP_HELPER_H */
