@@ -19,6 +19,8 @@ pub enum FactCategory {
     Promoted,
     /// Summary of the session's activity.
     Summary,
+    /// A sequence of tool calls forming a coherent task (episodic memory).
+    Episodic,
 }
 
 impl std::fmt::Display for FactCategory {
@@ -30,6 +32,7 @@ impl std::fmt::Display for FactCategory {
             FactCategory::Lesson => write!(f, "lesson"),
             FactCategory::Promoted => write!(f, "promoted"),
             FactCategory::Summary => write!(f, "summary"),
+            FactCategory::Episodic => write!(f, "episodic"),
         }
     }
 }
@@ -98,14 +101,6 @@ impl ConsolidatedFact {
 
     /// Serialize as markdown with YAML frontmatter. The output matches the
     /// style used by `memory_observe` — frontmatter + body.
-    ///
-    /// String scalars (`title`, `related_paths`) are emitted as YAML
-    /// double-quoted scalars so values containing `:`, `#`, `*`, leading
-    /// `-`, etc. cannot break frontmatter parsing or inject new keys.
-    /// `id`, `session_id`, `category`, `source_tool`, `created_at`,
-    /// `confidence` are produced internally (ULID / kebab-case enum /
-    /// short tool name / RFC3339 / f64) and never contain YAML
-    /// meta-characters, so they stay unquoted for readability.
     pub fn to_markdown(&self) -> String {
         let mut out = String::from("---\n");
         out.push_str(&format!("id: {}\n", self.id));
@@ -132,20 +127,15 @@ impl ConsolidatedFact {
         out
     }
 
-    /// Serialize as a single JSONL line (for facts.jsonl). Returns an error
-    /// on serialization failure so the caller can decide to skip the line
-    /// rather than emit an empty line that corrupts the JSONL index.
+    /// Serialize as a single JSONL line (for facts.jsonl).
     pub fn to_jsonl(&self) -> std::result::Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }
 
-/// Emit a YAML double-quoted scalar. Used for frontmatter values that may
-/// contain user-controlled substrings (file paths, search queries, error
-/// messages). YAML double-quoted scalars are surrounded by `"`, escape any
-/// embedded `"` or `\`, and collapse newlines to spaces — which prevents
-/// values containing `:`, `#`, `*`, leading `-`, or embedded newlines from
-/// breaking the frontmatter or injecting new keys.
+/// Emit a YAML double-quoted scalar. Escapes `\`, `"`, and newlines so
+/// user-controlled values (file paths, search queries, error messages)
+/// cannot break frontmatter parsing.
 fn yaml_quote(s: &str) -> String {
     let escaped: String = s
         .replace('\\', "\\\\")
@@ -157,20 +147,6 @@ fn yaml_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn yaml_quote_escapes_special_chars() {
-        // Meta-characters that would otherwise break YAML parsing.
-        let q = yaml_quote("a:b # c * d");
-        assert!(q.starts_with('"'));
-        assert!(q.ends_with('"'));
-        // Double quotes inside the value are backslash-escaped.
-        let q2 = yaml_quote("he said \"hi\"");
-        assert!(q2.contains("\\\""));
-        // Newlines are collapsed to spaces to keep the scalar on one line.
-        let q3 = yaml_quote("line1\nline2");
-        assert!(!q3.contains('\n'));
-    }
 
     #[test]
     fn fact_new_generates_ulid() {

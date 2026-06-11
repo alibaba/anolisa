@@ -66,6 +66,7 @@ mod tests {
             "alice",
             Some("test"),
             "user-alice",
+            None,
         )
         .unwrap();
         (tmp, svc)

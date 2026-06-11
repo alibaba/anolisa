@@ -413,3 +413,14 @@ async fn mem_consolidate_triggers_and_reports() {
 
     agent.cleanup().await;
 }
+
+#[tokio::test]
+async fn mem_compact_reports_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut agent = McpAgent::spawn(tmp.path(), &[]).await;
+
+    let text = agent.call("mem_compact", json!({})).await;
+    assert!(text.contains("compacted"), "compact result: {text}");
+
+    agent.cleanup().await;
+}

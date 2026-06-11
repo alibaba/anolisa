@@ -19,6 +19,7 @@ pub mod mem_snapshot_restore;
 pub mod memory_get_context;
 pub mod memory_observe;
 pub mod memory_search;
+pub mod memory_task;
 pub mod mkdir;
 pub mod promote;
 pub mod read;

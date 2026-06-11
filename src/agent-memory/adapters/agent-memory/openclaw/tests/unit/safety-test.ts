@@ -95,6 +95,17 @@ describe("escapeMemoryForPrompt", () => {
     const input = "The user's name is Alice. She works at Acme Corp.";
     assert.equal(escapeMemoryForPrompt(input), input);
   });
+
+  it("handles Chinese text without false positives", () => {
+    assert.equal(
+      looksLikePromptInjection("用户更喜欢用 Python 写后端服务。"),
+      false,
+    );
+    assert.equal(
+      looksLikePromptInjection("系统架构使用 PostgreSQL 作为主数据库。"),
+      false,
+    );
+  });
 });
 
 describe("wrapMemoryResultsForPrompt", () => {

@@ -28,6 +28,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EmbeddingConfig` (None|OpenAI|Ollama) with TOML parsing and environment variable overrides.
 - 30-second HTTP timeout on embedding API clients.
 
+- Memory consolidation: auto-extract L1 atomic facts from session audit logs
+  on shutdown via heuristic rules (working context, interest, change, lesson,
+  promoted, summary). Zero LLM calls, pure pattern matching. Configurable via
+  `[memory.consolidation]` with env overrides.
+- Episodic memory extraction: identify coherent tool-call chains (edit-verify
+  cycles, promote chains, error recovery, multi-step task sequences) from
+  session logs and store as episodic facts with chain steps, outcome, and
+  real duration.
+- Time-decay ranking: exponential decay (`exp(-λ×age_days)`) applied to BM25,
+  vector, and hybrid search scores. Configurable via `[memory.index]` with
+  env overrides `MEMORY_INDEX_TIME_DECAY_LAMBDA` / `MEMORY_INDEX_TIME_DECAY_ALPHA`.
+- Cold archival: automatic marking of old, never-accessed files as "cold" excluded
+  from normal search but still queryable via deep search. `mem_compact` MCP tool
+  for manual triggering. Config: `cold_after_days`, `exclude_cold_on_search`.
+- Conflict detection: BM25-based similarity search before writing new facts.
+  Conflicting facts are marked as superseded in the DB and excluded from normal
+  search. Configurable threshold via `conflict_bm25_threshold`.
+- Category subdirectories: consolidated facts organized under `facts/<category>/`
+  for structured browsing. `memory_search` gains optional `category` parameter
+  to filter results to a specific fact category.
+- Token tracking: `tokens` field in `AuditEntry` for estimating token consumption
+  of search and retrieval operations in the audit log.
+- `mem_consolidate` MCP tool for manual consolidation trigger.
+- `mem_compact` MCP tool for manual cold archival trigger.
+- `ConsolidationConfig` and `IndexConfig` expanded with env var overrides for
+  all new parameters.
+
+### Changed
+
+- `memory_search` signature extended with optional `mode` and `category` parameters.
+- `memory_search` query capped at 1024 characters to prevent FTS5 resource exhaustion.
+- Embedding error response bodies truncated to 200 chars to prevent API key leakage.
+- `ConsolidatedFact` token estimation distinguishes CJK (~1 token/char) from ASCII
+  (~4 chars/token) for more accurate context budget control.
+- `FactWriter` JSONL writes use a held file handle under a mutex to prevent line
+  interleaving from concurrent consolidation calls.
+- `BM25Store` derives mount root from db path instead of trusting `_MEMORY_MOUNT_ROOT`
+  env var, with `canonicalize()` + `starts_with()` path traversal guard.
+- `Episode::new` accepts real `duration_secs` computed from entry timestamps instead
+  of using `chain.len()` as a placeholder.
+- `episode::extract_episodes` accepts `session_id` to propagate correct ownership
+  to extracted facts. (was using entry `ts` timestamp as session_id placeholder).
+- `consolidate()` returns `usize` (fact count) instead of `()`, enabling
+  `mem_consolidate` to report the actual number of facts written.
+
 ### Changed
 
 - `memory_search` signature extended with optional `mode` parameter (backward-compatible).
@@ -45,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial release: filesystem memory MCP server for AI agents (Linux only).
-- 19 MCP tools over stdio JSON-RPC 2.0 in three tiers:
+- 21 MCP tools over stdio JSON-RPC 2.0 in three tiers:
   - Tier A file ops: `mem_read` / `mem_write` / `mem_append` / `mem_edit` / `mem_list` / `mem_grep` / `mem_diff` / `mem_mkdir` / `mem_remove` / `mem_promote` / `mem_session_log`.
   - Tier B structured search: `memory_search` (BM25) / `memory_observe` / `memory_get_context`.
   - Tier C governance: `mem_snapshot` / `mem_snapshot_list` / `mem_snapshot_restore` / `mem_log` / `mem_revert`.

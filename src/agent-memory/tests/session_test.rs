@@ -31,6 +31,7 @@ fn session_starts_with_meta_and_scratch() {
         "alice",
         Some("test"),
         "user-alice",
+        None,
     )
     .unwrap();
 
@@ -54,6 +55,7 @@ fn append_and_read_log_roundtrips() {
         "alice",
         None,
         "user-alice",
+        None,
     )
     .unwrap();
 
@@ -80,6 +82,7 @@ fn end_discard_removes_dir() {
         "alice",
         None,
         "user-alice",
+        None,
     )
     .unwrap();
     let root = svc.root().to_path_buf();
@@ -100,6 +103,7 @@ fn meta_toml_escapes_special_chars() {
         "alice\"\nrogue_key = \"injected",
         Some("agent\\with\"quotes"),
         "user-alice",
+        None,
     )
     .unwrap();
     let meta_text = std::fs::read_to_string(svc.root().join("meta.toml")).unwrap();
@@ -123,6 +127,7 @@ fn end_keep_preserves_dir() {
         "alice",
         None,
         "user-alice",
+        None,
     )
     .unwrap();
     let root = svc.root().to_path_buf();

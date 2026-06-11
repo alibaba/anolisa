@@ -120,6 +120,27 @@ pub struct ConsolidationConfig {
     /// Short sessions (1-2 calls) aren't worth extracting. Default: 3.
     #[serde(default = "default_min_calls")]
     pub min_tool_calls: usize,
+    /// Enable episodic memory extraction. Default: true.
+    #[serde(default = "default_true")]
+    pub episodic_enabled: bool,
+    /// Minimum steps to form an episode. Default: 3.
+    #[serde(default = "default_min_episode_steps")]
+    pub min_episode_steps: usize,
+    /// Max episodes per session. Default: 10.
+    #[serde(default = "default_max_episodes")]
+    pub max_episodes_per_session: usize,
+    /// Enable conflict detection during fact write. Default: true.
+    #[serde(default = "default_true")]
+    pub conflict_detection: bool,
+    /// BM25 score threshold for conflict detection. Default: -2.0.
+    #[serde(default = "default_conflict_threshold")]
+    pub conflict_bm25_threshold: f64,
+    /// Incremental consolidation interval: trigger consolidation every N
+    /// tool calls during the session (not just at shutdown). Ensures session
+    /// data is persisted incrementally so it survives SIGKILL.
+    /// Default: 20 (every 20 tool calls). Set to 0 to disable.
+    #[serde(default = "default_incremental_interval")]
+    pub incremental_interval: usize,
 }
 
 impl Default for ConsolidationConfig {
@@ -128,8 +149,30 @@ impl Default for ConsolidationConfig {
             enabled: default_true(),
             max_facts: default_max_facts(),
             min_tool_calls: default_min_calls(),
+            episodic_enabled: default_true(),
+            min_episode_steps: default_min_episode_steps(),
+            max_episodes_per_session: default_max_episodes(),
+            conflict_detection: default_true(),
+            conflict_bm25_threshold: default_conflict_threshold(),
+            incremental_interval: default_incremental_interval(),
         }
     }
+}
+
+fn default_incremental_interval() -> usize {
+    20
+}
+
+fn default_conflict_threshold() -> f64 {
+    -2.0
+}
+
+fn default_min_episode_steps() -> usize {
+    3
+}
+
+fn default_max_episodes() -> usize {
+    10
 }
 
 fn default_true() -> bool {
@@ -160,14 +203,45 @@ pub struct IndexConfig {
     /// you don't want the .anolisa/index/ subdirectory.
     #[serde(default = "default_index_enabled")]
     pub enabled: bool,
+    /// Time decay lambda for search ranking. `exp(-lambda * age_days)`.
+    /// Default 0.01 (half-life ~69 days). Set to 0.0 to disable.
+    #[serde(default = "default_decay_lambda")]
+    pub time_decay_lambda: f64,
+    /// Time decay alpha: weight of time factor added to search scores.
+    /// Default 0.3 — time contributes 30% of the final score boost.
+    #[serde(default = "default_decay_alpha")]
+    pub time_decay_alpha: f64,
+    /// Files with zero access_count older than this many days are marked
+    /// as cold (excluded from normal search). Default: 30 days.
+    #[serde(default = "default_cold_after_days")]
+    pub cold_after_days: u64,
+    /// Whether normal search excludes cold files. Default: true.
+    #[serde(default = "default_true")]
+    pub exclude_cold_on_search: bool,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             enabled: default_index_enabled(),
+            time_decay_lambda: default_decay_lambda(),
+            time_decay_alpha: default_decay_alpha(),
+            cold_after_days: default_cold_after_days(),
+            exclude_cold_on_search: default_true(),
         }
     }
+}
+
+fn default_decay_lambda() -> f64 {
+    0.01
+}
+
+fn default_decay_alpha() -> f64 {
+    0.3
+}
+
+fn default_cold_after_days() -> u64 {
+    30
 }
 
 fn default_index_enabled() -> bool {
@@ -365,6 +439,36 @@ impl AppConfig {
             };
         }
         self.memory.index.enabled = env_bool("MEMORY_INDEX_ENABLED", self.memory.index.enabled);
+        if let Ok(v) = std::env::var("MEMORY_INDEX_TIME_DECAY_LAMBDA") {
+            match v.parse::<f64>() {
+                Ok(n) if n >= 0.0 => self.memory.index.time_decay_lambda = n,
+                Ok(_) => tracing::warn!("MEMORY_INDEX_TIME_DECAY_LAMBDA must be >= 0; ignoring"),
+                Err(e) => {
+                    tracing::warn!("MEMORY_INDEX_TIME_DECAY_LAMBDA={v:?} not a f64: {e}; ignoring")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("MEMORY_INDEX_TIME_DECAY_ALPHA") {
+            match v.parse::<f64>() {
+                Ok(n) if (0.0..=1.0).contains(&n) => self.memory.index.time_decay_alpha = n,
+                Ok(_) => tracing::warn!("MEMORY_INDEX_TIME_DECAY_ALPHA must be 0.0-1.0; ignoring"),
+                Err(e) => {
+                    tracing::warn!("MEMORY_INDEX_TIME_DECAY_ALPHA={v:?} not a f64: {e}; ignoring")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("MEMORY_INDEX_COLD_AFTER_DAYS") {
+            match v.parse::<u64>() {
+                Ok(n) => self.memory.index.cold_after_days = n,
+                Err(e) => {
+                    tracing::warn!("MEMORY_INDEX_COLD_AFTER_DAYS={v:?} not a u64: {e}; ignoring")
+                }
+            }
+        }
+        self.memory.index.exclude_cold_on_search = env_bool(
+            "MEMORY_INDEX_EXCLUDE_COLD",
+            self.memory.index.exclude_cold_on_search,
+        );
         if let Ok(s) = std::env::var("MEMORY_MOUNT_STRATEGY") {
             if let Some(k) = crate::mount::MountStrategyKind::from_str_loose(&s) {
                 self.memory.mount.strategy = k;
@@ -427,6 +531,44 @@ impl AppConfig {
                 Err(e) => tracing::warn!(
                     "MEMORY_CONSOLIDATION_MIN_CALLS={v:?} not a usize: {e}; ignoring"
                 ),
+            }
+        }
+        self.memory.consolidation.episodic_enabled = env_bool(
+            "MEMORY_EPISODIC_ENABLED",
+            self.memory.consolidation.episodic_enabled,
+        );
+        if let Ok(v) = std::env::var("MEMORY_MIN_EPISODE_STEPS") {
+            match v.parse::<usize>() {
+                Ok(n) => self.memory.consolidation.min_episode_steps = n,
+                Err(e) => {
+                    tracing::warn!("MEMORY_MIN_EPISODE_STEPS={v:?} not a usize: {e}; ignoring")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("MEMORY_MAX_EPISODES") {
+            match v.parse::<usize>() {
+                Ok(n) => self.memory.consolidation.max_episodes_per_session = n,
+                Err(e) => tracing::warn!("MEMORY_MAX_EPISODES={v:?} not a usize: {e}; ignoring"),
+            }
+        }
+        self.memory.consolidation.conflict_detection = env_bool(
+            "MEMORY_CONFLICT_DETECTION",
+            self.memory.consolidation.conflict_detection,
+        );
+        if let Ok(v) = std::env::var("MEMORY_CONFLICT_THRESHOLD") {
+            match v.parse::<f64>() {
+                Ok(n) => self.memory.consolidation.conflict_bm25_threshold = n,
+                Err(e) => {
+                    tracing::warn!("MEMORY_CONFLICT_THRESHOLD={v:?} not a f64: {e}; ignoring")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("MEMORY_CONSOLIDATION_INTERVAL") {
+            match v.parse::<usize>() {
+                Ok(n) => self.memory.consolidation.incremental_interval = n,
+                Err(e) => {
+                    tracing::warn!("MEMORY_CONSOLIDATION_INTERVAL={v:?} not a usize: {e}; ignoring")
+                }
             }
         }
         if let Ok(v) = std::env::var("MEMORY_MAX_READ_BYTES") {
@@ -515,6 +657,16 @@ mod tests {
     }
 
     #[test]
+    fn embedding_config_parses_none_from_toml() {
+        let toml = r#"
+            [memory.embedding]
+            backend = "none"
+            "#;
+        let cfg: AppConfig = toml::from_str(toml).unwrap();
+        assert!(matches!(cfg.memory.embedding, EmbeddingConfig::None));
+    }
+
+    #[test]
     fn embedding_config_env_override_defaults_to_none() {
         // When MEMORY_EMBEDDING_BACKEND is not set, config stays at default (None).
         let mut cfg = AppConfig::default();
@@ -524,10 +676,6 @@ mod tests {
 
     #[test]
     fn shipped_default_toml_parses() {
-        // Regression guard: every field present in config/default.toml must
-        // exist on the corresponding struct (which all use
-        // `deny_unknown_fields`). A typo or stale field here would fail
-        // parsing at runtime for anyone using the shipped config.
         let toml_src = include_str!("../config/default.toml");
         let cfg: AppConfig = toml::from_str(toml_src).expect("shipped default.toml must parse");
         assert!(cfg.memory.consolidation.enabled);

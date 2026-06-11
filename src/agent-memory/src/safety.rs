@@ -341,4 +341,23 @@ mod tests {
         let result = redact_secrets(text);
         assert_eq!(result, text);
     }
+
+    #[test]
+    fn accepts_chinese_text() {
+        assert!(!looks_like_prompt_injection(
+            "用户更喜欢用 Python 写后端服务。"
+        ));
+        assert!(!looks_like_prompt_injection(
+            "系统架构使用 PostgreSQL 作为主数据库。"
+        ));
+    }
+
+    #[test]
+    fn chinese_text_passes_through_escape() {
+        let input = "用户名：张三。公司：阿里巴巴。";
+        let escaped = escape_memory_for_prompt(input);
+        // All CJK characters should pass through unchanged; no HTML
+        // special chars to escape.
+        assert_eq!(input, escaped);
+    }
 }

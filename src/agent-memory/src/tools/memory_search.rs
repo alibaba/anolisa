@@ -12,6 +12,9 @@ const TOOL: &str = "memory_search";
 /// - `"vector"`: dense embedding cosine similarity (requires embedding config).
 /// - `"hybrid"`: reciprocal rank fusion of BM25 + vector results.
 ///
+/// `category` filters results to a specific fact category (e.g. "lesson",
+/// "interest"). When empty, all categories are included.
+///
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
 /// an embedding provider.
@@ -20,6 +23,7 @@ pub fn memory_search(
     query: &str,
     top_k: usize,
     mode: Option<&str>,
+    category: Option<&str>,
 ) -> Result<Vec<SearchHit>> {
     let mode = mode.unwrap_or("bm25");
     let index = match svc.index.as_ref() {
@@ -36,10 +40,16 @@ pub fn memory_search(
     match mode {
         "bm25" => {
             let hits = index.search(query, top_k.max(1))?;
+            let hits = filter_by_category(hits, category);
+            let tokens = hits
+                .iter()
+                .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
+                .sum();
             svc.audit_log(
                 AuditEntry::new(TOOL)
                     .path(format!("bm25:{:.120}", query))
-                    .bytes(hits.len() as u64),
+                    .bytes(hits.len() as u64)
+                    .tokens(tokens),
             );
             Ok(hits)
         }
@@ -91,11 +101,17 @@ pub fn memory_search(
             } else {
                 index.search_hybrid(query, &embedding.vector, top_k.max(1))?
             };
+            let hits = filter_by_category(hits, category);
+            let tokens = hits
+                .iter()
+                .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
+                .sum();
 
             svc.audit_log(
                 AuditEntry::new(TOOL)
                     .path(format!("{mode}:{:.120}", query))
-                    .bytes(hits.len() as u64),
+                    .bytes(hits.len() as u64)
+                    .tokens(tokens),
             );
             Ok(hits)
         }
@@ -103,4 +119,19 @@ pub fn memory_search(
             "unknown search mode '{unknown}'; expected bm25, vector, or hybrid"
         ))),
     }
+}
+
+/// Filter search hits by category, based on the path prefix.
+/// Facts are stored under facts/<category>/<ulid>.md.
+fn filter_by_category(
+    hits: Vec<crate::index::SearchHit>,
+    category: Option<&str>,
+) -> Vec<crate::index::SearchHit> {
+    let Some(cat) = category else { return hits };
+    hits.into_iter()
+        .filter(|h| {
+            // Path like "facts/lesson/ulid.md" → category is the second component.
+            h.path.split('/').nth(1) == Some(cat)
+        })
+        .collect()
 }

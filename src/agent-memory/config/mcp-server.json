@@ -1,6 +1,6 @@
 {
   "name": "agent-memory",
-  "description": "Agent memory — filesystem memory MCP server. 20 tools across three tiers: Tier A file ops (read/write/append/edit/list/grep/diff/mkdir/remove/promote + mem_session_log), Tier B structured (memory_search with optional dense-vector semantic search via OpenAI/Ollama embedding backends + memory_observe + memory_get_context + mem_consolidate), Tier C governance (mem_snapshot/mem_snapshot_list/mem_snapshot_restore/mem_log/mem_revert). Optional Linux user-namespace isolation, SQLite FTS5 BM25 + vector hybrid background index, git versioning, tar.gz snapshots, cgroup v2 memory.max, and journald audit fan-out.",
+  "description": "Agent memory — filesystem memory MCP server. 25 tools across three tiers: Tier A file ops (read/write/append/edit/list/grep/diff/mkdir/remove/promote + mem_session_log), Tier B structured (memory_search with optional dense-vector semantic search via OpenAI/Ollama embedding backends, category filtering + memory_observe + memory_get_context + memory_task_save/resume/list/close), Tier C governance (mem_snapshot/mem_snapshot_list/mem_snapshot_restore/mem_log/mem_revert/mem_consolidate/mem_compact). Optional Linux user-namespace isolation, SQLite FTS5 BM25 + vector hybrid background index, time-decay ranking, cold archival, episodic memory extraction, conflict detection, git versioning, tar.gz snapshots, cgroup v2 memory.max, and journald audit fan-out.",
   "version": "0.1.0",
   "command": "/usr/bin/agent-memory",
   "args": [],
@@ -21,11 +21,16 @@
     "memory_search",
     "memory_observe",
     "memory_get_context",
+    "memory_task_save",
+    "memory_task_resume",
+    "memory_task_list",
+    "memory_task_close",
     "mem_snapshot",
     "mem_snapshot_list",
     "mem_snapshot_restore",
     "mem_log",
     "mem_revert",
-    "mem_consolidate"
+    "mem_consolidate",
+    "mem_compact"
   ]
 }

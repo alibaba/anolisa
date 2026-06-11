@@ -26,6 +26,10 @@ pub struct AuditEntry {
     /// Bytes read or written, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Estimated token count for the response (bytes / 4 approximation).
+    /// Only populated for search and context retrieval tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
     /// Error message if `ok == false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -42,6 +46,7 @@ impl AuditEntry {
             path: String::new(),
             ok: true,
             bytes: None,
+            tokens: None,
             error: None,
             trace_id: None,
         }
@@ -59,6 +64,11 @@ impl AuditEntry {
 
     pub fn bytes(mut self, n: u64) -> Self {
         self.bytes = Some(n);
+        self
+    }
+
+    pub fn tokens(mut self, n: u64) -> Self {
+        self.tokens = Some(n);
         self
     }
 

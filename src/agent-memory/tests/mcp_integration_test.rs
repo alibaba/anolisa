@@ -32,6 +32,11 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mem_log",
     "mem_revert",
     "mem_consolidate",
+    "mem_compact",
+    "memory_task_save",
+    "memory_task_resume",
+    "memory_task_list",
+    "memory_task_close",
 ];
 
 async fn spawn_with_dir(

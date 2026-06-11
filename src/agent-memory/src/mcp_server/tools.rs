@@ -205,13 +205,14 @@ impl MemoryMcpServer {
     // ---- Tier B: structured search/write API for weak models or batch use ----
 
     #[tool(
-        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid."
+        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid. Optional category filters results to a fact category (e.g. 'lesson', 'interest', 'working-context')."
     )]
     async fn memory_search(
         &self,
         #[tool(param)] query: String,
         #[tool(param)] top_k: Option<u32>,
         #[tool(param)] mode: Option<String>,
+        #[tool(param)] category: Option<String>,
     ) -> ToolResult {
         // Reject excessively long queries to prevent FTS5 resource exhaustion.
         const MAX_QUERY_LEN: usize = 1024;
@@ -224,7 +225,12 @@ impl MemoryMcpServer {
         let k = top_k.unwrap_or(5) as usize;
         let hits = self
             .svc
-            .memory_search(&query, k, mode.as_deref())
+            .memory_search(
+                &query,
+                k,
+                mode.as_deref(),
+                category.as_deref().filter(|s| !s.is_empty()),
+            )
             .map_err(|e| fmt_err("search failed", e))?;
         serde_json::to_string_pretty(&hits).map_err(|e| fmt_err("search serialize failed", e))
     }
@@ -325,6 +331,79 @@ impl MemoryMcpServer {
         let n = self.svc.consolidate();
         Ok(format!("consolidation complete: {n} facts written"))
     }
+
+    // ---- Index compaction (cold archival) ----
+
+    #[tool(
+        description = "Compact the memory index: mark old, never-searched files as cold. Cold files are excluded from normal search but still available via deep search. Returns the number of files compacted."
+    )]
+    async fn mem_compact(&self) -> ToolResult {
+        self.svc
+            .compact()
+            .map(|n| format!("compacted {n} files to cold storage"))
+            .map_err(|e| fmt_err("compact failed", e))
+    }
+
+    // ---- Task model (cross-session task persistence) ----
+
+    #[tool(
+        description = "Save or update a task for cross-session persistence. Tasks track title, status (in-progress/blocked/done/cancelled), progress (0-100%), next steps, blockers, files modified, and decisions. If 'id' is provided and exists, the task is updated; otherwise a new task is created. Returns the task id."
+    )]
+    #[allow(clippy::too_many_arguments)]
+    async fn memory_task_save(
+        &self,
+        #[tool(param)] title: String,
+        #[tool(param)] status: Option<String>,
+        #[tool(param)] progress: Option<u32>,
+        #[tool(param)] next_steps: Option<Vec<String>>,
+        #[tool(param)] blockers: Option<Vec<String>>,
+        #[tool(param)] files_modified: Option<Vec<String>>,
+        #[tool(param)] decisions: Option<Vec<String>>,
+        #[tool(param)] context: Option<String>,
+        #[tool(param)] id: Option<String>,
+    ) -> ToolResult {
+        crate::tools::memory_task::memory_task_save(
+            &self.svc,
+            &title,
+            status.as_deref(),
+            progress.map(|p| p as u8),
+            next_steps,
+            blockers,
+            files_modified,
+            decisions,
+            context.as_deref(),
+            id.as_deref(),
+        )
+        .map_err(|e| fmt_err("task_save failed", e))
+    }
+
+    #[tool(
+        description = "Resume a task by id: returns the full task context (title, status, progress, next steps, blockers, files, decisions, context) formatted for continuing work in a new session."
+    )]
+    async fn memory_task_resume(&self, #[tool(param)] id: String) -> ToolResult {
+        crate::tools::memory_task::memory_task_resume(&self.svc, &id)
+            .map_err(|e| fmt_err("task_resume failed", e))
+    }
+
+    #[tool(
+        description = "List tasks. By default shows active tasks (in-progress + blocked). Optional status filter: 'in-progress', 'blocked', 'done', 'cancelled'. Returns JSON array of task summaries."
+    )]
+    async fn memory_task_list(&self, #[tool(param)] status: Option<String>) -> ToolResult {
+        crate::tools::memory_task::memory_task_list(&self.svc, status.as_deref())
+            .map_err(|e| fmt_err("task_list failed", e))
+    }
+
+    #[tool(
+        description = "Close a task (mark as done). Optional reason is appended to the task context. Returns confirmation."
+    )]
+    async fn memory_task_close(
+        &self,
+        #[tool(param)] id: String,
+        #[tool(param)] reason: Option<String>,
+    ) -> ToolResult {
+        crate::tools::memory_task::memory_task_close(&self.svc, &id, reason.as_deref())
+            .map_err(|e| fmt_err("task_close failed", e))
+    }
 }
 
 rmcp::tool_box!(MemoryMcpServer {
@@ -348,6 +427,11 @@ rmcp::tool_box!(MemoryMcpServer {
     mem_log,
     mem_revert,
     mem_consolidate,
+    mem_compact,
+    memory_task_save,
+    memory_task_resume,
+    memory_task_list,
+    memory_task_close,
 } memory_tool_box);
 
 impl ServerHandler for MemoryMcpServer {

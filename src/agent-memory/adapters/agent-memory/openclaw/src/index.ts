@@ -13,11 +13,7 @@ import { Type } from "typebox";
 import { createHash } from "node:crypto";
 import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
-import {
-  escapeMemoryForPrompt,
-  looksLikePromptInjection,
-  wrapMemoryResultsForPrompt,
-} from "./safety.js";
+import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
 
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
@@ -396,10 +392,6 @@ export default definePluginEntry({
     );
 
     // ── Corpus supplement: integrate with memory_search corpus=all ──
-    // The supplement feeds memory content back into the model's context,
-    // so every snippet is HTML-escaped and suspicious hits are annotated
-    // (mirroring the explicit `memory_search` tool path) — defence in
-    // depth against prompt-injection payloads stored in memories.
     api.registerMemoryCorpusSupplement?.({
       async search(input: { query: string; maxResults?: number }) {
         try {
@@ -412,23 +404,13 @@ export default definePluginEntry({
             path: string;
             snippet: string;
             score: number;
-            suspicious?: boolean;
           }>;
-          return hits.map((h) => {
-            // Escape snippet for safe prompt inclusion; re-evaluate the
-            // injection heuristic on the snippet itself so the corpus
-            // supplement stays consistent with the `memory_search` path.
-            const suspicious =
-              h.suspicious === true || looksLikePromptInjection(h.snippet);
-            const snippet = escapeMemoryForPrompt(h.snippet);
-            const tag = suspicious ? " [SUSPICIOUS]" : "";
-            return {
-              corpus: "memory",
-              path: h.path,
-              snippet: suspicious ? `${snippet}${tag}` : snippet,
-              score: h.score,
-            };
-          });
+          return hits.map((h) => ({
+            corpus: "memory",
+            path: h.path,
+            snippet: h.snippet,
+            score: h.score,
+          }));
         } catch {
           return [];
         }

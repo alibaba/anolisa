@@ -47,17 +47,27 @@ pub struct SessionLogService {
     log_path: PathBuf,
     /// Held file handle for jsonl appends — avoids repeated open/close.
     log_file: Mutex<File>,
+    /// Persistent mirror of the session log, written to
+    /// `<mount>/.anolisa/session-logs/<sid>.jsonl`. Survives SIGKILL and
+    /// tmpfs loss. Best-effort — failures are logged but never propagate.
+    mirror_file: Mutex<Option<File>>,
 }
 
 impl SessionLogService {
     /// Create a new session directory under `base_dir/<sid>/`. Writes
     /// `meta.toml` and ensures `scratch/` exists.
+    ///
+    /// `mirror_dir` is the persistent directory where session log entries
+    /// are mirrored (typically `<mount>/.anolisa/session-logs/`). This
+    /// ensures session data survives SIGKILL and tmpfs loss. Pass `None`
+    /// to disable mirroring.
     pub fn start(
         base_dir: impl AsRef<Path>,
         sid: SessionId,
         owner_user_id: &str,
         agent_id: Option<&str>,
         mount_ns: &str,
+        mirror_dir: Option<&Path>,
     ) -> Result<Self> {
         let root = base_dir.as_ref().join(sid.as_str());
         let scratch = root.join(SCRATCH_DIR);
@@ -94,12 +104,40 @@ impl SessionLogService {
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&log_path)?;
 
+        // Open persistent mirror (best-effort — failure doesn't block session start).
+        let mirror_file = mirror_dir.and_then(|dir| {
+            if std::fs::create_dir_all(dir).is_err() {
+                tracing::warn!("failed to create session log mirror dir: {}", dir.display());
+                return None;
+            }
+            let mirror_path = dir.join(format!("{}.jsonl", sid.as_str()));
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+                .open(&mirror_path)
+            {
+                Ok(f) => {
+                    tracing::debug!("session log mirror: {}", mirror_path.display());
+                    Some(f)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "session log mirror unavailable at {}: {e}",
+                        mirror_path.display()
+                    );
+                    None
+                }
+            }
+        });
+
         Ok(Self {
             sid,
             root,
             scratch,
             log_path,
             log_file: Mutex::new(log_file),
+            mirror_file: Mutex::new(mirror_file),
         })
     }
 
@@ -119,12 +157,23 @@ impl SessionLogService {
         &self.log_path
     }
 
-    /// Append one jsonl line to the session log.
+    /// Append one jsonl line to the session log AND the persistent mirror.
+    /// The mirror write is best-effort — failures are logged but never
+    /// propagate, so the foreground tool call is never blocked.
     pub fn append_log(&self, entry: AuditEntry) -> Result<()> {
         let line = serde_json::to_string(&entry)? + "\n";
         let mut f = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
         f.write_all(line.as_bytes())?;
         f.flush()?;
+
+        // Mirror to persistent storage (best-effort).
+        if let Ok(mut guard) = self.mirror_file.lock() {
+            if let Some(ref mut mf) = *guard {
+                let _ = mf.write_all(line.as_bytes());
+                let _ = mf.flush();
+            }
+        }
+
         Ok(())
     }
 

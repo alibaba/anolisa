@@ -49,9 +49,24 @@ max_read_bytes   = 1_048_576   #  1 MiB
 max_write_bytes  = 16_777_216  # 16 MiB
 max_append_bytes = 4_194_304   #  4 MiB
 
+[memory.index]
+enabled = true
+# Time decay: exp(-lambda * age_days). 0 = disabled.
+time_decay_lambda = 0.01   # half-life ~69 days
+time_decay_alpha  = 0.3    # time contributes 30% of score boost
+# Cold archival: files with 0 access_count older than this many days
+# are excluded from normal search.
+cold_after_days       = 30
+exclude_cold_on_search = true
+
 # ── Consolidation ───────────────────────────────────────────────
 # Auto-extract L1 atomic facts from session audit logs on shutdown.
 [memory.consolidation]
-enabled        = true
-max_facts      = 20
-min_tool_calls = 3
+enabled                  = true
+max_facts                = 20
+min_tool_calls           = 3
+episodic_enabled         = true
+min_episode_steps        = 3
+max_episodes_per_session = 10
+conflict_detection       = true
+conflict_bm25_threshold  = -2.0

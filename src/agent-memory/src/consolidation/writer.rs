@@ -1,34 +1,59 @@
 //! Fact writer — writes consolidated facts to the filesystem.
 //!
 //! Produces two outputs per fact:
-//! 1. `facts/<ulid>.md` — markdown with YAML frontmatter
+//! 1. `facts/<category>/<ulid>.md` — markdown with YAML frontmatter
 //! 2. `facts/facts.jsonl` — JSONL line appended to the same directory
 //!
-//! Both writes go through `safe_fs` (openat2 + RESOLVE_BENEATH) to preserve
-//! namespace-sandbox consistency with other tools: the markdown file via
-//! `write_create_new`, the JSONL line via `append`.
+//! All writes use `safe_fs` (openat2 + RESOLVE_BENEATH) when a root_fd
+//! is provided, ensuring namespace sandbox containment.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::error::Result;
-use crate::safe_fs;
+use crate::index::store::BM25Store;
 
 use super::fact::ConsolidatedFact;
 
-/// Writes facts to a given base directory using namespace-safe paths.
+/// Writes facts to a given base directory.
 pub struct FactWriter {
-    root_fd: OwnedFd,
     facts_dir: PathBuf,
+    jsonl_path: PathBuf,
+    /// Mount root fd for sandboxed writes via safe_fs (openat2 + RESOLVE_BENEATH).
+    /// None falls back to std::fs (used in tests with temp dirs).
+    root_fd: Option<Arc<OwnedFd>>,
+    /// BM25 store for optional conflict detection.
+    index: Option<Arc<Mutex<BM25Store>>>,
+    /// BM25 threshold for conflict detection.
+    conflict_threshold: f64,
 }
 
 impl FactWriter {
-    /// Create a new FactWriter. `root_fd` is a clone of the mount root fd
-    /// used for safe_fs operations. `base_dir` is the absolute path to the
-    /// mount root.
-    pub fn new(root_fd: OwnedFd, base_dir: &Path) -> Self {
+    pub fn new(base_dir: &Path) -> Self {
         let facts_dir = base_dir.join("facts");
-        Self { root_fd, facts_dir }
+        let jsonl_path = facts_dir.join("facts.jsonl");
+        Self {
+            facts_dir,
+            jsonl_path,
+            root_fd: None,
+            index: None,
+            conflict_threshold: -2.0,
+        }
+    }
+
+    /// Attach a root fd for sandboxed writes.
+    pub fn with_root_fd(mut self, fd: Arc<OwnedFd>) -> Self {
+        self.root_fd = Some(fd);
+        self
+    }
+
+    pub fn with_index(mut self, index: Arc<Mutex<BM25Store>>, conflict_threshold: f64) -> Self {
+        self.index = Some(index);
+        self.conflict_threshold = conflict_threshold;
+        self
     }
 
     /// Ensure the facts directory exists.
@@ -37,26 +62,74 @@ impl FactWriter {
         Ok(())
     }
 
-    /// Write a single fact: creates `<ulid>.md` via safe_fs and appends to `facts.jsonl`.
+    /// Write a single fact: creates `<category>/<ulid>.md` and appends to `facts.jsonl`.
+    /// Uses safe_fs (openat2 + RESOLVE_BENEATH) when root_fd is available,
+    /// falling back to std::fs for tests with temp dirs.
+    /// If conflict detection is enabled, marks similar existing facts as superseded.
     pub fn write(&self, fact: &ConsolidatedFact) -> Result<()> {
-        self.ensure_dir()?;
+        std::fs::create_dir_all(&self.facts_dir)?;
 
-        // Write markdown file via safe_fs (openat2 + RESOLVE_BENEATH).
-        let rel_path = Path::new("facts").join(format!("{}.md", fact.id));
-        let content = fact.to_markdown();
-        safe_fs::write_create_new(self.root_fd.as_fd(), &rel_path, content.as_bytes())?;
+        // Conflict detection: search for similar facts before writing.
+        if let Some(ref store) = self.index {
+            let search_text = format!(
+                "{} {}",
+                fact.title,
+                fact.content.chars().take(100).collect::<String>()
+            );
+            let mut s = store.lock().expect("store poisoned");
+            match s.detect_conflicts(&search_text, self.conflict_threshold) {
+                Ok(conflicts) => {
+                    for (old_path, score) in &conflicts {
+                        tracing::info!(
+                            "conflict detected: new fact '{}' conflicts with '{}' (score={:.2})",
+                            fact.title,
+                            old_path,
+                            score
+                        );
+                        let _ = s.supersede(old_path, &fact.id);
+                    }
+                }
+                Err(e) => tracing::warn!("conflict detection failed: {e}"),
+            }
+        }
 
-        // Append JSONL line via safe_fs (openat2 + RESOLVE_BENEATH), keeping
-        // the write path consistent with the markdown file above. Each append
-        // opens and closes the file atomically; per-line fsync is dropped in
-        // favor of batch-level durability (callers write many facts per
-        // consolidation run).
-        let mut line = fact.to_jsonl()?;
-        line.push('\n');
-        let jsonl_rel = Path::new("facts").join("facts.jsonl");
-        safe_fs::append(self.root_fd.as_fd(), &jsonl_rel, line.as_bytes())?;
+        // Write markdown file under category subdirectory.
+        let category_dir = self.facts_dir.join(fact.category.to_string());
+        std::fs::create_dir_all(&category_dir)?;
+        let md_path = category_dir.join(format!("{}.md", fact.id));
 
-        tracing::debug!("wrote fact: {}", rel_path.display());
+        if let Some(ref fd) = self.root_fd {
+            // Sandboxed write via safe_fs (openat2 + RESOLVE_BENEATH).
+            let md_rel = Path::new("facts")
+                .join(fact.category.to_string())
+                .join(format!("{}.md", fact.id));
+            crate::safe_fs::write(fd.as_fd(), &md_rel, fact.to_markdown().as_bytes())?;
+        } else {
+            std::fs::write(&md_path, fact.to_markdown())?;
+        }
+
+        // Append JSONL line.
+        let jsonl_str = match fact.to_jsonl() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("failed to serialize fact {} to JSONL: {e}", fact.id);
+                return Ok(());
+            }
+        };
+        let jsonl_line = format!("{jsonl_str}\n");
+        if let Some(ref fd) = self.root_fd {
+            let jsonl_rel = Path::new("facts").join("facts.jsonl");
+            crate::safe_fs::append(fd.as_fd(), &jsonl_rel, jsonl_line.as_bytes())?;
+        } else {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.jsonl_path)?;
+            f.write_all(jsonl_line.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        tracing::debug!("wrote fact: {}", md_path.display());
         Ok(())
     }
 
@@ -65,6 +138,7 @@ impl FactWriter {
         if facts.is_empty() {
             return Ok(0);
         }
+        self.ensure_dir()?;
 
         let mut written = 0;
         for fact in facts {
@@ -89,15 +163,10 @@ mod tests {
     use super::*;
     use crate::consolidation::fact::{ConsolidatedFact, FactCategory};
 
-    fn make_writer(tmp: &tempfile::TempDir) -> FactWriter {
-        let root_fd = crate::safe_fs::open_root(tmp.path()).unwrap();
-        FactWriter::new(root_fd, tmp.path())
-    }
-
     #[test]
     fn write_single_fact() {
         let tmp = tempfile::tempdir().unwrap();
-        let writer = make_writer(&tmp);
+        let writer = FactWriter::new(tmp.path());
         let fact = ConsolidatedFact::new(
             "test-sid",
             FactCategory::WorkingContext,
@@ -109,7 +178,11 @@ mod tests {
         );
         writer.write(&fact).unwrap();
 
-        let md_path = tmp.path().join("facts").join(format!("{}.md", fact.id));
+        let md_path = tmp
+            .path()
+            .join("facts")
+            .join("working-context")
+            .join(format!("{}.md", fact.id));
         assert!(md_path.exists());
         assert!(
             std::fs::read_to_string(&md_path)
@@ -129,7 +202,7 @@ mod tests {
     #[test]
     fn write_batch_dedup() {
         let tmp = tempfile::tempdir().unwrap();
-        let writer = make_writer(&tmp);
+        let writer = FactWriter::new(tmp.path());
         let facts = vec![
             ConsolidatedFact::new(
                 "s1",

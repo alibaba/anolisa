@@ -293,15 +293,13 @@ fn flush(
             Some(b) => b,
             None => continue,
         };
-        if let Some(rel) = relative(mount, &path) {
-            let mtime = super::store::mtime_ms_of(&meta);
-            to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
+        let mtime = super::store::mtime_ms_of(&meta);
+        to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
 
-            // Compute embedding for this file if provider is available.
-            if let (Some(emb), Some(rt)) = (embedding, rt_handle.as_ref()) {
-                if let Ok(embedding_vec) = rt.block_on(emb.embed(&body)) {
-                    to_upsert_vec.push((rel, embedding_vec.vector));
-                }
+        // Compute embedding for this file if provider is available.
+        if let (Some(emb), Some(rt)) = (embedding, rt_handle.as_ref()) {
+            if let Ok(embedding_vec) = rt.block_on(emb.embed(&body)) {
+                to_upsert_vec.push((rel, embedding_vec.vector));
             }
         }
     }

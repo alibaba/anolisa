@@ -35,10 +35,12 @@ pub trait EmbeddingProvider: Send + Sync {
 
 /// Configuration for the embedding backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EmbeddingConfig {
     /// No embedding — only BM25 keyword search is available.
     #[serde(rename = "none")]
+    #[default]
     None,
     /// OpenAI `/v1/embeddings` compatible API.
     #[serde(rename = "openai")]
@@ -63,13 +65,6 @@ pub enum EmbeddingConfig {
         #[serde(default = "default_ollama_url")]
         base_url: String,
     },
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for EmbeddingConfig {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 fn default_openai_model() -> String {

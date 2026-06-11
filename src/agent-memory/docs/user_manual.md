@@ -5,7 +5,7 @@
 `agent-memory` is a Linux-only Rust [MCP](https://modelcontextprotocol.io/)
 server that gives an AI agent persistent, sandboxed, file-shaped memory.
 This manual covers the architecture, installation, configuration, the
-19 MCP tools the server exposes, how to integrate from a client / SDK,
+21 MCP tools the server exposes (25 including the four `memory_task_*` cross-session task tools), how to integrate from a client / SDK,
 and how to verify a deployment.
 
 ## Table of Contents
@@ -331,6 +331,10 @@ strategy = "auto"              # auto | userland | userns
 
 [memory.index]
 enabled = true
+time_decay_lambda = 0.01          # 0 = disable time decay
+time_decay_alpha  = 0.3           # time weight in score
+cold_after_days   = 30
+exclude_cold_on_search = true
 
 [memory.audit]
 journald = false
@@ -342,6 +346,16 @@ memory_max = "512M"
 [memory.git]
 enabled = false
 auto_commit = true
+
+[memory.consolidation]
+enabled                  = true
+max_facts                = 20
+min_tool_calls           = 3
+episodic_enabled         = true
+min_episode_steps        = 3
+max_episodes_per_session = 10
+conflict_detection       = true
+conflict_bm25_threshold  = -2.0
 ```
 
 ### Environment overrides
@@ -366,6 +380,18 @@ and one-off invocations.
 | `MEMORY_MAX_READ_BYTES` | `memory.max_read_bytes` | |
 | `MEMORY_MAX_WRITE_BYTES` | `memory.max_write_bytes` | |
 | `MEMORY_MAX_APPEND_BYTES` | `memory.max_append_bytes` | |
+| `MEMORY_INDEX_TIME_DECAY_LAMBDA` | `memory.index.time_decay_lambda` | must be ≥ 0.0 |
+| `MEMORY_INDEX_TIME_DECAY_ALPHA` | `memory.index.time_decay_alpha` | must be 0.0–1.0 |
+| `MEMORY_INDEX_COLD_AFTER_DAYS` | `memory.index.cold_after_days` | |
+| `MEMORY_INDEX_EXCLUDE_COLD` | `memory.index.exclude_cold_on_search` | |
+| `MEMORY_CONSOLIDATION_ENABLED` | `memory.consolidation.enabled` | |
+| `MEMORY_CONSOLIDATION_MAX_FACTS` | `memory.consolidation.max_facts` | |
+| `MEMORY_CONSOLIDATION_MIN_CALLS` | `memory.consolidation.min_tool_calls` | |
+| `MEMORY_EPISODIC_ENABLED` | `memory.consolidation.episodic_enabled` | |
+| `MEMORY_MIN_EPISODE_STEPS` | `memory.consolidation.min_episode_steps` | |
+| `MEMORY_MAX_EPISODES` | `memory.consolidation.max_episodes_per_session` | |
+| `MEMORY_CONFLICT_DETECTION` | `memory.consolidation.conflict_detection` | |
+| `MEMORY_CONFLICT_THRESHOLD` | `memory.consolidation.conflict_bm25_threshold` | |
 | `MEMORY_SESSION_ID` | (runtime-only) | Pins the agent run to a specific session id under `MEMORY_SESSION_DIR`. Required for `mem_promote`; see § 7. |
 
 ### Profiles
@@ -373,9 +399,9 @@ and one-off invocations.
 Profiles are a UX hint (not a security boundary), enforced at both
 `tools/list` and `tools/call`:
 
-- **basic** — all 19 tools listed; weak models can still benefit from
+- **basic** — all 25 tools listed; weak models can still benefit from
   the structured Tier B API.
-- **advanced** (default) — all 19 tools listed; strong models are
+- **advanced** (default) — all 25 tools listed; strong models are
   expected to prefer Tier A file ops.
 - **expert** — Tier B (`memory_search`, `memory_observe`,
   `memory_get_context`) is hidden from `tools/list` and rejected at
@@ -460,7 +486,7 @@ text: "<reason>"}] }` so a client can branch on `isError`.
 
 | Tool | Required | Optional | Returns |
 |------|----------|----------|---------|
-| `memory_search` | `query` | `top_k` (default 5) | JSON array of `{path, score, snippet}` |
+| `memory_search` | `query` | `top_k` (default 5), `mode` (bm25/vector/hybrid), `category` | JSON array of `{path, score, snippet, suspicious}` |
 | `memory_observe` | `content` | `hint` | `observed at notes/observed/<ulid>.md` |
 | `memory_get_context` | — | `max_tokens` (default 2048) | markdown preview |
 
@@ -473,6 +499,8 @@ text: "<reason>"}] }` so a client can branch on `isError`.
 | `mem_snapshot_restore` | `id` | — | `restored <id>` |
 | `mem_log` | — | `limit` (default 20), `path` | JSON array of `{hash, summary, author, time}` |
 | `mem_revert` | `path` | — | `reverted <path> (commit <hash>)` |
+| `mem_consolidate` | — | — | `consolidation complete: N facts written` |
+| `mem_compact` | — | — | `compacted N files to cold storage` |
 
 ### Error code semantics
 
@@ -615,7 +643,7 @@ cd src/agent-memory
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test                                        # all suites
-cargo test --test e2e_agent_test                  # 19-tool E2E
+cargo test --test e2e_agent_test                  # 21-tool E2E
 cargo test --test mcp_integration_test            # protocol level
 cargo test --test linux_userns_test -- --ignored  # needs unprivileged userns
 ```
