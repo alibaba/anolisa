@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+- Added `anolisa-register` skill. (#829)
+
 ## 0.4.0
 
 - Added auto-install tokenless plugin support for agent install skills. (#731)
