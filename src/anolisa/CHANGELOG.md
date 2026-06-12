@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-12
+
+### Added
+
+- **gVisor sandbox install path**: `anolisa osbase sandbox install gvisor`
+  now supports standalone, containerd runtime, and substrate control-plane
+  deployments, including runsc/shim/atelet/ateom-gvisor RPM packaging,
+  TOML-AST containerd config patching, Docker runtime registration, substrate
+  directory provisioning, and validation/dry-run coverage (#851)
+- **Repo-config catalog discovery**: `anolisa list` can now derive the
+  component catalog URL from `[backends.raw].base_url` in `repo.toml`, while
+  `ANOLISA_CATALOG_URL` remains an explicit override (#854)
+
+### Changed
+
+- **Component-only lifecycle model**: legacy capability resolver, enable,
+  disable, manifests, templates, execution-policy staging, and old capability
+  demo scripts were removed; CLI and JSON wire formats now consistently use
+  component terminology such as `data.components`, `.component`, and
+  `installed_components` (#876)
+- Legacy capability state still deserializes for upgrade compatibility and is
+  pruned with a warn-level audit record on the next state write (#876)
+
+### Fixed
+
+- `anolisa list` now reads `installed.toml` so catalog rows reflect
+  `installed`/`not_installed`, and `list --enabled` returns installed
+  components instead of an empty list (#872)
+- `anolisa list` no longer requires a separate local `config.toml` catalog
+  source when `repo.toml` or the default raw backend can provide one; missing
+  catalog hints now point to `repo.toml` / raw backend configuration (#854)
+
 ## [0.1.5] - 2026-06-11
 
 ### Added
@@ -198,6 +230,37 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.6] - 2026-06-12
+
+### 新增
+
+- **gVisor 沙箱安装链路**：`anolisa osbase sandbox install gvisor` 现在支持
+  standalone、containerd runtime 和 substrate control-plane 三种部署形态，
+  包含 runsc/shim/atelet/ateom-gvisor RPM 打包、containerd `config.toml`
+  AST 级补丁、Docker runtime 注册、substrate 目录准备，以及验证和 dry-run
+  覆盖 (#851)
+- **基于 repo.toml 的 catalog 发现**：`anolisa list` 现在可从 `repo.toml`
+  中的 `[backends.raw].base_url` 派生 component catalog URL，同时保留
+  `ANOLISA_CATALOG_URL` 显式覆盖 (#854)
+
+### 变更
+
+- **组件唯一生命周期模型**：移除 legacy capability resolver、enable、disable、
+  manifests、templates、execution-policy staging 和旧 capability demo 脚本；
+  CLI 与 JSON wire format 现在统一使用 component 语义，例如
+  `data.components`、`.component` 和 `installed_components` (#876)
+- 为升级兼容，legacy capability state 仍可反序列化，并会在下一次写 state 时
+  被剪除，同时写入 warn 级审计记录 (#876)
+
+### 修复
+
+- `anolisa list` 现在读取 `installed.toml`，catalog rows 可正确展示
+  `installed`/`not_installed`；`list --enabled` 会返回已安装组件，而不是空列表
+  (#872)
+- `anolisa list` 不再要求单独的本地 `config.toml` catalog 来源；当
+  `repo.toml` 或默认 raw backend 可提供 catalog 时即可正常工作，缺失 catalog
+  提示也改为指向 `repo.toml` / raw backend 配置 (#854)
 
 ## [0.1.5] - 2026-06-11
 
