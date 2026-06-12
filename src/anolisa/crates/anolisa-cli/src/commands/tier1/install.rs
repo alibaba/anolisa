@@ -1,14 +1,15 @@
 //! `anolisa install` — install a component through a configured backend.
 //!
-//! `install` takes a component noun that must resolve in the catalog as a
-//! component manifest. The resolution chain — repo.toml loading, backend selection
+//! `install` takes a component noun and resolves it through the configured
+//! backend. The resolution chain — repo.toml loading, backend selection
 //! (`--backend` > `default_backend`), base_url variable substitution, and
 //! package-name mapping (`--package` > `package_map` > scope > component
 //! name) — feeds the **raw** backend executor: fetch the distribution index
-//! from the raw repository root, resolve an artifact, download it with
-//! mandatory sha256 verification, install the manifest-declared files, and
-//! record state plus a central-log audit entry. `yum` / `npm` backends are
-//! selectable but their executors are NOT_IMPLEMENTED.
+//! from the raw repository root, resolve an artifact, then execute by
+//! downloading it with mandatory sha256 verification, loading the install
+//! contract, installing the declared files, and recording state plus a
+//! central-log audit entry. `yum` / `npm` backends are selectable but their
+//! executors are NOT_IMPLEMENTED.
 //!
 //! Deliberately out of scope for this milestone: execution-policy gating,
 //! pre/post hooks, health checks, and service start/enable. Installed
@@ -16,10 +17,13 @@
 
 use clap::Parser;
 use serde::Serialize;
+use std::path::PathBuf;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use anolisa_core::download::DownloadCache;
-use anolisa_core::install_runner::{InstallRunner, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES};
+use anolisa_core::download::{DownloadCache, DownloadError};
+use anolisa_core::install_runner::{
+    InstallRunner, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES, read_embedded_component_manifest,
+};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
@@ -67,18 +71,38 @@ pub struct InstallArgs {
     pub package: Option<String>,
 }
 
-/// Resolution context shared by the dry-run preview and the real
-/// executor: everything is decided before any file is written.
-struct ResolvedInstall {
+/// Raw backend resolution shared by dry-run preview and real execution.
+struct RawResolution {
     component: String,
     package: String,
     backend: String,
     base_url: String,
     entry: DistributionEntry,
     artifact_url: String,
+    warnings: Vec<String>,
+}
+
+/// Dry-run preview after optional lightweight metadata expansion.
+struct InstallPreview {
+    resolution: RawResolution,
     files: Vec<ResolvedInstallFile>,
     services: Vec<String>,
-    warnings: Vec<String>,
+}
+
+/// Execution input after the artifact has been verified and its install
+/// contract has been resolved.
+struct PreparedInstall {
+    resolution: RawResolution,
+    artifact_path: PathBuf,
+    files: Vec<ResolvedInstallFile>,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallContractSource {
+    EmbeddedArtifact,
+    SidecarMeta,
+    LocalCatalog,
 }
 
 #[derive(Serialize)]
@@ -88,8 +112,8 @@ struct ArtifactInfo {
     sha256: Option<String>,
 }
 
-/// Wire shape for `--dry-run`: the full resolution result without IO
-/// beyond the index fetch.
+/// Wire shape for `--dry-run`: the resolution result without downloading
+/// the install artifact.
 #[derive(Serialize)]
 struct InstallPlanPayload {
     component: String,
@@ -124,28 +148,6 @@ struct InstallResultPayload {
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     let command = format!("install {}", args.component);
     let component = args.component.clone();
-
-    // The component name is the ANOLISA-side identity and must exist in the
-    // catalog; `--package` only changes the backend-native package name.
-    let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
-    let manifest = catalog
-        .component(&component)
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: format!("component '{component}' is not in the catalog"),
-        })?
-        .clone();
-
-    let mode = ctx.install_mode.as_str();
-    if !manifest.install.modes.iter().any(|m| m == mode) {
-        return Err(CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "component '{component}' does not support {mode}-mode install (supported: {})",
-                manifest.install.modes.join(", ")
-            ),
-        });
-    }
 
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
@@ -201,7 +203,6 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
         ctx,
         &layout,
         &env,
-        &manifest,
         ResolveInputs {
             component,
             package,
@@ -213,10 +214,12 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     )?;
 
     if ctx.dry_run {
-        return render_plan(ctx, &resolved);
+        let preview = build_install_preview(ctx, &layout, resolved)?;
+        return render_plan(ctx, &preview);
     }
 
-    execute_raw(ctx, &layout, &command, resolved)
+    let prepared = prepare_raw_execution(ctx, &layout, resolved)?;
+    execute_raw(ctx, &layout, &command, prepared)
 }
 
 /// Caller-side inputs to [`resolve_raw`], grouped to keep the signature flat.
@@ -229,23 +232,25 @@ struct ResolveInputs<'a> {
     warnings: Vec<String>,
 }
 
-/// Resolve everything the raw executor needs without writing outside the
-/// download cache: fetch the index, pick an artifact, and render the
-/// manifest's file mappings against the layout.
+/// Resolve raw backend metadata without fetching the artifact.
+///
+/// This fetches the distribution index into the download cache, selects a
+/// supported artifact, and derives the artifact URL. Execution later
+/// downloads the artifact and reads its install contract; dry-run may read
+/// lightweight `meta.toml` metadata for a richer preview.
 fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
-    manifest: &ComponentManifest,
     inputs: ResolveInputs<'_>,
-) -> Result<ResolvedInstall, CliError> {
+) -> Result<RawResolution, CliError> {
     let ResolveInputs {
         component,
         package,
         backend,
         base_url,
         version,
-        mut warnings,
+        warnings,
     } = inputs;
 
     // The index is always re-fetched (DownloadCache overwrites on conflict),
@@ -299,26 +304,6 @@ fn resolve_raw(
             ),
         });
     }
-
-    // Missing checksum is a publisher-side defect, not caller input: refuse
-    // rather than install unverified bytes.
-    if entry.sha256.is_none() {
-        return Err(CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "distribution entry for '{package}' {} has no sha256 — refusing to install an unverifiable artifact",
-                entry.version
-            ),
-        });
-    }
-
-    if version.is_none() && entry.version != manifest.component.version {
-        warnings.push(format!(
-            "artifact version {} differs from catalog manifest version {}",
-            entry.version, manifest.component.version
-        ));
-    }
-
     // Three URL forms, most-mirror-friendly first: an omitted url uses the
     // code-owned raw layout, a repo-relative url resolves against the index
     // directory (self-contained mirrors), and an absolute url is used as-is
@@ -349,27 +334,316 @@ fn resolve_raw(
         )
     };
 
-    let files = resolve_manifest_files(manifest, layout, &component)?;
-    if files.is_empty() {
-        return Err(CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "component '{component}' declares no [install.files] — nothing to install"
-            ),
-        });
-    }
-
-    Ok(ResolvedInstall {
+    Ok(RawResolution {
         component,
         package,
         backend,
         base_url,
         artifact_url,
         entry,
-        files,
-        services: manifest.install.services.clone(),
         warnings,
     })
+}
+
+impl InstallContractSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::EmbeddedArtifact => "embedded artifact manifest",
+            Self::SidecarMeta => "sidecar meta.toml",
+            Self::LocalCatalog => "local catalog manifest",
+        }
+    }
+}
+
+fn build_install_preview(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    mut resolution: RawResolution,
+) -> Result<InstallPreview, CliError> {
+    if resolution.entry.sha256.is_none() {
+        resolution.warnings.push(format!(
+            "distribution entry for '{}' {} has no sha256; execute will refuse to install it",
+            resolution.package, resolution.entry.version
+        ));
+    }
+
+    let Some((manifest, source)) = load_lightweight_install_contract(ctx, layout, &resolution)?
+    else {
+        resolution.warnings.push(format!(
+            "dry-run did not download artifact {}; file and service details are unavailable",
+            resolution.artifact_url
+        ));
+        return Ok(InstallPreview {
+            resolution,
+            files: Vec::new(),
+            services: Vec::new(),
+        });
+    };
+
+    let (files, services) = match resolve_manifest_contract(
+        &manifest,
+        layout,
+        &resolution,
+        ctx.install_mode.as_str(),
+        source,
+    ) {
+        Ok(contract) => contract,
+        Err(err) if source == InstallContractSource::LocalCatalog => {
+            resolution.warnings.push(format!(
+                "local catalog manifest does not match resolved artifact; file and service details are unavailable: {}",
+                err.reason()
+            ));
+            (Vec::new(), Vec::new())
+        }
+        Err(err) => return Err(err),
+    };
+
+    Ok(InstallPreview {
+        resolution,
+        files,
+        services,
+    })
+}
+
+fn prepare_raw_execution(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    resolution: RawResolution,
+) -> Result<PreparedInstall, CliError> {
+    let sha256 = resolution.entry.sha256.as_deref().ok_or_else(|| {
+        CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "distribution entry for '{}' {} has no sha256 — refusing to install an unverifiable artifact",
+                resolution.package, resolution.entry.version
+            ),
+        }
+    })?;
+
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let artifact = cache
+        .fetch(&resolution.artifact_url, Some(sha256))
+        .map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "failed to download artifact {}: {err}",
+                resolution.artifact_url
+            ),
+        })?;
+
+    let (manifest, source) =
+        load_execution_install_contract(ctx, layout, &resolution, &artifact.cached_path)?;
+    let (files, services) = resolve_manifest_contract(
+        &manifest,
+        layout,
+        &resolution,
+        ctx.install_mode.as_str(),
+        source,
+    )?;
+
+    Ok(PreparedInstall {
+        resolution,
+        artifact_path: artifact.cached_path,
+        files,
+        services,
+    })
+}
+
+fn load_execution_install_contract(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    resolution: &RawResolution,
+    artifact_path: &std::path::Path,
+) -> Result<(ComponentManifest, InstallContractSource), CliError> {
+    match resolution.entry.artifact_type {
+        ArtifactType::TarGz => {
+            let manifest = read_embedded_component_manifest(artifact_path)
+                .map_err(|err| CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "failed to read embedded component manifest from {}: {err}",
+                        resolution.artifact_url
+                    ),
+                })?
+                .ok_or_else(|| CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "published artifact for package '{}' has no embedded .anolisa/component.toml",
+                        resolution.package
+                    ),
+                })?;
+            Ok((manifest, InstallContractSource::EmbeddedArtifact))
+        }
+        ArtifactType::Binary => {
+            load_lightweight_install_contract(ctx, layout, resolution)?.ok_or_else(|| {
+                CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "binary artifact for package '{}' {} requires sidecar meta.toml or a matching local component manifest",
+                        resolution.package, resolution.entry.version
+                    ),
+                }
+            })
+        }
+        other => Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "resolved artifact type '{}' is not installable by the raw backend (supported: {})",
+                artifact_type_wire(&other),
+                SUPPORTED_ARTIFACT_TYPES.join(", ")
+            ),
+        }),
+    }
+}
+
+fn load_lightweight_install_contract(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    resolution: &RawResolution,
+) -> Result<Option<(ComponentManifest, InstallContractSource)>, CliError> {
+    if let Some(manifest) = fetch_sidecar_meta_manifest(layout, resolution)? {
+        return Ok(Some((manifest, InstallContractSource::SidecarMeta)));
+    }
+
+    Ok(load_catalog_manifest(ctx, &resolution.component)?
+        .map(|manifest| (manifest, InstallContractSource::LocalCatalog)))
+}
+
+fn fetch_sidecar_meta_manifest(
+    layout: &FsLayout,
+    resolution: &RawResolution,
+) -> Result<Option<ComponentManifest>, CliError> {
+    let Some(meta_url) = sidecar_meta_url(
+        &resolution.artifact_url,
+        &resolution.entry.component,
+        &resolution.entry.version,
+    ) else {
+        return Ok(None);
+    };
+    let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded = match cache.fetch(&meta_url, expected_sha) {
+        Ok(downloaded) => downloaded,
+        Err(DownloadError::HttpStatus { status: 404, .. }) => return Ok(None),
+        Err(DownloadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+            });
+        }
+    };
+    let text =
+        std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "failed to read sidecar metadata {} from cache: {err}",
+                downloaded.cached_path.display()
+            ),
+        })?;
+    ComponentManifest::from_toml_str(&text)
+        .map(Some)
+        .map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+        })
+}
+
+fn load_catalog_manifest(
+    ctx: &CliContext,
+    component: &str,
+) -> Result<Option<ComponentManifest>, CliError> {
+    let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
+    Ok(catalog.component(component).cloned())
+}
+
+fn manifest_digest_sha256(digest: Option<&str>) -> Result<Option<&str>, CliError> {
+    match digest {
+        None => Ok(None),
+        Some(value) => value
+            .strip_prefix("sha256:")
+            .map(Some)
+            .ok_or_else(|| CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "unsupported manifest_digest '{value}' for sidecar metadata verification"
+                ),
+            }),
+    }
+}
+
+fn sidecar_meta_url(artifact_url: &str, component: &str, version: &str) -> Option<String> {
+    let version_marker = format!("/{component}/{version}/");
+    if let Some(idx) = artifact_url.rfind(&version_marker) {
+        return Some(format!(
+            "{}meta.toml",
+            &artifact_url[..idx + version_marker.len()]
+        ));
+    }
+
+    artifact_url
+        .rfind('/')
+        .map(|idx| format!("{}/meta.toml", &artifact_url[..idx]))
+}
+
+fn resolve_manifest_contract(
+    manifest: &ComponentManifest,
+    layout: &FsLayout,
+    resolution: &RawResolution,
+    mode: &str,
+    source: InstallContractSource,
+) -> Result<(Vec<ResolvedInstallFile>, Vec<String>), CliError> {
+    if manifest.component.name.as_str() != resolution.component {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "{} for package '{}' declares component '{}', expected '{}'",
+                source.label(),
+                resolution.package,
+                manifest.component.name,
+                resolution.component
+            ),
+        });
+    }
+    if manifest.component.version.as_str() != resolution.entry.version.as_str() {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "{} for component '{}' declares version {}, but the distribution index resolved {}",
+                source.label(),
+                resolution.component,
+                manifest.component.version,
+                resolution.entry.version
+            ),
+        });
+    }
+
+    if !manifest.install.modes.iter().any(|m| m == mode) {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "{} for component '{}' is inconsistent with the distribution index: index resolved {mode}-mode support, but manifest declares modes: {}",
+                source.label(),
+                resolution.component,
+                manifest.install.modes.join(", ")
+            ),
+        });
+    }
+
+    let files = resolve_manifest_files(manifest, layout, &resolution.component)?;
+    if files.is_empty() {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{}' declares no [install.files] — nothing to install",
+                resolution.component
+            ),
+        });
+    }
+
+    Ok((files, manifest.install.services.clone()))
 }
 
 /// Render the manifest's `[install.files]` against the layout: expand
@@ -441,25 +715,15 @@ fn execute_raw(
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
-    mut resolved: ResolvedInstall,
+    prepared: PreparedInstall,
 ) -> Result<(), CliError> {
+    let PreparedInstall {
+        mut resolution,
+        artifact_path,
+        files,
+        services,
+    } = prepared;
     let started_at = now_iso8601();
-    let sha256 = resolved
-        .entry
-        .sha256
-        .as_deref()
-        .expect("resolve_raw rejects entries without sha256");
-
-    let cache = DownloadCache::new(layout.cache_dir.clone());
-    let artifact = cache
-        .fetch(&resolved.artifact_url, Some(sha256))
-        .map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "failed to download artifact {}: {err}",
-                resolved.artifact_url
-            ),
-        })?;
 
     // Acquire lock, then load state inside the lock so a concurrent writer
     // cannot be overwritten and state-load failures precede any file copy.
@@ -472,7 +736,12 @@ fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
-    ensure_component_backend_compatible(&state, &resolved.component, &resolved.backend, command)?;
+    ensure_component_backend_compatible(
+        &state,
+        &resolution.component,
+        &resolution.backend,
+        command,
+    )?;
 
     // Nanosecond suffix avoids collisions between near-simultaneous
     // processes that serialize on the lock within the same second.
@@ -486,9 +755,9 @@ fn execute_raw(
     let runner = InstallRunner::new(layout);
     let outcome = runner
         .install_files(
-            artifact_type_wire(&resolved.entry.artifact_type),
-            &artifact.cached_path,
-            &resolved.files,
+            artifact_type_wire(&resolution.entry.artifact_type),
+            &artifact_path,
+            &files,
         )
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
@@ -522,7 +791,7 @@ fn execute_raw(
     // state-save failure rolls the prune back with the rest of the write.
     let pruned_legacy = state.prune_legacy_capabilities();
     if !pruned_legacy.is_empty() {
-        resolved.warnings.push(format!(
+        resolution.warnings.push(format!(
             "pruned legacy capability state object(s) written by an older release: {}",
             pruned_legacy.join(", ")
         ));
@@ -535,14 +804,14 @@ fn execute_raw(
     state.prefix = layout.prefix.clone();
     state.upsert_object(InstalledObject {
         kind: ObjectKind::Component,
-        name: resolved.component.clone(),
-        version: resolved.entry.version.clone(),
+        name: resolution.component.clone(),
+        version: resolution.entry.version.clone(),
         status: ObjectStatus::Installed,
         // Embedded-manifest digest verification is future work; recording
         // an unverified digest would overstate what install checked.
         manifest_digest: None,
-        distribution_source: Some(resolved.artifact_url.clone()),
-        install_backend: Some(resolved.backend.clone()),
+        distribution_source: Some(resolution.artifact_url.clone()),
+        install_backend: Some(resolution.backend.clone()),
         installed_at: started_at.clone(),
         last_operation_id: Some(operation_id.clone()),
         managed: true,
@@ -552,8 +821,7 @@ fn execute_raw(
         component_refs: Vec::new(),
         files: owned_files,
         external_modified_files: Vec::new(),
-        services: resolved
-            .services
+        services: services
             .iter()
             .map(|svc| ServiceRef {
                 name: svc.clone(),
@@ -619,20 +887,20 @@ fn execute_raw(
         operation_id: Some(operation_id.clone()),
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
-        component: Some(resolved.component.clone()),
+        component: Some(resolution.component.clone()),
         severity: Severity::Info,
         message: format!(
             "component {} {} installed via {} backend",
-            resolved.component, resolved.entry.version, resolved.backend
+            resolution.component, resolution.entry.version, resolution.backend
         ),
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
         started_at,
         finished_at: Some(now_iso8601()),
         status: Some(LogStatus::Ok),
-        objects: vec![resolved.component.clone()],
+        objects: vec![resolution.component.clone()],
         backup_ids: Vec::new(),
-        warnings: resolved.warnings.clone(),
+        warnings: resolution.warnings.clone(),
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record) {
@@ -640,17 +908,17 @@ fn execute_raw(
     }
 
     let payload = InstallResultPayload {
-        component: resolved.component,
-        package: resolved.package,
-        version: resolved.entry.version,
-        backend: resolved.backend,
-        base_url: resolved.base_url,
+        component: resolution.component,
+        package: resolution.package,
+        version: resolution.entry.version,
+        backend: resolution.backend,
+        base_url: resolution.base_url,
         install_mode: ctx.install_mode.as_str().to_string(),
         operation_id,
-        artifact_url: resolved.artifact_url,
+        artifact_url: resolution.artifact_url,
         files_installed: installed_paths,
-        services: resolved.services,
-        warnings: resolved.warnings,
+        services,
+        warnings: resolution.warnings,
     };
     if ctx.json {
         return render_json(command, &payload);
@@ -706,7 +974,8 @@ fn infer_backend_from_distribution_source(source: Option<&str>) -> Option<&'stat
     }
 }
 
-fn render_plan(ctx: &CliContext, resolved: &ResolvedInstall) -> Result<(), CliError> {
+fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliError> {
+    let resolved = &preview.resolution;
     let payload = InstallPlanPayload {
         component: resolved.component.clone(),
         package: resolved.package.clone(),
@@ -719,12 +988,12 @@ fn render_plan(ctx: &CliContext, resolved: &ResolvedInstall) -> Result<(), CliEr
             url: resolved.artifact_url.clone(),
             sha256: resolved.entry.sha256.clone(),
         },
-        files: resolved
+        files: preview
             .files
             .iter()
             .map(|f| f.dest.display().to_string())
             .collect(),
-        services: resolved.services.clone(),
+        services: preview.services.clone(),
         dry_run: true,
         warnings: resolved.warnings.clone(),
     };
@@ -878,13 +1147,12 @@ mod tests {
     use super::*;
 
     use crate::context::InstallMode;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
+    use tar::{Builder, Header};
     use tempfile::tempdir;
-
-    fn ctx(json: bool) -> CliContext {
-        ctx_with_prefix(json, None)
-    }
 
     // `--prefix` only rebases system-mode layouts (user mode resolves from
     // $HOME), so isolation tests run in System mode under a tempdir to keep
@@ -915,17 +1183,102 @@ mod tests {
         }
     }
 
-    /// Lay out a local file:// raw repo containing one binary artifact for
+    fn toml_string_array(values: &[&str]) -> String {
+        let quoted: Vec<String> = values.iter().map(|value| format!("\"{value}\"")).collect();
+        format!("[{}]", quoted.join(", "))
+    }
+
+    fn component_manifest_toml(component: &str, version: &str, modes: &[&str]) -> String {
+        let modes = toml_string_array(modes);
+        format!(
+            r#"[component]
+name = "{component}"
+version = "{version}"
+
+[component.layout]
+modes = {modes}
+
+[[component.layout.files]]
+source = "bin/{component}"
+target = "{{bindir}}/{component}"
+mode = "0755"
+type = "executable"
+"#
+        )
+    }
+
+    fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let buf = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut tar = Builder::new(enc);
+        for (path, data) in entries {
+            let mut header = Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, *path, *data)
+                .expect("append tar entry");
+        }
+        let enc = tar.into_inner().expect("finish tar");
+        enc.finish().expect("finish gzip")
+    }
+
+    fn build_component_artifact(component: &str, version: &str, modes: &[&str]) -> Vec<u8> {
+        let manifest = component_manifest_toml(component, version, modes);
+        let bin_path = format!("bin/{component}");
+        let payload = format!("#!/bin/sh\necho {component}\n");
+        build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), payload.as_bytes()),
+        ])
+    }
+
+    fn write_empty_repo(root: &Path) -> String {
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+        std::fs::write(
+            v1.join("index.toml"),
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+"#,
+        )
+        .expect("write index");
+        format!("file://{}", v1.display())
+    }
+
+    /// Lay out a local file:// raw repo containing one tar.gz artifact for
     /// `agentsight` targeting the *detected* host os/arch, and return the
     /// repo's raw v1 root. Uses a repo-relative artifact URL to also exercise
     /// the relative-URL join.
     fn write_local_repo(root: &Path) -> String {
+        write_local_repo_component(root, "agentsight", "0.2.0", &["system"])
+    }
+
+    fn write_local_repo_component(
+        root: &Path,
+        component: &str,
+        version: &str,
+        modes: &[&str],
+    ) -> String {
+        write_local_repo_component_with_modes(root, component, version, modes, modes)
+    }
+
+    fn write_local_repo_component_with_modes(
+        root: &Path,
+        component: &str,
+        version: &str,
+        index_modes: &[&str],
+        manifest_modes: &[&str],
+    ) -> String {
         let v1 = root.join("v1");
         std::fs::create_dir_all(&v1).expect("create repo dirs");
 
-        let payload = b"#!/bin/sh\necho agentsight\n";
-        std::fs::write(v1.join("agentsight-bin"), payload).expect("write artifact");
-        let sha = format!("{:x}", Sha256::digest(payload));
+        let artifact = build_component_artifact(component, version, manifest_modes);
+        let artifact_name = format!("{component}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        let modes = toml_string_array(index_modes);
 
         let env = anolisa_env::EnvService::detect();
         let index = format!(
@@ -934,15 +1287,15 @@ channel = "stable"
 publisher = "test"
 
 [[entries]]
-component = "agentsight"
-version = "0.2.0"
+component = "{component}"
+version = "{version}"
 channel = "stable"
-artifact_type = "binary"
+artifact_type = "tar_gz"
 backend = "raw"
-url = "agentsight-bin"
+url = "{artifact_name}"
 os = "{os}"
 arch = "{arch}"
-install_modes = ["system"]
+install_modes = {modes}
 sha256 = "{sha}"
 "#,
             os = env.os,
@@ -952,9 +1305,132 @@ sha256 = "{sha}"
         format!("file://{}", v1.display())
     }
 
+    fn write_published_layout_repo_with_meta(
+        root: &Path,
+        component: &str,
+        version: &str,
+        modes: &[&str],
+    ) -> String {
+        let env = anolisa_env::EnvService::detect();
+        let version_dir = root.join("v1").join(component).join(version);
+        let artifact_dir = version_dir.join(&env.os).join(&env.arch);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dirs");
+
+        let manifest = component_manifest_toml(component, version, modes);
+        std::fs::write(version_dir.join("meta.toml"), &manifest).expect("write meta");
+
+        let artifact = build_component_artifact(component, version, modes);
+        let artifact_name = format!(
+            "{component}-{version}-{os}-{arch}.tar.gz",
+            os = env.os,
+            arch = env.arch
+        );
+        std::fs::write(artifact_dir.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        let modes = toml_string_array(modes);
+        let url = format!(
+            "{component}/{version}/{os}/{arch}/{artifact_name}",
+            os = env.os,
+            arch = env.arch
+        );
+
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{url}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(root.join("v1/index.toml"), index).expect("write index");
+        format!("file://{}", root.join("v1").display())
+    }
+
+    fn write_binary_repo_component(
+        root: &Path,
+        component: &str,
+        version: &str,
+        modes: &[&str],
+    ) -> String {
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+        let artifact = format!("#!/bin/sh\necho {component}\n").into_bytes();
+        let artifact_name = component.to_string();
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        let modes = toml_string_array(modes);
+
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(v1.join("index.toml"), index).expect("write index");
+        format!("file://{}", v1.display())
+    }
+
+    fn write_overlay_manifest(layout: &FsLayout, component: &str, version: &str, modes: &[&str]) {
+        let runtime_dir = layout.manifests_overlay.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create overlay runtime dir");
+        std::fs::write(
+            runtime_dir.join(format!("{component}.toml")),
+            component_manifest_toml(component, version, modes),
+        )
+        .expect("write overlay manifest");
+    }
+
+    #[test]
+    fn sidecar_meta_url_uses_version_directory_for_published_layout() {
+        let artifact_url = "https://example.test/anolisa/v1/tokenless/0.5.0/linux/x86_64/tokenless-0.5.0-linux-x86_64.tar.gz";
+
+        assert_eq!(
+            sidecar_meta_url(artifact_url, "tokenless", "0.5.0").as_deref(),
+            Some("https://example.test/anolisa/v1/tokenless/0.5.0/meta.toml")
+        );
+    }
+
+    #[test]
+    fn sidecar_meta_url_keeps_flat_layout_fallback() {
+        let artifact_url = "file:///tmp/repo/v1/legacy-bin";
+
+        assert_eq!(
+            sidecar_meta_url(artifact_url, "legacy-bin", "1.0.0").as_deref(),
+            Some("file:///tmp/repo/v1/meta.toml")
+        );
+    }
+
     /// Like [`write_local_repo`], but the index row omits `url` and the
     /// artifact sits at the conventional publish path
-    /// `{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}`
+    /// `{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}.tar.gz`
     /// under the raw v1 root.
     fn write_conventional_repo(root: &Path) -> String {
         let env = anolisa_env::EnvService::detect();
@@ -964,10 +1440,10 @@ sha256 = "{sha}"
             .join(&env.arch);
         std::fs::create_dir_all(&artifact_dir).expect("create repo dirs");
 
-        let payload = b"#!/bin/sh\necho agentsight\n";
-        let file_name = format!("agentsight-0.2.0-{}-{}", env.os, env.arch);
-        std::fs::write(artifact_dir.join(file_name), payload).expect("write artifact");
-        let sha = format!("{:x}", Sha256::digest(payload));
+        let artifact = build_component_artifact("agentsight", "0.2.0", &["system"]);
+        let file_name = format!("agentsight-0.2.0-{}-{}.tar.gz", env.os, env.arch);
+        std::fs::write(artifact_dir.join(file_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
 
         let index = format!(
             r#"schema_version = 1
@@ -978,7 +1454,7 @@ publisher = "test"
 component = "agentsight"
 version = "0.2.0"
 channel = "stable"
-artifact_type = "binary"
+artifact_type = "tar_gz"
 backend = "raw"
 os = "{os}"
 arch = "{arch}"
@@ -1001,19 +1477,61 @@ sha256 = "{sha}"
 
     #[test]
     fn install_unknown_component_is_invalid_argument() {
-        let err = handle(args("no-such-component"), &ctx(false)).expect_err("must error");
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let mut a = args("no-such-component");
+        a.repo = Some(write_empty_repo(&tmp.path().join("repo")));
+
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("no-such-component"));
     }
 
-    /// agentsight's manifest declares `modes = ["system"]`; the mode gate
-    /// fires before any repo/index IO, so plain user-mode ctx is safe here.
+    /// Install mode support comes from the remote distribution index before
+    /// any artifact is downloaded.
     #[test]
     fn install_unsupported_mode_is_invalid_argument() {
-        let err = handle(args("agentsight"), &ctx(false)).expect_err("must error");
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let mut a = args("agentsight");
+        a.repo = Some(write_local_repo_component(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["user"],
+        ));
+
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
-            err.reason().contains("does not support user-mode"),
+            err.reason().contains("install mode is not supported"),
+            "got: {}",
+            err.reason()
+        );
+    }
+
+    /// The embedded manifest is a publisher consistency check after index
+    /// resolution, but it should use the same caller-visible error bucket as
+    /// the index-level mode filter.
+    #[test]
+    fn install_manifest_mode_mismatch_is_invalid_argument() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let mut a = args("agentsight");
+        a.repo = Some(write_local_repo_component_with_modes(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+            &["user"],
+        ));
+
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason()
+                .contains("inconsistent with the distribution index")
+                && err.reason().contains("system-mode support"),
             "got: {}",
             err.reason()
         );
@@ -1112,6 +1630,111 @@ base_url = "https://example.com/yum-repo"
             !layout.state_dir.join("installed.toml").exists(),
             "dry-run must not write state"
         );
+        let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+            .expect("downloads cache exists")
+            .map(|entry| {
+                entry
+                    .expect("cache entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            cached_names
+                .iter()
+                .all(|name| !name.ends_with("agentsight.tar.gz")),
+            "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+        );
+    }
+
+    #[test]
+    fn install_dry_run_reads_version_meta_without_downloading_artifact() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_published_layout_repo_with_meta(
+            &tmp.path().join("repo"),
+            "remote-only",
+            "1.0.0",
+            &["system"],
+        );
+        let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+        ctx.dry_run = true;
+        let layout = FsLayout::system(Some(prefix));
+        let env = anolisa_env::EnvService::detect();
+
+        let resolution = resolve_raw(
+            &ctx,
+            &layout,
+            &env,
+            ResolveInputs {
+                component: "remote-only".to_string(),
+                package: "remote-only".to_string(),
+                backend: "raw".to_string(),
+                base_url: repo_url,
+                version: None,
+                warnings: Vec::new(),
+            },
+        )
+        .expect("resolve");
+        let preview = build_install_preview(&ctx, &layout, resolution).expect("preview");
+
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].dest, layout.bin_dir.join("remote-only"));
+        assert!(
+            preview
+                .resolution
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("file and service details are unavailable")),
+            "version-level meta.toml should provide file details: {:?}",
+            preview.resolution.warnings
+        );
+
+        let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+            .expect("downloads cache exists")
+            .map(|entry| {
+                entry
+                    .expect("cache entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            cached_names
+                .iter()
+                .all(|name| !name.ends_with("remote-only-1.0.0-linux-x86_64.tar.gz")),
+            "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+        );
+    }
+
+    /// Legacy distribution indexes may still publish a raw `binary` entry.
+    /// Keep installing those when a local component manifest supplies the
+    /// destination contract.
+    #[test]
+    fn install_binary_artifact_uses_local_catalog_contract() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let layout = FsLayout::system(Some(prefix.clone()));
+        write_overlay_manifest(&layout, "legacy-bin", "1.0.0", &["system"]);
+
+        let mut a = args("legacy-bin");
+        a.repo = Some(write_binary_repo_component(
+            &tmp.path().join("repo"),
+            "legacy-bin",
+            "1.0.0",
+            &["system"],
+        ));
+
+        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+
+        let bin = FsLayout::system(Some(prefix)).bin_dir.join("legacy-bin");
+        assert!(bin.exists(), "binary artifact must be installed");
+        assert_eq!(
+            std::fs::read_to_string(&bin).expect("read installed binary"),
+            "#!/bin/sh\necho legacy-bin\n"
+        );
     }
 
     /// End-to-end raw install from a local file:// repo: resolve via the
@@ -1156,6 +1779,36 @@ base_url = "https://example.com/yum-repo"
         );
         assert_eq!(state.operations.len(), 1);
         assert!(state.operations[0].id.starts_with("op-install-"));
+    }
+
+    #[test]
+    fn install_raw_uses_embedded_manifest_without_local_catalog() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component(
+            &tmp.path().join("repo"),
+            "remote-only",
+            "1.0.0",
+            &["system"],
+        );
+
+        let mut a = args("remote-only");
+        a.repo = Some(repo_url);
+        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            layout.bin_dir.join("remote-only").exists(),
+            "component absent from local manifests must install from embedded artifact contract"
+        );
+        let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
+            .expect("state must load");
+        assert!(
+            state
+                .find_object(ObjectKind::Component, "remote-only")
+                .is_some(),
+            "remote-only component must be recorded"
+        );
     }
 
     #[test]
@@ -1246,7 +1899,7 @@ base_url = "https://example.com/yum-repo"
             obj.distribution_source.as_deref(),
             Some(
                 format!(
-                    "{repo_url}/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}",
+                    "{repo_url}/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
                     os = env.os,
                     arch = env.arch
                 )
@@ -1288,7 +1941,7 @@ base_url = "https://example.com/yum-repo"
             obj.distribution_source.as_deref(),
             Some(
                 format!(
-                    "file://{}/v1/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}",
+                    "file://{}/v1/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
                     repo_root.display(),
                     os = env.os,
                     arch = env.arch
