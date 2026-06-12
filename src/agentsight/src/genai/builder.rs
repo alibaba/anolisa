@@ -18,10 +18,10 @@ use super::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
     InputMessage, OutputMessage, MessagePart, TokenUsage,
 };
+use super::id_resolver::IdResolver;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use sha2::{Sha256, Digest};
 
 /// Output from `GenAIBuilder::build()`, containing built events and deferred resolution info.
 pub struct BuildOutput {
@@ -39,6 +39,9 @@ pub struct GenAIBuilder {
     session_prefix: String,
     /// Counter for generating unique IDs within a session
     call_counter: AtomicU64,
+    /// Resolver for `session_id` fallback / `conversation_id` based on the
+    /// earliest `response_id` observed within a session / conversation.
+    id_resolver: IdResolver,
 }
 
 impl Default for GenAIBuilder {
@@ -58,6 +61,7 @@ impl GenAIBuilder {
         GenAIBuilder {
             session_prefix: format!("{:x}_{:x}", ts, pid),
             call_counter: AtomicU64::new(0),
+            id_resolver: IdResolver::new(),
         }
     }
 
@@ -179,9 +183,19 @@ impl GenAIBuilder {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Parse messages from body to compute session_id, conversation_id,
-        // user_query, and serialise input_messages / system_instructions
-        let (session_id, conversation_id, user_query, input_messages, system_instructions) =
+        // Parse messages from body to extract user_query / input_messages /
+        // system_instructions / first_user_text / last_user_text。session_id 与
+        // conversation_id 在 request 阶段采用双层兑底：
+        //   1. 优先走 IdResolver::peek_*（同 PID 之前有过正常完成的调用 →
+        //      LRU 已 anchor 首个 response_id，复用后与正常路径完全对齐）。
+        //   2. 未命中时 → `crash_fallback_id`以 (agent_name, pid, user_text) 作为
+        //      兑底 ID 输入，保证 crash-drain 路径同 PID 同 user_query 的
+        //      crash 记录归一桶，不同 user_query 分桶。
+        //
+        // 正常响应到达后 `complete_pending` 仍会用 `IdResolver::resolve_*`
+        // 重新计算并 UPDATE 正常 ID，只有 crash 路径才会保留这里写入的
+        // peek/fallback 值。
+        let (user_query, input_messages, system_instructions, first_user_text, last_user_text) =
             if let Some(ref v) = body {
                 if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
                     // Helper: extract text from "content" which can be either
@@ -210,33 +224,20 @@ impl GenAIBuilder {
                         None
                     };
 
-                    // session_id: SHA256 of first user message text (same logic
-                    // as compute_session_id but operating on raw JSON values)
+                    // First user message raw text — used as `session_key` material
+                    // for IdResolver peek / crash fallback.
                     let first_user_text = messages.iter()
                         .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
                         .find_map(|m| extract_text(m))
                         .unwrap_or_default();
 
-                    let session_id = if !first_user_text.is_empty() {
-                        let hash = Sha256::digest(first_user_text.as_bytes());
-                        Some(format!("{:x}", hash)[..32].to_string())
-                    } else {
-                        None
-                    };
-
-                    // Last user message raw text — used for both conversation_id
-                    // (fingerprint hash) and user_query (display text)
+                    // Last user message raw text — used for user_query (display text)
+                    // 以及 conversation_key (peek / crash fallback)。
                     let last_user_raw = messages.iter()
                         .rev()
                         .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
                         .find_map(|m| extract_text(m));
-
-                    // conversation_id: SHA256 of last user message raw text
-                    // (same logic as compute_user_query_fingerprint)
-                    let conversation_id = last_user_raw.as_deref().map(|text| {
-                        let hash = Sha256::digest(text.as_bytes());
-                        format!("{:x}", hash)[..32].to_string()
-                    });
+                    let last_user_text = last_user_raw.clone().unwrap_or_default();
 
                     // user_query: last user message text, stripped of metadata prefix
                     let user_query = last_user_raw.as_deref()
@@ -261,13 +262,13 @@ impl GenAIBuilder {
                         serde_json::to_string(&sys).ok()
                     };
 
-                    (session_id, conversation_id, user_query, input_messages, system_instructions)
+                    (user_query, input_messages, system_instructions, first_user_text, last_user_text)
                 } else {
                     // messages key missing or not an array
-                    (None, None, None, None, None)
+                    (None, None, None, String::new(), String::new())
                 }
             } else {
-                (None, None, None, None, None)
+                (None, None, None, String::new(), String::new())
             };
 
         // Extract model from request body JSON "model" field
@@ -284,13 +285,48 @@ impl GenAIBuilder {
         let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache)
             .or_else(|| Some(request.source_event.comm_str()));
 
+        // 双层兑底计算 session_id / conversation_id（详见上方注释）。
+        // 这里不使用 unwrap_or_else(|| “”) 是为了让“同 PID 同 agent”上下文下
+        // crash_fallback_id 输入始终相同。
+        let agent_name_str = agent_name.as_deref().unwrap_or("");
+        let pid_i32 = conn_id.pid as i32;
+
+        let session_id = self
+            .id_resolver
+            .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+            .or_else(|| {
+                Some(super::id_resolver::crash_fallback_id(
+                    "session",
+                    agent_name_str,
+                    pid_i32,
+                    &first_user_text,
+                ))
+            });
+        let conversation_id = self
+            .id_resolver
+            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text)
+            .or_else(|| {
+                Some(super::id_resolver::crash_fallback_id(
+                    "conversation",
+                    agent_name_str,
+                    pid_i32,
+                    &last_user_text,
+                ))
+            });
+
         Some(PendingCallInfo {
             call_id,
             trace_id: None,          // LLM API response_id, not available until response
-            conversation_id,          // User query fingerprint hash (from request body)
+            // session_id / conversation_id 在请求阶段采用双层兑底：
+            // 1) IdResolver::peek_* 复用同 PID 之前正常完成调用的 anchor，
+            //    响应到达后 `complete_pending` 会用同样的值覆盖；
+            // 2) LRU miss 时走 `crash_fallback_id`（`crash-` 前缀与正常 ID 隔离），
+            //    进程崩溃不会走到 complete_pending 时该值会保留，供
+            //    handle_agent_crash_detection 按 (sid, cid) 分组。
+            conversation_id,
             session_id,
             start_timestamp_ns: request.source_event.timestamp_ns,
-            pid: conn_id.pid as i32,
+            pid: pid_i32,
             process_name: request.source_event.comm.clone(),
             agent_name,
             http_method: Some(request.method.clone()),
@@ -457,17 +493,10 @@ impl GenAIBuilder {
             .or_else(|| Self::extract_model_from_body(&http.request_body, &http.response_body))
             .unwrap_or_else(|| "unknown".to_string());
 
-        // 在 request move 之前提取用户查询、fingerprint 和 session_id
-        let query_fp = Self::compute_user_query_fingerprint(&request);
+        // 在 request move 之前提取用户查询 / first&last user message 原文
         let user_query = Self::extract_last_user_query(&request);
-        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
-        // fallback 到基于首条 user message 的 hash 计算
-        let response_id_val = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
-        let mapper_session = response_id_val.as_deref()
-            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
-            .map(|s| s.to_string());
-        let session_id = mapper_session.clone()
-            .unwrap_or_else(|| Self::compute_session_id(&request));
+        let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
+        let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
 
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
@@ -475,6 +504,39 @@ impl GenAIBuilder {
         let response_id = Self::extract_response_id(&parsed_message, &http);
         let call_id = response_id.clone().unwrap_or_else(|| internal_id.clone());
         let response_id = response_id.unwrap_or_else(|| call_id.clone());
+
+        // 提前解析 agent_name，后面调用 IdResolver 需要它作为 LRU key 维度，
+        // 避免同机不同 agent 在同一 user query 下撞同一 session_id。
+        let agent_name = Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache)
+            .unwrap_or_else(|| http.comm.clone());
+        let pid_i32 = http.pid as i32;
+
+        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
+        // 未命中时 fallback 到 `SHA256("session" + 该 session 内最早 response_id)`。
+        let parsed_response_id = parsed_message.as_ref()
+            .and_then(|m| m.response_id())
+            .map(|s| s.to_string());
+        let mapper_session = parsed_response_id.as_deref()
+            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .map(|s| s.to_string());
+        let session_id = match mapper_session {
+            Some(uuid) => Some(uuid),
+            None => self.id_resolver.resolve_session_id(
+                &agent_name,
+                pid_i32,
+                &first_user_raw,
+                &response_id,
+            ),
+        };
+
+        // conversation_id: SHA256("conversation" + 该 conversation 内最早 response_id)
+        let conversation_id = self.id_resolver.resolve_conversation_id(
+            &agent_name,
+            pid_i32,
+            &last_user_raw,
+            &response_id,
+        );
+
 
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
@@ -542,10 +604,9 @@ impl GenAIBuilder {
             response,
             token_usage,
             error,
-            pid: http.pid as i32,
+            pid: pid_i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache)
-                .or_else(|| Some(http.comm.clone())),
+            agent_name: Some(agent_name.clone()),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -573,7 +634,9 @@ impl GenAIBuilder {
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
-                meta.insert("conversation_id".to_string(), query_fp);
+                if let Some(ref cid) = conversation_id {
+                    meta.insert("conversation_id".to_string(), cid.clone());
+                }
                 // response_id: LLM API 返回的响应 ID，用作 trace_id
                 meta.insert("response_id".to_string(), response_id);
                 // user_query: 用户实际输入的原文
@@ -581,7 +644,9 @@ impl GenAIBuilder {
                     meta.insert("user_query".to_string(), q.clone());
                 }
                 // session_id: 同一 agent 进程的完整会话标识
-                meta.insert("session_id".to_string(), session_id);
+                if let Some(ref sid) = session_id {
+                    meta.insert("session_id".to_string(), sid.clone());
+                }
                 meta
             },
         })
@@ -1124,15 +1189,12 @@ impl GenAIBuilder {
         format!("{}_{}", self.session_prefix, seq)
     }
 
-    /// 生成 session_id（32 位 hex）
+    /// 提取第一条有实际文本内容的 user message 的原始文本
     ///
-    /// 基于第一条 user message 原文生成，原文包含时间戳前缀如
-    /// `[Tue 2026-03-31 17:19 GMT+8] 用户输入`，天然唯一。
-    /// - 同一会话（含退出重进）：第一条 user message 不变 → session_id 稳定
-    /// - 新会话：时间戳不同 → session_id 不同
-    fn compute_session_id(request: &LLMRequest) -> String {
-        // 找第一条有实际文本的 user message（原始文本，含时间戳）
-        let first_user_raw: String = request.messages.iter()
+    /// 仅返回含非空 `Text` 片段的首条 user message，供 `IdResolver`
+    /// 生成 session_key 使用。跳过只含 tool_result 等的 user message。
+    fn extract_first_user_raw(request: &LLMRequest) -> Option<String> {
+        request.messages.iter()
             .filter(|m| m.role == "user")
             .find_map(|m| {
                 let text: String = m.parts.iter()
@@ -1144,10 +1206,6 @@ impl GenAIBuilder {
                     .join("\n");
                 if text.is_empty() { None } else { Some(text) }
             })
-            .unwrap_or_default();
-
-        let hash = Sha256::digest(first_user_raw.as_bytes());
-        format!("{:x}", hash)[..32].to_string()
     }
 
     /// 提取最后一条有实际文本内容的 user message 的原始文本
@@ -1203,20 +1261,6 @@ impl GenAIBuilder {
             }
         }
         text.to_string()
-    }
-    
-    /// 计算 user query 的 fingerprint，用于关联同一个请求的调用链
-    ///
-    /// 使用原始文本（包含时间戳前缀）计算 hash，
-    /// 这样相同命令在不同时间发送也会产生不同的 fingerprint
-    fn compute_user_query_fingerprint(request: &LLMRequest) -> String {
-        match Self::extract_last_user_raw(request) {
-            Some(content) => {
-                let hash = Sha256::digest(content.as_bytes());
-                format!("{:x}", hash)[..32].to_string()
-            }
-            None => "no_user_query".to_string(),
-        }
     }
 
     /// Resolve agent name from comm string only (no /proc access).
@@ -1595,75 +1639,6 @@ mod tests {
         let text = "[not a timestamp] content";
         // No ':' and digit in bracket content -> returns original
         assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "[not a timestamp] content");
-    }
-
-    #[test]
-    fn test_compute_session_id_deterministic() {
-        let req = LLMRequest {
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "hello".to_string() }],
-                name: None,
-            }],
-            temperature: None, max_tokens: None, frequency_penalty: None,
-            presence_penalty: None, top_p: None, top_k: None, seed: None,
-            stop_sequences: None, stream: false, tools: None, raw_body: None,
-        };
-        let id1 = GenAIBuilder::compute_session_id(&req);
-        let id2 = GenAIBuilder::compute_session_id(&req);
-        assert_eq!(id1, id2);
-        assert_eq!(id1.len(), 32);
-    }
-
-    #[test]
-    fn test_compute_session_id_no_user() {
-        let req = LLMRequest {
-            messages: vec![InputMessage {
-                role: "system".to_string(),
-                parts: vec![MessagePart::Text { content: "sys".to_string() }],
-                name: None,
-            }],
-            temperature: None, max_tokens: None, frequency_penalty: None,
-            presence_penalty: None, top_p: None, top_k: None, seed: None,
-            stop_sequences: None, stream: false, tools: None, raw_body: None,
-        };
-        let id = GenAIBuilder::compute_session_id(&req);
-        assert_eq!(id.len(), 32); // still produces 32-char hash of empty string
-    }
-
-    #[test]
-    fn test_compute_user_query_fingerprint() {
-        let req = LLMRequest {
-            messages: vec![
-                InputMessage {
-                    role: "user".to_string(),
-                    parts: vec![MessagePart::Text { content: "first".to_string() }],
-                    name: None,
-                },
-                InputMessage {
-                    role: "user".to_string(),
-                    parts: vec![MessagePart::Text { content: "second".to_string() }],
-                    name: None,
-                },
-            ],
-            temperature: None, max_tokens: None, frequency_penalty: None,
-            presence_penalty: None, top_p: None, top_k: None, seed: None,
-            stop_sequences: None, stream: false, tools: None, raw_body: None,
-        };
-        let fp = GenAIBuilder::compute_user_query_fingerprint(&req);
-        assert_eq!(fp.len(), 32);
-        // fingerprint uses last user message
-        let req2 = LLMRequest {
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                parts: vec![MessagePart::Text { content: "second".to_string() }],
-                name: None,
-            }],
-            temperature: None, max_tokens: None, frequency_penalty: None,
-            presence_penalty: None, top_p: None, top_k: None, seed: None,
-            stop_sequences: None, stream: false, tools: None, raw_body: None,
-        };
-        assert_eq!(fp, GenAIBuilder::compute_user_query_fingerprint(&req2));
     }
 
     #[test]

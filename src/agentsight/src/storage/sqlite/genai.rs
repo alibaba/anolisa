@@ -862,8 +862,9 @@ impl GenAISqliteStore {
     }
 
     /// Look up the real session_id from completed records for the same PID.
-    /// Used in drain path to reconcile SHA256-hash fallback session_id with the
-    /// real agent UUID from ResponseSessionMapper.
+    /// Used in drain path to reconcile the response_id-based fallback session_id
+    /// (`SHA256("session" + first_response_id)`) with the real agent UUID from
+    /// ResponseSessionMapper.
     pub fn lookup_session_for_pid(
         &self,
         pid: i32,

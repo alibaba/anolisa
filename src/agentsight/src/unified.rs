@@ -107,7 +107,8 @@ pub struct AgentSight {
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
 /// If the mapper lookup succeeds within the timeout, session_id metadata is updated
-/// before export. Otherwise, the events are exported with the hash-based fallback.
+/// before export. Otherwise, the events are exported with the response_id-based
+/// fallback (`SHA256("session" + first_response_id)`).
 struct PendingGenAI {
     events: Vec<GenAISemanticEvent>,
     response_id: String,
@@ -1239,7 +1240,8 @@ impl AgentSight {
                         pending.conversation_id.clone(),
                     ));
                     // ── Session ID reconciliation ──────────────────────────
-                    // The drain path computes session_id via SHA256 hash fallback,
+                    // The drain path computes session_id via the response_id
+                    // domain-separated hash fallback (`SHA256("session"+rid)`),
                     // but normal flow uses ResponseSessionMapper (agent .jsonl UUID).
                     // Look up the real session_id from completed records for the same PID.
                     match store.lookup_session_for_pid(pid) {

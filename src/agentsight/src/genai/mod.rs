@@ -8,6 +8,7 @@ pub mod builder;
 pub mod exporter;
 pub mod storage;
 pub mod instance_id;
+pub mod id_resolver;
 pub mod logtail;
 pub mod encrypt;
 pub mod anolisa_release;
