@@ -51,7 +51,17 @@ pub struct CoshTuiAdapter {
 
 impl Default for CoshTuiAdapter {
     fn default() -> Self {
-        let program = std::env::var("COSH_TUI_PATH").unwrap_or_else(|_| "cosh-tui".to_string());
+        let program = std::env::var("COSH_TUI_PATH").unwrap_or_else(|_| {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let sibling = dir.join("cosh-tui");
+                    if sibling.is_file() {
+                        return sibling.to_string_lossy().into_owned();
+                    }
+                }
+            }
+            "cosh-tui".to_string()
+        });
         Self {
             program,
             session_id: Arc::new(Mutex::new(None)),
@@ -242,6 +252,12 @@ fn spawn_persistent(
         approval_bridge(approval_rx, bridge_stdin_tx);
     });
 
+    let (question_tx, question_rx) = mpsc::channel::<super::QuestionResponse>();
+    let q_bridge_stdin_tx = stdin_cmd_tx.clone();
+    thread::spawn(move || {
+        question_bridge(question_rx, q_bridge_stdin_tx);
+    });
+
     let prompt = cosh_tui_prompt_from_request(request, mode);
 
     let stdin_writer_tx = stdin_cmd_tx.clone();
@@ -278,6 +294,7 @@ fn spawn_persistent(
                     receiver: event_rx,
                     cancel: Arc::new(|| {}),
                     approval_sender: Some(approval_tx),
+                    question_sender: Some(question_tx),
                 },
             );
         }
@@ -290,7 +307,9 @@ fn spawn_persistent(
     let stderr = child.stderr.take().expect("stderr piped");
 
     thread::spawn(move || {
-        let _ = read_lossy(stderr);
+        for line in std::io::BufReader::new(stderr).lines().flatten() {
+            eprintln!("[cosh-tui] {line}");
+        }
     });
 
     thread::spawn(move || {
@@ -338,6 +357,7 @@ fn spawn_persistent(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        question_sender: Some(question_tx),
     };
 
     (proc, handle)
@@ -368,6 +388,12 @@ fn attach_run(
         approval_bridge(approval_rx, bridge_stdin_tx);
     });
 
+    let (question_tx, question_rx) = mpsc::channel::<super::QuestionResponse>();
+    let q_bridge_stdin_tx = proc.stdin_tx.clone();
+    thread::spawn(move || {
+        question_bridge(question_rx, q_bridge_stdin_tx);
+    });
+
     let prompt = cosh_tui_prompt_from_request(request, mode);
     let user_msg = super::control_protocol::serialize_user_message(&prompt, None);
     let _ = proc.stdin_tx.send(StdinCommand::SendLine(user_msg));
@@ -393,6 +419,7 @@ fn attach_run(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        question_sender: Some(question_tx),
     }
 }
 
@@ -480,6 +507,27 @@ fn persistent_stdout_reader(
                         tool_use_id,
                     }));
                 }
+                super::control_protocol::ControlRequest::AskUser {
+                    request_id,
+                    question,
+                    options,
+                    allow_free_text,
+                    multi_select,
+                } => {
+                    let selection_mode = if multi_select {
+                        crate::types::QuestionSelectionMode::Multiple
+                    } else {
+                        crate::types::QuestionSelectionMode::Single
+                    };
+                    let _ = event_tx.send(Ok(AgentEvent::UserQuestion {
+                        run_id: run_id.clone(),
+                        question,
+                        options: options.iter().map(|o| o.label.clone()).collect(),
+                        allow_free_text,
+                        selection_mode,
+                        request_id: Some(request_id),
+                    }));
+                }
                 super::control_protocol::ControlRequest::Initialize { .. } => {}
             }
             continue;
@@ -537,6 +585,19 @@ fn approval_bridge(
                 super::control_protocol::serialize_deny(&response.request_id, message)
             }
         };
+        if stdin_tx.send(StdinCommand::SendLine(msg)).is_err() {
+            break;
+        }
+    }
+}
+
+fn question_bridge(
+    rx: mpsc::Receiver<super::QuestionResponse>,
+    stdin_tx: mpsc::Sender<StdinCommand>,
+) {
+    while let Ok(response) = rx.recv() {
+        let msg =
+            super::control_protocol::serialize_answer(&response.request_id, &response.answer);
         if stdin_tx.send(StdinCommand::SendLine(msg)).is_err() {
             break;
         }

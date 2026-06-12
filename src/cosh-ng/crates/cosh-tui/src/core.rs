@@ -60,7 +60,10 @@ impl CoshCore {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        self.tools.names()
+        let mut names = self.tools.names();
+        names.push("ask_user_question".to_string());
+        names.sort();
+        names
     }
 
     pub fn emit<W: Write>(&self, writer: &mut W, msg: &OutputMessage) {
@@ -168,6 +171,7 @@ impl CoshCore {
             let mut block_index: u32 = 0;
             let mut text_block_started = false;
             let mut thinking_block_started = false;
+            let mut suppress_stream_text = false;
 
             self.emit(writer, &OutputMessage::stream_message_start());
 
@@ -196,8 +200,17 @@ impl CoshCore {
                             self.emit(writer, &OutputMessage::stream_text_start(block_index));
                             text_block_started = true;
                         }
-                        self.emit(writer, &OutputMessage::stream_text_delta(block_index, &delta));
                         text_buf.push_str(&delta);
+                        if !suppress_stream_text {
+                            if text_buf.contains("COSH_QUESTION:") {
+                                suppress_stream_text = true;
+                            } else {
+                                self.emit(
+                                    writer,
+                                    &OutputMessage::stream_text_delta(block_index, &delta),
+                                );
+                            }
+                        }
                     }
                     GenerateEvent::ToolCallStart { index, id, name } => {
                         if thinking_block_started {
@@ -267,6 +280,20 @@ impl CoshCore {
             }
 
             if tool_calls.is_empty() {
+                if let Some(synthetic) = parse_cosh_question_text(&text_buf) {
+                    let result =
+                        self.handle_ask_user("synthetic-ask", &synthetic, reader, writer).await;
+                    if result.is_error {
+                        self.messages.push(Message::assistant(&text_buf));
+                        return Ok(());
+                    }
+                    self.messages.push(Message::assistant(&text_buf));
+                    self.messages.push(Message::user(&format!(
+                        "User answered the question: {}",
+                        result.output
+                    )));
+                    continue;
+                }
                 self.messages.push(Message::assistant(&text_buf));
                 return Ok(());
             }
@@ -531,6 +558,12 @@ struct PendingToolCall {
     name: String,
     arguments: String,
     block_index: u32,
+}
+
+fn parse_cosh_question_text(text: &str) -> Option<serde_json::Value> {
+    let marker = "COSH_QUESTION:";
+    let json_text = text.split_once(marker)?.1.trim().lines().next()?.trim();
+    serde_json::from_str(json_text).ok()
 }
 
 #[cfg(test)]

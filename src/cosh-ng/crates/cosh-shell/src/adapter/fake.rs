@@ -282,6 +282,7 @@ impl AgentAdapter for FakeAgentAdapter {
                         options,
                         allow_free_text: true,
                         selection_mode,
+                        request_id: None,
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
@@ -697,6 +698,7 @@ impl AgentAdapter for FakeAgentAdapter {
                 options: vec!["Green".to_string(), "Blue".to_string()],
                 allow_free_text: true,
                 selection_mode: QuestionSelectionMode::Single,
+                request_id: None,
             })?;
             thread::sleep(Duration::from_millis(800));
             sink(AgentEvent::TextDelta {

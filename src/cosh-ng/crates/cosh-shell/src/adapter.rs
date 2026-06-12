@@ -64,6 +64,7 @@ pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
     pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
+    pub(crate) question_sender: Option<mpsc::Sender<QuestionResponse>>,
 }
 
 pub enum AgentRunPoll {
@@ -95,6 +96,19 @@ impl AgentRunHandle {
             .send(response)
             .map_err(|_| AdapterError {
                 message: "approval channel closed".to_string(),
+            })
+    }
+
+    pub fn respond_question(&self, response: QuestionResponse) -> Result<(), AdapterError> {
+        self.question_sender
+            .as_ref()
+            .ok_or_else(|| AdapterError {
+                message: "no question channel (adapter does not support inline questions)"
+                    .to_string(),
+            })?
+            .send(response)
+            .map_err(|_| AdapterError {
+                message: "question channel closed".to_string(),
             })
     }
 
@@ -239,6 +253,7 @@ fn start_threaded_adapter_run(adapter: AdapterInstance, request: AgentRequest) -
         receiver,
         cancel,
         approval_sender: None,
+        question_sender: None,
     }
 }
 

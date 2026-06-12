@@ -198,6 +198,7 @@ impl ClaudeStreamParser {
                 options,
                 allow_free_text,
                 selection_mode,
+                request_id: None,
             });
         }
         if !self.seen_tool_uses.insert(tool.id.clone()) {
@@ -249,6 +250,10 @@ impl ClaudeStreamParser {
             return;
         }
         self.emitted_text = true;
+        if let Some(question) = synthetic_question_from_text(&self.run_id, &text) {
+            events.push(question);
+            return;
+        }
         events.push(AgentEvent::TextDelta {
             run_id: self.run_id.clone(),
             text,
@@ -596,6 +601,50 @@ fn option_candidates_from_context_line(line: &str) -> Vec<String> {
         return vec![trimmed.to_string()];
     }
     Vec::new()
+}
+
+fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> {
+    let marker = "COSH_QUESTION:";
+    let json_text = text.split_once(marker)?.1.trim().lines().next()?.trim();
+    let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let question = value.get("question")?.as_str()?.to_string();
+    let options = value
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(ToString::to_string)
+                        .or_else(|| item.get("label").and_then(|l| l.as_str()).map(ToString::to_string))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let allow_free_text = value
+        .get("allow_free_text")
+        .or_else(|| value.get("allowFreeText"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(options.is_empty());
+    let selection_mode = if value
+        .get("multi_select")
+        .or_else(|| value.get("multiSelect"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        QuestionSelectionMode::Multiple
+    } else {
+        QuestionSelectionMode::Single
+    };
+    Some(AgentEvent::UserQuestion {
+        run_id: run_id.to_string(),
+        question,
+        options,
+        allow_free_text,
+        selection_mode,
+        request_id: None,
+    })
 }
 
 fn question_selection_mode(input: &serde_json::Value) -> QuestionSelectionMode {

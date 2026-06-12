@@ -235,6 +235,8 @@ pub enum AgentEvent {
         allow_free_text: bool,
         #[serde(default)]
         selection_mode: QuestionSelectionMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     Action {
         run_id: String,

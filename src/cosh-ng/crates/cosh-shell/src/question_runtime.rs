@@ -17,13 +17,15 @@ pub(super) struct RuntimeUserQuestion {
     allow_free_text: bool,
     selection_mode: QuestionSelectionMode,
     answer: Option<String>,
+    pub(super) control_request_id: Option<String>,
 }
 
 pub(super) struct QuestionAnswerRun {
     question_id: String,
     question: String,
-    answer: String,
+    pub(super) answer: String,
     pub(super) request: AgentRequest,
+    pub(super) control_request_id: Option<String>,
 }
 
 pub(super) fn pending_question_capture(state: &InlineState) -> Option<RawInputCapture> {
@@ -77,6 +79,19 @@ pub(super) fn render_question_answer_actions<W: Write>(
         };
 
         render_question_answer_notice(state, &answer_run, output)?;
+
+        if let Some(ctrl_req_id) = &answer_run.control_request_id {
+            if let Some(active_run) = state.active_run.as_ref() {
+                let response = cosh_shell::QuestionResponse {
+                    request_id: ctrl_req_id.clone(),
+                    answer: answer_run.answer.clone(),
+                };
+                let _ = active_run.handle.respond_question(response);
+                output.flush()?;
+                continue;
+            }
+        }
+
         stop_active_agent_run_without_rendering(state, output)?;
         start_agent_run(&answer_run.request, adapter, state, output, Some(idx))?;
         output.flush()?;
@@ -277,6 +292,9 @@ pub(super) fn agent_request_from_pending_question_answer(
     let raw_answer = question_answer_text_from_event(event)?;
     let answer = resolve_question_answer(&state.user_questions[question_index], &raw_answer)?;
     let question = state.user_questions[question_index].question.clone();
+    let control_request_id = state.user_questions[question_index]
+        .control_request_id
+        .clone();
     let mut request = agent_request_from_intercepted_input(event, sequence, true)?;
     let user_input = format!("Answer to pending Agent question: {question}\nUser answer: {answer}");
     request.id = format!("agent-answer-{question_id}-{sequence}");
@@ -292,6 +310,7 @@ pub(super) fn agent_request_from_pending_question_answer(
         question_id,
         question,
         answer,
+        control_request_id,
         request,
     })
 }
@@ -402,6 +421,7 @@ pub(super) fn record_user_questions(
             options,
             allow_free_text,
             selection_mode,
+            request_id,
         } = &event.event
         else {
             continue;
@@ -417,6 +437,7 @@ pub(super) fn record_user_questions(
             allow_free_text: *allow_free_text,
             selection_mode: *selection_mode,
             answer: None,
+            control_request_id: request_id.clone(),
         });
         state.pending_question_id = Some(id.clone());
         ids.push(id);

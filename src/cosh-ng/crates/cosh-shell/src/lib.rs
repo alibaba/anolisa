@@ -24,7 +24,7 @@ pub mod types;
 pub use adapter::{
     adapter_for_kind, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
-    ClaudeCodeAdapter, FakeAgentAdapter, PreparedInvocation, QwenCliAdapter,
+    ClaudeCodeAdapter, FakeAgentAdapter, PreparedInvocation, QuestionResponse, QwenCliAdapter,
 };
 pub use agent_render::{ConsultationCardModel, RatatuiInlineRenderer};
 pub use builtin_hooks::*;

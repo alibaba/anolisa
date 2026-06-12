@@ -377,6 +377,7 @@ fn start_cancellable_claude_process(
         receiver,
         cancel,
         approval_sender: None,
+        question_sender: None,
     }
 }
 
@@ -551,6 +552,7 @@ fn start_control_protocol_claude_process(
                         );
                     }
                     super::control_protocol::ControlRequest::Initialize { .. } => {}
+                    super::control_protocol::ControlRequest::AskUser { .. } => {}
                 }
                 continue;
             }
@@ -604,6 +606,7 @@ fn start_control_protocol_claude_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        question_sender: None,
     }
 }
 

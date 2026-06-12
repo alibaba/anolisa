@@ -113,6 +113,7 @@ fn synthetic_question_from_text(run_id: &str, text: &str) -> Option<AgentEvent> 
         options,
         allow_free_text,
         selection_mode,
+        request_id: None,
     })
 }
 

@@ -19,6 +19,19 @@ pub(super) fn render_intercept_agent_guidance<W: Write>(
 
         if let Some(answer_run) = agent_request_from_pending_question_answer(event, idx, state) {
             render_question_answer_notice(state, &answer_run, output)?;
+
+            if let Some(ctrl_req_id) = &answer_run.control_request_id {
+                if let Some(active_run) = state.active_run.as_ref() {
+                    let response = cosh_shell::QuestionResponse {
+                        request_id: ctrl_req_id.clone(),
+                        answer: answer_run.answer.clone(),
+                    };
+                    let _ = active_run.handle.respond_question(response);
+                    output.flush()?;
+                    continue;
+                }
+            }
+
             stop_active_agent_run_without_rendering(state, output)?;
             state.needs_prompt_after_agent_run = event.cwd.is_none();
             start_agent_run(&answer_run.request, adapter, state, output, Some(idx))?;

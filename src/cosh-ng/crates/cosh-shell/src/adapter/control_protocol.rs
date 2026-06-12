@@ -10,6 +10,19 @@ pub enum ControlRequest {
         tool_input: Value,
         tool_use_id: String,
     },
+    AskUser {
+        request_id: String,
+        question: String,
+        options: Vec<AskUserOption>,
+        allow_free_text: bool,
+        multi_select: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AskUserOption {
+    pub label: String,
+    pub description: Option<String>,
 }
 
 pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
@@ -34,8 +47,62 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                 tool_use_id,
             })
         }
+        "ask_user" => {
+            let question = request.get("question")?.as_str()?.to_string();
+            let allow_free_text = request
+                .get("allow_free_text")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let multi_select = request
+                .get("multi_select")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let options = request
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let label = item.get("label")?.as_str()?.to_string();
+                            let description = item
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .map(|s| s.to_string());
+                            Some(AskUserOption { label, description })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ControlRequest::AskUser {
+                request_id,
+                question,
+                options,
+                allow_free_text,
+                multi_select,
+            })
+        }
         _ => None,
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct QuestionResponse {
+    pub request_id: String,
+    pub answer: String,
+}
+
+pub fn serialize_answer(request_id: &str, answer: &str) -> String {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "answer": answer
+            }
+        }
+    })
+    .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +202,45 @@ mod tests {
             }
             _ => panic!("expected Initialize"),
         }
+    }
+
+    #[test]
+    fn parse_ask_user() {
+        let line = r#"{"type":"control_request","request_id":"ask-1","request":{"subtype":"ask_user","question":"What color?","options":[{"label":"Red","description":"Warm color"},{"label":"Blue"}],"allow_free_text":true,"multi_select":false}}"#;
+        let req = parse_control_request(line).expect("should parse");
+        match req {
+            ControlRequest::AskUser {
+                request_id,
+                question,
+                options,
+                allow_free_text,
+                multi_select,
+            } => {
+                assert_eq!(request_id, "ask-1");
+                assert_eq!(question, "What color?");
+                assert_eq!(options.len(), 2);
+                assert_eq!(options[0].label, "Red");
+                assert_eq!(
+                    options[0].description.as_deref(),
+                    Some("Warm color")
+                );
+                assert_eq!(options[1].label, "Blue");
+                assert!(options[1].description.is_none());
+                assert!(allow_free_text);
+                assert!(!multi_select);
+            }
+            _ => panic!("expected AskUser"),
+        }
+    }
+
+    #[test]
+    fn serialize_answer_format() {
+        let s = serialize_answer("ask-1", "Red");
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["type"], "control_response");
+        assert_eq!(v["response"]["subtype"], "success");
+        assert_eq!(v["response"]["request_id"], "ask-1");
+        assert_eq!(v["response"]["response"]["answer"], "Red");
     }
 
     #[test]
