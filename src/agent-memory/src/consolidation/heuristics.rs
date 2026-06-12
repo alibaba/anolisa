@@ -620,6 +620,7 @@ mod tests {
 
     #[test]
     fn consolidation_drops_prompt_injection_facts() {
+        // Facts whose content looks like prompt injection must be filtered.
         let config = default_config();
         let entries = vec![
             make_entry(

@@ -175,8 +175,9 @@ impl MemoryService {
         top_k: usize,
         mode: Option<&str>,
         category: Option<&str>,
+        agent_scope: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
-        crate::tools::memory_search(self, query, top_k, mode, category)
+        crate::tools::memory_search(self, query, top_k, mode, category, agent_scope)
     }
 
     pub fn memory_observe(&self, content: &str, hint: Option<&str>) -> Result<String> {

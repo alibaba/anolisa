@@ -80,6 +80,17 @@ impl IndexHandle {
         store.search(query, top_k, self.exclude_cold)
     }
 
+    /// Search with agent scope filter.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        top_k: usize,
+        agent_scope: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        let store = self.store.lock().expect("index store poisoned");
+        store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
+    }
+
     /// Deep search: include cold files too.
     pub fn search_deep(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().expect("index store poisoned");

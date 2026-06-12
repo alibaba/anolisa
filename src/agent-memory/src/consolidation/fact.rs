@@ -117,8 +117,6 @@ impl ConsolidatedFact {
         out.push_str(&format!("created_at: {}\n", self.created_at));
         out.push_str(&format!("confidence: {}\n", self.confidence));
         out.push_str("---\n\n");
-        // Escape frontmatter terminator sequences in the body so user-controlled
-        // content (from audit logs) cannot prematurely end the YAML frontmatter.
         let safe_content = self.content.replace("\n---\n", "\n- - -\n");
         out.push_str(&safe_content);
         if !self.content.ends_with('\n') {

@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corpus supplement registration for `memory_search corpus=all` integration.
 - `EmbeddingConfig` (None|OpenAI|Ollama) with TOML parsing and environment variable overrides.
 - 30-second HTTP timeout on embedding API clients.
+- Per-agent memory isolation via `[memory].agent_scope` (`shared` | `isolated` |
+  `filter`). Agent identity is sourced from the `MCP_CLIENT_NAME` environment
+  variable, persisted on `upsert`, and enforced at `search_scoped` time using a
+  parameterised SQL binding. Schema bumped to v5
+  (`ALTER TABLE files ADD COLUMN agent_id TEXT DEFAULT NULL`). `memory_search`
+  gains an optional `agent_scope` parameter overriding the config per call.
+  Vector/hybrid modes degrade to scoped BM25 when an agent scope is active so
+  the isolation boundary is never silently widened.
 
 - Memory consolidation: auto-extract L1 atomic facts from session audit logs
   on shutdown via heuristic rules (working context, interest, change, lesson,

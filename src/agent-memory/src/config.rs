@@ -58,6 +58,12 @@ pub struct MemoryConfig {
     /// Consolidation: auto-extract facts from session audit logs on shutdown.
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
+    /// Agent memory scope: "shared" (default, all agents see all memories),
+    /// "isolated" (each agent only sees its own memories), or
+    /// "filter" (each agent sees its own + unscoped memories).
+    /// Agent identity comes from MCP_CLIENT_NAME environment variable.
+    #[serde(default)]
+    pub agent_scope: String,
     /// Maximum bytes returned by a single mem_read call. Files exceeding
     /// this cap are rejected with InvalidArgument to prevent multi-GB
     /// blobs from exhausting memory. Default 1 MiB.
@@ -88,6 +94,7 @@ impl Default for MemoryConfig {
             cgroup: crate::cgroup::CgroupConfig::default(),
             git: crate::git_repo::GitConfig::default(),
             consolidation: ConsolidationConfig::default(),
+            agent_scope: "shared".to_string(),
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
             max_append_bytes: default_max_append_bytes(),

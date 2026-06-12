@@ -205,7 +205,7 @@ impl MemoryMcpServer {
     // ---- Tier B: structured search/write API for weak models or batch use ----
 
     #[tool(
-        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid. Optional category filters results to a fact category (e.g. 'lesson', 'interest', 'working-context')."
+        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid. Optional category filters results to a fact category (e.g. 'lesson', 'interest', 'working-context'). Optional agent_scope overrides [memory].agent_scope for this call; accepted values: 'shared' (no filtering), 'isolated:<id>' (only memories tagged with <id>), or 'filter:<id>' (<id>'s own memories plus unscoped ones). When agent_scope is set to isolated/filter, vector/hybrid degrade to scoped BM25 so the isolation boundary is preserved."
     )]
     async fn memory_search(
         &self,
@@ -213,6 +213,7 @@ impl MemoryMcpServer {
         #[tool(param)] top_k: Option<u32>,
         #[tool(param)] mode: Option<String>,
         #[tool(param)] category: Option<String>,
+        #[tool(param)] agent_scope: Option<String>,
     ) -> ToolResult {
         // Reject excessively long queries to prevent FTS5 resource exhaustion.
         const MAX_QUERY_LEN: usize = 1024;
@@ -230,6 +231,7 @@ impl MemoryMcpServer {
                 k,
                 mode.as_deref(),
                 category.as_deref().filter(|s| !s.is_empty()),
+                agent_scope.as_deref().filter(|s| !s.is_empty()),
             )
             .map_err(|e| fmt_err("search failed", e))?;
         serde_json::to_string_pretty(&hits).map_err(|e| fmt_err("search serialize failed", e))

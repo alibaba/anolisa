@@ -25,7 +25,9 @@ pub struct FactWriter {
     /// Mount root fd for sandboxed writes via safe_fs (openat2 + RESOLVE_BENEATH).
     /// None falls back to std::fs (used in tests with temp dirs).
     root_fd: Option<Arc<OwnedFd>>,
-    /// BM25 store for optional conflict detection.
+    /// Held file handle for fallback (non-sandboxed) JSONL writes.
+    jsonl_file: Mutex<Option<std::fs::File>>,
+    /// Optional BM25 store for conflict detection.
     index: Option<Arc<Mutex<BM25Store>>>,
     /// BM25 threshold for conflict detection.
     conflict_threshold: f64,
@@ -39,6 +41,7 @@ impl FactWriter {
             facts_dir,
             jsonl_path,
             root_fd: None,
+            jsonl_file: Mutex::new(None),
             index: None,
             conflict_threshold: -2.0,
         }
@@ -66,6 +69,7 @@ impl FactWriter {
     /// Uses safe_fs (openat2 + RESOLVE_BENEATH) when root_fd is available,
     /// falling back to std::fs for tests with temp dirs.
     /// If conflict detection is enabled, marks similar existing facts as superseded.
+    /// Facts are organized into category subdirectories under facts/.
     pub fn write(&self, fact: &ConsolidatedFact) -> Result<()> {
         std::fs::create_dir_all(&self.facts_dir)?;
 
@@ -121,10 +125,15 @@ impl FactWriter {
             let jsonl_rel = Path::new("facts").join("facts.jsonl");
             crate::safe_fs::append(fd.as_fd(), &jsonl_rel, jsonl_line.as_bytes())?;
         } else {
-            let mut f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.jsonl_path)?;
+            let mut guard = self.jsonl_file.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                let f = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.jsonl_path)?;
+                *guard = Some(f);
+            }
+            let f = guard.as_mut().unwrap();
             f.write_all(jsonl_line.as_bytes())?;
             f.sync_all()?;
         }

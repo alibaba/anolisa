@@ -309,13 +309,14 @@ fn flush(
     // small batch of upserts/removes per debounce window instead of the
     // entire walk+extract pass.
     let mut store = store.lock().expect("index store poisoned");
+    let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
         }
     }
     for (rel, mtime, size, body) in to_upsert {
-        if let Err(e) = store.upsert(&rel, mtime, size, &body) {
+        if let Err(e) = store.upsert(&rel, mtime, size, &body, agent_id.as_deref()) {
             tracing::warn!("index upsert failed for {rel}: {e}");
         }
     }
@@ -333,6 +334,7 @@ fn full_scan(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>) -> Result<()
 
     let mut store = store.lock().expect("index store poisoned");
     let mut seen: HashSet<String> = HashSet::new();
+    let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
 
     for entry in WalkDir::new(&mount.root)
         .follow_links(false)
@@ -374,7 +376,7 @@ fn full_scan(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>) -> Result<()
                 continue;
             }
         }
-        if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body) {
+        if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
             tracing::warn!("index full-scan upsert failed for {rel}: {e}");
         }
         seen.insert(rel);
