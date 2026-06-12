@@ -1,8 +1,30 @@
 diff --git a/src/cmds/python/pytest_cmd.rs b/src/cmds/python/pytest_cmd.rs
-index 2febb2e..2816158 100644
+index 2febb2e..327fd00 100644
 --- a/src/cmds/python/pytest_cmd.rs
 +++ b/src/cmds/python/pytest_cmd.rs
-@@ -78,6 +78,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -2,7 +2,7 @@
+ 
+ use crate::core::runner;
+ use crate::core::truncate::CAP_WARNINGS;
+-use crate::core::utils::{resolved_command, tool_exists, truncate};
++use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+ use anyhow::Result;
+ 
+ const MAX_XFAIL: usize = CAP_WARNINGS;
+@@ -69,7 +69,11 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+     let mut summary_line = String::new();
+ 
+     for line in output.lines() {
+-        let trimmed = line.trim();
++        // Strip ANSI escape codes before matching — pytest with color-enabled
++        // terminals (CI, Docker) wraps headers/summaries in \x1b[1m...\x1b[0m,
++        // which breaks starts_with("===") checks.
++        let stripped = strip_ansi(line);
++        let trimmed = stripped.trim();
+ 
+         // State transitions
+         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
+@@ -78,6 +82,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
          } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
              state = ParseState::Failures;
              continue;
@@ -13,7 +35,7 @@ index 2febb2e..2816158 100644
          } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
              state = ParseState::Summary;
              // Save current failure if any
-@@ -89,7 +93,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -89,7 +97,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
          } else if trimmed.starts_with("===")
              && (trimmed.contains("passed")
                  || trimmed.contains("failed")
@@ -23,7 +45,7 @@ index 2febb2e..2816158 100644
          {
              summary_line = trimmed.to_string();
              continue;
-@@ -100,7 +105,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -100,7 +109,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
              && !trimmed.starts_with("ERROR")
              && (trimmed.contains(" passed")
                  || trimmed.contains(" failed")
@@ -33,7 +55,7 @@ index 2febb2e..2816158 100644
              && trimmed.contains(" in ")
          {
              summary_line = trimmed.to_string();
-@@ -153,16 +159,26 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
+@@ -153,16 +163,29 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
      }
  
      // Build compact output
@@ -42,7 +64,10 @@ index 2febb2e..2816158 100644
 +
 +    // If stdout was empty/minimal and we got "No tests collected", the real error
 +    // is likely on stderr (e.g. a Python traceback before pytest could start).
-+    // The caller in runner.rs will include stderr in the output for this case.
++    // The caller in runner.rs includes stderr in the output for this case.
++    //
++    // NOTE: runner.rs matches on "No tests collected" substring to trigger the
++    // stderr fallback. Keep "No tests collected" stable if message wording changes.
 +    if result == "Pytest: No tests collected" && output.trim().is_empty() {
 +        return "Pytest: No tests collected (empty stdout, see stderr below)".to_string();
 +    }
@@ -62,7 +87,7 @@ index 2febb2e..2816158 100644
  }
  
  fn build_pytest_summary(
-@@ -178,13 +194,14 @@ fn build_pytest_summary(
+@@ -178,13 +201,14 @@ fn build_pytest_summary(
          skipped,
          xfailed,
          xpassed,
@@ -79,7 +104,7 @@ index 2febb2e..2816158 100644
  
      if failed == 0 && passed > 0 && !extras_present {
          return format!("Pytest: {} passed", passed);
-@@ -201,6 +218,9 @@ fn build_pytest_summary(
+@@ -201,6 +225,9 @@ fn build_pytest_summary(
      if xpassed > 0 {
          result.push_str(&format!(", {} xpassed", xpassed));
      }
@@ -89,7 +114,7 @@ index 2febb2e..2816158 100644
      result.push('\n');
      result.push_str("═══════════════════════════════════════\n");
  
-@@ -248,6 +268,17 @@ fn build_pytest_summary(
+@@ -248,6 +275,17 @@ fn build_pytest_summary(
                      result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
                  }
                  continue;
@@ -107,7 +132,7 @@ index 2febb2e..2816158 100644
              }
          }
  
-@@ -310,6 +341,9 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
+@@ -310,6 +348,9 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                  counts.failed = n;
              } else if word.contains("skipped") {
                  counts.skipped = n;
@@ -117,7 +142,7 @@ index 2febb2e..2816158 100644
              }
          }
      }
-@@ -517,4 +551,203 @@ collected 3 items
+@@ -517,4 +558,203 @@ collected 3 items
              result
          );
      }
@@ -322,26 +347,32 @@ index 2febb2e..2816158 100644
 +    }
  }
 diff --git a/src/core/runner.rs b/src/core/runner.rs
-index 571c763..81ba858 100644
+index 571c763..4ef49d8 100644
 --- a/src/core/runner.rs
 +++ b/src/core/runner.rs
-@@ -111,7 +111,32 @@ where
-     } else {
-         raw
+@@ -113,12 +113,49 @@ where
      };
--    let filtered = filter_fn(text_to_filter, exit_code);
-+    let mut filtered = filter_fn(text_to_filter, exit_code);
-+
+     let filtered = filter_fn(text_to_filter, exit_code);
+ 
 +    // When filtering stdout only, if the filter produced a "no tests" result
 +    // (e.g. pytest stderr had the actual error but stdout was empty), include
 +    // stderr content so the LLM can see what went wrong instead of retrying
 +    // with different parameters.
-+    if opts.filter_stdout_only
++    //
++    // NOTE: The "No tests collected" substring check is coupled to
++    // pytest_cmd::filter_pytest_output which returns messages containing
++    // that exact phrase. Keep these in sync if the message wording changes.
++    //
++    // Use Option<String> for stderr output to avoid cloning filtered in the
++    // normal case — timer.track takes &str, so filtered stays borrowed.
++    let stderr_output: Option<String> = if opts.filter_stdout_only
 +        && (filtered.contains("No tests collected") || filtered.trim().is_empty())
 +        && !result.raw_stderr.trim().is_empty()
 +    {
-+        let mut preview = filtered;
-+        preview.push_str("\n\n[stderr output]\n");
++        // Replace the misleading "No tests collected" message entirely with
++        // stderr content — the LLM should see the actual error, not the
++        // filter's inability to parse the output.
++        let mut preview = String::from("[stderr output]\n");
 +        let max_lines = 40;
 +        let stderr_lines: Vec<&str> = result.raw_stderr.lines().collect();
 +        for line in stderr_lines.iter().take(max_lines) {
@@ -354,8 +385,21 @@ index 571c763..81ba858 100644
 +                stderr_lines.len() - max_lines
 +            ));
 +        }
-+        filtered = preview;
-+    }
- 
++        Some(preview)
++    } else {
++        None
++    };
++    let display: &str = stderr_output.as_deref().unwrap_or(&filtered);
++
      if let Some(label) = opts.tee_label {
-         print_with_hint(&filtered, raw, label, exit_code);
+-        print_with_hint(&filtered, raw, label, exit_code);
++        print_with_hint(display, raw, label, exit_code);
+     } else if opts.no_trailing_newline {
+-        print!("{}", filtered);
++        print!("{}", display);
+     } else {
+-        println!("{}", filtered);
++        println!("{}", display);
+     }
+ 
+     let raw_for_tracking = if opts.filter_stdout_only {
