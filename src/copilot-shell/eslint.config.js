@@ -26,6 +26,8 @@ export default tseslint.config(
       'dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
+      // Standalone hook scripts use Node.js APIs directly
+      'packages/**/src/**/*.mjs',
     ],
   },
   eslint.configs.recommended,
