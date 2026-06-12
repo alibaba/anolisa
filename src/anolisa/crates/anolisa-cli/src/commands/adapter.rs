@@ -40,8 +40,8 @@ use anolisa_core::install_runner::{InstallRunner, ResolvedInstallFile};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
-    FileOwner, InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
-    OperationRecord, OwnedFile,
+    FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
+    ObjectStatus, OperationRecord, OwnedFile,
 };
 use anolisa_core::{DistributionIndex, ResolveQuery};
 
@@ -146,6 +146,24 @@ struct SkippedFile {
     reason: String,
 }
 
+/// One entry in the `adapter list` output.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ListEntry {
+    adapter: String,
+    component: String,
+    framework: String,
+    status: String,
+    version: String,
+    install_path: Option<String>,
+    files: Vec<String>,
+}
+
+/// Top-level `adapter list` output.
+#[derive(Serialize)]
+struct ListResult {
+    adapters: Vec<ListEntry>,
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -163,8 +181,83 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
             framework,
             purge,
         } => handle_remove(&component, &framework, purge, ctx),
-        AdapterCommands::List => Err(CliError::not_implemented("adapter list")),
+        AdapterCommands::List => handle_list(ctx),
     }
+}
+
+// ---------------------------------------------------------------------------
+// adapter list
+// ---------------------------------------------------------------------------
+
+/// List installed adapters from local state.
+fn handle_list(ctx: &CliContext) -> Result<(), CliError> {
+    let state = common::load_installed_state(ctx, "adapter list")?;
+    let entries = list_entries(&state);
+
+    if ctx.json {
+        return render_json("adapter list", ListResult { adapters: entries });
+    }
+
+    if !ctx.quiet {
+        let color = Palette::new(ctx.no_color);
+        if entries.is_empty() {
+            println!("{}", color.muted("no adapters installed"));
+        } else {
+            println!(
+                "{}",
+                color.header(format!(
+                    "{:<28} {:<16} {:<16} {:<12} {}",
+                    "ADAPTER", "COMPONENT", "FRAMEWORK", "STATUS", "INSTALL PATH"
+                ))
+            );
+            for e in &entries {
+                println!(
+                    "{:<28} {:<16} {:<16} {:<12} {}",
+                    e.adapter,
+                    e.component,
+                    e.framework,
+                    color.status(&e.status),
+                    e.install_path.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build list entries from installed state (pure function for testability).
+fn list_entries(state: &InstalledState) -> Vec<ListEntry> {
+    state
+        .objects
+        .iter()
+        .filter(|obj| obj.kind == ObjectKind::Adapter)
+        .map(|obj| {
+            let (component, framework) = obj
+                .name
+                .split_once('/')
+                .map(|(c, f)| (c.to_string(), f.to_string()))
+                .unwrap_or_else(|| (obj.name.clone(), "-".to_string()));
+            let file_paths: Vec<String> = obj
+                .files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect();
+            let install_path = file_paths.first().and_then(|p| {
+                Path::new(p)
+                    .parent()
+                    .map(|parent| parent.display().to_string())
+            });
+            ListEntry {
+                adapter: obj.name.clone(),
+                component,
+                framework,
+                status: common::object_status_str(obj.status).to_string(),
+                version: obj.version.clone(),
+                install_path,
+                files: file_paths,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,10 +1639,134 @@ mod tests {
         assert!(target.exists(), "symlink target must not be removed");
     }
 
-    // -- dispatch: list returns NOT_IMPLEMENTED -----------------------------
+    // -- adapter list ----------------------------------------------------------
+
+    fn component_object(name: &str) -> InstalledObject {
+        InstalledObject {
+            kind: ObjectKind::Component,
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        }
+    }
 
     #[test]
-    fn list_returns_not_implemented() {
+    fn list_empty_state_returns_no_adapters() {
+        let state = InstalledState::default();
+        let entries = list_entries(&state);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_adapter_produces_entry() {
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object(
+            "tokenless/openclaw",
+            vec![OwnedFile {
+                path: PathBuf::from("/data/adapters/tokenless/openclaw/plugin.so"),
+                owner: FileOwner::Anolisa,
+                sha256: None,
+            }],
+        ));
+        let entries = list_entries(&state);
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.adapter, "tokenless/openclaw");
+        assert_eq!(e.component, "tokenless");
+        assert_eq!(e.framework, "openclaw");
+        assert_eq!(e.status, "installed");
+        assert_eq!(
+            e.install_path.as_deref(),
+            Some("/data/adapters/tokenless/openclaw")
+        );
+        assert_eq!(e.files, vec!["/data/adapters/tokenless/openclaw/plugin.so"]);
+    }
+
+    #[test]
+    fn list_excludes_component_objects() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object("tokenless"));
+        state.upsert_object(adapter_object("tokenless/openclaw", vec![]));
+        let entries = list_entries(&state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].adapter, "tokenless/openclaw");
+    }
+
+    #[test]
+    fn list_splits_name_correctly() {
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object("tokenless/hermes", vec![]));
+        let entries = list_entries(&state);
+        assert_eq!(entries[0].component, "tokenless");
+        assert_eq!(entries[0].framework, "hermes");
+    }
+
+    #[test]
+    fn list_malformed_name_does_not_panic() {
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object("no-slash-name", vec![]));
+        let entries = list_entries(&state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].adapter, "no-slash-name");
+        assert_eq!(entries[0].component, "no-slash-name");
+        assert_eq!(entries[0].framework, "-");
+    }
+
+    #[test]
+    fn list_status_maps_correctly() {
+        let mut state = InstalledState::default();
+        let mut obj = adapter_object("a/b", vec![]);
+        obj.status = ObjectStatus::Failed;
+        state.upsert_object(obj);
+        let entries = list_entries(&state);
+        assert_eq!(entries[0].status, "failed");
+
+        let mut state = InstalledState::default();
+        let mut obj = adapter_object("a/b", vec![]);
+        obj.status = ObjectStatus::Disabled;
+        state.upsert_object(obj);
+        let entries = list_entries(&state);
+        assert_eq!(entries[0].status, "disabled");
+    }
+
+    #[test]
+    fn list_json_payload_has_adapters_key() {
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object("tokenless/openclaw", vec![]));
+        let entries = list_entries(&state);
+        let result = ListResult { adapters: entries };
+        let json_str = serde_json::to_string(&result).expect("serialize");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
+        assert!(val.get("adapters").is_some());
+        assert!(val.get("capabilities").is_none());
+        assert!(val["adapters"][0].get("kind").is_none());
+    }
+
+    #[test]
+    fn list_no_files_gives_no_install_path() {
+        let mut state = InstalledState::default();
+        state.upsert_object(adapter_object("tokenless/openclaw", vec![]));
+        let entries = list_entries(&state);
+        assert!(entries[0].install_path.is_none());
+        assert!(entries[0].files.is_empty());
+    }
+
+    #[test]
+    fn list_dispatch_succeeds_on_empty_state() {
         let tmp = tempdir().expect("tmpdir");
         let ctx = ctx_with_prefix(
             false,
@@ -1557,14 +1774,32 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        let err = handle(
+        handle(
             AdapterArgs {
                 command: AdapterCommands::List,
             },
             &ctx,
         )
-        .expect_err("list must return not implemented");
-        assert_eq!(err.code(), "NOT_IMPLEMENTED");
+        .expect("list must succeed on empty state");
+    }
+
+    #[test]
+    fn list_quiet_does_not_panic() {
+        let tmp = tempdir().expect("tmpdir");
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        // ctx_with_prefix already sets quiet = true
+        handle(
+            AdapterArgs {
+                command: AdapterCommands::List,
+            },
+            &ctx,
+        )
+        .expect("list quiet must succeed");
     }
 
     // -- openclaw CLI invocation construction (pure, no spawn) --------------
