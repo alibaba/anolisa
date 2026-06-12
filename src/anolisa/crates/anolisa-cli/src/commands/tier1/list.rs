@@ -4,9 +4,11 @@
 //! configurable URL, maps each entry to a [`Row`], and renders as a
 //! human table or `--json` envelope.
 //!
-//! Local installation detection is stubbed: every component reports
-//! `not_installed`. `--enabled` therefore always returns an empty list.
+//! Install status is resolved from `installed.toml` by matching
+//! [`ObjectKind::Component`] objects against catalog entries.
+//! `--enabled` filters to rows whose status is `installed`.
 
+use anolisa_core::state::{InstalledState, ObjectKind, ObjectStatus};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -102,7 +104,8 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
     };
     let bytes = common::fetch_catalog_bytes(&url, COMMAND)?;
     let catalog = parse_catalog(&bytes)?;
-    let rows = build_rows(&catalog, &args)?;
+    let state = common::load_installed_state(ctx, COMMAND)?;
+    let rows = build_rows(&catalog, &args, &state)?;
 
     if ctx.json {
         return render_json(COMMAND, ListPayload { components: rows });
@@ -180,11 +183,11 @@ fn parse_catalog(bytes: &[u8]) -> Result<ComponentCatalogV1, CliError> {
     Ok(catalog)
 }
 
-fn build_rows(catalog: &ComponentCatalogV1, args: &ListArgs) -> Result<Vec<Row>, CliError> {
-    if args.enabled {
-        return Ok(Vec::new());
-    }
-
+fn build_rows(
+    catalog: &ComponentCatalogV1,
+    args: &ListArgs,
+    state: &InstalledState,
+) -> Result<Vec<Row>, CliError> {
     let rows: Vec<Row> = catalog
         .components
         .iter()
@@ -195,6 +198,14 @@ fn build_rows(catalog: &ComponentCatalogV1, args: &ListArgs) -> Result<Vec<Row>,
                 .map(|bs| bs.iter().map(|b| b.backend_type.clone()).collect())
                 .unwrap_or_default();
             let available = entry.status.as_deref() == Some("available");
+            let installed = state
+                .find_object(ObjectKind::Component, &entry.name)
+                .is_some_and(|obj| obj.status == ObjectStatus::Installed);
+            let status = if installed {
+                "installed"
+            } else {
+                "not_installed"
+            };
             Row {
                 name: entry.name.clone(),
                 display_name: entry
@@ -205,11 +216,12 @@ fn build_rows(catalog: &ComponentCatalogV1, args: &ListArgs) -> Result<Vec<Row>,
                 category: entry.category.clone().unwrap_or_default(),
                 version: entry.version.clone().unwrap_or_default(),
                 backends,
-                status: "not_installed".to_string(),
+                status: status.to_string(),
                 available,
             }
         })
         .filter(|row| !args.available || row.available)
+        .filter(|row| !args.enabled || row.status == "installed")
         .collect();
 
     Ok(rows)
@@ -248,6 +260,7 @@ fn render_human(rows: &[Row], no_color: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anolisa_core::state::InstalledObject;
 
     fn sample_catalog_json() -> &'static str {
         r#"{
@@ -283,6 +296,35 @@ mod tests {
         }"#
     }
 
+    fn empty_state() -> InstalledState {
+        InstalledState::default()
+    }
+
+    fn state_with_object(kind: ObjectKind, name: &str, status: ObjectStatus) -> InstalledState {
+        let mut state = InstalledState::default();
+        state.objects.push(InstalledObject {
+            kind,
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            status,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: None,
+            installed_at: "2026-06-12T00:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+    }
+
     #[test]
     fn parse_v1_catalog_builds_rows() {
         let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("valid v1 JSON");
@@ -290,7 +332,8 @@ mod tests {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         assert_eq!(rows.len(), 2);
 
         let sight = &rows[0];
@@ -326,21 +369,126 @@ mod tests {
             available: true,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "agentsight");
         assert!(rows[0].available);
     }
 
     #[test]
-    fn enabled_stub_returns_empty() {
+    fn empty_state_all_not_installed() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        for row in &rows {
+            assert_eq!(row.status, "not_installed");
+        }
+    }
+
+    #[test]
+    fn installed_component_shows_installed() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+
+        let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
+        assert_eq!(sight.status, "not_installed");
+
+        let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
+        assert_eq!(token.status, "installed");
+    }
+
+    #[test]
+    fn adapter_object_does_not_mark_component_installed() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = state_with_object(ObjectKind::Adapter, "tokenless", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
+        assert_eq!(token.status, "not_installed");
+    }
+
+    #[test]
+    fn failed_component_shows_not_installed() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Failed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
+        assert_eq!(token.status, "not_installed");
+    }
+
+    #[test]
+    fn disabled_component_shows_not_installed() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Disabled);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
+        assert_eq!(token.status, "not_installed");
+    }
+
+    #[test]
+    fn enabled_returns_only_installed() {
         let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
         let args = ListArgs {
             available: false,
             enabled: true,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "tokenless");
+        assert_eq!(rows[0].status, "installed");
+    }
+
+    #[test]
+    fn enabled_with_empty_state_returns_empty() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: true,
+        };
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn available_and_enabled_returns_intersection() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: true,
+            enabled: true,
+        };
+        // tokenless is installed but not available; agentsight is available but not installed
+        let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        assert!(rows.is_empty());
+
+        // agentsight is both available and installed
+        let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "agentsight");
     }
 
     #[test]
@@ -350,12 +498,38 @@ mod tests {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         let payload = ListPayload { components: rows };
         let json_str = serde_json::to_string(&payload).expect("serialize");
         let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
         assert!(val.get("components").is_some());
         assert!(val.get("capabilities").is_none());
+    }
+
+    #[test]
+    fn json_payload_status_reflects_install_state() {
+        let catalog = parse_catalog(sample_catalog_json().as_bytes()).expect("parse");
+        let args = ListArgs {
+            available: false,
+            enabled: false,
+        };
+        let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Installed);
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
+        let payload = ListPayload { components: rows };
+        let json_str = serde_json::to_string(&payload).expect("serialize");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
+        let components = val["components"].as_array().unwrap();
+        let sight = components
+            .iter()
+            .find(|c| c["name"] == "agentsight")
+            .unwrap();
+        assert_eq!(sight["status"], "installed");
+        let token = components
+            .iter()
+            .find(|c| c["name"] == "tokenless")
+            .unwrap();
+        assert_eq!(token["status"], "not_installed");
     }
 
     #[test]
@@ -379,7 +553,8 @@ mod tests {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         assert_eq!(rows[0].backends, vec!["custom-repo"]);
     }
 
@@ -391,7 +566,8 @@ mod tests {
             available: false,
             enabled: false,
         };
-        let rows = build_rows(&catalog, &args).expect("build_rows");
+        let state = empty_state();
+        let rows = build_rows(&catalog, &args, &state).expect("build_rows");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.name, "minimal");
