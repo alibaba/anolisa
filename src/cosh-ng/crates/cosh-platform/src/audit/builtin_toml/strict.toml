@@ -1,0 +1,67 @@
+# Built-in audit policy: strict.
+#
+# default = Deny. Only an explicit allow-list of read-only operations passes.
+# Suitable for production servers and untrusted Agents.
+
+version = "v1-strict"
+default = "Deny"
+
+# Read-only single-token shell commands.
+[[rules]]
+name = "shell-allow-readonly-singletons"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = { one_of = [
+  "uptime", "uname", "hostname", "whoami", "id", "pwd",
+  "ls", "cat", "head", "tail", "wc",
+  "ps", "df", "du", "free",
+  "date", "env", "printenv", "which", "whereis",
+  "echo", "file", "stat", "readlink",
+  "find", "grep", "rg", "awk", "sed",
+  "sort", "uniq", "cut", "tr",
+  "netstat", "ss", "ip", "lsof", "dig",
+  "journalctl"
+] }
+
+# Read-only git subcommands.
+[[rules]]
+name = "shell-allow-git-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "git"
+target = { one_of = ["status", "log", "diff", "show", "blame", "describe", "rev-parse", "ls-files", "ls-tree", "shortlog", "grep"] }
+
+# Read-only systemctl.
+[[rules]]
+name = "shell-allow-systemctl-readonly"
+outcome = "Allow"
+[rules.matches]
+subsystem = "shell"
+operation = "systemctl"
+target = { one_of = ["status", "is-active", "is-enabled", "list-units", "list-unit-files", "show", "cat"] }
+
+# Pkg subsystem: read-only only.
+[[rules]]
+name = "pkg-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "pkg"
+operation = { one_of = ["search", "list"] }
+
+# Svc subsystem: read-only only.
+[[rules]]
+name = "svc-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "svc"
+operation = { one_of = ["status", "list"] }
+
+# Checkpoint: read-only queries.
+[[rules]]
+name = "checkpoint-readonly-allow"
+outcome = "Allow"
+[rules.matches]
+subsystem = "checkpoint"
+operation = { one_of = ["list", "status", "diff"] }

@@ -1,0 +1,23 @@
+[package]
+name = "cosh-cli"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cosh"
+path = "src/main.rs"
+
+[dependencies]
+cosh-types = { path = "../cosh-types" }
+cosh-platform = { path = "../cosh-platform" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+which.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

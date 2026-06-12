@@ -1,0 +1,26 @@
+[package]
+name = "cosh-tui"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Interactive TUI for cosh - human-facing terminal interface"
+
+[[bin]]
+name = "cosh-tui"
+path = "src/main.rs"
+
+[dependencies]
+cosh-types = { path = "../cosh-types" }
+cosh-platform = { path = "../cosh-platform" }
+ratatui = "0.28"
+crossterm = "0.28"
+serde.workspace = true
+serde_json.workspace = true
+dirs = "5"
+rustc_version_runtime = "0.3"
+ureq = { version = "2", features = ["json", "native-certs"] }
+chrono = { workspace = true, features = ["clock"] }
+aes-gcm = "0.10"
+scrypt = "0.11"
+which.workspace = true

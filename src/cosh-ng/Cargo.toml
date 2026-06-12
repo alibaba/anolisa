@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/cosh-types", "crates/cosh-platform", "crates/cosh-cli", "crates/cosh-tui"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://gitlab.alibaba-inc.com/Agentic-OS/cosh-ng"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false }
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+which = "7"
+toml = "0.8"
+sha2 = "0.10"
+nix = { version = "0.29", default-features = false, features = ["user"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

