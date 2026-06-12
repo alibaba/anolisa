@@ -2,7 +2,7 @@
 //!
 //! Two distinct concerns share this module:
 //! - [`Registry`] is the historical lookup facade over the bundled [`Catalog`]
-//!   (capability/component by name). It delegates fully to `Catalog`.
+//!   (component by name). It delegates fully to `Catalog`.
 //! - [`RegistryConfig`] + [`RegistryClient`] resolve the distribution
 //!   `index.toml` URL/cache policy and fetch the index over HTTP with a TTL
 //!   cache and offline fallback. Submodules are private; the public types are
@@ -18,7 +18,7 @@ pub use config::RegistryConfig;
 pub use error::RegistryError;
 
 use crate::catalog::{Catalog, CatalogError, CatalogLayers};
-use crate::manifest::{CapabilityManifest, ComponentManifest};
+use crate::manifest::ComponentManifest;
 use std::path::PathBuf;
 
 /// Lookup facade over a loaded [`Catalog`].
@@ -44,19 +44,9 @@ impl Registry {
         &self.catalog
     }
 
-    /// Lookup a capability by name.
-    pub fn capability(&self, name: &str) -> Option<&CapabilityManifest> {
-        self.catalog.capability(name)
-    }
-
     /// Lookup a component by name.
     pub fn component(&self, name: &str) -> Option<&ComponentManifest> {
         self.catalog.component(name)
-    }
-
-    /// List all capabilities in catalog order.
-    pub fn list_capabilities(&self) -> Vec<&CapabilityManifest> {
-        self.catalog.list_capabilities()
     }
 
     /// List all components in catalog order.

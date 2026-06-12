@@ -1,10 +1,8 @@
 //! Manifest v2 schema.
 //!
 //! This module hosts the canonical typed representation of the TOML manifests
-//! shipped under `src/anolisa/manifests/`. Two top-level shapes exist:
-//!
-//! * `CapabilityManifest` — user-facing capability definition.
-//! * `ComponentManifest` — concrete component (runtime or osbase substrate).
+//! shipped under `src/anolisa/manifests/`. The single top-level shape is
+//! `ComponentManifest` — a concrete component (runtime or osbase substrate).
 //!
 //! All deserialization is *tolerant*: missing optional fields default and we
 //! accept both the new canonical TOML layout (per `templates/*.toml`) and the
@@ -19,93 +17,6 @@ use std::path::{Path, PathBuf};
 
 /// Default schema version applied when the TOML omits it.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
-
-// ---------------------------------------------------------------------------
-// CapabilityManifest
-// ---------------------------------------------------------------------------
-
-/// Canonical capability manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "CapabilityManifestRaw")]
-pub struct CapabilityManifest {
-    /// Schema version after tolerant parsing.
-    pub schema_version: u32,
-    /// User-facing capability metadata.
-    pub capability: CapabilityMeta,
-    /// Component names backing this capability.
-    pub components: Vec<String>,
-    /// Feature names enabled unless the caller overrides them.
-    pub default_features: Vec<String>,
-    /// Capability-level host requirements.
-    pub env_requirements: EnvRequirements,
-}
-
-/// User-facing metadata for a capability manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilityMeta {
-    /// Stable CLI name.
-    pub name: String,
-    /// Human-readable list/status summary.
-    pub description: String,
-    /// Capability layer label; defaults preserve older fixture layouts.
-    pub layer: String,
-    /// Stability channel shown in list/status surfaces.
-    pub stability: String,
-}
-
-#[derive(Deserialize)]
-struct CapabilityManifestRaw {
-    #[serde(default = "current_schema_version", alias = "manifest_version")]
-    schema_version: u32,
-    capability: CapabilityMetaRaw,
-    #[serde(default)]
-    implementation: ImplementationRaw,
-    #[serde(default, alias = "env_requirements")]
-    requires_env: EnvRequirementsRaw,
-}
-
-#[derive(Deserialize)]
-struct CapabilityMetaRaw {
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default = "default_capability_layer")]
-    layer: String,
-    #[serde(default = "default_stability")]
-    stability: String,
-}
-
-#[derive(Deserialize, Default)]
-struct ImplementationRaw {
-    #[serde(default)]
-    components: Vec<String>,
-    #[serde(default)]
-    features: BTreeMap<String, Vec<String>>,
-}
-
-impl From<CapabilityManifestRaw> for CapabilityManifest {
-    fn from(raw: CapabilityManifestRaw) -> Self {
-        let ImplementationRaw {
-            components,
-            features,
-        } = raw.implementation;
-        let mut default_features: Vec<String> = features.into_values().flatten().collect();
-        default_features.sort();
-        default_features.dedup();
-        Self {
-            schema_version: raw.schema_version,
-            capability: CapabilityMeta {
-                name: raw.capability.name,
-                description: raw.capability.description,
-                layer: raw.capability.layer,
-                stability: raw.capability.stability,
-            },
-            components,
-            default_features,
-            env_requirements: raw.requires_env.into(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ComponentManifest
@@ -190,7 +101,7 @@ pub struct ComponentMeta {
     pub version: String,
     /// Architecture layer label (`runtime`, `osbase`, ...).
     pub layer: String,
-    /// Optional domain label for capability grouping.
+    /// Optional domain label for catalog grouping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     /// Human-facing component name (minimal schema `display_name`).
@@ -905,7 +816,7 @@ fn source_from_raw(raw: SourceRaw) -> SourceSpec {
 // EnvRequirements
 // ---------------------------------------------------------------------------
 
-/// Host requirements normalized from capability and component TOML styles.
+/// Host requirements normalized from the component TOML styles.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(from = "EnvRequirementsRaw")]
 pub struct EnvRequirements {
@@ -927,7 +838,7 @@ pub struct EnvRequirements {
 
 #[derive(Deserialize, Default)]
 struct EnvRequirementsRaw {
-    // Capability-style keys (also used by `[component.platform]`).
+    // Bare keys, also accepted via `[component.platform]`.
     #[serde(default)]
     os: Option<StringOrList>,
     #[serde(default)]
@@ -1050,33 +961,13 @@ impl<'de> Deserialize<'de> for StringOrList {
 fn current_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
-fn default_capability_layer() -> String {
-    "tier1-capability".to_string()
-}
 fn default_runtime_layer() -> String {
     "runtime".to_string()
-}
-fn default_stability() -> String {
-    "stable".to_string()
 }
 
 // ---------------------------------------------------------------------------
 // File-loading entry points
 // ---------------------------------------------------------------------------
-
-impl CapabilityManifest {
-    /// Load a capability manifest from TOML on disk.
-    pub fn from_file(path: &Path) -> Result<Self, ManifestError> {
-        let content = read_to_string(path)?;
-        toml::from_str(&content)
-            .map_err(|e| ManifestError::Parse(path.display().to_string(), e.to_string()))
-    }
-
-    /// Parse a capability manifest from TOML text.
-    pub fn from_toml_str(s: &str) -> Result<Self, ManifestError> {
-        toml::from_str(s).map_err(|e| ManifestError::Parse("<string>".into(), e.to_string()))
-    }
-}
 
 impl ComponentManifest {
     /// Load a component manifest from TOML on disk.
@@ -1152,31 +1043,6 @@ pub enum ManifestError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn capability_manifest_parses_existing_fixture() {
-        let toml_text = r#"
-            [capability]
-            name = "agent-observability"
-            description = "Agent behavior tracing"
-
-            [implementation]
-            components = ["agentsight"]
-            features.agentsight = ["token_counting", "ebpf_tracing"]
-
-            [requires_env]
-            os = "linux"
-            arch = ["x86_64", "aarch64"]
-        "#;
-        let m = CapabilityManifest::from_toml_str(toml_text).expect("parse");
-        assert_eq!(m.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(m.capability.name, "agent-observability");
-        assert_eq!(m.capability.layer, "tier1-capability");
-        assert_eq!(m.components, vec!["agentsight"]);
-        assert_eq!(m.env_requirements.os, vec!["linux"]);
-        assert_eq!(m.env_requirements.arch, vec!["x86_64", "aarch64"]);
-        assert!(m.default_features.contains(&"token_counting".to_string()));
-    }
 
     #[test]
     fn component_manifest_parses_existing_fixture() {

@@ -5,8 +5,8 @@ use crate::response::CliError;
 
 #[derive(Parser)]
 pub struct DoctorArgs {
-    /// Diagnose a specific capability (default: all enabled)
-    pub capability: Option<String>,
+    /// Diagnose a specific component (default: all installed)
+    pub component: Option<String>,
     /// Apply suggested fixes automatically.
     ///
     /// `doctor` with no `--fix` is read-only. `--fix` executes the fix
@@ -18,8 +18,8 @@ pub struct DoctorArgs {
 }
 
 pub fn handle(args: DoctorArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let command = match &args.capability {
-        Some(cap) => format!("doctor {cap}"),
+    let command = match &args.component {
+        Some(comp) => format!("doctor {comp}"),
         None => "doctor".to_string(),
     };
 

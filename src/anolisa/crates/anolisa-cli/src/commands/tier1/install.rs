@@ -1,8 +1,7 @@
 //! `anolisa install` — install a component through a configured backend.
 //!
-//! First end-to-end path of the capability→component unification: `install`
-//! takes a component noun directly instead of going through a capability
-//! manifest. The resolution chain — repo.toml loading, backend selection
+//! `install` takes a component noun that must resolve in the catalog as a
+//! component manifest. The resolution chain — repo.toml loading, backend selection
 //! (`--backend` > `default_backend`), base_url variable substitution, and
 //! package-name mapping (`--package` > `package_map` > scope > component
 //! name) — feeds the **raw** backend executor: fetch the distribution index
@@ -11,10 +10,9 @@
 //! record state plus a central-log audit entry. `yum` / `npm` backends are
 //! selectable but their executors are NOT_IMPLEMENTED.
 //!
-//! Deliberately out of scope for this milestone (still owned by `enable`):
-//! execution-policy gating, pre/post hooks, health checks, and service
-//! start/enable. Installed services are recorded in state with
-//! `enabled: false`.
+//! Deliberately out of scope for this milestone: execution-policy gating,
+//! pre/post hooks, health checks, and service start/enable. Installed
+//! services are recorded in state with `enabled: false`.
 
 use clap::Parser;
 use serde::Serialize;
@@ -443,7 +441,7 @@ fn execute_raw(
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
-    resolved: ResolvedInstall,
+    mut resolved: ResolvedInstall,
 ) -> Result<(), CliError> {
     let started_at = now_iso8601();
     let sha256 = resolved
@@ -519,6 +517,17 @@ fn execute_raw(
         crate::context::InstallMode::User => "systemd-user",
     };
 
+    // Migrate away legacy capability rows on this state write; surfaced
+    // in the result warnings and audited in the central log below. A
+    // state-save failure rolls the prune back with the rest of the write.
+    let pruned_legacy = state.prune_legacy_capabilities();
+    if !pruned_legacy.is_empty() {
+        resolved.warnings.push(format!(
+            "pruned legacy capability state object(s) written by an older release: {}",
+            pruned_legacy.join(", ")
+        ));
+    }
+
     state.install_mode = match ctx.install_mode {
         crate::context::InstallMode::System => StateInstallMode::System,
         crate::context::InstallMode::User => StateInstallMode::User,
@@ -550,7 +559,7 @@ fn execute_raw(
                 name: svc.clone(),
                 manager: service_manager.to_string(),
                 restartable: true,
-                // Service enablement stays with `enable` for this milestone.
+                // Service enablement is deferred to a later milestone.
                 enabled: false,
             })
             .collect(),
@@ -578,6 +587,33 @@ fn execute_raw(
     // Audit log is best-effort: the install already succeeded and state is
     // saved, so a log failure downgrades to a warning instead of unwinding.
     let log = CentralLog::open(layout.central_log.clone());
+    if !pruned_legacy.is_empty() {
+        // Warn-severity so `logs --level warn` surfaces the migration.
+        let prune_record = LogRecord {
+            kind: LogKind::Operation,
+            operation_id: Some(operation_id.clone()),
+            command: command.to_string(),
+            source: "anolisa-cli".to_string(),
+            component: None,
+            severity: Severity::Warn,
+            message: format!(
+                "pruned legacy capability state object(s) written by an older release: {}",
+                pruned_legacy.join(", ")
+            ),
+            actor: "cli".to_string(),
+            install_mode: Some(ctx.install_mode.as_str().to_string()),
+            started_at: started_at.clone(),
+            finished_at: Some(now_iso8601()),
+            status: None,
+            objects: pruned_legacy.clone(),
+            backup_ids: Vec::new(),
+            warnings: Vec::new(),
+            details: serde_json::Value::Null,
+        };
+        if let Err(err) = log.append(&prune_record) {
+            eprintln!("warning: failed to write central log: {err}");
+        }
+    }
     let record = LogRecord {
         kind: LogKind::Operation,
         operation_id: Some(operation_id.clone()),

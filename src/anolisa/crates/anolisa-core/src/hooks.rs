@@ -50,9 +50,9 @@ pub enum HookPhase {
     PreInstall,
     /// Runs after component files are installed.
     PostInstall,
-    /// Runs before a capability is enabled or reactivated.
+    /// Runs before a component is installed or reactivated.
     PreEnable,
-    /// Runs after a capability is enabled or reactivated.
+    /// Runs after a component is installed or reactivated.
     PostEnable,
     /// Runs before a logical disable changes state.
     PreDisable,
@@ -496,7 +496,7 @@ pub struct HookRunResult {
 /// so no log line lands in the central log for that combination).
 ///
 /// This is the alpha contract: hooks are 100% manifest-free and live on
-/// disk under an ANOLISA-owned path. A capability shipping a hook is the
+/// disk under an ANOLISA-owned path. A component shipping a hook is the
 /// same delivery shape as shipping a binary — the install runner drops
 /// the file under `<datadir>/hooks/<component>/...`, and the lifecycle
 /// runner picks it up by phase. Path-safety is enforced by `run_hook`
@@ -520,7 +520,7 @@ pub fn discover_component_phase_hook(
 
 /// Convenience over `run_hooks` that handles the common "for each
 /// component in this op, run its `<phase>.sh` if present" pattern. Used
-/// by the lifecycle executors (`enable_execute`, `disable_execute`,
+/// by the lifecycle executors (`install_runner`,
 /// `lifecycle::execute_uninstall_or_purge`) so all three verbs share
 /// hook semantics: same discovery convention, same path-safety guard,
 /// same central-log shape, same warning aggregation.

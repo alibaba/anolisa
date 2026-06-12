@@ -1,19 +1,10 @@
-//! Generic lifecycle plan + executor for `disable` / `uninstall` / `purge`.
+//! Lifecycle plan + executor for `uninstall` / `purge` of components.
 //!
-//! P1-C extracts the previously disable-only state machine into a single
-//! data model — [`LifecyclePlan`] — that all three teardown verbs share.
-//! Today `disable_execute.rs` still owns the control-plane disable flow;
-//! this module provides the planning data model and a real executor for
-//! `uninstall` and `purge`. The executor for `disable` here is kept as a
-//! thin shim that delegates back to `execute_disable` so the wire
-//! envelope and audit-log shape do not change.
+//! Both teardown verbs share a single data model — [`LifecyclePlan`] —
+//! built from the questions every destructive verb must answer before
+//! touching the system:
 //!
-//! # Why a plan?
-//!
-//! All three verbs need to answer the same questions before they touch
-//! the system:
-//!
-//!   1. What components / files / services does this capability own?
+//!   1. What files / services does this component own?
 //!   2. Which of those files are ANOLISA-owned (safe to remove) vs.
 //!      external (must be preserved)?
 //!   3. What service-stop / hook phases would run, and which ones are
@@ -28,9 +19,6 @@
 //!
 //! # Scope guarantees (hard rules)
 //!
-//! * `Disable` — logical only; files always [`FileActionKind::Keep`],
-//!   service phases [`LifecycleMode::NotImplemented`]. Existing
-//!   [`crate::execute_disable`] semantics unchanged.
 //! * `Uninstall` — removes only files where `owner ==
 //!   FileOwner::Anolisa`; everything else is skipped or refused.
 //! * `Purge` — `Uninstall` semantics + drops ANOLISA-owned config / cache
@@ -39,12 +27,10 @@
 //!   the executor treats it as deferred follow-up work.
 //!
 //! No AgentSight-specific code lives here — the plan is shaped from
-//! [`InstalledState`] alone, which is what `install_runner`/`enable_execute`
-//! already write.
+//! [`InstalledState`] alone, which is what `install_runner` already
+//! writes.
 //!
 //! # Transaction integration
-//!
-//! `Disable` is logical-only and does not open a transaction.
 //!
 //! `Uninstall` opens a [`crate::transaction::Transaction`] **inside** the
 //! install lock, after the authoritative state load. `Transaction::begin`
@@ -101,9 +87,7 @@ use crate::transaction::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleOperation {
-    /// Logical disable — state flip only, no destructive action.
-    Disable,
-    /// Remove ANOLISA-owned files for the capability.
+    /// Remove ANOLISA-owned files for the component.
     Uninstall,
     /// Uninstall + drop ANOLISA-owned config / cache / state fragments.
     Purge,
@@ -113,7 +97,6 @@ impl LifecycleOperation {
     /// Wire label for the verb, used in audit-log records and JSON.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Disable => "disable",
             Self::Uninstall => "uninstall",
             Self::Purge => "purge",
         }
@@ -175,8 +158,8 @@ impl From<StateFileOwner> for FileOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileActionKind {
-    /// Leave the file on disk (the default for `Disable`, and for
-    /// non-ANOLISA files in `Uninstall` / `Purge`).
+    /// Leave the file on disk (the default for non-ANOLISA files in
+    /// `Uninstall` / `Purge`).
     Keep,
     /// Delete the file. Only valid when `owner ==
     /// FileOwner::Anolisa`.
@@ -231,7 +214,7 @@ pub struct ServiceAction {
     pub reason: Option<String>,
 }
 
-/// Hook (pre/post-disable, pre/post-uninstall, etc.) recorded in the plan.
+/// Hook (pre/post-uninstall, etc.) recorded in the plan.
 #[derive(Debug, Clone, Serialize)]
 pub struct HookAction {
     /// Hook phase name shown in the plan.
@@ -243,18 +226,17 @@ pub struct HookAction {
     pub reason: Option<String>,
 }
 
-/// Per-component slice of the plan. Mirrors how `enable_plan` decomposes a
-/// capability into its components.
+/// Per-component slice of the plan.
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentLifecyclePlan {
     /// Component this plan slice describes.
     pub name: String,
     /// Service work associated with the component.
     pub services: Vec<ServiceAction>,
-    /// Installed file actions for uninstall/disable.
+    /// Installed file actions for uninstall.
     pub files: Vec<FileAction>,
     /// Configuration / state fragments owned by ANOLISA (e.g. dropins
-    /// the capability wrote into `etc_dir`). Only populated for `Purge`.
+    /// the component wrote into `etc_dir`). Only populated for `Purge`.
     pub configs: Vec<FileAction>,
     /// Hook phases that would surround the component lifecycle.
     pub hooks: Vec<HookAction>,
@@ -266,7 +248,7 @@ pub struct ComponentLifecyclePlan {
 pub struct LifecyclePhase {
     /// Stable phase identifier (e.g. `"stop_services"`, `"remove_files"`).
     pub name: String,
-    /// Human-readable verb (`"stop"`, `"remove"`, `"flip_state"`, ...).
+    /// Human-readable verb (`"stop"`, `"remove"`, `"run_hook"`, ...).
     pub action: String,
     /// What the phase is acting on (component name, file path, etc.).
     pub target: String,
@@ -278,12 +260,13 @@ pub struct LifecyclePhase {
 }
 
 /// Installed-state object vocabulary targeted by a lifecycle plan.
+///
+/// Components are the only installable object today; the enum stays on
+/// the wire as an extension point for future target kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleTargetKind {
-    /// Legacy capability target; uninstall follows its component refs.
-    Capability,
-    /// Direct component target used by `anolisa install` / `uninstall`.
+    /// Component target used by `anolisa install` / `uninstall`.
     Component,
 }
 
@@ -294,9 +277,8 @@ pub struct LifecyclePlan {
     pub operation: LifecycleOperation,
     /// Installed-state object kind this plan targets.
     pub target_kind: LifecycleTargetKind,
-    /// Target name. Kept as `capability` on the wire for compatibility with
-    /// existing lifecycle JSON; component plans store the component name here.
-    pub capability: String,
+    /// Component name the plan targets.
+    pub component: String,
     /// Per-component plan slices.
     pub components: Vec<ComponentLifecyclePlan>,
     /// Ordered phases shown by dry-run renderers.
@@ -314,61 +296,10 @@ pub struct LifecyclePlan {
 // ---------------------------------------------------------------------------
 
 impl LifecyclePlan {
-    /// Build a `Disable` plan from `installed_state`. Files always
-    /// [`FileActionKind::Keep`]; service phases recorded as
-    /// [`LifecycleMode::NotImplemented`] (P1-I scope).
-    ///
-    /// `manifests` is accepted for future use (per-capability hook
-    /// declarations) but the alpha planner consults [`InstalledState`]
-    /// alone — that is where install_runner / enable_execute actually
-    /// recorded ownership.
-    pub fn for_disable(
-        capability: &str,
-        installed_state: &InstalledState,
-        _manifests: &CapabilityManifestsView<'_>,
-    ) -> Self {
-        Self::build(
-            LifecycleOperation::Disable,
-            LifecycleTargetKind::Capability,
-            capability,
-            installed_state,
-        )
-    }
-
-    /// Build an `Uninstall` plan: every `OwnedFile` whose owner is
-    /// ANOLISA becomes [`FileActionKind::Remove`]; external residue is
-    /// surfaced as [`FileActionKind::Refuse`].
-    pub fn for_uninstall(
-        capability: &str,
-        installed_state: &InstalledState,
-        _manifests: &CapabilityManifestsView<'_>,
-    ) -> Self {
-        Self::build(
-            LifecycleOperation::Uninstall,
-            LifecycleTargetKind::Capability,
-            capability,
-            installed_state,
-        )
-    }
-
-    /// Build a `Purge` plan: `Uninstall` + remove ANOLISA-owned
-    /// `etc_dir` / `cache_dir` / `state_dir` fragments. External
-    /// modifications stay [`FileActionKind::Refuse`].
-    pub fn for_purge(
-        capability: &str,
-        installed_state: &InstalledState,
-        _manifests: &CapabilityManifestsView<'_>,
-    ) -> Self {
-        Self::build(
-            LifecycleOperation::Purge,
-            LifecycleTargetKind::Capability,
-            capability,
-            installed_state,
-        )
-    }
-
-    /// Build an `Uninstall` plan for a component installed directly through
-    /// `anolisa install`.
+    /// Build an `Uninstall` plan for a component installed through
+    /// `anolisa install`: every `OwnedFile` whose owner is ANOLISA
+    /// becomes [`FileActionKind::Remove`]; external residue is surfaced
+    /// as [`FileActionKind::Refuse`].
     pub fn for_component_uninstall(component: &str, installed_state: &InstalledState) -> Self {
         Self::build(
             LifecycleOperation::Uninstall,
@@ -378,8 +309,10 @@ impl LifecyclePlan {
         )
     }
 
-    /// Build a `Purge` plan for a component target. Execution remains gated
-    /// by the same purge guard as capability plans.
+    /// Build a `Purge` plan: `Uninstall` + remove ANOLISA-owned
+    /// `etc_dir` / `cache_dir` / `state_dir` fragments. External
+    /// modifications stay [`FileActionKind::Refuse`]. Execution remains
+    /// gated by the purge guard.
     pub fn for_component_purge(component: &str, installed_state: &InstalledState) -> Self {
         Self::build(
             LifecycleOperation::Purge,
@@ -395,84 +328,49 @@ impl LifecyclePlan {
         target: &str,
         installed_state: &InstalledState,
     ) -> Self {
-        let target_obj = match target_kind {
-            LifecycleTargetKind::Capability => {
-                installed_state.find_object(ObjectKind::Capability, target)
-            }
-            LifecycleTargetKind::Component => {
-                installed_state.find_object(ObjectKind::Component, target)
-            }
-        };
-        let component_refs: Vec<String> = match target_kind {
-            LifecycleTargetKind::Capability => target_obj
-                .map(|c| c.component_refs.clone())
-                .unwrap_or_default(),
-            LifecycleTargetKind::Component => target_obj
-                .map(|_| vec![target.to_string()])
-                .unwrap_or_default(),
-        };
+        let target_obj = installed_state.find_object(ObjectKind::Component, target);
 
         let mut components: Vec<ComponentLifecyclePlan> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
 
-        for comp_name in &component_refs {
-            let comp_obj = installed_state.find_object(ObjectKind::Component, comp_name);
-            let mut files: Vec<FileAction> = Vec::new();
-            let mut configs: Vec<FileAction> = Vec::new();
-            let mut services: Vec<ServiceAction> = Vec::new();
-            if let Some(obj) = comp_obj {
-                files.extend(plan_owned_files(operation, &obj.files));
-                files.extend(plan_external_files(operation, &obj.external_modified_files));
-                services.extend(plan_services(operation, &obj.services));
-                if operation == LifecycleOperation::Purge {
-                    configs.extend(plan_purge_configs(&obj.files));
-                }
+        if let Some(obj) = target_obj {
+            let mut files: Vec<FileAction> = plan_owned_files(&obj.files);
+            files.extend(plan_external_files(&obj.external_modified_files));
+            let configs = if operation == LifecycleOperation::Purge {
+                plan_purge_configs(&obj.files)
             } else {
-                warnings.push(format!(
-                    "component '{comp_name}' referenced by capability but missing from installed.toml — skipping",
-                ));
-            }
+                Vec::new()
+            };
             components.push(ComponentLifecyclePlan {
-                name: comp_name.clone(),
-                services,
+                name: target.to_string(),
+                services: plan_services(&obj.services),
                 files,
                 configs,
                 // Hook execution is deferred to lifecycle teardown; record
                 // the intent so audit / preview is honest.
                 hooks: default_hooks_for(operation),
             });
+        } else {
+            warnings.push(format!(
+                "component '{target}' is not installed — plan is empty"
+            ));
         }
 
         let phases = build_phases(operation, target, &components);
 
-        let requires_privilege = match operation {
-            LifecycleOperation::Disable => false,
-            LifecycleOperation::Uninstall | LifecycleOperation::Purge => components
-                .iter()
-                .any(|c| c.files.iter().any(|f| f.action == FileActionKind::Remove)),
-        };
+        let requires_privilege = components
+            .iter()
+            .any(|c| c.files.iter().any(|f| f.action == FileActionKind::Remove));
 
         let risk = match operation {
-            LifecycleOperation::Disable => RiskLevel::Low,
             LifecycleOperation::Uninstall => RiskLevel::Medium,
             LifecycleOperation::Purge => RiskLevel::High,
         };
 
-        if target_obj.is_none() {
-            warnings.push(match target_kind {
-                LifecycleTargetKind::Capability => {
-                    format!("capability '{target}' is not installed — plan is empty")
-                }
-                LifecycleTargetKind::Component => {
-                    format!("component '{target}' is not installed — plan is empty")
-                }
-            });
-        }
-
         Self {
             operation,
             target_kind,
-            capability: target.to_string(),
+            component: target.to_string(),
             components,
             phases,
             risk,
@@ -482,52 +380,18 @@ impl LifecyclePlan {
     }
 }
 
-/// Stub view into the catalog. The alpha planner does not consult
-/// manifests directly (state is authoritative for ownership) but the
-/// planner constructors accept this opaque view so the API does not
-/// change when per-capability hook declarations land.
-pub struct CapabilityManifestsView<'a> {
-    _marker: std::marker::PhantomData<&'a ()>,
-}
-
-#[allow(clippy::needless_lifetimes)]
-impl<'a> CapabilityManifestsView<'a> {
-    /// Empty view for callers that have not loaded the catalog yet (the
-    /// alpha case for every CLI surface). Forwards-compatible: when the
-    /// catalog grows hook declarations, this constructor stays valid
-    /// and a `with_catalog(&Catalog)` constructor lands alongside it.
-    pub fn empty() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-#[allow(clippy::needless_lifetimes)]
-impl<'a> Default for CapabilityManifestsView<'a> {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-fn plan_owned_files(operation: LifecycleOperation, files: &[OwnedFile]) -> Vec<FileAction> {
+fn plan_owned_files(files: &[OwnedFile]) -> Vec<FileAction> {
     files
         .iter()
         .map(|f| {
             let owner: FileOwner = f.owner.into();
-            let (action, reason) = match (operation, owner) {
-                (LifecycleOperation::Disable, _) => (
-                    FileActionKind::Keep,
-                    Some("disable is logical-only".to_string()),
-                ),
-                (LifecycleOperation::Uninstall, FileOwner::Anolisa)
-                | (LifecycleOperation::Purge, FileOwner::Anolisa) => (FileActionKind::Remove, None),
-                (LifecycleOperation::Uninstall, FileOwner::External)
-                | (LifecycleOperation::Purge, FileOwner::External) => (
+            let (action, reason) = match owner {
+                FileOwner::Anolisa => (FileActionKind::Remove, None),
+                FileOwner::External => (
                     FileActionKind::Refuse,
                     Some("file marked external in state".to_string()),
                 ),
-                (_, FileOwner::Unknown) => (
+                FileOwner::Unknown => (
                     FileActionKind::Keep,
                     Some("owner unknown — refusing to delete".to_string()),
                 ),
@@ -542,56 +406,30 @@ fn plan_owned_files(operation: LifecycleOperation, files: &[OwnedFile]) -> Vec<F
         .collect()
 }
 
-fn plan_external_files(
-    operation: LifecycleOperation,
-    files: &[ExternalModifiedFile],
-) -> Vec<FileAction> {
+fn plan_external_files(files: &[ExternalModifiedFile]) -> Vec<FileAction> {
     files
         .iter()
-        .map(|f| {
-            // Disable never touches any file. Uninstall / Purge refuse
-            // external modifications — the user (or a future restore
-            // command) owns the cleanup decision.
-            let (action, reason) = match operation {
-                LifecycleOperation::Disable => (
-                    FileActionKind::Keep,
-                    Some("disable is logical-only".to_string()),
-                ),
-                LifecycleOperation::Uninstall | LifecycleOperation::Purge => (
-                    FileActionKind::Refuse,
-                    Some("external modification recorded in state".to_string()),
-                ),
-            };
-            FileAction {
-                path: f.path.clone(),
-                owner: FileOwner::External,
-                action,
-                reason,
-            }
+        .map(|f| FileAction {
+            path: f.path.clone(),
+            owner: FileOwner::External,
+            // Uninstall / Purge refuse external modifications — the user
+            // (or a future restore command) owns the cleanup decision.
+            action: FileActionKind::Refuse,
+            reason: Some("external modification recorded in state".to_string()),
         })
         .collect()
 }
 
-fn plan_services(operation: LifecycleOperation, services: &[ServiceRef]) -> Vec<ServiceAction> {
+fn plan_services(services: &[ServiceRef]) -> Vec<ServiceAction> {
     services
         .iter()
-        .map(|s| {
-            let (action, reason) = match operation {
-                LifecycleOperation::Disable
-                | LifecycleOperation::Uninstall
-                | LifecycleOperation::Purge => (
-                    ServiceActionKind::Stop,
-                    Some(
-                        "stops via systemd in system mode; skipped on user/non-linux/container hosts"
-                            .to_string(),
-                    ),
-                ),
-            };
-            ServiceAction {
-                name: s.name.clone(),
-                action,
-                reason,
-            }
+        .map(|s| ServiceAction {
+            name: s.name.clone(),
+            action: ServiceActionKind::Stop,
+            reason: Some(
+                "stops via systemd in system mode; skipped on user/non-linux/container hosts"
+                    .to_string(),
+            ),
         })
         .collect()
 }
@@ -629,7 +467,6 @@ fn is_config_or_state_path(p: &Path) -> bool {
 
 fn default_hooks_for(operation: LifecycleOperation) -> Vec<HookAction> {
     let names: &[&str] = match operation {
-        LifecycleOperation::Disable => &["pre_disable", "post_disable"],
         LifecycleOperation::Uninstall => &["pre_uninstall", "post_uninstall"],
         LifecycleOperation::Purge => &["pre_uninstall", "post_uninstall", "post_purge"],
     };
@@ -645,7 +482,7 @@ fn default_hooks_for(operation: LifecycleOperation) -> Vec<HookAction> {
 
 fn build_phases(
     operation: LifecycleOperation,
-    capability: &str,
+    component: &str,
     components: &[ComponentLifecyclePlan],
 ) -> Vec<LifecyclePhase> {
     let mut phases: Vec<LifecyclePhase> = Vec::new();
@@ -687,62 +524,49 @@ fn build_phases(
     }
 
     // File phases.
-    match operation {
-        LifecycleOperation::Disable => {
+    for c in components {
+        for f in &c.files {
             phases.push(LifecyclePhase {
-                name: "flip_state".to_string(),
-                action: "set_disabled".to_string(),
-                target: capability.to_string(),
-                mode: LifecycleMode::Execute,
-                rollback_hint: Some("anolisa enable <cap>".to_string()),
+                name: "remove_file".to_string(),
+                action: match f.action {
+                    FileActionKind::Remove => "remove",
+                    FileActionKind::Keep => "keep",
+                    FileActionKind::Backup => "backup",
+                    FileActionKind::Refuse => "refuse",
+                }
+                .to_string(),
+                target: f.path.display().to_string(),
+                mode: match f.action {
+                    FileActionKind::Remove => LifecycleMode::Execute,
+                    _ => LifecycleMode::Skip,
+                },
+                rollback_hint: match f.action {
+                    FileActionKind::Remove => {
+                        Some("anolisa install <component> (reinstall)".to_string())
+                    }
+                    _ => None,
+                },
             });
         }
-        LifecycleOperation::Uninstall | LifecycleOperation::Purge => {
-            for c in components {
-                for f in &c.files {
-                    phases.push(LifecyclePhase {
-                        name: "remove_file".to_string(),
-                        action: match f.action {
-                            FileActionKind::Remove => "remove",
-                            FileActionKind::Keep => "keep",
-                            FileActionKind::Backup => "backup",
-                            FileActionKind::Refuse => "refuse",
-                        }
-                        .to_string(),
-                        target: f.path.display().to_string(),
-                        mode: match f.action {
-                            FileActionKind::Remove => LifecycleMode::Execute,
-                            _ => LifecycleMode::Skip,
-                        },
-                        rollback_hint: match f.action {
-                            FileActionKind::Remove => {
-                                Some("anolisa enable <cap> (reinstall)".to_string())
-                            }
-                            _ => None,
-                        },
-                    });
-                }
-                if operation == LifecycleOperation::Purge {
-                    for f in &c.configs {
-                        phases.push(LifecyclePhase {
-                            name: "remove_config".to_string(),
-                            action: "remove".to_string(),
-                            target: f.path.display().to_string(),
-                            mode: LifecycleMode::Execute,
-                            rollback_hint: None,
-                        });
-                    }
-                }
+        if operation == LifecycleOperation::Purge {
+            for f in &c.configs {
+                phases.push(LifecyclePhase {
+                    name: "remove_config".to_string(),
+                    action: "remove".to_string(),
+                    target: f.path.display().to_string(),
+                    mode: LifecycleMode::Execute,
+                    rollback_hint: None,
+                });
             }
-            phases.push(LifecyclePhase {
-                name: "remove_state".to_string(),
-                action: "remove_object".to_string(),
-                target: capability.to_string(),
-                mode: LifecycleMode::Execute,
-                rollback_hint: Some("anolisa enable <cap> (reinstall)".to_string()),
-            });
         }
     }
+    phases.push(LifecyclePhase {
+        name: "remove_state".to_string(),
+        action: "remove_object".to_string(),
+        target: component.to_string(),
+        mode: LifecycleMode::Execute,
+        rollback_hint: Some("anolisa install <component> (reinstall)".to_string()),
+    });
 
     phases
 }
@@ -769,17 +593,15 @@ pub struct LifecycleOutcome {
     pub operation_id: String,
     /// Lifecycle verb that was executed.
     pub operation: LifecycleOperation,
-    /// Target name. Kept as `capability` for the existing lifecycle wire
-    /// shape; component uninstall stores the component name here.
-    pub capability: String,
+    /// Component name the operation targeted.
+    pub component: String,
     /// Paths actually removed by this op (only populated for
     /// `Uninstall` / `Purge`).
     pub removed_files: Vec<PathBuf>,
     /// Files the plan flagged as `Refuse` (external) or `Keep` — i.e.
     /// not deleted, surfaced so the CLI can render an honest summary.
     pub skipped_files: Vec<PathBuf>,
-    /// Whether the target object was removed from `installed.toml`
-    /// (vs. marked disabled).
+    /// Whether the target object was removed from `installed.toml`.
     pub state_object_removed: bool,
     /// Non-fatal warnings raised AFTER the destructive ops succeeded.
     ///
@@ -797,20 +619,11 @@ pub struct LifecycleOutcome {
     pub central_log_path: PathBuf,
 }
 
-/// Failure surface for [`execute_plan`]. Variants mirror the
-/// [`crate::disable_execute::DisableError`] vocabulary so the CLI error
-/// router can reuse the same buckets.
+/// Failure surface for [`execute_plan`].
 #[derive(Debug, thiserror::Error)]
 pub enum LifecycleError {
-    /// Capability is absent from `installed.toml`; no lifecycle work can
-    /// be planned into a concrete mutation.
-    #[error("capability '{capability}' is not installed")]
-    CapabilityNotInstalled {
-        /// Requested capability name.
-        capability: String,
-    },
-    /// Component is absent from `installed.toml`; direct component uninstall
-    /// cannot infer files or services to remove.
+    /// Component is absent from `installed.toml`; uninstall cannot infer
+    /// files or services to remove.
     #[error("component '{component}' is not installed")]
     ComponentNotInstalled {
         /// Requested component name.
@@ -877,9 +690,9 @@ pub enum LifecycleError {
     },
     /// A `pre_uninstall` lifecycle hook failed. Aborts the verb before
     /// any file delete runs — the transaction is rolled back, the
-    /// capability + component objects stay on disk, and a `failed`
-    /// operation record balances the started log line. CLI surfaces
-    /// this through the runtime (execution-failed) bucket.
+    /// component object stays on disk, and a `failed` operation record
+    /// balances the started log line. CLI surfaces this through the
+    /// runtime (execution-failed) bucket.
     #[error("hook {phase} for component '{component}' failed (exit {exit_code:?}): {summary}")]
     HookFailed {
         /// Lifecycle phase whose strict hook failed.
@@ -894,83 +707,23 @@ pub enum LifecycleError {
     },
 }
 
-/// Execute a plan. `Disable` is delegated to
-/// [`crate::execute_disable`] so the existing wire envelope is
-/// preserved. `Uninstall` / `Purge` are handled inline here.
+/// Execute a plan (`Uninstall` or `Purge`).
 ///
 /// `actor` is recorded in every audit record; `install_mode` is mirrored
 /// into the central-log records so audit pipelines can filter by mode.
 ///
-/// The choice of "remove the capability object vs. mark it removed":
+/// The choice of "remove the component object vs. mark it removed":
 /// the alpha state schema has no `Removed` `ObjectStatus`, so the
-/// executor REMOVES the capability + component objects via
-/// `InstalledState::remove_object` for `Uninstall` / `Purge`. This is
-/// the smallest delta from the existing schema and matches how
-/// `disable_execute` already manipulates the object set in-place.
+/// executor REMOVES the component object via
+/// `InstalledState::remove_object` for `Uninstall` / `Purge` — the
+/// smallest delta from the existing schema.
 pub fn execute_plan(
     plan: &LifecyclePlan,
     layout: &FsLayout,
     actor: &str,
     install_mode: &str,
 ) -> Result<LifecycleOutcome, LifecycleError> {
-    match plan.operation {
-        LifecycleOperation::Disable => {
-            // The control-plane disable executor is the source of
-            // truth for the wire envelope; we delegate to it so the
-            // observable outcome (state changes, central log) is
-            // identical to the pre-P1-C behavior.
-            execute_disable_via_plan(plan, layout, actor, install_mode)
-        }
-        LifecycleOperation::Uninstall | LifecycleOperation::Purge => {
-            execute_uninstall_or_purge(plan, layout, actor, install_mode)
-        }
-    }
-}
-
-fn execute_disable_via_plan(
-    plan: &LifecyclePlan,
-    layout: &FsLayout,
-    actor: &str,
-    install_mode: &str,
-) -> Result<LifecycleOutcome, LifecycleError> {
-    let outcome =
-        crate::disable_execute::execute_disable(layout, &plan.capability, actor, install_mode)
-            .map_err(disable_err_to_lifecycle)?;
-    Ok(LifecycleOutcome {
-        operation_id: outcome.operation_id,
-        operation: LifecycleOperation::Disable,
-        capability: outcome.capability,
-        removed_files: Vec::new(),
-        skipped_files: Vec::new(),
-        state_object_removed: false,
-        warnings: outcome.warnings,
-        state_path: outcome.state_path,
-        central_log_path: outcome.central_log_path,
-    })
-}
-
-fn disable_err_to_lifecycle(err: crate::disable_execute::DisableError) -> LifecycleError {
-    use crate::disable_execute::DisableError;
-    match err {
-        DisableError::CapabilityNotInstalled { capability } => {
-            LifecycleError::CapabilityNotInstalled { capability }
-        }
-        DisableError::LockHeld { path } => LifecycleError::LockHeld { path },
-        DisableError::Lock { source } => LifecycleError::Lock { source },
-        DisableError::State { source } => LifecycleError::State { source },
-        DisableError::Log { source } => LifecycleError::Log { source },
-        DisableError::HookFailed {
-            phase,
-            component,
-            summary,
-            exit_code,
-        } => LifecycleError::HookFailed {
-            phase,
-            component,
-            summary,
-            exit_code,
-        },
-    }
+    execute_uninstall_or_purge(plan, layout, actor, install_mode)
 }
 
 /// `Purge` is still plan-only. The verb declares "remove ANOLISA-owned
@@ -981,8 +734,8 @@ fn disable_err_to_lifecycle(err: crate::disable_execute::DisableError) -> Lifecy
 /// today would therefore offer no extra value over `uninstall` while
 /// adding a strictly more dangerous wire surface.
 ///
-/// `Disable` and `Uninstall` are NOT gated — they go through the
-/// transaction-backed executor below.
+/// `Uninstall` is NOT gated — it goes through the transaction-backed
+/// executor below.
 ///
 /// Dry-run is always allowed; it remains the supported way to preview
 /// what `purge` would touch once the gate lifts.
@@ -1011,42 +764,17 @@ fn execute_uninstall_or_purge(
     install_mode: &str,
 ) -> Result<LifecycleOutcome, LifecycleError> {
     let state_path = layout.state_dir.join("installed.toml");
-    let target_name = plan.capability.as_str();
+    let target_name = plan.component.as_str();
 
-    // Step 1 — best-effort pre-lock typo check, symmetric with
-    // execute_disable. The preflight is read-only.
-    if let Ok(preflight) = InstalledState::load(&state_path) {
-        match plan.target_kind {
-            LifecycleTargetKind::Capability => {
-                if preflight
-                    .find_object(ObjectKind::Capability, target_name)
-                    .is_none()
-                {
-                    return Err(LifecycleError::CapabilityNotInstalled {
-                        capability: target_name.to_string(),
-                    });
-                }
-            }
-            LifecycleTargetKind::Component => {
-                if preflight
-                    .find_object(ObjectKind::Component, target_name)
-                    .is_none()
-                {
-                    return Err(LifecycleError::ComponentNotInstalled {
-                        component: target_name.to_string(),
-                    });
-                }
-            }
-        }
-    } else {
-        return match plan.target_kind {
-            LifecycleTargetKind::Capability => Err(LifecycleError::CapabilityNotInstalled {
-                capability: target_name.to_string(),
-            }),
-            LifecycleTargetKind::Component => Err(LifecycleError::ComponentNotInstalled {
-                component: target_name.to_string(),
-            }),
-        };
+    // Step 1 — best-effort pre-lock typo check. The preflight is
+    // read-only; an unreadable state file counts as "not installed".
+    let preflight_present = InstalledState::load(&state_path)
+        .map(|s| s.find_object(ObjectKind::Component, target_name).is_some())
+        .unwrap_or(false);
+    if !preflight_present {
+        return Err(LifecycleError::ComponentNotInstalled {
+            component: target_name.to_string(),
+        });
     }
 
     // Step 1.5 — Purge stays gated pending manifest-driven discovery.
@@ -1062,7 +790,7 @@ fn execute_uninstall_or_purge(
 
     // Step 3 — authoritative load INSIDE the lock and rebuild the plan
     // against the live state. The plan we were handed was built outside
-    // the lock; a concurrent install / disable could have mutated state
+    // the lock; a concurrent install / uninstall could have mutated state
     // since then.
     let mut state = match InstalledState::load(&state_path) {
         Ok(s) => s,
@@ -1071,76 +799,21 @@ fn execute_uninstall_or_purge(
             return Err(LifecycleError::State { source });
         }
     };
-    let component_refs = match plan.target_kind {
-        LifecycleTargetKind::Capability => {
-            let cap_obj = match state.find_object(ObjectKind::Capability, target_name) {
-                Some(o) => o.clone(),
-                None => {
-                    drop(lock);
-                    return Err(LifecycleError::CapabilityNotInstalled {
-                        capability: target_name.to_string(),
-                    });
-                }
-            };
-            cap_obj.component_refs.clone()
-        }
-        LifecycleTargetKind::Component => {
-            if state
-                .find_object(ObjectKind::Component, target_name)
-                .is_none()
-            {
-                drop(lock);
-                return Err(LifecycleError::ComponentNotInstalled {
-                    component: target_name.to_string(),
-                });
-            }
-            vec![target_name.to_string()]
-        }
-    };
-    let dependent_capabilities: Vec<String> = match plan.target_kind {
-        LifecycleTargetKind::Capability => Vec::new(),
-        LifecycleTargetKind::Component => state
-            .objects
-            .iter()
-            .filter(|o| {
-                o.kind == ObjectKind::Capability
-                    && o.component_refs.iter().any(|c| c == target_name)
-            })
-            .map(|o| o.name.clone())
-            .collect(),
-    };
+    if state
+        .find_object(ObjectKind::Component, target_name)
+        .is_none()
+    {
+        drop(lock);
+        return Err(LifecycleError::ComponentNotInstalled {
+            component: target_name.to_string(),
+        });
+    }
 
-    let live_plan = match (plan.operation, plan.target_kind) {
-        (LifecycleOperation::Uninstall, LifecycleTargetKind::Capability) => {
-            LifecyclePlan::for_uninstall(target_name, &state, &CapabilityManifestsView::empty())
-        }
-        (LifecycleOperation::Uninstall, LifecycleTargetKind::Component) => {
+    let live_plan = match plan.operation {
+        LifecycleOperation::Uninstall => {
             LifecyclePlan::for_component_uninstall(target_name, &state)
         }
-        (LifecycleOperation::Purge, LifecycleTargetKind::Capability) => {
-            LifecyclePlan::for_purge(target_name, &state, &CapabilityManifestsView::empty())
-        }
-        (LifecycleOperation::Purge, LifecycleTargetKind::Component) => {
-            LifecyclePlan::for_component_purge(target_name, &state)
-        }
-        (LifecycleOperation::Disable, _) => {
-            drop(lock);
-            return Err(LifecycleError::UnsupportedOperation { op: "disable" });
-        }
-    };
-
-    // Shared-component scan: any component referenced by *another*
-    // installed capability is preserved (its files stay on disk and the
-    // component object itself is not dropped). Without this, uninstalling
-    // capability A would silently break capability B.
-    let shared_components: std::collections::HashSet<String> = match plan.target_kind {
-        LifecycleTargetKind::Capability => state
-            .objects
-            .iter()
-            .filter(|o| o.kind == ObjectKind::Capability && o.name != target_name)
-            .flat_map(|o| o.component_refs.iter().cloned())
-            .collect(),
-        LifecycleTargetKind::Component => std::collections::HashSet::new(),
+        LifecycleOperation::Purge => LifecyclePlan::for_component_purge(target_name, &state),
     };
 
     // Step 4 — open a Transaction inside the lock. Begin snapshots
@@ -1159,20 +832,7 @@ fn execute_uninstall_or_purge(
     let started_at = tx.started_at.clone();
     let command = format!("{} {target_name}", plan.operation.as_str());
 
-    let objects: Vec<String> = match plan.target_kind {
-        LifecycleTargetKind::Capability => {
-            let mut objects = Vec::with_capacity(1 + component_refs.len());
-            objects.push(target_name.to_string());
-            objects.extend(component_refs.iter().cloned());
-            objects
-        }
-        LifecycleTargetKind::Component => {
-            let mut objects = Vec::with_capacity(1 + dependent_capabilities.len());
-            objects.push(target_name.to_string());
-            objects.extend(dependent_capabilities.iter().cloned());
-            objects
-        }
-    };
+    let objects: Vec<String> = vec![target_name.to_string()];
 
     let central = CentralLog::open(layout.central_log.clone());
 
@@ -1195,19 +855,12 @@ fn execute_uninstall_or_purge(
 
     // Step 5.25 — pre_uninstall hooks. Run BEFORE service-stop and
     // file-deletion so hooks can drain state, snapshot data, or notify
-    // dependents while the capability's binaries and services are
-    // still in place. Discovered scripts only run for components that
-    // are NOT shared with another installed capability — running
-    // pre_uninstall for a component that will be retained would lie
-    // about lifecycle intent.
-    let unshared_components: Vec<String> = component_refs
-        .iter()
-        .filter(|c| !shared_components.contains(*c))
-        .cloned()
-        .collect();
+    // dependents while the component's binaries and services are still
+    // in place.
+    let hook_components: Vec<String> = vec![target_name.to_string()];
     let pre_uninstall = run_phase_hooks(
         layout,
-        &unshared_components,
+        &hook_components,
         HookPhase::PreUninstall,
         Some(&central),
         &operation_id,
@@ -1240,15 +893,11 @@ fn execute_uninstall_or_purge(
     // the delete loop. Stopping a service before unlinking its binary
     // is the only sequence that lets a still-running daemon shut down
     // cleanly. Stop failures NEVER fail uninstall — they surface on
-    // `LifecycleOutcome.warnings`. Shared components are skipped: the
-    // unit is co-owned by another capability that is still installed.
+    // `LifecycleOutcome.warnings`.
     let mut warnings_pre_delete: Vec<String> = pre_uninstall.warnings;
     {
         let mut units: Vec<(String, String)> = Vec::new();
         for c in &live_plan.components {
-            if shared_components.contains(&c.name) {
-                continue;
-            }
             for s in &c.services {
                 units.push((c.name.clone(), s.name.clone()));
             }
@@ -1310,40 +959,16 @@ fn execute_uninstall_or_purge(
     }
 
     // Step 6 — backup + delete every owned file flagged Remove. Files
-    // that are skipped (Refuse / Keep / shared-component / Unknown
-    // owner) are still recorded as Skipped journal steps so the audit
-    // trail is honest about what the executor saw.
+    // that are skipped (Refuse / Keep / Unknown owner) are still
+    // recorded as Skipped journal steps so the audit trail is honest
+    // about what the executor saw.
     let mut removed_files: Vec<PathBuf> = Vec::new();
     let mut skipped_files: Vec<PathBuf> = Vec::new();
     let mut backup_idx: usize = 0;
     let backup_root = layout.backup_dir.join(&operation_id);
 
     for c in &live_plan.components {
-        let comp_shared = shared_components.contains(&c.name);
         for f in &c.files {
-            if comp_shared {
-                if let Err(err) = record_skipped_step(
-                    &mut tx,
-                    "remove_file",
-                    &f.path,
-                    &format!("component '{}' shared with another capability", c.name),
-                ) {
-                    return rollback_uninstall(
-                        err,
-                        &mut tx,
-                        &central,
-                        &operation_id,
-                        &command,
-                        actor,
-                        install_mode,
-                        &started_at,
-                        objects,
-                        lock,
-                    );
-                }
-                skipped_files.push(f.path.clone());
-                continue;
-            }
             match (f.action, f.owner) {
                 (FileActionKind::Remove, FileOwner::Anolisa) => {
                     // Boundary check: even though state claims this file
@@ -1529,7 +1154,7 @@ fn execute_uninstall_or_purge(
         // Today the gate above prevents this branch from executing for
         // Purge, but we leave the loop in place so the wiring is ready
         // when the gate lifts.
-        if plan.operation == LifecycleOperation::Purge && !comp_shared {
+        if plan.operation == LifecycleOperation::Purge {
             for f in &c.configs {
                 if f.action == FileActionKind::Remove && f.owner == FileOwner::Anolisa {
                     // Mirror the boundary check applied to `files`: a
@@ -1656,26 +1281,14 @@ fn execute_uninstall_or_purge(
         }
     }
 
-    // Step 7 — drop state objects. Capability uninstall preserves shared
-    // components; direct component uninstall removes the component and any
-    // legacy capability objects that still point at it so state has no
-    // dangling component refs after the component is gone.
-    match plan.target_kind {
-        LifecycleTargetKind::Capability => {
-            for comp in &component_refs {
-                if !shared_components.contains(comp) {
-                    let _ = state.remove_object(ObjectKind::Component, comp);
-                }
-            }
-            state.remove_object(ObjectKind::Capability, target_name);
-        }
-        LifecycleTargetKind::Component => {
-            let _ = state.remove_object(ObjectKind::Component, target_name);
-            for capability in &dependent_capabilities {
-                let _ = state.remove_object(ObjectKind::Capability, capability);
-            }
-        }
-    }
+    // Step 7 — drop the component object from state.
+    let _ = state.remove_object(ObjectKind::Component, target_name);
+
+    // Step 7.5 — migrate away legacy capability objects. Releases that
+    // predate the capability removal may have left `kind = "capability"`
+    // rows; prune them on this write so old state files converge. A
+    // Step 8 save failure restores the prior bytes, rolling this back too.
+    let pruned_legacy = state.prune_legacy_capabilities();
 
     let finished_at_utc = Utc::now();
     let finished_at = finished_at_utc.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -1758,6 +1371,23 @@ fn execute_uninstall_or_purge(
     // can keep its binary mapped after delete on Linux).
     let mut combined = warnings_pre_delete;
     combined.append(&mut warnings);
+    if !pruned_legacy.is_empty() {
+        let msg = format!(
+            "pruned legacy capability state object(s) written by an older release: {}",
+            pruned_legacy.join(", ")
+        );
+        // Best-effort audit trail; the prune already landed with Step 8.
+        let _ = central.append(&warning_record(
+            &operation_id,
+            &command,
+            actor,
+            install_mode,
+            &started_at,
+            pruned_legacy,
+            &msg,
+        ));
+        combined.push(msg);
+    }
     let warnings = combined;
 
     // Best-effort cleanup of backups on the success path.
@@ -1773,7 +1403,7 @@ fn execute_uninstall_or_purge(
     // removal; downgrading would lie about what is on disk.
     let post_uninstall = run_phase_hooks(
         layout,
-        &unshared_components,
+        &hook_components,
         HookPhase::PostUninstall,
         Some(&central),
         &operation_id,
@@ -1787,7 +1417,7 @@ fn execute_uninstall_or_purge(
     Ok(LifecycleOutcome {
         operation_id,
         operation: plan.operation,
-        capability: target_name.to_string(),
+        component: target_name.to_string(),
         removed_files,
         skipped_files,
         state_object_removed: true,
@@ -2232,7 +1862,6 @@ mod tests {
 
     fn seed_state_with_two_files(
         layout: &FsLayout,
-        capability: &str,
         component: &str,
         owned_path: &Path,
         external_path: &Path,
@@ -2272,26 +1901,6 @@ mod tests {
                 restartable: true,
                 enabled: false,
             }],
-            health: Vec::new(),
-        });
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: capability.to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec![component.to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
             health: Vec::new(),
         });
         state
@@ -2339,13 +1948,7 @@ mod tests {
         std_fs::create_dir_all(external_path.parent().unwrap()).unwrap();
         std_fs::write(&external_path, b"external").unwrap();
 
-        seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned_path,
-            &external_path,
-        );
+        seed_state_with_two_files(&layout, "agentsight", &owned_path, &external_path);
 
         write_hook_script(
             &layout,
@@ -2360,10 +1963,9 @@ mod tests {
             "#!/bin/sh\nexit 0\n",
         );
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
+        let plan = LifecyclePlan::for_component_uninstall(
+            "agentsight",
             &InstalledState::load(&layout.state_dir.join("installed.toml")).unwrap(),
-            &CapabilityManifestsView::empty(),
         );
         let outcome = execute_plan(&plan, &layout, "tester", "system").expect("uninstall ok");
 
@@ -2408,69 +2010,21 @@ mod tests {
     }
 
     #[test]
-    fn disable_plan_keeps_all_files_and_marks_services_stop() {
-        let root = tempdir().expect("tempdir");
-        let layout = fixture_layout(root.path());
-        let owned = layout.bin_dir.join("agentsight");
-        let external = layout.etc_dir.join("third-party.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-
-        let plan = LifecyclePlan::for_disable(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
-        assert_eq!(plan.operation, LifecycleOperation::Disable);
-        assert_eq!(plan.risk, RiskLevel::Low);
-        assert!(!plan.requires_privilege);
-        let comp = &plan.components[0];
-        // Every file must be Keep.
-        for f in &comp.files {
-            assert_eq!(
-                f.action,
-                FileActionKind::Keep,
-                "disable plan must keep '{}'",
-                f.path.display(),
-            );
-        }
-        // Service phases recorded as Stop (executed best-effort by the
-        // ServiceManager; degrades to a quiet skip on unsupported hosts).
-        for s in &comp.services {
-            assert_eq!(s.action, ServiceActionKind::Stop);
-        }
-        // No remove_file phases.
-        for ph in &plan.phases {
-            assert_ne!(ph.action, "remove");
-        }
-    }
-
-    #[test]
     fn uninstall_plan_remove_anolisa_refuse_external() {
         let root = tempdir().expect("tempdir");
         let layout = fixture_layout(root.path());
         let owned = layout.bin_dir.join("agentsight");
         let external = layout.etc_dir.join("third-party.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
         assert_eq!(plan.operation, LifecycleOperation::Uninstall);
         assert_eq!(plan.risk, RiskLevel::Medium);
+        // Service phases recorded as Stop (executed best-effort by the
+        // ServiceManager; degrades to a quiet skip on unsupported hosts).
+        for s in &plan.components[0].services {
+            assert_eq!(s.action, ServiceActionKind::Stop);
+        }
         let comp = &plan.components[0];
         let owned_action = comp
             .files
@@ -2494,7 +2048,7 @@ mod tests {
         //
         //   * the ANOLISA-owned binary is unlinked,
         //   * the external file is preserved,
-        //   * `installed.toml` drops the capability + non-shared component,
+        //   * `installed.toml` drops the component,
         //   * the central log gains a started+succeeded pair,
         //   * a journal exists under `state_dir/journal/` whose terminal
         //     status is `Ok` and whose `remove_file` step is `Done`.
@@ -2507,18 +2061,8 @@ mod tests {
         let external = layout.etc_dir.join("third-party.toml");
         std_fs::write(&external, b"third-party = true\n").expect("write external");
 
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
 
         let outcome =
             execute_plan(&plan, &layout, "tester", "system").expect("uninstall must succeed");
@@ -2536,15 +2080,9 @@ mod tests {
             InstalledState::load(&layout.state_dir.join("installed.toml")).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Capability, "agent-observability")
-                .is_none(),
-            "capability object must be dropped",
-        );
-        assert!(
-            after
                 .find_object(ObjectKind::Component, "agentsight")
                 .is_none(),
-            "non-shared component must be dropped",
+            "component must be dropped",
         );
 
         // Operation-kind only — service:stop / hook component records
@@ -2557,7 +2095,7 @@ mod tests {
         assert_eq!(lines.len(), 2, "expect started + succeeded record");
         assert_eq!(
             lines[0].get("command").and_then(|v| v.as_str()),
-            Some("uninstall agent-observability"),
+            Some("uninstall agentsight"),
         );
         assert_eq!(lines[1].get("status").and_then(|v| v.as_str()), Some("ok"),);
 
@@ -2579,93 +2117,6 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_execute_preserves_shared_component() {
-        // Two capabilities both reference the same component. Uninstalling
-        // the first must leave the component object — and its files —
-        // intact so the second capability stays consistent.
-        let root = tempdir().expect("tempdir");
-        let layout = fixture_layout(root.path());
-        std_fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
-        let owned = layout.bin_dir.join("agentsight");
-        std_fs::write(&owned, b"binary").expect("write owned");
-        let external = layout.etc_dir.join("third.toml");
-
-        let mut state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-        // Add a second capability that also references `agentsight`.
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: "token-optimization".to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec!["agentsight".to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
-        state
-            .save(&layout.state_dir.join("installed.toml"))
-            .expect("save state");
-
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
-        let outcome =
-            execute_plan(&plan, &layout, "tester", "system").expect("uninstall must succeed");
-
-        assert!(
-            owned.exists(),
-            "shared component's file must NOT be removed",
-        );
-        assert!(
-            outcome.removed_files.is_empty(),
-            "no file may be removed when the only component is shared",
-        );
-        assert!(
-            outcome.skipped_files.iter().any(|p| p == &owned),
-            "owned file must surface as skipped because of shared-component scan",
-        );
-
-        let after =
-            InstalledState::load(&layout.state_dir.join("installed.toml")).expect("reload state");
-        assert!(
-            after
-                .find_object(ObjectKind::Capability, "agent-observability")
-                .is_none(),
-            "uninstalled capability must be dropped",
-        );
-        assert!(
-            after
-                .find_object(ObjectKind::Component, "agentsight")
-                .is_some(),
-            "shared component object must survive",
-        );
-        assert!(
-            after
-                .find_object(ObjectKind::Capability, "token-optimization")
-                .is_some(),
-            "other capability that referenced the shared component must survive",
-        );
-    }
-
-    #[test]
     fn uninstall_execute_lock_held_returns_lock_held() {
         let root = tempdir().expect("tempdir");
         let layout = fixture_layout(root.path());
@@ -2673,18 +2124,8 @@ mod tests {
         let owned = layout.bin_dir.join("agentsight");
         std_fs::write(&owned, b"binary").expect("write owned");
         let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
 
         // Hold the install lock from this test thread before invoking.
         let _held = crate::lock::InstallLock::acquire(&layout.lock_file)
@@ -2731,22 +2172,12 @@ mod tests {
         let owned = layout.bin_dir.join("agentsight");
         std_fs::write(&owned, b"binary content").expect("write owned");
         let external = layout.etc_dir.join("third.toml");
-        let _state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
+        let _state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
         // Re-load the state to build the plan against the on-disk bytes.
         let live_state =
             InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load");
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &live_state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &live_state);
 
         // Pre-create everything the executor would otherwise create
         // inside `state_dir` so the chmod below cannot block it.
@@ -2790,14 +2221,14 @@ mod tests {
             restored, b"binary content",
             "restored bytes must match backup bytes",
         );
-        // installed.toml still names the capability (snapshot restored).
+        // installed.toml still names the component (snapshot restored).
         let after =
             InstalledState::load(&layout.state_dir.join("installed.toml")).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Capability, "agent-observability")
+                .find_object(ObjectKind::Component, "agentsight")
                 .is_some(),
-            "snapshot restore must put the capability back",
+            "snapshot restore must put the component back",
         );
 
         // Central log: started + failed entry. Operation-kind only —
@@ -2825,19 +2256,9 @@ mod tests {
         let owned = layout.bin_dir.join("agentsight");
         std_fs::write(&owned, b"keep me").expect("write owned");
         let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
         assert!(!plan.components.is_empty());
         assert!(
             owned.exists(),
@@ -2847,22 +2268,18 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_on_not_installed_capability_returns_capability_not_installed() {
+    fn uninstall_on_not_installed_component_returns_component_not_installed() {
         let root = tempdir().expect("tempdir");
         let layout = fixture_layout(root.path());
         // No state on disk at all.
         let empty = InstalledState::default();
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &empty,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &empty);
         let err = execute_plan(&plan, &layout, "tester", "system").expect_err("must error");
         match err {
-            LifecycleError::CapabilityNotInstalled { capability } => {
-                assert_eq!(capability, "agent-observability");
+            LifecycleError::ComponentNotInstalled { component } => {
+                assert_eq!(component, "agentsight");
             }
-            other => panic!("expected CapabilityNotInstalled, got {other:?}"),
+            other => panic!("expected ComponentNotInstalled, got {other:?}"),
         }
         assert!(!layout.central_log.exists());
     }
@@ -2882,19 +2299,9 @@ mod tests {
         let external = layout.etc_dir.join("third-party.toml");
         std_fs::write(&external, b"third").expect("write external");
 
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_purge(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_purge("agentsight", &state);
         assert_eq!(plan.operation, LifecycleOperation::Purge);
         assert_eq!(plan.risk, RiskLevel::High);
 
@@ -2923,7 +2330,7 @@ mod tests {
         // The owned "file" recorded in installed.toml is actually a
         // directory on disk. `fs::remove_file` returns EISDIR; the
         // executor must surface a `Filesystem` error, restore the prior
-        // state from the snapshot (capability still present), and emit a
+        // state from the snapshot (component still present), and emit a
         // failed central-log record — NOT a succeeded one.
         let root = tempdir().expect("tempdir");
         let layout = fixture_layout(root.path());
@@ -2931,19 +2338,9 @@ mod tests {
         let owned = layout.bin_dir.join("agentsight");
         std_fs::create_dir(&owned).expect("create owned as dir");
         let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
+        let state = seed_state_with_two_files(&layout, "agentsight", &owned, &external);
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
         let err = execute_plan(&plan, &layout, "tester", "system")
             .expect_err("EISDIR must surface as a Filesystem error");
         assert!(
@@ -2952,15 +2349,15 @@ mod tests {
         );
 
         // The directory survives (EISDIR was the symptom, not a partial
-        // delete) and the snapshot rollback put the capability back.
+        // delete) and the snapshot rollback put the component back.
         assert!(owned.exists(), "directory must survive failed unlink");
         let after =
             InstalledState::load(&layout.state_dir.join("installed.toml")).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Capability, "agent-observability")
+                .find_object(ObjectKind::Component, "agentsight")
                 .is_some(),
-            "snapshot rollback must restore the capability object",
+            "snapshot rollback must restore the component object",
         );
 
         // Operation-kind only — service-stop / hook component records
@@ -2977,139 +2374,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disable_via_plan_idempotent_no_duplicate_operation_record() {
-        // Two back-to-back disable calls through the lifecycle facade
-        // must observe the same idempotent-second-call contract as
-        // execute_disable: only one OperationRecord lands in state.
-        let root = tempdir().expect("tempdir");
-        let layout = fixture_layout(root.path());
-        let owned = layout.bin_dir.join("agentsight");
-        let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-
-        let plan = LifecyclePlan::for_disable(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
-        let first = execute_plan(&plan, &layout, "tester", "system").expect("first disable ok");
-        let second = execute_plan(&plan, &layout, "tester", "system")
-            .expect("second disable ok (idempotent)");
-
-        let after = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load");
-        let our_ops: Vec<_> = after
-            .operations
-            .iter()
-            .filter(|op| op.id == first.operation_id || op.id == second.operation_id)
-            .collect();
-        assert_eq!(
-            our_ops.len(),
-            1,
-            "idempotent second disable must NOT append a second OperationRecord",
-        );
-    }
-
-    #[test]
-    fn disable_via_plan_preserves_existing_disable_envelope() {
-        let root = tempdir().expect("tempdir");
-        let layout = fixture_layout(root.path());
-        let owned = layout.bin_dir.join("agentsight");
-        let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-
-        let plan = LifecyclePlan::for_disable(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
-        let outcome = execute_plan(&plan, &layout, "tester", "system").expect("disable ok");
-        assert_eq!(outcome.operation, LifecycleOperation::Disable);
-        assert!(!outcome.state_object_removed);
-        assert!(outcome.removed_files.is_empty());
-
-        // Central log: started + succeeded for "disable agent-observability"
-        // (proves the existing disable wire shape is preserved).
-        // Operation-kind only — service:stop / hook component records
-        // would otherwise inflate this count.
-        let all = read_log_lines(&layout.central_log);
-        let lines: Vec<&serde_json::Value> = all
-            .iter()
-            .filter(|l| l.get("kind").and_then(|v| v.as_str()) == Some("operation"))
-            .collect();
-        assert_eq!(lines.len(), 2);
-        for line in &lines {
-            assert_eq!(
-                line.get("command").and_then(|v| v.as_str()),
-                Some("disable agent-observability"),
-            );
-        }
-    }
-
-    /// Defense-in-depth: the destructive-execute gate must never fire on
-    /// a `Disable` plan, even when the underlying state has owned files
-    /// that an `Uninstall` plan would have queued for removal. Pins the
-    /// scope of the gate so a future refactor that broadens the predicate
-    /// (e.g. "any Execute mode") cannot silently break logical disable.
-    #[test]
-    fn disable_execute_is_unaffected_by_destructive_execute_gate() {
-        let root = tempdir().expect("tempdir");
-        let layout = fixture_layout(root.path());
-        // Real owned file on disk — proves the gate's predicate is keyed
-        // on operation kind, not on the presence of removable files.
-        std_fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
-        let owned = layout.bin_dir.join("agentsight");
-        std_fs::write(&owned, b"binary").expect("write owned");
-        let external = layout.etc_dir.join("third.toml");
-        let state = seed_state_with_two_files(
-            &layout,
-            "agent-observability",
-            "agentsight",
-            &owned,
-            &external,
-        );
-
-        let plan = LifecyclePlan::for_disable(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
-        let outcome = execute_plan(&plan, &layout, "tester", "system")
-            .expect("disable must succeed through the gate");
-
-        // Logical-only outcome and the owned file must still be on disk.
-        assert_eq!(outcome.operation, LifecycleOperation::Disable);
-        assert!(!outcome.state_object_removed);
-        assert!(owned.exists(), "disable must not touch owned files");
-
-        // The capability + component are flipped to Disabled (control
-        // plane still owns this transition).
-        let after = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load");
-        let cap = after
-            .find_object(ObjectKind::Capability, "agent-observability")
-            .expect("capability present");
-        assert_eq!(cap.status, ObjectStatus::Disabled);
-        let comp = after
-            .find_object(ObjectKind::Component, "agentsight")
-            .expect("component present");
-        assert_eq!(comp.status, ObjectStatus::Disabled);
-    }
-
-    /// A capability whose component declares ZERO `OwnedFile` entries
-    /// must still pass through the executor cleanly: the journal opens,
-    /// state objects are dropped, and the central log gets a started +
+    /// A component that declares ZERO `OwnedFile` entries must still
+    /// pass through the executor cleanly: the journal opens, the state
+    /// object is dropped, and the central log gets a started +
     /// succeeded pair. No file deletions, no rollback.
     #[test]
     fn uninstall_execute_with_no_removable_files_succeeds() {
@@ -3141,34 +2408,10 @@ mod tests {
             services: Vec::new(),
             health: Vec::new(),
         });
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: "agent-observability".to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec!["agentsight".to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
         // Sanity: the plan has zero remove file actions.
         assert!(
             plan.components.iter().all(|c| c
@@ -3187,12 +2430,6 @@ mod tests {
         let after = InstalledState::load(&state_path).expect("reload state");
         assert!(
             after
-                .find_object(ObjectKind::Capability, "agent-observability")
-                .is_none(),
-            "capability must be dropped",
-        );
-        assert!(
-            after
                 .find_object(ObjectKind::Component, "agentsight")
                 .is_none(),
             "component must be dropped",
@@ -3203,12 +2440,96 @@ mod tests {
         assert_eq!(lines[1].get("status").and_then(|v| v.as_str()), Some("ok"),);
     }
 
+    /// Legacy `kind = "capability"` rows from older releases must be
+    /// pruned on the uninstall state write, surfaced as an outcome
+    /// warning, and audited with a warn-severity central-log record.
+    #[test]
+    fn uninstall_execute_prunes_legacy_capability_objects() {
+        let root = tempdir().expect("tempdir");
+        let layout = fixture_layout(root.path());
+        std_fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "agentsight".to_string(),
+            version: "0.2.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            install_backend: Some("raw".to_string()),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Capability,
+            name: "agent-observability".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        let state_path = layout.state_dir.join("installed.toml");
+        state.save(&state_path).expect("seed state save");
+
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
+        let outcome =
+            execute_plan(&plan, &layout, "tester", "system").expect("must succeed cleanly");
+
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("legacy capability") && w.contains("agent-observability")),
+            "outcome must surface the prune as a warning: {:?}",
+            outcome.warnings,
+        );
+
+        let after = InstalledState::load(&state_path).expect("reload state");
+        assert!(
+            after.objects.is_empty(),
+            "both the component and the legacy capability row must be gone",
+        );
+
+        let lines = read_log_lines(&layout.central_log);
+        assert!(
+            lines.iter().any(|l| {
+                l.get("severity").and_then(|v| v.as_str()) == Some("warn")
+                    && l.get("message")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|m| m.contains("legacy capability"))
+            }),
+            "central log must carry a warn-severity prune record",
+        );
+    }
+
     /// A forged or stale `installed.toml` claims `owner = anolisa` for a
     /// path that lives outside the current FsLayout's owned roots. The
     /// executor must refuse to delete it (otherwise uninstall becomes an
     /// arbitrary-delete primitive), record a Skipped journal step, leave
     /// the file untouched on disk, and still proceed to drop the
-    /// capability/component objects from state.
+    /// component object from state.
     #[test]
     fn uninstall_execute_refuses_forged_owner_outside_owned_roots() {
         let root = tempdir().expect("tempdir prefix");
@@ -3247,34 +2568,10 @@ mod tests {
             services: Vec::new(),
             health: Vec::new(),
         });
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: "agent-observability".to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec!["agentsight".to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
 
-        let plan = LifecyclePlan::for_uninstall(
-            "agent-observability",
-            &state,
-            &CapabilityManifestsView::empty(),
-        );
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
         let outcome =
             execute_plan(&plan, &layout, "tester", "system").expect("uninstall must succeed");
 
@@ -3293,12 +2590,6 @@ mod tests {
         assert!(outcome.state_object_removed);
 
         let after = InstalledState::load(&state_path).expect("reload state");
-        assert!(
-            after
-                .find_object(ObjectKind::Capability, "agent-observability")
-                .is_none(),
-            "capability must still be dropped",
-        );
         assert!(
             after
                 .find_object(ObjectKind::Component, "agentsight")
@@ -3461,11 +2752,11 @@ mod tests {
             &mut tx,
             &central,
             "op-test",
-            "uninstall agent-observability",
+            "uninstall agentsight",
             "tester",
             "system",
             "2026-06-02T00:00:00Z",
-            &["agent-observability".to_string()],
+            &["agentsight".to_string()],
         );
 
         assert_eq!(warnings.len(), 1, "expected exactly one warning");

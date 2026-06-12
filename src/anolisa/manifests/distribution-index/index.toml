@@ -5,9 +5,9 @@
 # artifact URL / checksum / signature / backend live here, never in component
 # manifests.
 #
-# This index now carries real raw/tar_gz release entries for capabilities
-# graduated in `templates/execution-policy.toml`. Keep URLs real: a matching
-# row becomes a live HTTP(S) request as soon as a Linux host resolves it.
+# This index carries real raw/tar_gz release entries for published
+# components. Keep URLs real: a matching row becomes a live HTTP(S)
+# request as soon as a Linux host resolves it.
 
 schema_version = 1
 channel = "stable"

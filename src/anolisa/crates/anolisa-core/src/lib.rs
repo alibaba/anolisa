@@ -6,17 +6,12 @@
 
 pub mod adapter;
 pub mod backup;
-pub mod capability;
 pub mod catalog;
 pub mod central_log;
 pub mod component;
-pub mod contract_lint;
 pub mod dependency;
-pub mod disable_execute;
 pub mod distribution;
 pub mod download;
-pub mod enable_execute;
-pub mod enable_plan;
 pub mod feature_flags;
 pub mod health;
 pub mod hooks;
@@ -38,26 +33,16 @@ pub mod upload;
 
 pub use adapter::{AdapterError, DetectResult, detect_framework, expand_layout_placeholders};
 pub use backup::{BackupEntry, BackupSet};
-pub use capability::{CapabilityError, CapabilityResolver, ResolvedPlan};
 pub use catalog::{Catalog, CatalogError, CatalogLayers};
 pub use central_log::{
     CentralLog, CentralLogError, LogFilter, LogKind, LogRecord, LogStatus, Severity,
 };
 pub use component::{Component, ComponentMeta, ComponentStatus};
-pub use contract_lint::{
-    LintFinding, LintSeverity, has_errors as lint_has_errors, lint_capability,
-};
-pub use disable_execute::{DisableError, DisableOutcome, execute_disable};
 pub use distribution::{
     ArtifactType, DistributionEntry, DistributionError, DistributionIndex, ResolveError,
     ResolveQuery,
 };
 pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
-pub use enable_execute::{ExecuteError, ExecuteInstalledFile, ExecuteOutcome, execute_enable};
-pub use enable_plan::{
-    ArtifactPlan, ComponentPlan, EnablePlan, EnvFactsSummary, ExecuteGate, LayoutSummary,
-    PLAN_SCHEMA_VERSION, PlanError, PlanStatus, PrecheckResult, plan_enable,
-};
 pub use feature_flags::FeatureStore;
 pub use health::{CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, run_check};
 pub use hooks::{
@@ -69,9 +54,9 @@ pub use install_runner::{
 };
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
-    CapabilityManifestsView, ComponentLifecyclePlan, FileAction, FileActionKind,
-    FileOwner as LifecycleFileOwner, HookAction, LifecycleError, LifecycleMode, LifecycleOperation,
-    LifecycleOutcome, LifecyclePhase, LifecyclePlan, LifecycleTargetKind, RiskLevel, ServiceAction,
+    ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
+    HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecycleOutcome,
+    LifecyclePhase, LifecyclePlan, LifecycleTargetKind, RiskLevel, ServiceAction,
     ServiceActionKind, execute_plan,
 };
 pub use lock::{InstallLock, LockError};

@@ -18,7 +18,7 @@
 //!   `INVALID_ARGUMENT` so callers can tell "I gave you bad input" apart
 //!   from "you tried and something on the machine refused": download
 //!   IO, install IO, state-write IO, log-write IO, lock IO. Plan-time
-//!   refusals (e.g. blocked plan, unknown capability) stay
+//!   refusals (e.g. blocked plan, unknown component) stay
 //!   `INVALID_ARGUMENT` — they tell the caller to fix the input or the
 //!   environment before retrying.
 

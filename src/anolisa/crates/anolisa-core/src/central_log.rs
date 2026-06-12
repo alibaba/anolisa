@@ -72,7 +72,7 @@ pub struct LogRecord {
     /// events typically leave this `None`.
     #[serde(default)]
     pub operation_id: Option<String>,
-    /// Human-readable command, e.g. `enable agent-observability`.
+    /// Human-readable command, e.g. `install agentsight`.
     pub command: String,
     /// Producer, e.g. `anolisa-cli`, `agentsight`, `sec-core`.
     pub source: String,
@@ -99,7 +99,7 @@ pub struct LogRecord {
     /// records still in flight.
     #[serde(default)]
     pub status: Option<LogStatus>,
-    /// Capability/component names involved in the record.
+    /// Component names involved in the record.
     #[serde(default)]
     pub objects: Vec<String>,
     /// Backup IDs taken by the operation.
@@ -344,7 +344,7 @@ mod tests {
         LogRecord {
             kind: LogKind::Operation,
             operation_id: Some(operation_id.to_string()),
-            command: "enable agent-observability".to_string(),
+            command: "install agentsight".to_string(),
             source: "anolisa-cli".to_string(),
             component: None,
             severity,
@@ -387,11 +387,11 @@ mod tests {
         let record = LogRecord {
             kind: LogKind::Operation,
             operation_id: Some("op-20260601-001".to_string()),
-            command: "enable agent-observability".to_string(),
+            command: "install agentsight".to_string(),
             source: "anolisa-cli".to_string(),
             component: Some("agentsight".to_string()),
             severity: Severity::Info,
-            message: "enable agent-observability finished".to_string(),
+            message: "install agentsight finished".to_string(),
             actor: "test-actor".to_string(),
             install_mode: Some("user".to_string()),
             started_at: "2026-06-01T10:00:00Z".to_string(),

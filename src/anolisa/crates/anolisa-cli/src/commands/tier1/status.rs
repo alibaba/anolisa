@@ -1,15 +1,15 @@
-//! `anolisa status [CAPABILITY]` — read-only view of installed capabilities.
+//! `anolisa status [COMPONENT]` — read-only view of installed components.
 //!
 //! Reads `installed.toml` via the shared [`crate::commands::common`] helper
-//! and lists every `Capability`-kind object, or filters down to a single
+//! and lists every `Component`-kind object, or filters down to a single
 //! name. A missing state file is the expected fresh-install case and yields
-//! an empty result; an unknown capability name surfaces a synthetic
+//! an empty result; an unknown component name surfaces a synthetic
 //! `not_installed` record rather than an error (launch spec §7.1).
 //!
-//! This handler does NOT consult the catalog or resolver — it reports only
-//! what is already on disk. Every field in [`CapabilityRecord`] is projected
-//! straight from [`InstalledObject`]; nothing is synthesized that the state
-//! file does not already know about.
+//! This handler does NOT consult the resolver — it reports state-on-disk
+//! plus live read-only probes. Every persisted field in [`ComponentRecord`]
+//! is projected straight from [`InstalledObject`]; the only synthesized data
+//! are the integrity and manifest health entries layered on top.
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
@@ -55,16 +55,16 @@ const COMMAND: &str = "status";
 
 #[derive(Parser)]
 pub struct StatusArgs {
-    /// Show detail for a specific capability (omit for aggregate view).
-    pub capability: Option<String>,
+    /// Show detail for a specific component (omit for aggregate view).
+    pub component: Option<String>,
 }
 
-/// JSON-shaped record for a single capability, used in both the wire
+/// JSON-shaped record for a single component, used in both the wire
 /// envelope and the human renderer. Fields are projected straight from
 /// the matching [`InstalledObject`] on disk; optional/empty fields are
 /// skipped when absent so synthetic `not_installed` records stay compact.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct CapabilityRecord {
+struct ComponentRecord {
     name: String,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,9 +73,6 @@ struct CapabilityRecord {
     installed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_operation_id: Option<String>,
-    /// Components reported by the install record (from `component_refs`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    components: Vec<String>,
     /// Feature flags the install record marks as enabled.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     enabled_features: Vec<String>,
@@ -95,16 +92,16 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     // would mask a working install.
     let catalog = common::load_bundled_catalog(ctx, COMMAND).ok();
     let install_mode = ctx.install_mode.as_str();
-    let records = select_capabilities(
+    let records = select_components(
         &state,
         &layout,
         catalog.as_ref(),
         install_mode,
-        args.capability.as_deref(),
+        args.component.as_deref(),
     );
 
     if ctx.json {
-        let data = serde_json::json!({ "capabilities": records });
+        let data = serde_json::json!({ "components": records });
         return render_json(COMMAND, data);
     }
 
@@ -114,43 +111,36 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Pure selector: project [`InstalledState`] down to capability records,
+/// Pure selector: project [`InstalledState`] down to component records,
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
 /// `CliContext` or touching the filesystem.
-fn select_capabilities(
+fn select_components(
     state: &InstalledState,
     layout: &FsLayout,
     catalog: Option<&Catalog>,
     install_mode: &str,
     name: Option<&str>,
-) -> Vec<CapabilityRecord> {
+) -> Vec<ComponentRecord> {
     let installed: Vec<&InstalledObject> = state
         .objects
         .iter()
-        .filter(|o| o.kind == ObjectKind::Capability)
+        .filter(|o| o.kind == ObjectKind::Component)
         .collect();
 
     match name {
         None => installed
             .iter()
-            .map(|o| record_from_object(state, layout, catalog, install_mode, o))
+            .map(|o| record_from_object(layout, catalog, install_mode, o))
             .collect(),
         Some(target) => match installed.iter().find(|o| o.name == target) {
-            Some(obj) => vec![record_from_object(
-                state,
-                layout,
-                catalog,
-                install_mode,
-                obj,
-            )],
-            None => vec![CapabilityRecord {
+            Some(obj) => vec![record_from_object(layout, catalog, install_mode, obj)],
+            None => vec![ComponentRecord {
                 name: target.to_string(),
                 status: "not_installed".to_string(),
                 version: None,
                 installed_at: None,
                 last_operation_id: None,
-                components: Vec::new(),
                 enabled_features: Vec::new(),
                 health: Vec::new(),
             }],
@@ -159,12 +149,11 @@ fn select_capabilities(
 }
 
 fn record_from_object(
-    state: &InstalledState,
     layout: &FsLayout,
     catalog: Option<&Catalog>,
     install_mode: &str,
     obj: &InstalledObject,
-) -> CapabilityRecord {
+) -> ComponentRecord {
     // Start from the state's last-known health entries, then layer the
     // live integrity probe on top. The integrity probe is authoritative
     // for owned-file existence and sha256; it can escalate the wire
@@ -172,7 +161,7 @@ fn record_from_object(
     // touching the on-disk state.
     let base_status = common::object_status_str(obj.status).to_string();
     let mut health = obj.health.clone();
-    let (integrity_entries, integrity_status) = integrity_probe(state, layout, obj, &base_status);
+    let (integrity_entries, integrity_status) = integrity_probe(layout, obj, &base_status);
     health.extend(integrity_entries);
 
     // Layer manifest-driven health checks on top. Each entry can escalate
@@ -189,35 +178,33 @@ fn record_from_object(
         integrity_status
     };
 
-    CapabilityRecord {
+    ComponentRecord {
         name: obj.name.clone(),
         status: manifest_status,
         version: Some(obj.version.clone()),
         installed_at: Some(obj.installed_at.clone()),
         last_operation_id: obj.last_operation_id.clone(),
-        components: obj.component_refs.clone(),
         enabled_features: obj.enabled_features.clone(),
         health,
     }
 }
 
-/// Walk every component referenced by `capability`, probe each owned
-/// file's integrity, and return synthesized [`HealthEntry`] items plus
-/// the (possibly escalated) wire status label.
+/// Probe the integrity of every file owned by `component` and return
+/// synthesized [`HealthEntry`] items plus the (possibly escalated) wire
+/// status label.
 ///
 /// Escalation rules (only move toward more-broken, never back):
 /// - any [`IntegrityStatus::is_failure`] result → `"failed"`
 /// - any [`IntegrityStatus::Unverified`] result on an otherwise-clean
-///   capability → `"degraded"`
+///   component → `"degraded"`
 /// - otherwise the base status (`installed`/`disabled`/etc) is preserved
 ///
-/// Status is left untouched when the capability is already `disabled`
-/// or `not_installed`: probing a disabled capability and demoting it
+/// Status is left untouched when the component is already `disabled`
+/// or `not_installed`: probing a disabled component and demoting it
 /// to `degraded` would be a regression in the meaning of `disabled`.
 fn integrity_probe(
-    state: &InstalledState,
     layout: &FsLayout,
-    capability: &InstalledObject,
+    component: &InstalledObject,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
@@ -225,42 +212,26 @@ fn integrity_probe(
     let mut had_unverified = false;
     let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    for comp_name in &capability.component_refs {
-        let Some(component) = state.find_object(ObjectKind::Component, comp_name) else {
-            // Component referenced by name but no install record — surface
-            // as a degradation signal rather than a silent absence.
-            entries.push(HealthEntry {
-                name: format!("component:{comp_name}"),
-                status: "missing_component_record".to_string(),
-                checked_at: checked_at.clone(),
-                reason: Some(format!(
-                    "capability references component '{comp_name}' but no install record was found"
-                )),
-            });
-            had_unverified = true;
+    for file in &component.files {
+        let result = check_owned_file(layout, file);
+        if result == IntegrityStatus::Skipped {
             continue;
-        };
-        for file in &component.files {
-            let result = check_owned_file(layout, file);
-            if result == IntegrityStatus::Skipped {
-                continue;
-            }
-            if result.is_failure() {
-                had_failure = true;
-            } else if matches!(result, IntegrityStatus::Unverified) {
-                had_unverified = true;
-            }
-            entries.push(HealthEntry {
-                name: format!("integrity:{}", file.path.display()),
-                status: result.label().to_string(),
-                checked_at: checked_at.clone(),
-                reason: None,
-            });
         }
+        if result.is_failure() {
+            had_failure = true;
+        } else if matches!(result, IntegrityStatus::Unverified) {
+            had_unverified = true;
+        }
+        entries.push(HealthEntry {
+            name: format!("integrity:{}", file.path.display()),
+            status: result.label().to_string(),
+            checked_at: checked_at.clone(),
+            reason: None,
+        });
     }
 
     // Only escalate from "installed"/"adopted" — keep "disabled"/"failed"
-    // as-is so a disabled capability does not get demoted by a stale
+    // as-is so a disabled component does not get demoted by a stale
     // sha256 mismatch on disk.
     let escalated = match base_status {
         "installed" | "adopted" if had_failure => "failed".to_string(),
@@ -270,11 +241,11 @@ fn integrity_probe(
     (entries, escalated)
 }
 
-/// Walk every component referenced by `capability`, look up its manifest
-/// in the layered catalog, and run each declared `[[health_checks]]`
-/// entry. Three kinds are supported today (file/command/systemd); unknown
-/// kinds are reported verbatim with `status = "unsupported_kind"` so a
-/// future probe doesn't get silently dropped.
+/// Look up the component's manifest in the layered catalog and run each
+/// declared `[[health_checks]]` entry. Three kinds are supported today
+/// (file/command/systemd); unknown kinds are reported verbatim with
+/// `status = "unsupported_kind"` so a future probe doesn't get silently
+/// dropped.
 ///
 /// Escalation rules (status moves only toward more-broken):
 /// - required check fails → `"failed"`
@@ -288,7 +259,7 @@ fn manifest_health_probe(
     layout: &FsLayout,
     catalog: &Catalog,
     install_mode: &str,
-    capability: &InstalledObject,
+    component: &InstalledObject,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
@@ -300,18 +271,15 @@ fn manifest_health_probe(
     // a `EnvService::detect()` call in user mode shells out to `uname -r`.
     let mut service_manager: Option<Box<dyn anolisa_core::ServiceManager>> = None;
 
-    for comp_name in &capability.component_refs {
-        let Some(manifest) = catalog.component(comp_name) else {
-            // No manifest in the catalog — silent. This is the
-            // out-of-tree component case (the alpha contract) and the
-            // integrity probe already surfaces missing install records.
-            continue;
-        };
+    // No manifest in the catalog — silent. This is the out-of-tree
+    // component case (the alpha contract); the integrity probe already
+    // covers everything the state file knows about.
+    if let Some(manifest) = catalog.component(&component.name) {
         for check in &manifest.health_checks {
             let optional = check.optional.unwrap_or(false);
             let entry_name = format!(
                 "{}:{}:{}",
-                comp_name,
+                component.name,
                 check.kind,
                 check.name.as_deref().unwrap_or("(unnamed)")
             );
@@ -398,7 +366,7 @@ fn expand_layout_placeholders(input: &str, layout: &FsLayout) -> String {
 ///      `/etc/passwd` or a `..`-traversal must NOT trigger a stat that
 ///      could leak existence to a passive attacker via timing or
 ///      surface a sensitive file in the wire output. External paths
-///      degrade to `out_of_bounds` / `Unsupported` so the capability
+///      degrade to `out_of_bounds` / `Unsupported` so the component
 ///      goes `degraded` (not `failed`) — the manifest is misauthored,
 ///      not the install.
 ///   2. `symlink_metadata` instead of `Path::exists()` — `exists()`
@@ -447,7 +415,7 @@ fn probe_file_check(layout: &FsLayout, spec: &HealthSpec) -> HealthOutcome {
             // Returning `ok` for a directory turned a misauthored
             // manifest into a silent green light; surfacing
             // `not_regular_file` makes the manifest bug visible in the
-            // wire output without escalating the capability to `failed`
+            // wire output without escalating the component to `failed`
             // (the install itself is fine — the manifest is wrong).
             label: "not_regular_file".to_string(),
             reason: Some(format!(
@@ -685,10 +653,10 @@ fn probe_systemd_check(
     }
 }
 
-fn render_human(records: &[CapabilityRecord], verbose: bool, no_color: bool) {
+fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
     let color = Palette::new(no_color);
     if records.is_empty() {
-        println!("{}", color.muted("no installed capabilities"));
+        println!("{}", color.muted("no installed components"));
         return;
     }
 
@@ -712,13 +680,6 @@ fn render_human(records: &[CapabilityRecord], verbose: bool, no_color: bool) {
         if verbose {
             if let Some(op) = record.last_operation_id.as_deref() {
                 println!("    {} {}", color.label("last_operation_id:"), color.id(op));
-            }
-            if !record.components.is_empty() {
-                println!(
-                    "    {} {}",
-                    color.label("components:"),
-                    record.components.join(", ")
-                );
             }
             if !record.enabled_features.is_empty() {
                 println!(
@@ -765,9 +726,12 @@ mod tests {
         FsLayout::system(Some(PathBuf::from("/tmp/anolisa-status-tests-noop")))
     }
 
-    fn capability_object(name: &str, version: &str, status: ObjectStatus) -> InstalledObject {
+    /// Baseline component install record. Owned `files` default to empty
+    /// so projection-only tests never touch the filesystem; integrity
+    /// tests attach files explicitly before upserting.
+    fn component_object(name: &str, version: &str, status: ObjectStatus) -> InstalledObject {
         InstalledObject {
-            kind: ObjectKind::Capability,
+            kind: ObjectKind::Component,
             name: name.to_string(),
             version: version.to_string(),
             status,
@@ -781,11 +745,7 @@ mod tests {
             subscription_scope: SubscriptionScope::None,
             enabled_features: Vec::new(),
             component_refs: Vec::new(),
-            files: vec![OwnedFile {
-                path: PathBuf::from("/tmp/anolisa/bin/foo"),
-                owner: FileOwner::Anolisa,
-                sha256: None,
-            }],
+            files: Vec::new(),
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
@@ -794,35 +754,35 @@ mod tests {
 
     /// A missing `installed.toml` is the fresh-install case and must
     /// surface as an empty result, not an error. Verifies the helper
-    /// stack (`InstalledState::load` -> `select_capabilities`) collapses
-    /// "no file" to "no capabilities".
+    /// stack (`InstalledState::load` -> `select_components`) collapses
+    /// "no file" to "no components".
     #[test]
     fn missing_state_file_yields_empty_result() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
         let state = InstalledState::load(&path).expect("missing file is not an error");
-        let records = select_capabilities(&state, &dummy_layout(), None, "system", None);
+        let records = select_components(&state, &dummy_layout(), None, "system", None);
         assert!(records.is_empty());
     }
 
     #[test]
-    fn unfiltered_listing_returns_all_capabilities() {
+    fn unfiltered_listing_returns_all_components() {
         let mut state = InstalledState::default();
-        state.upsert_object(capability_object(
-            "agent-observability",
+        state.upsert_object(component_object(
+            "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
         ));
-        state.upsert_object(capability_object(
+        state.upsert_object(component_object(
             "tokenless",
             "0.2.0",
             ObjectStatus::Partial,
         ));
 
-        let records = select_capabilities(&state, &dummy_layout(), None, "system", None);
+        let records = select_components(&state, &dummy_layout(), None, "system", None);
         assert_eq!(records.len(), 2);
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
-        assert!(names.contains(&"agent-observability"));
+        assert!(names.contains(&"agentsight"));
         assert!(names.contains(&"tokenless"));
         // Partial maps to the wire-friendly `degraded` label.
         let tokenless = records
@@ -835,27 +795,28 @@ mod tests {
     #[test]
     fn filter_miss_yields_synthetic_not_installed_record() {
         let mut state = InstalledState::default();
-        state.upsert_object(capability_object(
-            "agent-observability",
+        state.upsert_object(component_object(
+            "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
         ));
 
-        let records = select_capabilities(&state, &dummy_layout(), None, "system", Some("ws-ckpt"));
+        let records = select_components(&state, &dummy_layout(), None, "system", Some("ws-ckpt"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "ws-ckpt");
         assert_eq!(records[0].status, "not_installed");
         assert!(records[0].version.is_none());
         assert!(records[0].installed_at.is_none());
         assert!(records[0].last_operation_id.is_none());
-        assert!(records[0].components.is_empty());
+        assert!(records[0].enabled_features.is_empty());
     }
 
     #[test]
     fn filter_hit_returns_stored_record() {
         let mut state = InstalledState::default();
-        let mut obj = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        obj.component_refs = vec!["agentsight".to_string(), "openclaw".to_string()];
+        // No owned files -> integrity probe is a no-op so the
+        // state-projected record passes through clean.
+        let mut obj = component_object("agentsight", "0.3.1", ObjectStatus::Installed);
         obj.enabled_features = vec!["bpf-events".to_string()];
         obj.health = vec![HealthEntry {
             name: "binary".to_string(),
@@ -864,62 +825,26 @@ mod tests {
             reason: None,
         }];
         state.upsert_object(obj);
-        // Component records present, no owned files -> integrity probe
-        // is a no-op so the state-projected record passes through clean.
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
-        state.upsert_object(component_object("openclaw", "0.1.0", Vec::new()));
 
-        let records = select_capabilities(
-            &state,
-            &dummy_layout(),
-            None,
-            "system",
-            Some("agent-observability"),
-        );
+        let records =
+            select_components(&state, &dummy_layout(), None, "system", Some("agentsight"));
         assert_eq!(records.len(), 1);
         let only = &records[0];
-        assert_eq!(only.name, "agent-observability");
+        assert_eq!(only.name, "agentsight");
         assert_eq!(only.status, "installed");
         assert_eq!(only.version.as_deref(), Some("0.3.1"));
         assert_eq!(only.installed_at.as_deref(), Some("2026-06-01T10:00:00Z"));
         assert_eq!(only.last_operation_id.as_deref(), Some("op-20260601-001"));
         // State-projected fields must reach the wire record verbatim.
-        assert_eq!(only.components, vec!["agentsight", "openclaw"]);
         assert_eq!(only.enabled_features, vec!["bpf-events"]);
         assert_eq!(only.health.len(), 1);
         assert_eq!(only.health[0].name, "binary");
         assert_eq!(only.health[0].status, "ok");
     }
 
-    /// Helper: build a component object with the given owned files. Used
-    /// by the integrity-probe tests below.
-    fn component_object(name: &str, version: &str, files: Vec<OwnedFile>) -> InstalledObject {
-        InstalledObject {
-            kind: ObjectKind::Component,
-            name: name.to_string(),
-            version: version.to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: None,
-            managed: true,
-            adopted: false,
-            subscription_scope: SubscriptionScope::None,
-            enabled_features: Vec::new(),
-            component_refs: Vec::new(),
-            files,
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        }
-    }
-
-    /// Capability whose components have all owned files present on disk
-    /// with matching sha256 stays `installed` and the wire record
-    /// gains one `integrity:<path>` health entry per file with
-    /// `status = "ok"`.
+    /// Component whose owned files are all present on disk with matching
+    /// sha256 stays `installed` and the wire record gains one
+    /// `integrity:<path>` health entry per file with `status = "ok"`.
     #[test]
     fn integrity_probe_present_file_with_matching_sha_keeps_installed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -928,24 +853,17 @@ mod tests {
         std::fs::write(&file_path, b"payload").expect("write");
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: file_path.clone(),
-                owner: FileOwner::Anolisa,
-                sha256: Some(
-                    "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string(),
-                ),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: file_path.clone(),
+            owner: FileOwner::Anolisa,
+            sha256: Some(
+                "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string(),
+            ),
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "installed");
         // Exactly one integrity entry, status "ok", with the path in the name.
@@ -959,7 +877,7 @@ mod tests {
         assert!(integrity[0].name.ends_with("agentsight"));
     }
 
-    /// Missing owned file on disk escalates the capability status to
+    /// Missing owned file on disk escalates the component status to
     /// `"failed"` and emits a `missing_file` health entry. The original
     /// `installed` ObjectStatus is NOT mutated — escalation is purely
     /// at the wire layer (`status` field).
@@ -970,22 +888,15 @@ mod tests {
         let missing_path = layout.bin_dir.join("anolisa-integrity-missing");
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: missing_path,
-                owner: FileOwner::Anolisa,
-                sha256: Some("deadbeef".to_string()),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: missing_path,
+            owner: FileOwner::Anolisa,
+            sha256: Some("deadbeef".to_string()),
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "failed", "missing file -> failed");
         let integrity = only
@@ -1007,24 +918,17 @@ mod tests {
         std::fs::write(&file_path, b"tampered-payload").expect("write");
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: file_path,
-                owner: FileOwner::Anolisa,
-                sha256: Some(
-                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-                ),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: file_path,
+            owner: FileOwner::Anolisa,
+            sha256: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "failed", "sha mismatch -> failed");
         let integrity = only
@@ -1047,22 +951,15 @@ mod tests {
         std::fs::write(&file_path, b"payload").expect("write");
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: file_path,
-                owner: FileOwner::Anolisa,
-                sha256: None,
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: file_path,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "degraded");
         let integrity = only
@@ -1073,32 +970,25 @@ mod tests {
         assert_eq!(integrity.status, "unverified");
     }
 
-    /// A disabled capability MUST stay disabled even if its owned files
+    /// A disabled component MUST stay disabled even if its owned files
     /// are gone — `disabled` is a deliberate state set by the user, not
     /// a drift signal we should overwrite from a sha probe.
     #[test]
-    fn integrity_probe_does_not_escalate_disabled_capability() {
+    fn integrity_probe_does_not_escalate_disabled_component() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
         let missing_path = layout.bin_dir.join("anolisa-integrity-still-disabled");
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Disabled);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: missing_path,
-                owner: FileOwner::Anolisa,
-                sha256: Some("deadbeef".to_string()),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Disabled);
+        comp.files = vec![OwnedFile {
+            path: missing_path,
+            owner: FileOwner::Anolisa,
+            sha256: Some("deadbeef".to_string()),
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "disabled");
         // The integrity entry is still surfaced so users can see the drift,
@@ -1124,22 +1014,15 @@ mod tests {
         let layout = test_layout(dir.path());
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: PathBuf::from("/etc/shadow"),
-                owner: FileOwner::Anolisa,
-                sha256: Some("deadbeef".to_string()),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: PathBuf::from("/etc/shadow"),
+            owner: FileOwner::Anolisa,
+            sha256: Some("deadbeef".to_string()),
+        }];
+        state.upsert_object(comp);
 
-        let records =
-            select_capabilities(&state, &layout, None, "system", Some("agent-observability"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "failed", "out-of-bounds path -> failed");
         let integrity = only
@@ -1151,35 +1034,6 @@ mod tests {
             integrity.status, "out_of_bounds",
             "path-safety guard must fire before any stat",
         );
-    }
-
-    /// A capability that lists a component_ref but has no matching
-    /// InstalledObject in state degrades and emits a synthetic
-    /// `missing_component_record` health entry — this is the
-    /// install-record-corruption signal.
-    #[test]
-    fn integrity_probe_missing_component_record_degrades() {
-        let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["ghost-component".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-
-        let records = select_capabilities(
-            &state,
-            &dummy_layout(),
-            None,
-            "system",
-            Some("agent-observability"),
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "component:ghost-component")
-            .expect("synthetic entry present");
-        assert_eq!(entry.status, "missing_component_record");
     }
 
     // -----------------------------------------------------------------
@@ -1231,18 +1085,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "installed");
@@ -1287,18 +1141,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "failed", "required missing file -> failed");
@@ -1337,18 +1191,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded", "optional missing file -> degraded");
@@ -1399,18 +1253,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "installed");
@@ -1446,18 +1300,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "failed");
@@ -1471,7 +1325,7 @@ mod tests {
 
     /// File-kind check pointing outside the ANOLISA-owned roots must be
     /// refused as `out_of_bounds` and degrade the wire status — never
-    /// stat the path. The capability MUST NOT escalate to `failed`
+    /// stat the path. The component MUST NOT escalate to `failed`
     /// (a misauthored probe is a manifest bug, not an install bug) but
     /// must surface clearly in the wire output.
     #[test]
@@ -1493,18 +1347,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(
@@ -1555,18 +1409,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1585,7 +1439,7 @@ mod tests {
     /// misauthored manifest (probe pointing at a parent directory
     /// instead of the binary) into a silent "everything is fine".
     /// `not_regular_file` makes the manifest bug visible while keeping
-    /// the capability `degraded` rather than `failed` (the install is
+    /// the component `degraded` rather than `failed` (the install is
     /// fine; the manifest is wrong).
     #[test]
     fn manifest_health_file_check_refuses_directory_target() {
@@ -1613,23 +1467,23 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(
             only.status, "degraded",
-            "directory target must escalate the capability to degraded, not ok",
+            "directory target must escalate the component to degraded, not ok",
         );
         let entry = only
             .health
@@ -1664,18 +1518,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1709,18 +1563,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1759,18 +1613,18 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1806,20 +1660,15 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object("agentsight", "0.1.0", Vec::new()));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
 
         // user mode is the portable "no service backend" install_mode.
-        let records = select_capabilities(
-            &state,
-            &layout,
-            Some(&catalog),
-            "user",
-            Some("agent-observability"),
-        );
+        let records =
+            select_components(&state, &layout, Some(&catalog), "user", Some("agentsight"));
         let only = &records[0];
         assert_eq!(only.status, "degraded", "unsupported -> degraded");
         let entry = only
@@ -1857,26 +1706,20 @@ mod tests {
         let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
-        let mut cap = capability_object("agent-observability", "0.3.1", ObjectStatus::Installed);
-        cap.component_refs = vec!["agentsight".to_string()];
-        cap.files = Vec::new();
-        state.upsert_object(cap);
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            vec![OwnedFile {
-                path: missing_owned,
-                owner: FileOwner::Anolisa,
-                sha256: Some("deadbeef".to_string()),
-            }],
-        ));
+        let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
+        comp.files = vec![OwnedFile {
+            path: missing_owned,
+            owner: FileOwner::Anolisa,
+            sha256: Some("deadbeef".to_string()),
+        }];
+        state.upsert_object(comp);
 
-        let records = select_capabilities(
+        let records = select_components(
             &state,
             &layout,
             Some(&catalog),
             "system",
-            Some("agent-observability"),
+            Some("agentsight"),
         );
         let only = &records[0];
         assert_eq!(

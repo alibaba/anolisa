@@ -10,9 +10,9 @@ prefix = "~/.local"
 anolisa_version = "0.1.0"
 
 [[objects]]
-kind = "capability" # capability | component | adapter | osbase
-name = "agent-observability"
-version = "0.1.0"
+kind = "component" # component | adapter | osbase ("capability" parses as legacy only)
+name = "agentsight"
+version = "0.2.0"
 status = "installed" # installed | partial | disabled | failed | adopted
 manifest_digest = "sha256:replace-with-manifest-digest"
 distribution_source = "builtin"
@@ -55,7 +55,7 @@ restore_strategy = "replace-file"
 
 [[operations]]
 id = "op-20260601-001"
-command = "enable agent-observability"
+command = "install agentsight"
 status = "ok"
 started_at = "2026-06-01T10:00:00Z"
 finished_at = "2026-06-01T10:00:03Z"

@@ -53,11 +53,10 @@
 # Lays out a self-contained ANOLISA install under ${ANOLISA_PREFIX}:
 #
 #   ${ANOLISA_PREFIX}/bin/anolisa                                   (binary)
-#   ${ANOLISA_PREFIX}/share/anolisa/manifests/                      (capabilities, osbase, runtime)
+#   ${ANOLISA_PREFIX}/share/anolisa/manifests/                      (osbase, runtime)
 #   ${ANOLISA_PREFIX}/share/anolisa/manifests/distribution-index/   (OSS-targeted index)
-#   ${ANOLISA_PREFIX}/share/anolisa/templates/execution-policy.toml (scope gate)
 #
-# After install, `anolisa env / list / enable agent-observability --dry-run`
+# After install, `anolisa env / list / install <component> --dry-run`
 # work without the source tree, without overlays, and without any DEMO_ROOT env.
 #
 # Required env for URL-fetch mode:
@@ -84,8 +83,8 @@
 #
 # Without --strict the script emits prominent WARN lines for missing
 # checksums (capped to first 5 missing-sha256 rows), with a hint that
-# `enable <cap>` against this index will fail with `MissingChecksum` until
-# real artifacts are uploaded and their checksums populated.
+# `install <component>` against this index will fail with `MissingChecksum`
+# until real artifacts are uploaded and their checksums populated.
 #
 # Where OSS artifact upload + sha256 population is tracked: P1-J operations
 # work (see `manifests/distribution-index/index.oss.toml` for the inline
@@ -185,7 +184,7 @@ URL-fetch mode notes:
   * The default manifest bundle path uses manifests-latest.tar.gz. Pin to a
     specific release by setting ANOLISA_MANIFEST_BUNDLE_URL explicitly.
   * The OSS-published distribution-index currently has empty sha256 fields
-    (see manifests/distribution-index/index.oss.toml). Real "anolisa enable"
+    (see manifests/distribution-index/index.oss.toml). Real "anolisa install"
     against such an index will fail with MissingChecksum. Uploading the real
     artifacts and populating their sha256s is tracked under P1-J operations
     work. Pass --strict if you want this installer to refuse to finish until
@@ -347,7 +346,6 @@ fi
 FINAL_BIN_DIR="$ANOLISA_PREFIX/bin"
 FINAL_DATADIR="$ANOLISA_PREFIX/share/anolisa"
 FINAL_MANIFESTS_DIR="$FINAL_DATADIR/manifests"
-FINAL_TEMPLATES_DIR="$FINAL_DATADIR/templates"
 FINAL_INDEX_DIR="$FINAL_MANIFESTS_DIR/distribution-index"
 FINAL_BIN_DEST="$FINAL_BIN_DIR/anolisa"
 
@@ -383,8 +381,7 @@ if [ "$MODE" = "url-fetch" ] && [ "$DRY_RUN" -eq 1 ]; then
   log "would stage under   : <mktemp staging dir> (auto-removed on exit)"
   log "would write to prefix:"
   log "  $FINAL_BIN_DEST"
-  log "  $FINAL_MANIFESTS_DIR/{capabilities,osbase,runtime}/"
-  log "  $FINAL_TEMPLATES_DIR/execution-policy.toml"
+  log "  $FINAL_MANIFESTS_DIR/{osbase,runtime}/"
   log "  $FINAL_INDEX_DIR/index.toml"
   exit 0
 fi
@@ -410,14 +407,13 @@ log "staging root    : $STAGING_ROOT"
 BIN_DIR="$STAGING_ROOT/bin"
 DATADIR="$STAGING_ROOT/share/anolisa"
 MANIFESTS_DIR="$DATADIR/manifests"
-TEMPLATES_DIR="$DATADIR/templates"
 INDEX_DIR="$MANIFESTS_DIR/distribution-index"
 BIN_DEST="$BIN_DIR/anolisa"
 
 # Download workspace lives under the staging root so cleanup is unified.
 DOWNLOAD_DIR="$STAGING_ROOT/.download"
 
-mkdir -p "$BIN_DIR" "$MANIFESTS_DIR" "$TEMPLATES_DIR" "$INDEX_DIR" "$DOWNLOAD_DIR"
+mkdir -p "$BIN_DIR" "$MANIFESTS_DIR" "$INDEX_DIR" "$DOWNLOAD_DIR"
 
 # ---- sha256 verification helper --------------------------------------------
 #
@@ -631,11 +627,11 @@ realpath_inside() {
 # operations are safe, and the audit step needs real files to inspect.
 
 stage_from_local() {
-  # Copy capability / osbase / runtime manifests verbatim. We do NOT copy
-  # the dev-tree distribution-index/index.toml — that file is intentionally
-  # empty; we lay down the OSS-targeted variant from
-  # manifests/distribution-index/ below instead.
-  for subdir in capabilities osbase runtime; do
+  # Copy osbase / runtime manifests verbatim. We do NOT copy the dev-tree
+  # distribution-index/index.toml — that file is intentionally empty; we
+  # lay down the OSS-targeted variant from manifests/distribution-index/
+  # below instead.
+  for subdir in osbase runtime; do
     local src="$FROM_LOCAL/manifests/$subdir"
     if [ ! -d "$src" ]; then
       warn "$src missing; skipping"
@@ -658,13 +654,6 @@ stage_from_local() {
     cp "$FROM_LOCAL/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
     chmod 0644 "$MANIFESTS_DIR/SPEC.md"
   fi
-
-  # Execution policy: ship the canonical template so the CLI scope-gate
-  # works straight out of the box, without an overlay or a dev-tree
-  # fallback.
-  log "stage templates/execution-policy.toml"
-  cp "$FROM_LOCAL/templates/execution-policy.toml" "$TEMPLATES_DIR/execution-policy.toml"
-  chmod 0644 "$TEMPLATES_DIR/execution-policy.toml"
 
   # Distribution index: prefer the OSS-targeted variant (index.oss.toml)
   # when present so the packaged install ships URLs pointing at the
@@ -725,9 +714,9 @@ stage_from_url() {
   fi
 
   # Extract bundle into a fresh empty subdir of the staging root; from
-  # there we copy manifests/<subdir> and templates/<file> into the staged
-  # layout. The bundle is expected to contain manifests/ and templates/
-  # at the top level, or under a single wrapping directory (auto-unwrap).
+  # there we copy manifests/<subdir> into the staged layout. The bundle is
+  # expected to contain manifests/ and templates/ at the top level, or
+  # under a single wrapping directory (auto-unwrap).
   #
   # Tar option rationale (script's runtime target is Linux/GNU tar; we
   # degrade gracefully on bsdtar — macOS dev environments):
@@ -816,7 +805,7 @@ stage_from_url() {
   fi
 
   # Copy manifests subdirs verbatim from the extracted bundle.
-  for subdir in capabilities osbase runtime; do
+  for subdir in osbase runtime; do
     local src="$bundle_stage/manifests/$subdir"
     if [ ! -d "$src" ]; then
       warn "$src missing in manifest bundle; skipping"
@@ -831,13 +820,6 @@ stage_from_url() {
 
   if [ -f "$bundle_stage/manifests/SPEC.md" ]; then
     cp "$bundle_stage/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
-  fi
-
-  if [ -f "$bundle_stage/templates/execution-policy.toml" ]; then
-    cp "$bundle_stage/templates/execution-policy.toml" "$TEMPLATES_DIR/execution-policy.toml"
-  else
-    err "manifest bundle is missing templates/execution-policy.toml"
-    exit 1
   fi
 
   # ---- distribution index ----
@@ -958,7 +940,7 @@ audit_index_sha256() {
     warn "  $index:$line"
     shown=$((shown + 1))
   done
-  warn "Real \`anolisa enable <cap>\` against this index will fail with MissingChecksum"
+  warn "Real \`anolisa install <component>\` against this index will fail with MissingChecksum"
   warn "until artifacts are uploaded to OSS and their sha256s populated (P1-J)."
 }
 

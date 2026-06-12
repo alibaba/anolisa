@@ -12,7 +12,7 @@ pub struct ComponentMeta {
     pub version: String,
     /// Architectural layer this component belongs to.
     pub layer: Layer,
-    /// Runtime capability domain.
+    /// Functional domain within the runtime layer.
     pub domain: Domain,
     /// Human-readable component summary.
     pub description: String,
@@ -29,7 +29,7 @@ pub enum Layer {
     Encapsulation,
 }
 
-/// Capability domain within the runtime layer.
+/// Functional domain within the runtime layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Domain {
     /// Tooling or command execution domain.

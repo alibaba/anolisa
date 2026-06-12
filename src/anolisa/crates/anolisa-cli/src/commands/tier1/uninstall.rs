@@ -1,8 +1,7 @@
 //! `anolisa uninstall <COMPONENT>` (with optional `--purge`).
 //!
-//! The CLI face of [`anolisa_core::execute_plan`] for direct component
-//! teardown. The legacy capability path is retained as a fallback while
-//! the capability concept is being removed. Two surfaces:
+//! The CLI face of [`anolisa_core::execute_plan`] for component
+//! teardown. Two surfaces:
 //!
 //!   * `--dry-run` — render the [`LifecyclePlan`] (human or JSON) and
 //!     return without touching the filesystem.
@@ -18,11 +17,11 @@
 //! but the executor does not yet branch on it. We surface a warning so
 //! users see the boundary instead of getting silent semantics.
 //!
-//! Error routing mirrors `disable`:
+//! Error routing:
 //!
 //! | `LifecycleError`            | CLI code           | exit |
 //! |-----------------------------|--------------------|------|
-//! | `CapabilityNotInstalled`    | `INVALID_ARGUMENT` | 2    |
+//! | `ComponentNotInstalled`     | `INVALID_ARGUMENT` | 2    |
 //! | `UnsupportedOperation`      | `EXECUTION_FAILED` | 1    |
 //! | `LockHeld`                  | `EXECUTION_FAILED` | 1    |
 //! | `Lock`                      | `EXECUTION_FAILED` | 1    |
@@ -31,19 +30,16 @@
 //! | `Filesystem`                | `EXECUTION_FAILED` | 1    |
 //! | `ExecuteGated`              | `NOT_IMPLEMENTED`  | 64   |
 //!
-//! The `ExecuteGated` mapping follows the prior art `disable.rs` uses
-//! for `--feature` / `--purge`: when a CLI surface is wire-shipped but
+//! The `ExecuteGated` mapping: when a CLI surface is wire-shipped but
 //! the executor refuses to perform a destructive operation, the right
-//! bucket is `NOT_IMPLEMENTED` (exit 64) — same convention as the
-//! enable-policy and disable-flag gates. The gate itself lives in
+//! bucket is `NOT_IMPLEMENTED` (exit 64). The gate itself lives in
 //! `anolisa-core::lifecycle::check_destructive_execute_gate`; see the
-//! docstring there for the P1-D lift conditions.
+//! docstring there for the lift conditions.
 
 use clap::Parser;
 
 use anolisa_core::{
-    CapabilityManifestsView, LifecycleError, LifecycleOperation, LifecycleOutcome, LifecyclePlan,
-    LifecycleTargetKind, ObjectKind, execute_plan,
+    LifecycleError, LifecycleOperation, LifecycleOutcome, LifecyclePlan, ObjectKind, execute_plan,
 };
 
 use crate::color::Palette;
@@ -55,7 +51,7 @@ const COMMAND: &str = "uninstall";
 
 #[derive(Parser)]
 pub struct UninstallArgs {
-    /// Component to uninstall; legacy capability names are accepted as fallback
+    /// Component to uninstall
     #[arg(value_name = "COMPONENT")]
     pub component: String,
     /// Also remove ANOLISA-owned config / cache / state fragments
@@ -77,40 +73,31 @@ pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     // Load installed state to plan against. Missing state is the same
     // as "target not installed" — surface that as INVALID_ARGUMENT so
-    // the user sees the right exit code (matches disable behavior).
+    // the user sees the right exit code.
     let installed = common::load_installed_state(ctx, COMMAND)?;
-    let target_kind = if installed
+
+    // A name that only matches a legacy `kind = "capability"` row written
+    // by an older release is not uninstallable — say so instead of a bare
+    // "not installed".
+    if installed
         .find_object(ObjectKind::Component, target)
-        .is_some()
-        || installed
+        .is_none()
+        && installed
             .find_object(ObjectKind::Capability, target)
-            .is_none()
+            .is_some()
     {
-        LifecycleTargetKind::Component
-    } else {
-        LifecycleTargetKind::Capability
-    };
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "'{target}' is a legacy capability state entry from an older release; \
+                 the capability concept is removed. The entry is pruned automatically \
+                 on the next install/uninstall; use `anolisa list` to see components"
+            ),
+        });
+    }
     let plan = match operation {
-        LifecycleOperation::Uninstall => match target_kind {
-            LifecycleTargetKind::Component => {
-                LifecyclePlan::for_component_uninstall(target, &installed)
-            }
-            LifecycleTargetKind::Capability => {
-                LifecyclePlan::for_uninstall(target, &installed, &CapabilityManifestsView::empty())
-            }
-        },
-        LifecycleOperation::Purge => match target_kind {
-            LifecycleTargetKind::Component => {
-                LifecyclePlan::for_component_purge(target, &installed)
-            }
-            LifecycleTargetKind::Capability => {
-                LifecyclePlan::for_purge(target, &installed, &CapabilityManifestsView::empty())
-            }
-        },
-        // Disable goes through `anolisa disable`; the executor refuses
-        // here but this branch keeps the match total without leaking
-        // the surface.
-        LifecycleOperation::Disable => unreachable!("uninstall handler never builds Disable plans"),
+        LifecycleOperation::Uninstall => LifecyclePlan::for_component_uninstall(target, &installed),
+        LifecycleOperation::Purge => LifecyclePlan::for_component_purge(target, &installed),
     };
 
     if ctx.dry_run {
@@ -164,12 +151,6 @@ pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 
 fn lifecycle_err_to_cli(command: &str, err: LifecycleError) -> CliError {
     match &err {
-        LifecycleError::CapabilityNotInstalled { capability } => CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "capability '{capability}' is not installed — nothing to uninstall (run `anolisa status` to see what is installed)",
-            ),
-        },
         LifecycleError::ComponentNotInstalled { component } => CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
@@ -248,7 +229,7 @@ fn lifecycle_err_to_cli(command: &str, err: LifecycleError) -> CliError {
 struct UninstallPayload {
     operation_id: String,
     operation: String,
-    capability: String,
+    component: String,
     removed_files: Vec<String>,
     skipped_files: Vec<String>,
     state_object_removed: bool,
@@ -263,7 +244,7 @@ impl From<&LifecycleOutcome> for UninstallPayload {
         Self {
             operation_id: o.operation_id.clone(),
             operation: o.operation.as_str().to_string(),
-            capability: o.capability.clone(),
+            component: o.component.clone(),
             removed_files: o
                 .removed_files
                 .iter()
@@ -287,7 +268,7 @@ fn render_plan_human(plan: &LifecyclePlan, no_color: bool) {
     println!(
         "{} {} {}",
         color.command(plan.operation.as_str()),
-        plan.capability,
+        plan.component,
         color.muted(format!(
             "(dry_run: true, risk: {:?}, requires_privilege: {})",
             plan.risk, plan.requires_privilege,
@@ -345,7 +326,7 @@ fn render_outcome_human(outcome: &LifecycleOutcome, no_color: bool) {
     println!(
         "{} {} {}",
         color.command(outcome.operation.as_str()),
-        outcome.capability,
+        outcome.component,
         color.ok("succeeded")
     );
     println!(
@@ -437,15 +418,14 @@ mod tests {
         );
     }
 
-    /// Asking to uninstall a capability that is not installed must
-    /// surface `INVALID_ARGUMENT` (exit 2), not `EXECUTION_FAILED`.
-    /// Symmetric with `disable_unknown_capability_*` so wrapping
-    /// scripts can use the same routing for both verbs.
+    /// Asking to uninstall a component that is not installed must
+    /// surface `INVALID_ARGUMENT` (exit 2), not `EXECUTION_FAILED`,
+    /// so wrapping scripts can rely on the routing.
     #[test]
-    fn uninstall_unknown_capability_routes_to_invalid_argument_exit_2() {
+    fn uninstall_unknown_component_routes_to_invalid_argument_exit_2() {
         let tmp = tempdir().expect("tmpdir");
         let err = handle(
-            args("agent-observability", false),
+            args("agentsight", false),
             &ctx_with_prefix(
                 false,
                 false,
@@ -463,16 +443,70 @@ mod tests {
         );
     }
 
-    /// Dry-run path must not touch the filesystem even when the
-    /// capability is not installed: the planner builds an empty plan
-    /// and we return Ok(()). This is the same contract as
-    /// `enable --dry-run` for absent capabilities once the policy gate
-    /// is open.
+    /// A name that only matches a legacy `kind = "capability"` row must
+    /// get the migration hint, not a bare "not installed".
     #[test]
-    fn uninstall_dry_run_on_unknown_capability_returns_empty_plan() {
+    fn uninstall_legacy_capability_name_gets_migration_hint() {
+        use anolisa_core::{InstalledObject, InstalledState, ObjectKind, ObjectStatus};
+        use anolisa_platform::fs_layout::FsLayout;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Capability,
+            name: "agent-observability".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+
+        let err = handle(
+            args("agent-observability", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect_err("legacy capability name must be rejected");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.reason().contains("legacy capability"),
+            "reason must explain the legacy entry: {}",
+            err.reason(),
+        );
+    }
+
+    /// Dry-run path must not touch the filesystem even when the
+    /// component is not installed: the planner builds an empty plan
+    /// and we return Ok(()).
+    #[test]
+    fn uninstall_dry_run_on_unknown_component_returns_empty_plan() {
         let tmp = tempdir().expect("tmpdir");
         let result = handle(
-            args("agent-observability", false),
+            args("agentsight", false),
             &ctx_with_prefix(
                 false,
                 true,
@@ -480,7 +514,7 @@ mod tests {
                 Some(tmp.path().to_path_buf()),
             ),
         );
-        result.expect("dry-run must produce a plan even for absent capabilities");
+        result.expect("dry-run must produce a plan even for absent components");
     }
 
     /// `lifecycle_err_to_cli` routing pin: every LifecycleError variant
@@ -490,7 +524,7 @@ mod tests {
     #[test]
     fn lifecycle_err_lock_held_maps_to_execution_failed_exit_1() {
         let err = lifecycle_err_to_cli(
-            "uninstall agent-observability",
+            "uninstall agentsight",
             LifecycleError::LockHeld {
                 path: PathBuf::from("/var/lib/anolisa/lock"),
             },
@@ -501,27 +535,26 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_err_capability_not_installed_maps_to_invalid_argument_exit_2() {
+    fn lifecycle_err_component_not_installed_maps_to_invalid_argument_exit_2() {
         let err = lifecycle_err_to_cli(
-            "uninstall agent-observability",
-            LifecycleError::CapabilityNotInstalled {
-                capability: "agent-observability".to_string(),
+            "uninstall agentsight",
+            LifecycleError::ComponentNotInstalled {
+                component: "agentsight".to_string(),
             },
         );
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert_eq!(err.exit_code(), 2);
     }
 
-    /// P1-C plan-only gate: `LifecycleError::ExecuteGated` must surface
-    /// as `NOT_IMPLEMENTED` (exit 64) so wrapping scripts see the same
-    /// boundary semantics as `disable --feature` / `disable --purge`.
-    /// The gate's reason text MUST be plumbed through to the CLI hint
-    /// so users can see why the executor refused and that `--dry-run`
-    /// is the supported alternative.
+    /// Plan-only gate: `LifecycleError::ExecuteGated` must surface as
+    /// `NOT_IMPLEMENTED` (exit 64). The gate's reason text MUST be
+    /// plumbed through to the CLI hint so users can see why the
+    /// executor refused and that `--dry-run` is the supported
+    /// alternative.
     #[test]
     fn lifecycle_err_execute_gated_maps_to_not_implemented_exit_64() {
         let err = lifecycle_err_to_cli(
-            "uninstall agent-observability",
+            "uninstall agentsight",
             LifecycleError::ExecuteGated {
                 reason: "uninstall execute is gated pending transaction-backed file removal \
                          (P1-D integration); run with --dry-run to preview the plan"
@@ -537,110 +570,10 @@ mod tests {
         );
     }
 
-    /// End-to-end success: when the capability IS installed, the
-    /// executor must remove the ANOLISA-owned file, drop the capability
-    /// + component objects from `installed.toml`, write started +
-    ///   succeeded central-log entries, and return `Ok(())`. Pins the
-    ///   "uninstall execute on installed capability succeeds" contract
-    ///   that replaced the previous plan-only gate (P0-D).
-    #[test]
-    fn uninstall_execute_on_installed_capability_removes_owned_files_and_succeeds() {
-        use anolisa_core::{
-            FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
-        };
-        use anolisa_platform::fs_layout::FsLayout;
-
-        let tmp = tempdir().expect("tmpdir");
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-
-        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
-        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
-        let owned = layout.bin_dir.join("agentsight");
-        std::fs::write(&owned, b"binary").expect("write owned");
-
-        let mut state = InstalledState::default();
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Component,
-            name: "agentsight".to_string(),
-            version: "0.2.0".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: Some("file:///fake".to_string()),
-            install_backend: Some("raw".to_string()),
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: Vec::new(),
-            files: vec![OwnedFile {
-                path: owned.clone(),
-                owner: FileOwner::Anolisa,
-                sha256: Some("0".repeat(64)),
-            }],
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: "agent-observability".to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec!["agentsight".to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
-        let state_path = layout.state_dir.join("installed.toml");
-        state.save(&state_path).expect("seed state save");
-
-        handle(
-            args("agent-observability", false),
-            &ctx_with_prefix(
-                false,
-                false,
-                InstallMode::System,
-                Some(tmp.path().to_path_buf()),
-            ),
-        )
-        .expect("uninstall execute must succeed");
-
-        assert!(
-            !owned.exists(),
-            "ANOLISA-owned file must be removed by uninstall execute",
-        );
-
-        let after = InstalledState::load(&state_path).expect("reload state");
-        assert!(
-            after
-                .find_object(ObjectKind::Capability, "agent-observability")
-                .is_none(),
-            "capability object must be dropped from installed.toml",
-        );
-        assert!(
-            after
-                .find_object(ObjectKind::Component, "agentsight")
-                .is_none(),
-            "non-shared component object must be dropped from installed.toml",
-        );
-        assert!(
-            layout.central_log.exists(),
-            "uninstall execute must append a central-log record",
-        );
-    }
-
+    /// End-to-end success: when the component IS installed, the
+    /// executor must remove the ANOLISA-owned file, drop the component
+    /// object from `installed.toml`, write started + succeeded
+    /// central-log entries, and return `Ok(())`.
     #[test]
     fn uninstall_execute_on_installed_component_removes_owned_files_and_succeeds() {
         use anolisa_core::{
@@ -756,32 +689,12 @@ mod tests {
             services: Vec::new(),
             health: Vec::new(),
         });
-        state.upsert_object(InstalledObject {
-            kind: ObjectKind::Capability,
-            name: "agent-observability".to_string(),
-            version: "stable".to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: None,
-            install_backend: None,
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: Some("op-prior".to_string()),
-            managed: true,
-            adopted: false,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: vec!["agentsight".to_string()],
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-        });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
         let prior_bytes = std::fs::read(&state_path).expect("read prior");
 
         let err = handle(
-            args("agent-observability", true),
+            args("agentsight", true),
             &ctx_with_prefix(
                 false,
                 false,

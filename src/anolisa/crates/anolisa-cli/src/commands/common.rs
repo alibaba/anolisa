@@ -18,7 +18,7 @@ use crate::context::{CliContext, InstallMode};
 use crate::packaged;
 use crate::response::CliError;
 
-/// Subdirectory under `datadir` and `etc_dir` where capability/component
+/// Subdirectory under `datadir` and `etc_dir` where component
 /// manifests live (e.g. `share/anolisa/manifests`, `etc/anolisa/manifests`).
 const MANIFESTS_SUBDIR: &str = "manifests";
 
@@ -264,7 +264,7 @@ pub(crate) fn object_status_str(status: ObjectStatus) -> &'static str {
     }
 }
 
-/// True iff the wire status label denotes a capability that is actively
+/// True iff the wire status label denotes a component that is actively
 /// serving (i.e. `installed`, `degraded`, or `adopted`). Used by
 /// `list --enabled` to exclude `disabled`/`failed`/`not_installed`.
 pub(crate) fn status_is_enabled(status_label: &str) -> bool {

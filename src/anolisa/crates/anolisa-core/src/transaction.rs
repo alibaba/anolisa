@@ -27,7 +27,7 @@
 //! file always parses.
 //!
 //! AgentSight is not mentioned anywhere on purpose: this primitive is
-//! shared by every capability the package manager knows about.
+//! shared by every component the package manager knows about.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File, OpenOptions};
@@ -587,10 +587,9 @@ impl Transaction {
     }
 }
 
-/// `op-YYYYMMDDHHMMSS-<6-hex>` — matches the format used by the rest of
-/// anolisa (`enable_execute::build_operation_id`,
-/// `disable_execute::build_operation_id`) so journal ids round-trip
-/// 1:1 with `installed.toml::operations[].id` and the central log.
+/// `op-YYYYMMDDHHMMSS-<6-hex>` — matches the operation-id format used by
+/// the rest of anolisa so journal ids round-trip 1:1 with
+/// `installed.toml::operations[].id` and the central log.
 fn build_operation_id(now: &DateTime<Utc>) -> String {
     let ts = now.format("%Y%m%d%H%M%S").to_string();
     let nanos = now.timestamp_nanos_opt().unwrap_or_else(|| now.timestamp());
@@ -695,17 +694,6 @@ fn tmp_path_for(path: &Path) -> PathBuf {
     tmp.set_file_name(format!(".{file_name}.{pid}.{counter}.{nanos}.tmp"));
     tmp
 }
-
-// NOTE on integration with existing call sites:
-//
-// `enable_execute.rs` keeps its own ad-hoc `prior_state_bytes: Option<Vec<u8>>`
-// snapshot today (see comment around the `Step 5 — persist state` block).
-// Migrating that to `Transaction` is a deliberate follow-up: it would change
-// the order in which we mint the `operation_id` (transaction-first vs.
-// late-binding) and would intertwine with the central-log + journal merge
-// the C-branch is doing. Doing it here would create cross-branch merge pain
-// for zero behaviour change today, so we leave the wiring for a follow-up
-// commit once both D (this branch) and C land.
 
 #[cfg(test)]
 mod tests {

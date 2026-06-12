@@ -27,7 +27,7 @@ const MAX_LIMIT: usize = 1000;
 
 #[derive(Parser)]
 pub struct LogsArgs {
-    /// Filter target: capability / component / operation id / log source / `all`.
+    /// Filter target: component / operation id / log source / `all`.
     /// Omit to query everything.
     #[arg(value_name = "OBJECT")]
     pub object: Option<String>,

@@ -1,6 +1,6 @@
 //! Adapter detection and layout placeholder expansion.
 //!
-//! This module provides two core capabilities for adapter management:
+//! This module provides two core concerns for adapter management:
 //!
 //! 1. **Framework detection** — inspects the `detect` hints from an
 //!    [`AdapterSpec`] to determine whether a framework (binary on PATH,

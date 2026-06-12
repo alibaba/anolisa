@@ -1,7 +1,7 @@
 //! Installed state tracking (`installed.toml`).
 //!
 //! `InstalledState` is the on-disk record of every ANOLISA-managed object
-//! (capability / component / adapter / osbase) plus the backups and
+//! (component / adapter / osbase) plus the backups and
 //! operations that produced them. Persistence is TOML and save is atomic
 //! (`tmp` + `rename`) so a crash mid-write cannot leave a truncated state
 //! file.
@@ -43,9 +43,13 @@ pub enum InstallMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
-    /// User-facing capability object.
+    /// Legacy capability object. The capability concept is removed; the
+    /// variant survives only so `installed.toml` files written by older
+    /// releases still deserialize. New code must never create objects of
+    /// this kind; queries are limited to legacy-migration paths (see
+    /// [`InstalledState::prune_legacy_capabilities`]).
     Capability,
-    /// Runtime/osbase component backing one or more capabilities.
+    /// Runtime/osbase component.
     Component,
     /// Agent-framework adapter object.
     Adapter,
@@ -164,7 +168,7 @@ pub struct HealthEntry {
     pub reason: Option<String>,
 }
 
-/// A single installed object (capability, component, adapter, or osbase).
+/// A single installed object (component, adapter, or osbase).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledObject {
     /// Object vocabulary used by commands and state lookup.
@@ -208,8 +212,8 @@ pub struct InstalledObject {
     /// state files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enabled_features: Vec<String>,
-    /// Capability-to-component linkage; components use it for shared ownership
-    /// decisions during uninstall.
+    /// Legacy capability-to-component linkage; retained so old state files
+    /// still deserialize. Component objects leave it empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component_refs: Vec<String>,
     /// ANOLISA-owned files that status/uninstall may verify or remove.
@@ -413,6 +417,25 @@ impl InstalledState {
             .find(|o| o.kind == kind && o.name == name)
     }
 
+    /// Drop legacy `kind = "capability"` objects left by releases that
+    /// predate the capability concept's removal, returning the pruned
+    /// names so callers can audit the migration in the central log.
+    ///
+    /// Only state-writing paths (install / uninstall) may call this:
+    /// read-only commands must not rewrite `installed.toml`.
+    pub fn prune_legacy_capabilities(&mut self) -> Vec<String> {
+        let mut pruned = Vec::new();
+        self.objects.retain(|obj| {
+            if obj.kind == ObjectKind::Capability {
+                pruned.push(obj.name.clone());
+                false
+            } else {
+                true
+            }
+        });
+        pruned
+    }
+
     /// Append a backup record.
     pub fn append_backup(&mut self, b: BackupRecord) {
         self.backups.push(b);
@@ -589,36 +612,78 @@ mod tests {
             "expected at least one operation"
         );
 
-        let cap = state
+        let comp = state
             .objects
             .iter()
-            .find(|o| o.kind == ObjectKind::Capability)
-            .expect("template has capability object");
-        assert_eq!(cap.name, "agent-observability");
-        assert!(!cap.external_modified_files.is_empty());
+            .find(|o| o.kind == ObjectKind::Component)
+            .expect("template has component object");
+        assert_eq!(comp.name, "agentsight");
+        assert!(!comp.external_modified_files.is_empty());
         assert_eq!(
-            cap.external_modified_files[0].backup_id,
+            comp.external_modified_files[0].backup_id,
             state.backups[0].id
         );
+    }
+
+    /// State files written before the capability concept was removed still
+    /// carry `kind = "capability"` objects; loading must not reject them.
+    #[test]
+    fn legacy_capability_object_still_deserializes() {
+        let toml_text = r#"
+            schema_version = 1
+            updated_at = "2026-06-01T10:00:00Z"
+            install_mode = "user"
+            prefix = "~/.local"
+            anolisa_version = "0.1.0"
+
+            [[objects]]
+            kind = "capability"
+            name = "agent-observability"
+            version = "0.1.0"
+            status = "installed"
+            installed_at = "2026-06-01T10:00:00Z"
+        "#;
+        let state: InstalledState = toml::from_str(toml_text).expect("legacy state parses");
+        assert_eq!(state.objects[0].kind, ObjectKind::Capability);
+    }
+
+    #[test]
+    fn prune_legacy_capabilities_drops_only_capability_objects() {
+        let mut state = InstalledState::default();
+        state.upsert_object(sample_object(
+            ObjectKind::Capability,
+            "agent-observability",
+            "0.1.0",
+        ));
+        state.upsert_object(sample_object(ObjectKind::Component, "agentsight", "0.2.0"));
+
+        let pruned = state.prune_legacy_capabilities();
+
+        assert_eq!(pruned, vec!["agent-observability".to_string()]);
+        assert_eq!(state.objects.len(), 1);
+        assert_eq!(state.objects[0].kind, ObjectKind::Component);
+
+        // Idempotent on a clean state.
+        assert!(state.prune_legacy_capabilities().is_empty());
     }
 
     #[test]
     fn upsert_then_find_object() {
         let mut state = InstalledState::default();
-        let first = sample_object(ObjectKind::Capability, "agent-observability", "0.1.0");
+        let first = sample_object(ObjectKind::Component, "agentsight", "0.1.0");
         state.upsert_object(first);
 
         let found = state
-            .find_object(ObjectKind::Capability, "agent-observability")
+            .find_object(ObjectKind::Component, "agentsight")
             .expect("present after upsert");
         assert_eq!(found.version, "0.1.0");
 
-        let second = sample_object(ObjectKind::Capability, "agent-observability", "0.2.0");
+        let second = sample_object(ObjectKind::Component, "agentsight", "0.2.0");
         state.upsert_object(second);
         assert_eq!(state.objects.len(), 1, "upsert dedupes by (kind, name)");
         assert_eq!(
             state
-                .find_object(ObjectKind::Capability, "agent-observability")
+                .find_object(ObjectKind::Component, "agentsight")
                 .expect("present")
                 .version,
             "0.2.0"

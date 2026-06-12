@@ -1,6 +1,6 @@
 //! `anolisa bug` — generate a local bug report with diagnostic context.
 //!
-//! The command is read-only. It gathers environment facts, capability state,
+//! The command is read-only. It gathers environment facts, component state,
 //! and recent warn/error central-log records, then renders copyable Markdown
 //! for the repository bug report issue form.
 
@@ -20,9 +20,9 @@ const MAX_LIMIT: usize = 100;
 
 #[derive(Parser)]
 pub struct BugArgs {
-    /// Limit the report to one capability.
+    /// Limit the report to one component.
     #[arg(long, value_name = "NAME")]
-    pub capability: Option<String>,
+    pub component: Option<String>,
     /// Maximum number of recent warn/error log records to include.
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
@@ -49,7 +49,7 @@ struct EnvironmentSummary {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct CapabilitySummary {
+struct ComponentSummary {
     name: String,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,13 +76,13 @@ struct BugReportPayload {
     issue_url: String,
     markdown: String,
     environment: EnvironmentSummary,
-    enabled_capabilities: Vec<CapabilitySummary>,
+    installed_components: Vec<ComponentSummary>,
     recent_logs: Vec<RecentLogSummary>,
 }
 
 pub fn handle(args: BugArgs, ctx: &CliContext) -> Result<(), CliError> {
     let limit = validate_limit(args.limit.unwrap_or(DEFAULT_LIMIT))?;
-    let payload = build_payload(args.capability.as_deref(), limit, ctx)?;
+    let payload = build_payload(args.component.as_deref(), limit, ctx)?;
 
     if ctx.json {
         return render_json(COMMAND, payload);
@@ -102,20 +102,20 @@ pub fn handle(args: BugArgs, ctx: &CliContext) -> Result<(), CliError> {
 }
 
 fn build_payload(
-    capability: Option<&str>,
+    component: Option<&str>,
     limit: usize,
     ctx: &CliContext,
 ) -> Result<BugReportPayload, CliError> {
     let environment = collect_environment(ctx);
-    let capabilities = collect_capabilities(capability, ctx)?;
-    let recent_logs = collect_recent_logs(capability, limit, ctx)?;
-    let markdown = render_markdown(&environment, &capabilities, &recent_logs);
+    let components = collect_components(component, ctx)?;
+    let recent_logs = collect_recent_logs(component, limit, ctx)?;
+    let markdown = render_markdown(&environment, &components, &recent_logs);
 
     Ok(BugReportPayload {
         issue_url: ISSUE_URL.to_string(),
         markdown,
         environment,
-        enabled_capabilities: capabilities,
+        installed_components: components,
         recent_logs,
     })
 }
@@ -146,30 +146,30 @@ fn collect_environment(ctx: &CliContext) -> EnvironmentSummary {
     }
 }
 
-fn collect_capabilities(
-    capability: Option<&str>,
+fn collect_components(
+    component: Option<&str>,
     ctx: &CliContext,
-) -> Result<Vec<CapabilitySummary>, CliError> {
+) -> Result<Vec<ComponentSummary>, CliError> {
     let state = common::load_installed_state(ctx, COMMAND)?;
-    let all: Vec<CapabilitySummary> = state
+    let all: Vec<ComponentSummary> = state
         .objects
         .iter()
-        .filter(|o| o.kind == ObjectKind::Capability)
-        .map(|o| CapabilitySummary {
+        .filter(|o| o.kind == ObjectKind::Component)
+        .map(|o| ComponentSummary {
             name: o.name.clone(),
             status: common::object_status_str(o.status).to_string(),
             installed_version: Some(o.version.clone()),
         })
         .collect();
 
-    match capability {
+    match component {
         Some(name) => {
-            let matches: Vec<CapabilitySummary> =
+            let matches: Vec<ComponentSummary> =
                 all.into_iter().filter(|s| s.name == name).collect();
             if matches.is_empty() {
                 return Err(CliError::InvalidArgument {
                     command: COMMAND.to_string(),
-                    reason: format!("unknown capability '{name}'"),
+                    reason: format!("unknown component '{name}'"),
                 });
             }
             Ok(matches)
@@ -182,7 +182,7 @@ fn collect_capabilities(
 }
 
 fn collect_recent_logs(
-    capability: Option<&str>,
+    component: Option<&str>,
     limit: usize,
     ctx: &CliContext,
 ) -> Result<Vec<RecentLogSummary>, CliError> {
@@ -191,7 +191,7 @@ fn collect_recent_logs(
     let records = log
         .query(&LogFilter {
             severity_at_least: Some(Severity::Warn),
-            object: capability.map(|name| name.to_string()),
+            object: component.map(|name| name.to_string()),
             limit: None,
             ..Default::default()
         })
@@ -238,7 +238,7 @@ fn summarize_log(record: LogRecord) -> RecentLogSummary {
 
 fn render_markdown(
     env: &EnvironmentSummary,
-    capabilities: &[CapabilitySummary],
+    components: &[ComponentSummary],
     logs: &[RecentLogSummary],
 ) -> String {
     let mut out = String::new();
@@ -261,17 +261,17 @@ fn render_markdown(
     push_opt_kv(&mut out, "cap_bpf", env.cap_bpf.map(bool_label));
     push_opt_kv(&mut out, "container", env.container.as_deref());
 
-    out.push_str("\n## Enabled Capabilities\n\n");
-    if capabilities.is_empty() {
+    out.push_str("\n## Installed Components\n\n");
+    if components.is_empty() {
         out.push_str("- none\n");
     } else {
-        for cap in capabilities {
-            match cap.installed_version.as_deref() {
+        for comp in components {
+            match comp.installed_version.as_deref() {
                 Some(version) => out.push_str(&format!(
                     "- {}: {}, version {}\n",
-                    cap.name, cap.status, version
+                    comp.name, comp.status, version
                 )),
-                None => out.push_str(&format!("- {}: {}\n", cap.name, cap.status)),
+                None => out.push_str(&format!("- {}: {}\n", comp.name, comp.status)),
             }
         }
     }
@@ -389,8 +389,8 @@ fn is_value_boundary(ch: char) -> bool {
 mod tests {
     use super::*;
 
-    fn make_summary(name: &str, status: &str, version: Option<&str>) -> CapabilitySummary {
-        CapabilitySummary {
+    fn make_summary(name: &str, status: &str, version: Option<&str>) -> ComponentSummary {
+        ComponentSummary {
             name: name.to_string(),
             status: status.to_string(),
             installed_version: version.map(|v| v.to_string()),
@@ -398,17 +398,17 @@ mod tests {
     }
 
     fn filter_summaries(
-        all: &[CapabilitySummary],
-        capability: Option<&str>,
-    ) -> Result<Vec<CapabilitySummary>, CliError> {
-        match capability {
+        all: &[ComponentSummary],
+        component: Option<&str>,
+    ) -> Result<Vec<ComponentSummary>, CliError> {
+        match component {
             Some(name) => {
-                let matches: Vec<CapabilitySummary> =
+                let matches: Vec<ComponentSummary> =
                     all.iter().filter(|s| s.name == name).cloned().collect();
                 if matches.is_empty() {
                     return Err(CliError::InvalidArgument {
                         command: COMMAND.to_string(),
-                        reason: format!("unknown capability '{name}'"),
+                        reason: format!("unknown component '{name}'"),
                     });
                 }
                 Ok(matches)
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn default_capability_report_includes_enabled_rows_only() {
+    fn default_component_report_includes_enabled_rows_only() {
         let all = vec![
             make_summary("agent-observability", "installed", Some("0.1.0")),
             make_summary("sandbox", "disabled", Some("0.1.0")),
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_filter_keeps_requested_row_even_when_disabled() {
+    fn component_filter_keeps_requested_row_even_when_disabled() {
         let all = vec![make_summary("sandbox", "disabled", Some("0.1.0"))];
 
         let caps = filter_summaries(&all, Some("sandbox")).expect("summaries");
@@ -467,13 +467,13 @@ mod tests {
     }
 
     #[test]
-    fn capability_filter_rejects_unknown_name() {
+    fn component_filter_rejects_unknown_name() {
         let all = vec![make_summary("sandbox", "installed", Some("0.1.0"))];
 
-        let err = filter_summaries(&all, Some("missing")).expect_err("unknown capability");
+        let err = filter_summaries(&all, Some("missing")).expect_err("unknown component");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
-        assert!(err.reason().contains("unknown capability"));
+        assert!(err.reason().contains("unknown component"));
     }
 
     #[test]

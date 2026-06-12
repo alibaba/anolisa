@@ -1,7 +1,7 @@
 //! Command-line surface.
 //!
 //! Two-tier structure (see design doc):
-//! - **Tier 1** — capability-vocabulary verbs for everyday use (`tier1/`).
+//! - **Tier 1** — component lifecycle verbs for everyday use (`tier1/`).
 //! - **Tier 2** — independent management surfaces (register / adapter / self
 //!   / runtime / osbase). Each surface uses its own appropriate vocabulary.
 
@@ -71,7 +71,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     #[command(flatten)]
-    Capability(CapabilityCommands),
+    Component(ComponentCommands),
 
     #[command(flatten)]
     Management(ManagementCommands),
@@ -79,13 +79,13 @@ pub enum Commands {
 
 /// Primary commands — component lifecycle and operations.
 #[derive(Subcommand)]
-pub enum CapabilityCommands {
+pub enum ComponentCommands {
     /// List available components from remote catalog
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
     /// Install a component from a configured backend (raw today; yum/npm planned)
     Install(tier1::install::InstallArgs),
-    /// Uninstall a component; legacy capability names are accepted as fallback
+    /// Uninstall a component
     Uninstall(tier1::uninstall::UninstallArgs),
     /// Show component health
     Status(tier1::status::StatusArgs),
@@ -118,9 +118,9 @@ pub enum ManagementCommands {
 
 /// Build the top-level [`clap::Command`] with grouped help rendering.
 ///
-/// Generates the "Capability Commands / Management Commands / Other"
+/// Generates the "Component Commands / Management Commands / Other"
 /// sections dynamically from the registered subcommands so that adding
-/// a new variant to [`CapabilityCommands`] or [`ManagementCommands`]
+/// a new variant to [`ComponentCommands`] or [`ManagementCommands`]
 /// automatically updates `--help` without maintaining a separate const.
 pub fn build_cli() -> clap::Command {
     let cmd = Cli::command();
@@ -129,7 +129,7 @@ pub fn build_cli() -> clap::Command {
 }
 
 fn generate_grouped_help() -> String {
-    let cap = subcommand_rows::<CapabilityCommands>();
+    let cap = subcommand_rows::<ComponentCommands>();
     let mgmt = subcommand_rows::<ManagementCommands>();
     render_grouped_help(&cap, &mgmt)
 }
@@ -187,16 +187,16 @@ fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> S
 pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     validate_global_args(ctx)?;
     match cli.command {
-        Commands::Capability(cmd) => match cmd {
-            CapabilityCommands::List(args) => tier1::list::handle(args, ctx),
-            CapabilityCommands::Install(args) => tier1::install::handle(args, ctx),
-            CapabilityCommands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
-            CapabilityCommands::Status(args) => tier1::status::handle(args, ctx),
-            CapabilityCommands::Doctor(args) => tier1::doctor::handle(args, ctx),
-            CapabilityCommands::Logs(args) => tier1::logs::handle(args, ctx),
-            CapabilityCommands::Restart(args) => tier1::restart::handle(args, ctx),
-            CapabilityCommands::Update(args) => tier1::update::handle(args, ctx),
-            CapabilityCommands::Adapter(args) => adapter::handle(args, ctx),
+        Commands::Component(cmd) => match cmd {
+            ComponentCommands::List(args) => tier1::list::handle(args, ctx),
+            ComponentCommands::Install(args) => tier1::install::handle(args, ctx),
+            ComponentCommands::Uninstall(args) => tier1::uninstall::handle(args, ctx),
+            ComponentCommands::Status(args) => tier1::status::handle(args, ctx),
+            ComponentCommands::Doctor(args) => tier1::doctor::handle(args, ctx),
+            ComponentCommands::Logs(args) => tier1::logs::handle(args, ctx),
+            ComponentCommands::Restart(args) => tier1::restart::handle(args, ctx),
+            ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
+            ComponentCommands::Adapter(args) => adapter::handle(args, ctx),
         },
         Commands::Management(cmd) => match cmd {
             ManagementCommands::Register(args) => register::handle_register_group(args, ctx),

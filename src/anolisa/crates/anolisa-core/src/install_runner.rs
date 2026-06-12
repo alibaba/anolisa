@@ -131,9 +131,7 @@ pub enum InstallError {
     },
 
     /// Fresh-install milestone refuses to overwrite existing files.
-    #[error(
-        "destination '{path}' already exists — P1-F refuses to overwrite (backup/rollback lands in P1-G)"
-    )]
+    #[error("destination '{path}' already exists — refuses to overwrite")]
     DestExists {
         /// Existing destination path.
         path: PathBuf,
@@ -250,7 +248,7 @@ impl<'a> InstallRunner<'a> {
     /// which must be absolute paths already substituted against the layout
     /// (Sub-C will pass the planner's `ComponentPlan.resolved_files`).
     ///
-    /// `artifact_type` is the wire string from the EnablePlan (e.g. "binary",
+    /// `artifact_type` is the wire string from the install plan (e.g. "binary",
     /// "tar_gz").
     ///
     /// On success returns one `InstalledFile` per written path with the

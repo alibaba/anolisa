@@ -89,7 +89,6 @@ dependencies = ["kernel-headers"]
 #   dry-run output misleading. Land them together when aarch64 graduates.
 #
 # TODO(P1-J, owner: release-ops): tokenless / agent-memory / agent-sec-core artifacts.
-#   The execution policy graduates `token-optimization`, but the runtime
-#   `tokenless` component is not yet published. Add the row here when it
-#   ships so `enable token-optimization --dry-run` resolves an artifact
-#   instead of falling back to `blocked: no entry`.
+#   The runtime `tokenless` component is not yet published. Add the row
+#   here when it ships so `install tokenless --dry-run` resolves an
+#   artifact instead of falling back to `blocked: no entry`.
