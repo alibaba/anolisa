@@ -84,8 +84,8 @@ async fn recv(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdou
     serde_json::from_str(&line).unwrap()
 }
 
-// 11 Tier A + 6 Tier B + 3 snapshot + 2 git + 2 consolidation + 4 task + 2 export/import + 2 sovereignty (read-only) = 31
-const TOTAL_TOOLS: usize = 31;
+// 11 Tier A + 6 Tier B + 3 snapshot + 2 git + 2 consolidation + 4 task + 2 export/import + 2 sovereignty (read-only) + 2 session-history = 33
+const TOTAL_TOOLS: usize = 33;
 const TIER_B_COUNT: usize = 6;
 
 #[tokio::test]

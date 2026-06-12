@@ -27,6 +27,7 @@ pub mod mkdir;
 pub mod promote;
 pub mod read;
 pub mod remove;
+pub mod session_history;
 pub mod session_log;
 pub mod write;
 

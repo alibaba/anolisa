@@ -262,6 +262,30 @@ impl MemoryMcpServer {
             .map_err(|e| fmt_err("get_context failed", e))
     }
 
+    #[tool(
+        description = "List historical session summaries from facts/summary/. Returns session_id, created_at, tool_calls, and description."
+    )]
+    async fn memory_sessions(&self, #[tool(param)] limit: Option<u32>) -> ToolResult {
+        crate::tools::session_history::memory_sessions(&self.svc, limit.unwrap_or(10) as usize)
+            .map_err(|e| fmt_err("memory_sessions failed", e))
+    }
+
+    #[tool(
+        description = "Show tool call timeline for a specific session. Returns timestamped entries with tool, path, status."
+    )]
+    async fn memory_timeline(
+        &self,
+        #[tool(param)] session_id: String,
+        #[tool(param)] limit: Option<u32>,
+    ) -> ToolResult {
+        crate::tools::session_history::memory_timeline(
+            &self.svc,
+            &session_id,
+            limit.unwrap_or(50) as usize,
+        )
+        .map_err(|e| fmt_err("memory_timeline failed", e))
+    }
+
     // ---- Tier C: governance (snapshots) ----
 
     #[tool(
@@ -521,6 +545,8 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_search,
     memory_observe,
     memory_get_context,
+    memory_sessions,
+    memory_timeline,
     mem_snapshot,
     mem_snapshot_list,
     mem_snapshot_restore,

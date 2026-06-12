@@ -142,11 +142,9 @@ pub struct ConsolidationConfig {
     /// BM25 score threshold for conflict detection. Default: -2.0.
     #[serde(default = "default_conflict_threshold")]
     pub conflict_bm25_threshold: f64,
-    /// Incremental consolidation interval: trigger consolidation every N
-    /// tool calls during the session (not just at shutdown). Ensures session
-    /// data is persisted incrementally so it survives SIGKILL.
-    /// Default: 20 (every 20 tool calls). Set to 0 to disable.
-    #[serde(default = "default_incremental_interval")]
+    /// Trigger incremental consolidation every N tool calls (0 = disabled).
+    /// Default: 0.
+    #[serde(default)]
     pub incremental_interval: usize,
 }
 
@@ -161,13 +159,9 @@ impl Default for ConsolidationConfig {
             max_episodes_per_session: default_max_episodes(),
             conflict_detection: default_true(),
             conflict_bm25_threshold: default_conflict_threshold(),
-            incremental_interval: default_incremental_interval(),
+            incremental_interval: 0,
         }
     }
-}
-
-fn default_incremental_interval() -> usize {
-    20
 }
 
 fn default_conflict_threshold() -> f64 {
@@ -573,14 +567,6 @@ impl AppConfig {
                 Ok(n) => self.memory.consolidation.conflict_bm25_threshold = n,
                 Err(e) => {
                     tracing::warn!("MEMORY_CONFLICT_THRESHOLD={v:?} not a f64: {e}; ignoring")
-                }
-            }
-        }
-        if let Ok(v) = std::env::var("MEMORY_CONSOLIDATION_INTERVAL") {
-            match v.parse::<usize>() {
-                Ok(n) => self.memory.consolidation.incremental_interval = n,
-                Err(e) => {
-                    tracing::warn!("MEMORY_CONSOLIDATION_INTERVAL={v:?} not a usize: {e}; ignoring")
                 }
             }
         }
