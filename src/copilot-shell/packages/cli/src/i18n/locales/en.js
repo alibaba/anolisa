@@ -1035,6 +1035,12 @@ export default {
   'Invalid auth method selected.': 'Invalid auth method selected.',
   'Failed to authenticate. Message: {{message}}':
     'Failed to authenticate. Message: {{message}}',
+  'Configuration verification failed. Please check your API Key and model settings.':
+    'Configuration verification failed. Please check your API Key and model settings.',
+  'Verifying and saving configuration...':
+    'Verifying and saving configuration...',
+  '{{authType}} configuration saved successfully, current model: {{model}}':
+    '{{authType}} configuration saved successfully, current model: {{model}}',
   '{{authType}} credentials saved successfully.':
     '{{authType}} credentials saved successfully.',
   // OpenAI API key validation errors

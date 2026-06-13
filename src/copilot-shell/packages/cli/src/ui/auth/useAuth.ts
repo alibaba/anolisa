@@ -113,11 +113,16 @@ export const useAuthCommand = (
       // For OpenAI auth, keep OpenAIKeyPrompt open to show error
       // by NOT calling onAuthError which would open AuthDialog
       if (pendingAuthType === AuthType.USE_OPENAI) {
-        // Only set authError state, don't open AuthDialog
-        // OpenAIKeyPrompt will read authError from UIStateContext and display it
         setAuthError(errorMessage);
-        // Keep isAuthenticating=true so OpenAIKeyPrompt stays open
-        // User can press Escape to cancel and go back to AuthDialog
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: t(
+              'Configuration verification failed. Please check your API Key and model settings.',
+            ),
+          },
+          Date.now(),
+        );
       } else {
         // For other auth types, use onAuthError which opens AuthDialog
         setIsAuthenticating(false);
@@ -125,7 +130,7 @@ export const useAuthCommand = (
         onAuthError(errorMessage);
       }
     },
-    [translateAuthError, onAuthError, pendingAuthType, config],
+    [translateAuthError, onAuthError, pendingAuthType, config, addItem],
   );
 
   const handleAuthSuccess = useCallback(
@@ -140,42 +145,30 @@ export const useAuthCommand = (
           authType,
         );
 
-        // Persist model from ContentGenerator config (handles fallback cases)
-        // This ensures that when syncAfterAuthRefresh falls back to default model,
-        // it gets persisted to settings.json
         const contentGeneratorConfig = config.getContentGeneratorConfig();
-        if (contentGeneratorConfig?.model) {
-          settings.setValue(
-            authTypeScope,
-            'model.name',
-            contentGeneratorConfig.model,
-          );
-          // 同时写入按认证方式隔离的模型字段，避免不同认证方式互相覆盖
+        const submittedModel = credentials?.model?.trim();
+        // For OpenAI auth, persist the model from the post-refresh content
+        // generator config. That is the model validateApiKey() actually checked.
+        const resolvedModel =
+          authType === AuthType.USE_OPENAI
+            ? contentGeneratorConfig?.model
+            : contentGeneratorConfig?.model || submittedModel;
+
+        if (resolvedModel) {
+          settings.setValue(authTypeScope, 'model.name', resolvedModel);
           if (authType === AuthType.USE_OPENAI) {
             settings.setValue(
               authTypeScope,
               'security.auth.openaiModel',
-              contentGeneratorConfig.model,
+              resolvedModel,
             );
           } else if (authType === AuthType.USE_ALIYUN) {
             settings.setValue(
               authTypeScope,
               'security.auth.aliyunModel',
-              contentGeneratorConfig.model,
+              resolvedModel,
             );
           }
-        } else if (authType === AuthType.USE_ALIYUN && credentials?.model) {
-          // For Aliyun auth, specifically preserve the user-entered model
-          settings.setValue(
-            authTypeScope,
-            'model.name',
-            credentials.model.trim(),
-          );
-          settings.setValue(
-            authTypeScope,
-            'security.auth.aliyunModel',
-            credentials.model.trim(),
-          );
         }
 
         if (credentials) {
@@ -209,13 +202,21 @@ export const useAuthCommand = (
       const authEvent = new AuthEvent(authType, 'manual', 'success');
       logAuth(config, authEvent);
 
-      // Show success message
+      // Show success message with resolved model name
+      const contentGeneratorConfig = config.getContentGeneratorConfig();
+      const savedModel =
+        authType === AuthType.USE_OPENAI
+          ? contentGeneratorConfig?.model
+          : contentGeneratorConfig?.model || credentials?.model?.trim();
       addItem(
         {
           type: MessageType.INFO,
-          text: t('{{authType}} credentials saved successfully.', {
-            authType,
-          }),
+          text: savedModel
+            ? t(
+                '{{authType}} configuration saved successfully, current model: {{model}}',
+                { authType, model: savedModel },
+              )
+            : t('{{authType}} credentials saved successfully.', { authType }),
         },
         Date.now(),
       );
@@ -313,6 +314,13 @@ export const useAuthCommand = (
         // Only perform authentication when credentials are provided (from OpenAIKeyPrompt)
         // When credentials are undefined, DialogManager will show OpenAIKeyPrompt for user input
         if (credentials && 'apiKey' in credentials) {
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: t('Verifying and saving configuration...'),
+            },
+            Date.now(),
+          );
           // Pass settings.model.generationConfig to updateCredentials so it can be merged
           // after clearing provider-sourced config. This ensures settings.json generationConfig
           // fields (e.g., samplingParams, timeout) are preserved.
@@ -408,6 +416,7 @@ export const useAuthCommand = (
       isProviderManagedModel,
       onAuthError,
       settings,
+      addItem,
     ],
   );
 

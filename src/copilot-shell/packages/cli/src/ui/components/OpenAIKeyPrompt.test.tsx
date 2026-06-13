@@ -531,4 +531,86 @@ describe('OpenAIKeyPrompt', () => {
       expect(lastFrame()).not.toContain('abc*');
     });
   });
+
+  // ─── Model retention on re-entry ──────────────────────────────────────────
+
+  describe('Model retention on re-entry', () => {
+    const makeKey = (overrides: Partial<Key> = {}): Key => ({
+      name: '',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+      ...overrides,
+    });
+
+    function getLatestHandler(): (key: Key) => void {
+      const mock = vi.mocked(useKeypress);
+      return mock.mock.calls[mock.mock.calls.length - 1]![0];
+    }
+
+    async function pressKey(key: Partial<Key>): Promise<void> {
+      await act(() => {
+        getLatestHandler()(makeKey(key));
+      });
+    }
+
+    it('should display defaultModel instead of provider default when re-entering config', () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://dashscope.aliyuncs.com/compatible-mode/v1"
+          defaultModel="custom-saved-model"
+          defaultApiKey="sk-existing"
+        />,
+      );
+      const output = lastFrame()!;
+      expect(output).toContain('custom-saved-model');
+      expect(output).not.toContain('qwen3-coder-plus');
+    });
+
+    it('should preserve defaultModel when navigating within initial subProvider', async () => {
+      // DashScope Beijing is the initial subProvider (index [0, 0])
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://dashscope.aliyuncs.com/compatible-mode/v1"
+          defaultModel="custom-saved-model"
+          defaultApiKey="sk-existing"
+        />,
+      );
+
+      // Enter subProvider menu
+      await pressKey({ name: 'return', sequence: '\r' });
+      // Navigate to apiKey
+      await pressKey({ name: 'return', sequence: '\r' });
+      // Navigate to model field
+      await pressKey({ name: 'return', sequence: '\r' });
+
+      expect(lastFrame()).toContain('custom-saved-model');
+    });
+
+    it('should use new provider default model when switching to a different provider', async () => {
+      const { lastFrame } = render(
+        <OpenAIKeyPrompt
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+          defaultBaseUrl="https://dashscope.aliyuncs.com/compatible-mode/v1"
+          defaultModel="custom-saved-model"
+          defaultApiKey="sk-existing"
+        />,
+      );
+
+      // Navigate down to DeepSeek (index 3 from DashScope at 0)
+      await pressKey({ name: 'down', sequence: '' }); // DashScope Coding Plan
+      await pressKey({ name: 'down', sequence: '' }); // DashScope Token Plan
+      await pressKey({ name: 'down', sequence: '' }); // DeepSeek
+
+      expect(lastFrame()).toContain('deepseek-chat');
+      expect(lastFrame()).not.toContain('custom-saved-model');
+    });
+  });
 });

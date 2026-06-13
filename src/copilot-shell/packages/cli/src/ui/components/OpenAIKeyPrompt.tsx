@@ -247,7 +247,13 @@ export function OpenAIKeyPrompt({
   const applyProvider = (pIdx: number, sIdx: number) => {
     const p = getEffectiveProvider(pIdx, sIdx);
     setBaseUrl(p.id !== 'custom' ? p.baseUrl : '');
-    setModel(p.id !== 'custom' ? p.defaultModel : '');
+    const [initP, initS] = initialIndices;
+    const isInitialProvider = pIdx === initP && sIdx === initS;
+    if (isInitialProvider && defaultModel) {
+      setModel(defaultModel);
+    } else {
+      setModel(p.id !== 'custom' ? p.defaultModel : '');
+    }
   };
 
   const handleProviderChange = (newIndex: number) => {

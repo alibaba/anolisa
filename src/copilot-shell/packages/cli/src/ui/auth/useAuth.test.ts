@@ -18,6 +18,10 @@ vi.mock('../hooks/useQwenAuth.js', () => ({
   }),
 }));
 
+vi.mock('../../config/modelProvidersScope.js', () => ({
+  getPersistScopeForModelSelection: () => 'user',
+}));
+
 describe('useAuthCommand', () => {
   const createMockSettings = (): LoadedSettings =>
     ({
@@ -25,8 +29,12 @@ describe('useAuthCommand', () => {
         security: {
           auth: {},
         },
+        model: {},
       },
       setValue: vi.fn(),
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
     }) as unknown as LoadedSettings;
 
   const createMockConfig = (): Config =>
@@ -84,5 +92,115 @@ describe('useAuthCommand', () => {
 
     expect(result.current.isAuthDialogOpen).toBe(true);
     expect(result.current.showBashOptionInAuthDialog).toBe(false);
+  });
+
+  it('should persist effective model to model.name and security.auth.openaiModel', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'my-model',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false),
+    );
+
+    // Step 1: set pendingAuthType (simulates user selecting OpenAI in AuthDialog)
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+
+    // Step 2: submit credentials (simulates OpenAIKeyPrompt submission)
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    const calls = vi.mocked(settings.setValue).mock.calls;
+    const modelNameCall = calls.find(([, key]) => key === 'model.name');
+    const openaiModelCall = calls.find(
+      ([, key]) => key === 'security.auth.openaiModel',
+    );
+    expect(modelNameCall).toBeDefined();
+    expect(modelNameCall![2]).toBe('my-model');
+    expect(openaiModelCall).toBeDefined();
+    expect(openaiModelCall![2]).toBe('my-model');
+  });
+
+  it('should persist validated fallback model over submitted model', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'qwen3-coder-plus',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false),
+    );
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    const calls = vi.mocked(settings.setValue).mock.calls;
+    const modelNameCall = calls.find(([, key]) => key === 'model.name');
+    const openaiModelCall = calls.find(
+      ([, key]) => key === 'security.auth.openaiModel',
+    );
+    expect(modelNameCall).toBeDefined();
+    expect(modelNameCall![2]).toBe('qwen3-coder-plus');
+    expect(openaiModelCall).toBeDefined();
+    expect(openaiModelCall![2]).toBe('qwen3-coder-plus');
+  });
+
+  it('should set authError and keep isAuthenticating for OpenAI on failure', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    vi.mocked(config.refreshAuth).mockRejectedValue(
+      new Error('Invalid API key'),
+    );
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false),
+    );
+
+    // Step 1: set pendingAuthType
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+
+    // Step 2: submit credentials that will fail
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-bad',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'test-model',
+      });
+    });
+
+    expect(result.current.authError).toBeTruthy();
+    expect(result.current.isAuthenticating).toBe(true);
+
+    const errorItem = addItem.mock.calls.find(([item]) => {
+      const historyItem = item as Omit<import('../types.js').HistoryItem, 'id'>;
+      return historyItem.type === 'error';
+    });
+    expect(errorItem).toBeDefined();
   });
 });
