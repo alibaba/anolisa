@@ -60,43 +60,16 @@ pub fn set_verbose(v: bool) {
     init_logging(v, None);
 }
 
-/// Initialize logging with optional file output.
+/// Initialize or reconfigure logging with optional file output.
+///
+/// Safe to call on every `AgentSight::new` in the same process: the output
+/// destination and filter are updated in place.
 ///
 /// * `verbose` — true = debug level, false = warn level (unless `RUST_LOG` is set)
 /// * `log_path` — if `Some`, log output is appended to this file; otherwise stderr
 pub fn init_logging(verbose: bool, log_path: Option<&str>) {
     VERBOSE.store(verbose, Ordering::SeqCst);
-
-    let level = if verbose {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Warn
-    };
-
-    let mut builder = env_logger::Builder::new();
-
-    // Respect RUST_LOG if set, otherwise use verbose-based level.
-    if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        builder.parse_filters(&rust_log);
-    } else {
-        builder.filter_level(level);
-    }
-
-    // Direct output to file if log_path is provided.
-    if let Some(path) = log_path {
-        use std::fs::OpenOptions;
-        match OpenOptions::new().create(true).append(true).open(path) {
-            Ok(file) => {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
-            Err(e) => {
-                eprintln!("agentsight: failed to open log file {:?}: {}", path, e);
-            }
-        }
-    }
-
-    // init() may fail if called twice; that's fine.
-    let _ = builder.try_init();
+    crate::logging::init(verbose, log_path);
 }
 
 pub fn verbose() -> bool {

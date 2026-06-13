@@ -131,10 +131,10 @@ impl AgentSight {
     /// let mut sight = AgentSight::new(config)?;
     /// ```
     pub fn new(mut config: AgentsightConfig) -> Result<Self> {
-        config.apply_verbose();
-
         // Load rules from config file only when config_path is set (CLI --config)
         // FFI users provide rules via API, no config file needed.
+        let mut config_load_ok = false;
+        let mut config_load_err: Option<(PathBuf, anyhow::Error)> = None;
         if let Some(path) = config.config_path.clone() {
             let load_result = if path.exists() {
                 config.load_from_file(&path)
@@ -145,24 +145,33 @@ impl AgentSight {
                 }
             };
             match load_result {
-                Ok(()) => {
-                    log::info!(
-                        "Loaded {} cmdline rule(s), {} https rule(s), {} http target(s) from {:?}",
-                        config.cmdline_rules.len(),
-                        config.https_rules.len(),
-                        config.http_targets.len(),
-                        path
-                    );
-                }
+                Ok(()) => config_load_ok = true,
                 Err(e) => {
-                    log::warn!(
-                        "Failed to load config from {:?}: {}, using embedded defaults",
-                        path,
-                        e
-                    );
+                    config_load_err = Some((path, e));
                     config.cmdline_rules = crate::config::default_cmdline_rules();
                 }
             }
+        }
+
+        // Init logging after config file load so JSON `log_path` / `verbose` apply.
+        config.apply_verbose();
+
+        if config_load_ok {
+            if let Some(path) = config.config_path.as_ref() {
+                log::info!(
+                    "Loaded {} cmdline rule(s), {} https rule(s), {} http target(s) from {:?}",
+                    config.cmdline_rules.len(),
+                    config.https_rules.len(),
+                    config.http_targets.len(),
+                    path
+                );
+            }
+        } else if let Some((path, e)) = config_load_err {
+            log::warn!(
+                "Failed to load config from {:?}: {}, using embedded defaults",
+                path,
+                e
+            );
         }
 
         let all_cmdline_rules = config.cmdline_rules.clone();

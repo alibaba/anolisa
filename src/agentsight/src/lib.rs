@@ -25,6 +25,7 @@
 //! ```
 
 pub mod probes;
+mod logging;
 pub mod config;
 
 // Re-export config types
