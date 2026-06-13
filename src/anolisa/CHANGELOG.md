@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-06-13
+
+### Changed
+
+- **file-hierarchy(7) user layout**: user-mode `lib_dir` now resolves to
+  `~/.local/lib/anolisa` and `libexec_dir` to
+  `~/.local/lib/anolisa/libexec`, while data/config/state/cache/runtime roots
+  continue to honor their standard `XDG_*` environment overrides.
+
+### Fixed
+
+- **Remote raw install contracts**: `anolisa install` no longer requires the
+  component to exist in the local manifest catalog before raw backend
+  execution; it resolves the artifact from the remote distribution index,
+  verifies and downloads the artifact, then reads the embedded
+  `.anolisa/component.toml` install contract.
+- `anolisa install --dry-run` can now use version-level sidecar `meta.toml`
+  metadata to preview files and services without downloading the install
+  artifact, and legacy raw `binary` artifacts can still install when a sidecar
+  or matching local catalog contract is available.
+
 ## [0.1.6] - 2026-06-12
 
 ### Added
@@ -230,6 +251,24 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.7] - 2026-06-13
+
+### 变更
+
+- **file-hierarchy(7) 用户态布局**：user-mode 下 `lib_dir` 现在解析为
+  `~/.local/lib/anolisa`，`libexec_dir` 解析为
+  `~/.local/lib/anolisa/libexec`；data/config/state/cache/runtime 根目录仍然
+  继续遵循标准 `XDG_*` 环境变量覆盖。
+
+### 修复
+
+- **远程 raw 安装契约**：`anolisa install` 不再要求 raw 后端执行前组件必须存在于
+  本地 manifest catalog；现在会先从远程 distribution index 解析 artifact，
+  校验并下载后，再读取 artifact 内嵌的 `.anolisa/component.toml` 安装契约。
+- `anolisa install --dry-run` 现在可使用版本级 sidecar `meta.toml` 元数据预览
+  文件和服务，而无需下载安装 artifact；legacy raw `binary` artifact 在存在
+  sidecar 或匹配本地 catalog 契约时仍可安装。
 
 ## [0.1.6] - 2026-06-12
 
