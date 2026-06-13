@@ -236,7 +236,7 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
 
             // sandbox install writes to /etc, /var/lib, /usr/lib and enables
             // systemd units — all of which are system-scoped. The default
-            // global --install-mode is `user` (XDG), under which sandbox
+            // global --install-mode is `user`, under which sandbox
             // install would silently route audit log + state to
             // ~/.local/state/anolisa/ while the actual writes still target
             // /etc and /var/lib (and need root). Reject that mismatch up

@@ -19,7 +19,7 @@
 //!   3. The install-mode default `layout.datadir` — what the
 //!      [`FsLayout`] resolution returns for the current
 //!      `--install-mode` (system: `/usr/local/share/anolisa`; user:
-//!      `$XDG_DATA_HOME/anolisa`). Kept as the final fallback so
+//!      `~/.local/share/anolisa`). Kept as the final fallback so
 //!      pre-P1-A installs (where the datadir matches the install-mode
 //!      root directly) still resolve.
 //!

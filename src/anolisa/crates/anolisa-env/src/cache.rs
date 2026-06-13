@@ -8,7 +8,7 @@ pub fn cache_path(system_mode: bool) -> PathBuf {
     if system_mode {
         PathBuf::from("/var/lib/anolisa/env-facts.json")
     } else {
-        // XDG_STATE_HOME or fallback
+        // user state root override, else the $HOME-based default
         std::env::var("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {

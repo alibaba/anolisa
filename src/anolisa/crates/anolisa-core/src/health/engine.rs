@@ -448,7 +448,7 @@ fn boundary_reason(err: &PathBoundaryError) -> String {
     }
 }
 
-/// Expand the FHS/XDG layout placeholders a manifest may use in a probe path.
+/// Expand the FHS / file-hierarchy layout placeholders a manifest may use in a probe path.
 /// The minimal-schema names (`{sysconfdir}`/`{sharedir}`) and the legacy ones
 /// (`{etcdir}`/`{datadir}`) both resolve to the same roots during the
 /// additive-compat window.

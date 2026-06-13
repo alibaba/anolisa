@@ -32,7 +32,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallMode {
-    /// Per-user XDG install scope.
+    /// Per-user (`file-hierarchy(7)`) install scope.
     #[default]
     User,
     /// System-wide FHS install scope.

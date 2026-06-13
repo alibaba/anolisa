@@ -11,7 +11,7 @@
 //! whose ops succeed with `state: NotSupported, supported: false,
 //! changed: false`. Callers treat that as a quiet skip rather than a
 //! warning, so the lifecycle on macOS / inside CI containers / under
-//! XDG-only user installs stays a no-op for services.
+//! user-mode installs stays a no-op for services.
 //!
 //! `FakeServiceManager` is the executor used by `service.rs`'s own unit
 //! tests and by integration tests that need to assert which ops the

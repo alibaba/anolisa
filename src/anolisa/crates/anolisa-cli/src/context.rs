@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 
-/// Where ANOLISA installs files: user-mode (XDG under `$HOME`) or system-mode
-/// (FHS under `/usr/local`, redirectable via `--prefix`).
+/// Where ANOLISA installs files: user-mode (`file-hierarchy(7)` under `$HOME`)
+/// or system-mode (FHS under `/usr/local`, redirectable via `--prefix`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum InstallMode {
