@@ -27,6 +27,18 @@ pub enum AgentHealthState {
     Offline,
 }
 
+/// Role of an agent process in the process group
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// Service process with listening TCP ports (e.g. OpenClaw Gateway on 18789)
+    Gateway,
+    /// Client process without ports (e.g. TUI main process)
+    Client,
+    /// Worker sub-process forked from a Client (parent_pid is also same agent)
+    Worker,
+}
+
 /// Health status of a single agent process
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentHealthStatus {
@@ -49,6 +61,11 @@ pub struct AgentHealthStatus {
     /// 进入 Offline 状态的时刻（Unix ms）。仅 Offline 项有值，用于 TTL 自动清理。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offline_since: Option<u64>,
+    /// 进程角色：Gateway（有端口）/ Client（无端口）/ Worker（子进程）
+    pub role: AgentRole,
+    /// 父进程 PID（用于折叠展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
 }
 
 /// Stores the latest health check results for all tracked agents

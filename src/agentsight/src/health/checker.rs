@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::port_detector::detect_listening_ports;
-use super::store::{AgentHealthState, AgentHealthStatus, HealthStore, now_ms};
+use super::store::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore, now_ms};
 use crate::discovery::AgentScanner;
 use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
@@ -239,6 +239,12 @@ impl HealthChecker {
 
         log::debug!("Health check: found {} agent(s)", agents.len());
 
+        // Collect agent names by PID for role inference (detect parent-child within same agent)
+        let agent_name_by_pid: HashMap<u32, String> = agents
+            .iter()
+            .map(|a| (a.pid, a.agent_info.name.clone()))
+            .collect();
+
         for agent in &agents {
             let ports = detect_listening_ports(agent.pid);
             // Cosh has no daemon process and does not support keepalive/restart.
@@ -248,6 +254,23 @@ impl HealthChecker {
             } else {
                 Some(build_restart_cmd(&agent.exe_path, &agent.cmdline_args))
             };
+
+            // Read parent PID from /proc/<pid>/stat for role inference
+            let ppid = read_ppid(agent.pid);
+
+            // Infer role: Gateway (has ports) > Worker (parent is same agent) > Client
+            let role = if !ports.is_empty() {
+                AgentRole::Gateway
+            } else if let Some(pp) = ppid {
+                if agent_name_by_pid.get(&pp).map(|n| n == &agent.agent_info.name).unwrap_or(false) {
+                    AgentRole::Worker
+                } else {
+                    AgentRole::Client
+                }
+            } else {
+                AgentRole::Client
+            };
+
             let status = if ports.is_empty() {
                 AgentHealthStatus {
                     pid: agent.pid,
@@ -261,9 +284,11 @@ impl HealthChecker {
                     error_message: None,
                     restart_cmd,
                     offline_since: None,
+                    role,
+                    parent_pid: ppid,
                 }
             } else {
-                self.probe_agent(agent, &ports, restart_cmd)
+                self.probe_agent(agent, &ports, restart_cmd, role, ppid)
             };
 
             if let Ok(mut store) = self.store.write() {
@@ -283,6 +308,8 @@ impl HealthChecker {
         agent: &crate::discovery::DiscoveredAgent,
         ports: &[u16],
         restart_cmd: Option<Vec<String>>,
+        role: AgentRole,
+        parent_pid: Option<u32>,
     ) -> AgentHealthStatus {
         let mut last_error = String::new();
         // 标记是否遇到了超时错误（区分 hung vs unreachable）
@@ -315,6 +342,8 @@ impl HealthChecker {
                         error_message: None,
                         restart_cmd,
                         offline_since: None,
+                        role: role.clone(),
+                        parent_pid,
                     };
                 }
                 Err(ureq::Error::Status(_code, _resp)) => {
@@ -331,6 +360,8 @@ impl HealthChecker {
                         error_message: None,
                         restart_cmd,
                         offline_since: None,
+                        role: role.clone(),
+                        parent_pid,
                     };
                 }
                 Err(ureq::Error::Transport(e)) => {
@@ -372,6 +403,8 @@ impl HealthChecker {
             error_message: Some(last_error),
             restart_cmd,
             offline_since: None,
+            role,
+            parent_pid,
         }
     }
 
@@ -423,4 +456,18 @@ fn build_restart_cmd(exe_path: &str, cmdline_args: &[String]) -> Vec<String> {
         .collect();
     cmd.extend(args);
     cmd
+}
+
+/// Read the parent PID (ppid) from /proc/<pid>/stat.
+/// Returns None if the file cannot be read or parsed.
+fn read_ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    // Format: "pid (comm) state ppid ..."
+    // Find the closing ')' first (comm may contain spaces/parens)
+    let after_comm = stat.rsplit_once(')')?.1;
+    // after_comm = " state ppid ..."
+    let mut fields = after_comm.split_whitespace();
+    let _state = fields.next()?;
+    let ppid_str = fields.next()?;
+    ppid_str.parse::<u32>().ok()
 }

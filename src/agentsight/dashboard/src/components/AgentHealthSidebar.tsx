@@ -97,6 +97,21 @@ const AgentCard: React.FC<{
         <span className={`font-medium text-sm truncate ${nameColor}`}>
           {agent.agent_name}
         </span>
+        {agent.role === 'gateway' && (
+          <span className="text-[10px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-medium">
+            Gateway
+          </span>
+        )}
+        {agent.role === 'client' && (
+          <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+            客户端
+          </span>
+        )}
+        {agent.role === 'worker' && (
+          <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+            Worker
+          </span>
+        )}
         <span className={`ml-auto text-xs flex-shrink-0 ${labelColor}`}>
           {label}
         </span>
@@ -153,6 +168,8 @@ const AgentCard: React.FC<{
 
 export const AgentHealthSidebar: React.FC = () => {
   const [agents, setAgents] = useState<AgentHealthStatus[]>([]);
+  const [clientAgents, setClientAgents] = useState<AgentHealthStatus[]>([]);
+  const [showClients, setShowClients] = useState(false);
   const [lastScan, setLastScan] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -178,11 +195,11 @@ export const AgentHealthSidebar: React.FC = () => {
       data.agents.forEach(a => {
         if (a.status === 'offline' && !notifiedOfflineRef.current.has(a.pid)) {
           notifiedOfflineRef.current.add(a.pid);
-          addToast(`⚠️ Agent "${a.agent_name}" (PID ${a.pid}) 已下线`);
+          addToast(`\u26a0\ufe0f Agent "${a.agent_name}" (PID ${a.pid}) \u5df2\u9000\u51fa`);
         }
         if (a.status === 'hung' && !notifiedOfflineRef.current.has(-a.pid)) {
           notifiedOfflineRef.current.add(-a.pid); // 用负数区分 hung 通知
-          addToast(`⏳ Agent "${a.agent_name}" (PID ${a.pid}) 响应超时，可能卡顿`);
+          addToast(`\u23f3 Agent "${a.agent_name}" (PID ${a.pid}) \u54cd\u5e94\u8d85\u65f6\uff0c\u53ef\u80fd\u5361\u987f`);
         }
       });
       // 清理不再存在的 PID
@@ -199,16 +216,20 @@ export const AgentHealthSidebar: React.FC = () => {
       setAgents(data.agents);
       setLastScan(data.last_scan_time);
       setError(null);
+
+      // 如果当前展开了客户端进程，同步刷新
+      if (showClients) {
+        const allData = await fetchAgentHealth({ includeClients: true });
+        setClientAgents(allData.agents.filter(a => a.role !== 'gateway'));
+      }
     } catch (e: any) {
-      // If we already have agent data, suppress transient poll errors (e.g. 408
-      // timeout during backend restart) to avoid flickering the error banner.
       if (agents.length === 0) {
-        setError(e.message || '请求失败');
+        setError(e.message || '\u8bf7\u6c42\u5931\u8d25');
       }
     } finally {
       setLoading(false);
     }
-  }, [addToast]);
+  }, [addToast, showClients]);
 
   const handleDelete = async (pid: number) => {
     try {
@@ -313,6 +334,42 @@ export const AgentHealthSidebar: React.FC = () => {
                 restarting={restartingPids.has(agent.pid)}
               />
             ))}
+            {/* 关联客户端进程折叠区 */}
+            <div className="px-3 py-2 border-t border-gray-100">
+              <button
+                onClick={async () => {
+                  const next = !showClients;
+                  setShowClients(next);
+                  if (next) {
+                    const allData = await fetchAgentHealth({ includeClients: true });
+                    setClientAgents(allData.agents.filter(a => a.role !== 'gateway'));
+                  } else {
+                    setClientAgents([]);
+                  }
+                }}
+                className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+              >
+                <span className={`transition-transform ${showClients ? 'rotate-90' : ''}`}>▶</span>
+                关联进程{clientAgents.length > 0 ? ` (${clientAgents.length})` : ''}
+              </button>
+              {showClients && clientAgents.length > 0 && (
+                <div className="mt-1 ml-2 border-l-2 border-gray-100 pl-2 space-y-1">
+                  {clientAgents.map(ca => (
+                    <div key={ca.pid} className="text-[11px] text-gray-500 flex items-center gap-1.5">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300" />
+                      <span className="font-medium">{ca.agent_name}</span>
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100">
+                        {ca.role === 'worker' ? 'Worker' : '客户端'}
+                      </span>
+                      <span className="text-gray-400">PID {ca.pid}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {showClients && clientAgents.length === 0 && (
+                <div className="mt-1 ml-4 text-[11px] text-gray-400 italic">无关联客户端进程</div>
+              )}
+            </div>
           </div>
         )}
 

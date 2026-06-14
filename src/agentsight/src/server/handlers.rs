@@ -340,12 +340,21 @@ pub struct AgentHealthResponse {
 /// so there is nothing meaningful to display in the UI. Agent-crash interruption
 /// detection for Cosh still works via the health checker background scan.
 #[get("/api/agent-health")]
-pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
+pub async fn get_agent_health(
+    data: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    let include_clients = req.query_string().contains("include_clients=true");
     let store = data.health_store.read().unwrap();
     let agents = store
         .all_agents()
         .into_iter()
         .filter(|a| a.agent_name != "Cosh")
+        .filter(|a| {
+            include_clients
+                || a.role == crate::health::store::AgentRole::Gateway
+                || a.status == crate::health::store::AgentHealthState::Offline
+        })
         .collect();
     HttpResponse::Ok().json(AgentHealthResponse {
         agents,

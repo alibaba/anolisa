@@ -475,8 +475,9 @@ export async function fetchInterruptionConversationCounts(
 /**
  * Fetch the current health status of all discovered agent processes.
  */
-export async function fetchAgentHealth(): Promise<AgentHealthResponse> {
-  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health`);
+export async function fetchAgentHealth(opts?: { includeClients?: boolean }): Promise<AgentHealthResponse> {
+  const qs = opts?.includeClients ? '?include_clients=true' : '';
+  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health${qs}`);
 }
 
 /**
