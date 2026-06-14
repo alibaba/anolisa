@@ -408,7 +408,7 @@ h1 span{color:var(--accent-light)}
 
 <section class="hero">
   <div class="wrap">
-    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.5</div>
+    <div class="badge"><span class="badge-dot"></span>ANOLISA v0.1.7</div>
     <h1><span>&gt;_</span> ANOLISA</h1>
     <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
     <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
@@ -488,7 +488,58 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-5">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-7">
+          <div class="release-meta">
+            <div class="release-version">0.1.7</div>
+            <div class="release-date">2026-06-13</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li>User-mode library paths now resolve to <code>~/.local/lib/anolisa</code>; other directories continue to follow <code>XDG_*</code> overrides.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa install</code> no longer requires a local catalog entry before downloading from the remote repository.</li>
+              <li><code>anolisa install --dry-run</code> can preview files and services without downloading the full package.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-6">
+          <div class="release-meta">
+            <div class="release-version">0.1.6</div>
+            <div class="release-date">2026-06-12</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa osbase sandbox install gvisor</code> now supports standalone, containerd, and substrate deployments. (#851)</li>
+              <li><code>anolisa list</code> can derive the component catalog from <code>repo.toml</code> configuration. (#854)</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li>Replaced the legacy &quot;capability&quot; model with a unified component lifecycle; old state auto-migrates on next write. (#876)</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa list --enabled</code> now correctly shows installed components instead of an empty list. (#872)</li>
+              <li><code>anolisa list</code> no longer requires a separate local catalog file when <code>repo.toml</code> is configured. (#854)</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-5">
           <div class="release-meta">
             <div class="release-version">0.1.5</div>
             <div class="release-date">2026-06-11</div>
@@ -497,30 +548,28 @@ h1 span{color:var(--accent-light)}
           <div class="release-body-section">
             <h3>Added</h3>
             <ul>
-              <li><strong>Component catalog listing</strong>: <code>anolisa list</code> now reads a v1 JSON component catalog from <code>ANOLISA_CATALOG_URL</code> or <code>[catalog].url</code>, supports <code>file://</code> and <code>http(s)://</code> sources, and renders component-oriented JSON under <code>components</code> (#850)</li>
-              <li><strong>Component-first raw install</strong>: <code>anolisa install &lt;component&gt;</code> now resolves <code>repo.toml</code> backend configuration, selects the <code>raw</code> backend, downloads sha256-verified artifacts through the distribution index, installs manifest-declared files and symlinks, records installed state, and writes central-log audit records (#852)</li>
-              <li><strong>Component lifecycle plumbing</strong>: <code>anolisa uninstall</code> now understands component-first installed state while preserving legacy capability fallback; installed state records backend provenance, and cross-backend reinstalls are rejected until the component is uninstalled first (#852)</li>
+              <li><code>anolisa list</code> reads from a remote or local component catalog and returns structured JSON. (#850)</li>
+              <li><code>anolisa install &lt;component&gt;</code> downloads, verifies, and installs components from the remote repository. (#852)</li>
+              <li><code>anolisa uninstall</code> supports the new component model while preserving legacy fallback. (#852)</li>
             </ul>
           </div>
           <div class="release-body-section">
             <h3>Changed</h3>
             <ul>
-              <li>Simplified the top-level CLI command surface around component-first workflows, removing obsolete exposed capability commands and regrouping help output around <code>list</code>, <code>install</code>, <code>uninstall</code>, <code>status</code>, <code>doctor</code>, <code>logs</code>, <code>restart</code>, <code>update</code>, and adapter/management surfaces (#850)</li>
-              <li>Decoupled bug report collection from the old <code>list</code> row builder so bug reports no longer depend on capability catalog rendering internals (#850)</li>
+              <li>Simplified CLI help around <code>list</code>, <code>install</code>, <code>uninstall</code>, <code>status</code>, <code>doctor</code>, <code>logs</code>, <code>restart</code>, <code>update</code>. (#850)</li>
             </ul>
           </div>
           <div class="release-body-section">
             <h3>Fixed</h3>
             <ul>
-              <li><code>anolisa list</code> now treats a missing catalog URL as an empty successful list with a config hint, while malformed catalog config remains an explicit error (#850)</li>
-              <li>Raw installs now roll back files, tar.gz multi-file writes, symlinks, and temporary siblings if a later install step fails before state is persisted (#852)</li>
-              <li>Enable dry-run smoke coverage now uses a temporary system prefix so registry cache and config lookups do not touch host paths during tests (#834)</li>
+              <li><code>anolisa list</code> returns an empty list with a config hint when no catalog is configured. (#850)</li>
+              <li>Failed installs now automatically roll back partially-written files. (#852)</li>
             </ul>
           </div>
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-4">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-4">
           <div class="release-meta">
             <div class="release-version">0.1.4</div>
             <div class="release-date">2026-06-10</div>
@@ -529,31 +578,30 @@ h1 span{color:var(--accent-light)}
           <div class="release-body-section">
             <h3>Added</h3>
             <ul>
-              <li><strong>Agent-framework adapter lifecycle</strong>: <code>anolisa adapter scan</code> now detects available framework integrations, while <code>adapter install</code> resolves verified tar.gz artifacts from the distribution index, reads embedded component manifests, expands safe layout placeholders, and records adapter state plus central-log entries</li>
-              <li><strong>Safe adapter removal</strong>: <code>anolisa adapter remove</code> now supports dry-run and JSON previews, deletes only ANOLISA-owned files within the active layout, refuses symlinks/directories, and records skipped files with reasons</li>
-              <li><strong>OpenClaw adapter wiring</strong>: <code>anolisa adapter install tokenless openclaw</code> and <code>adapter remove tokenless openclaw</code> now register/unregister through the OpenClaw CLI, including rollback or state retention when framework CLI operations fail</li>
-              <li><strong>Remote registry-backed enable</strong>: <code>anolisa enable</code> now fetches the default remote distribution index, caches it with TTL freshness, overlays published <code>meta.toml</code> contracts for resolved components, supports registry URL overrides, and degrades to bundled or cached indexes when offline</li>
-              <li><strong>Component health checks</strong>: component manifests can carry structured health checks; <code>enable</code> records post-install probe results, and <code>status</code> layers manifest health plus owned-file integrity probes into capability health output</li>
+              <li><code>anolisa adapter scan</code> detects available framework integrations. (#808)</li>
+              <li><code>anolisa adapter install</code> downloads verified packages and registers adapters with the target framework.</li>
+              <li><code>anolisa adapter remove</code> safely removes only ANOLISA-managed files, with dry-run and JSON preview support.</li>
+              <li><code>anolisa adapter install tokenless openclaw</code> wires up the tokenless adapter via the OpenClaw CLI.</li>
+              <li><code>anolisa enable</code> fetches component metadata from the remote repository, with offline fallback.</li>
+              <li><code>anolisa status</code> now includes component health check results.</li>
             </ul>
           </div>
           <div class="release-body-section">
             <h3>Changed</h3>
             <ul>
-              <li>Flattened co-build registration from the former subscription surface into top-level <code>anolisa register</code>, <code>anolisa register status</code>, and <code>anolisa unregister</code></li>
-              <li>Extended the tar.gz install runner to support directory sources, allowing adapter packages to install whole source directories rather than only basename-matched files</li>
+              <li>Renamed subscription commands to top-level <code>anolisa register</code> / <code>unregister</code>.</li>
             </ul>
           </div>
           <div class="release-body-section">
             <h3>Fixed</h3>
             <ul>
-              <li>Restored <code>AdapterSpec</code> parsing and exports after the adapter subsystem landed on main</li>
-              <li>Hardened adapter install/remove failure handling so unsafe destinations are rejected before extraction, partial installs roll back, and failed removals keep state for retry</li>
+              <li>Adapter install/remove failures now roll back or preserve state for retry.</li>
             </ul>
           </div>
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-3">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-3">
           <div class="release-meta">
             <div class="release-version">0.1.3</div>
             <div class="release-date">2026-06-09</div>
@@ -562,63 +610,15 @@ h1 span{color:var(--accent-light)}
           <div class="release-body-section">
             <h3>Added</h3>
             <ul>
-              <li><strong>Grouped CLI help</strong>: top-level <code>anolisa --help</code> now separates everyday capability commands from independent management surfaces, with sections generated from the clap command model so new subcommands appear in the correct group automatically</li>
-              <li><strong>Help alias display</strong>: the <code>list</code> command now exposes its <code>ls</code> alias in help output</li>
-              <li><strong>Self-update changelog link</strong>: successful <code>anolisa update self</code> runs now print the published CLI changelog URL</li>
+              <li><code>anolisa --help</code> now groups commands by category (everyday vs. management).</li>
+              <li><code>list</code> command shows its <code>ls</code> alias in help output.</li>
+              <li><code>anolisa update self</code> prints a changelog link on success.</li>
             </ul>
           </div>
           <div class="release-body-section">
             <h3>Changed</h3>
             <ul>
-              <li>Corrected workspace package license metadata to Apache-2.0</li>
-            </ul>
-          </div>
-          </div>
-        </article>
-
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-2">
-          <div class="release-meta">
-            <div class="release-version">0.1.2</div>
-            <div class="release-date">2026-06-08</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><strong>Bug report command</strong>: <code>anolisa bug</code> generates local diagnostic Markdown and JSON payloads with environment facts, enabled capability state, and recent warn/error central-log records</li>
-              <li><strong>Self-update alias</strong>: <code>anolisa self update</code> now delegates to the existing <code>anolisa update self</code> flow</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li>Restored and simplified the bug report issue template</li>
-            </ul>
-          </div>
-          </div>
-        </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-1">
-          <div class="release-meta">
-            <div class="release-version">0.1.1</div>
-            <div class="release-date">2026-06-07</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><strong>Sandbox install pipeline</strong>: 5-phase orchestrator for sandbox provisioning with firecracker standard and e2b backend variants, including pre-flight checks, package installation, OS primitives, service setup, and post-verify phases</li>
-              <li><strong>Subscription consent management</strong>: Token collection state machine (register/unregister/later) with atomic-write persistence, 30-day later expiry, and sysom co-registration detection</li>
-              <li><strong>Upload enablement</strong>: ilogtail install/configure/teardown with region-id probing (metadata API → cloud-init → public fallback), SLS account management, and enable_sls_log marker</li>
-              <li><strong>Self-update</strong>: <code>anolisa update self</code> with release-manifest based updater, tar.gz artifact download, checksum verification, extraction, exclusive locking, and replacement rollback</li>
-              <li><strong>Package manager backends</strong>: Real dnf/apt implementations replacing placeholder stubs</li>
-              <li><strong>CI integration</strong>: GitHub Actions automation for anolisa workspace</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li>Replace <code>sed</code> with bash parameter expansion in install script for improved portability and correctness</li>
+              <li>Corrected package license metadata to Apache-2.0.</li>
             </ul>
           </div>
           </div>
