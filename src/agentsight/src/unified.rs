@@ -573,7 +573,7 @@ impl AgentSight {
     pub fn detach_process(&mut self, pid: u32, agent_name: &str) {
         log::debug!("Detaching from pid {}, agent name: {}", pid, agent_name);
         let _ = self.probes.remove_traced_pid(pid).inspect_err(|e| {
-            log::error!("failed to delete {pid} from traced pid map: {e}");
+            log::debug!("traced pid {pid} already removed from BPF map (expected race with sched_process_exit): {e}");
         });
         self.probes.detach_ssl_probes(pid);
     }
