@@ -120,7 +120,10 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 fn render_missing_catalog(ctx: &CliContext) -> Result<(), CliError> {
     let config_path = common::resolve_layout(ctx).etc_dir.join("repo.toml");
     let warning = format!(
-        "component catalog is not configured; set ANOLISA_CATALOG_URL or configure [backends.raw].base_url in {}",
+        "component catalog is not configured; \
+         the catalog provides the list of available components — without it, \
+         `anolisa ls` cannot display anything. \
+         Set ANOLISA_CATALOG_URL or configure [backends.raw].base_url in {}",
         config_path.display()
     );
 
@@ -146,10 +149,21 @@ fn render_missing_catalog(ctx: &CliContext) -> Result<(), CliError> {
     if !ctx.quiet {
         let color = Palette::new(ctx.no_color);
         println!("{}", color.muted("no component catalog configured"));
-        println!("  {}", color.label("config:"));
+        println!();
+        println!("  The component catalog provides the list of available ANOLISA components.");
+        println!("  Without it, `anolisa ls` cannot display anything.");
+        println!();
+        println!("  {}", color.label("config file:"));
         println!("    {}", config_path.display());
-        println!("  {}", color.label("hint:"));
-        println!("    set ANOLISA_CATALOG_URL or configure [backends.raw].base_url in repo.toml");
+        println!();
+        println!("  {}", color.label("option 1 — environment variable:"));
+        println!(
+            "    export ANOLISA_CATALOG_URL=https://example.com/anolisa-releases/anolisa/v1/catalog.json"
+        );
+        println!();
+        println!("  {}", color.label("option 2 — add to repo.toml:"));
+        println!("    [backends.raw]");
+        println!("    base_url = \"https://example.com/anolisa-releases/anolisa/v1/\"");
     }
     Ok(())
 }
