@@ -23,7 +23,7 @@ interface GeminiThoughtMessageContentProps {
 export const GeminiThoughtMessageContent: React.FC<
   GeminiThoughtMessageContentProps
 > = ({ text, isPending, availableTerminalHeight, contentWidth }) => {
-  const originalPrefix = '✦ ';
+  const originalPrefix = 'Thinking: ';
   const prefixWidth = originalPrefix.length;
 
   return (

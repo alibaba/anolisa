@@ -8,6 +8,7 @@ import type React from 'react';
 import { Text, Box } from 'ink';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
+import { SCREEN_READER_THINKING_PREFIX } from '../../textConstants.js';
 
 interface GeminiThoughtMessageProps {
   text: string;
@@ -26,13 +27,19 @@ export const GeminiThoughtMessage: React.FC<GeminiThoughtMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
 }) => {
-  const prefix = '✦ ';
+  const prefix = 'Thinking: ';
   const prefixWidth = prefix.length;
 
   return (
     <Box flexDirection="row">
       <Box width={prefixWidth}>
-        <Text color={theme.text.secondary}>{prefix}</Text>
+        <Text
+          color={theme.ui.comment}
+          italic
+          aria-label={SCREEN_READER_THINKING_PREFIX}
+        >
+          {prefix}
+        </Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
         <MarkdownDisplay

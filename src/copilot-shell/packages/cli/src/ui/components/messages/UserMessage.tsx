@@ -22,7 +22,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, commands }) => {
 
   const textColor = isSlashCommand(text, commands)
     ? theme.text.accent
-    : theme.text.secondary;
+    : theme.text.primary;
 
   return (
     <Box flexDirection="row" paddingY={0} marginY={1} alignSelf="flex-start">

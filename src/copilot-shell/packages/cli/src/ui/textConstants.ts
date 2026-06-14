@@ -8,6 +8,8 @@ export const SCREEN_READER_USER_PREFIX = 'User: ';
 
 export const SCREEN_READER_MODEL_PREFIX = 'Model: ';
 
+export const SCREEN_READER_THINKING_PREFIX = 'Thinking: ';
+
 export const SCREEN_READER_LOADING = 'loading';
 
 export const SCREEN_READER_RESPONDING = 'responding';
