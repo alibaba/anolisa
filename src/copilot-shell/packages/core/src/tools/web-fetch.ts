@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerateContentResponse } from '@google/genai';
 import { convert } from 'html-to-text';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type { Config } from '../config/config.js';
@@ -69,59 +70,24 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       );
     }
 
+    // Phase 1: HTTP fetch
+    let html: string;
+    let byteLength: number;
     try {
       console.debug(`[WebFetchTool] Fetching content from: ${url}`);
       const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
 
       if (!response.ok) {
-        const errorMessage = `Request failed with status code ${response.status} ${response.statusText}`;
-        console.error(`[WebFetchTool] ${errorMessage}`);
-        throw new Error(errorMessage);
+        throw new Error(
+          `Request failed with status code ${response.status} ${response.statusText}`,
+        );
       }
 
-      console.debug(`[WebFetchTool] Successfully fetched content from ${url}`);
-      const html = await response.text();
-      const textContent = convert(html, {
-        wordwrap: false,
-        selectors: [
-          { selector: 'a', options: { ignoreHref: true } },
-          { selector: 'img', format: 'skip' },
-        ],
-      }).substring(0, MAX_CONTENT_LENGTH);
-
+      html = await response.text();
+      byteLength = html.length;
       console.debug(
-        `[WebFetchTool] Converted HTML to text (${textContent.length} characters)`,
+        `[WebFetchTool] Successfully fetched content from ${url} (${byteLength} chars)`,
       );
-
-      const geminiClient = this.config.getGeminiClient();
-      const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
-
-I have fetched the content from ${this.params.url}. Please use the following content to answer the user's request.
-
----
-${textContent}
----`;
-
-      console.debug(
-        `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
-      );
-
-      const result = await geminiClient.generateContent(
-        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {},
-        signal,
-        this.config.getModel() || DEFAULT_QWEN_MODEL,
-      );
-      const resultText = getResponseText(result) || '';
-
-      console.debug(
-        `[WebFetchTool] Successfully processed content from ${this.params.url}`,
-      );
-
-      return {
-        llmContent: resultText,
-        returnDisplay: `Content from ${this.params.url} processed successfully.`,
-      };
     } catch (e) {
       const error = e as Error;
       const errorMessage = `Error during fetch for ${url}: ${error.message}`;
@@ -135,6 +101,107 @@ ${textContent}
         },
       };
     }
+
+    // Phase 2: HTML to text conversion
+    let textContent: string;
+    let truncated: boolean;
+    try {
+      const converted = convert(html, {
+        wordwrap: false,
+        selectors: [
+          { selector: 'a', options: { ignoreHref: true } },
+          { selector: 'img', format: 'skip' },
+        ],
+      });
+      truncated = converted.length > MAX_CONTENT_LENGTH;
+      textContent = converted.substring(0, MAX_CONTENT_LENGTH);
+      console.debug(
+        `[WebFetchTool] Converted HTML to text (${textContent.length} characters${truncated ? ', truncated' : ''})`,
+      );
+    } catch (e) {
+      const error = e as Error;
+      const errorMessage = `HTML conversion failed for ${url}: ${error.message}`;
+      console.error(`[WebFetchTool] ${errorMessage}`, error);
+      return {
+        llmContent: `Error: ${errorMessage}`,
+        returnDisplay: `Error: ${errorMessage}`,
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.WEB_FETCH_PROCESSING_ERROR,
+        },
+      };
+    }
+
+    // Phase 3: Sub-model summarization (failures degrade to raw content)
+    const geminiClient = this.config.getGeminiClient();
+    const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
+
+I have fetched the content from ${this.params.url}. Please use the following content to answer the user's request.
+
+---
+${textContent}
+---`;
+
+    console.debug(
+      `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
+    );
+
+    const stats = `${byteLength} bytes fetched, ${textContent.length} chars extracted${truncated ? ' (truncated)' : ''}`;
+
+    let result: GenerateContentResponse;
+    try {
+      result = await geminiClient.generateContent(
+        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
+        {},
+        signal,
+        this.config.getModel() || DEFAULT_QWEN_MODEL,
+      );
+    } catch (e) {
+      const error = e as Error;
+      const reason = `sub-model call failed: ${error.message}`;
+      console.warn(`[WebFetchTool] ${reason}`, error);
+      return this.buildRawFallbackResult(textContent, stats, reason);
+    }
+
+    const finishReason = result.candidates?.[0]?.finishReason;
+    const resultText = getResponseText(result) ?? '';
+    const isValidFinish =
+      finishReason === undefined ||
+      finishReason === 'STOP' ||
+      finishReason === 'MAX_TOKENS';
+
+    if (!isValidFinish || resultText.trim() === '') {
+      const reason = !isValidFinish
+        ? `sub-model finishReason=${finishReason}`
+        : 'sub-model returned empty text';
+      console.warn(`[WebFetchTool] ${reason} for ${this.params.url}`);
+      return this.buildRawFallbackResult(textContent, stats, reason);
+    }
+
+    console.debug(
+      `[WebFetchTool] Successfully processed content from ${this.params.url}`,
+    );
+
+    return {
+      llmContent: resultText,
+      returnDisplay: `Content from ${this.params.url} processed successfully (${stats}).`,
+    };
+  }
+
+  private buildRawFallbackResult(
+    textContent: string,
+    stats: string,
+    reason: string,
+  ): ToolResult {
+    return {
+      llmContent:
+        `[WebFetch] Sub-model summarization unavailable (${reason}). ` +
+        `Raw extracted text from ${this.params.url} follows:\n\n` +
+        textContent,
+      returnDisplay:
+        `Content from ${this.params.url}: ${stats}; ` +
+        `sub-model summarization unavailable (${reason}), returned raw content.`,
+    };
   }
 
   override getDescription(): string {
