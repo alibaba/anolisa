@@ -85,7 +85,14 @@ impl HealthChecker {
         // Mark gone processes as Offline (instead of deleting immediately)
         let newly_offline = if let Ok(mut store) = self.store.write() {
             store.last_scan_time = now_ms();
-            store.mark_stale_offline(&active_pids)
+            let offline = store.mark_stale_offline(&active_pids);
+            // 自动清理超过 5 分钟的 Offline 条目，避免历史 PID 在 Sidebar 长期残留
+            const OFFLINE_TTL_MS: u64 = 5 * 60 * 1000;
+            let removed = store.cleanup_stale_offline(OFFLINE_TTL_MS);
+            if removed > 0 {
+                log::info!("HealthStore: cleaned {} stale offline entries (TTL={}s)", removed, OFFLINE_TTL_MS / 1000);
+            }
+            offline
         } else {
             vec![]
         };
@@ -253,6 +260,7 @@ impl HealthChecker {
                     latency_ms: None,
                     error_message: None,
                     restart_cmd,
+                    offline_since: None,
                 }
             } else {
                 self.probe_agent(agent, &ports, restart_cmd)
@@ -306,6 +314,7 @@ impl HealthChecker {
                         latency_ms: Some(latency),
                         error_message: None,
                         restart_cmd,
+                        offline_since: None,
                     };
                 }
                 Err(ureq::Error::Status(_code, _resp)) => {
@@ -321,6 +330,7 @@ impl HealthChecker {
                         latency_ms: Some(latency),
                         error_message: None,
                         restart_cmd,
+                        offline_since: None,
                     };
                 }
                 Err(ureq::Error::Transport(e)) => {
@@ -361,6 +371,7 @@ impl HealthChecker {
             latency_ms: None,
             error_message: Some(last_error),
             restart_cmd,
+            offline_since: None,
         }
     }
 

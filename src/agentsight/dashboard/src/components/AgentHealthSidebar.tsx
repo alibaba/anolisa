@@ -9,17 +9,27 @@ const STATUS_COLORS: Record<string, string> = {
   hung: 'bg-orange-500',
   unknown: 'bg-yellow-400',
   no_port: 'bg-gray-400',
-  offline: 'bg-red-600',
+  offline: 'bg-gray-500',
 };
 
 /** Status display label */
 const STATUS_LABELS: Record<string, string> = {
   healthy: '正常',
-  unhealthy: '异常',
-  hung: '卡顿',
-  unknown: '未知',
-  no_port: '无端口',
-  offline: '已下线',
+  unhealthy: '端口无响应',
+  hung: '响应卡住',
+  unknown: '待检测',
+  no_port: '客户端进程',
+  offline: '已退出',
+};
+
+/** Status tooltip / 描述，帮助用户理解状态含义 */
+const STATUS_TOOLTIPS: Record<string, string> = {
+  healthy: '服务监听端口且 HTTP 探活成功',
+  unhealthy: '端口不接受连接，可能需要重启',
+  hung: '端口可连但 HTTP 探活超时，进程可能卡死',
+  unknown: '首轮健康检查未完成',
+  no_port: 'TUI / 子进程，本身不提供服务端口（正常）',
+  offline: '进程已退出，5 分钟后从列表自动移除',
 };
 
 /** Format relative time in Chinese */
@@ -46,44 +56,85 @@ const AgentCard: React.FC<{
 }> = ({ agent, onDelete, onRestart, restarting }) => {
   const dotColor = STATUS_COLORS[agent.status] || 'bg-gray-400';
   const label = STATUS_LABELS[agent.status] || agent.status;
+  const tooltip = STATUS_TOOLTIPS[agent.status] || '';
   const isOffline = agent.status === 'offline';
   const isHung = agent.status === 'hung';
+  const isUnhealthy = agent.status === 'unhealthy';
   const canRestart = isHung && !!agent.restart_cmd?.length;
 
+  // 计算 offline 项距离自动移除还有多久（5 分钟 TTL）
+  const OFFLINE_TTL_MS = 5 * 60 * 1000;
+  const offlineRemainSec =
+    isOffline && agent.offline_since
+      ? Math.max(0, Math.ceil((OFFLINE_TTL_MS - (Date.now() - agent.offline_since)) / 1000))
+      : null;
+
+  // 背景色：只有 hung/unhealthy 才是需要告警的，offline 不再标红
+  const bgClass = isHung ? 'bg-orange-50' : isUnhealthy ? 'bg-red-50' : '';
+  // 名称色：offline 用灰色（类似“只读历史”），只有真问题才醒目
+  const nameColor = isOffline
+    ? 'text-gray-500'
+    : isHung
+    ? 'text-orange-700'
+    : isUnhealthy
+    ? 'text-red-700'
+    : 'text-gray-900';
+  const labelColor = isOffline
+    ? 'text-gray-400'
+    : isHung
+    ? 'text-orange-500 font-semibold'
+    : isUnhealthy
+    ? 'text-red-500 font-semibold'
+    : 'text-gray-400';
+
   return (
-    <div className={`px-3 py-2.5 border-b border-gray-100 last:border-b-0 ${
-      isOffline ? 'bg-red-50' : isHung ? 'bg-orange-50' : ''
-    }`}>
+    <div
+      className={`group px-3 py-2.5 border-b border-gray-100 last:border-b-0 ${bgClass}`}
+      title={tooltip}
+    >
       <div className="flex items-center gap-2">
         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
-        <span className={`font-medium text-sm truncate ${
-          isOffline ? 'text-red-700' : isHung ? 'text-orange-700' : 'text-gray-900'
-        }`}>
+        <span className={`font-medium text-sm truncate ${nameColor}`}>
           {agent.agent_name}
         </span>
-        <span className={`ml-auto text-xs flex-shrink-0 ${
-          isOffline ? 'text-red-500 font-semibold' : isHung ? 'text-orange-500 font-semibold' : 'text-gray-400'
-        }`}>
+        <span className={`ml-auto text-xs flex-shrink-0 ${labelColor}`}>
           {label}
         </span>
       </div>
+      {/* 鼠标悬停整张卡时展开状态说明（重点问题卡 hung/unhealthy 始终显示） */}
+      {tooltip && (
+        <div
+          className={`mt-1 ml-4 text-[11px] leading-snug text-gray-500 italic ${
+            isHung || isUnhealthy ? 'block' : 'hidden group-hover:block'
+          }`}
+        >
+          ℹ️ {tooltip}
+        </div>
+      )}
       <div className="mt-1 ml-4 text-xs text-gray-500 space-y-0.5">
         <div>PID {agent.pid}</div>
         {agent.latency_ms !== null && agent.status === 'healthy' && (
           <span className="text-green-600">{agent.latency_ms}ms</span>
         )}
-        {agent.error_message && (
+        {agent.error_message && !isOffline && (
           <div className={`truncate ${isHung ? 'text-orange-500' : 'text-red-500'}`} title={agent.error_message}>
             {agent.error_message}
           </div>
         )}
         <div className="text-gray-400">{relativeTime(agent.last_check_time)}</div>
+        {isOffline && offlineRemainSec !== null && (
+          <div className="text-gray-400 italic">
+            {offlineRemainSec > 0
+              ? `${offlineRemainSec >= 60 ? Math.ceil(offlineRemainSec / 60) + ' 分钟' : offlineRemainSec + ' 秒'}后自动移除`
+              : '即将移除'}
+          </div>
+        )}
         {isOffline && (
           <button
             onClick={() => onDelete(agent.pid)}
-            className="mt-1 text-xs text-red-400 hover:text-red-600 underline"
+            className="mt-1 text-xs text-gray-400 hover:text-gray-600 underline"
           >
-            确认下线并删除
+            立即移除
           </button>
         )}
         {canRestart && (
@@ -197,9 +248,9 @@ export const AgentHealthSidebar: React.FC = () => {
     };
   }, [refresh]);
 
-  // 排序: offline 首位（告警），其次 hung，然后 unhealthy，再 healthy，最后 no_port/unknown
+  // 排序：hung/unhealthy 首位（真有问题），正常中间，offline 最后（不抢眼）
   const sorted = [...agents].sort((a, b) => {
-    const order: Record<string, number> = { offline: 0, hung: 1, unhealthy: 2, healthy: 3, unknown: 4, no_port: 5 };
+    const order: Record<string, number> = { hung: 0, unhealthy: 1, healthy: 2, no_port: 3, unknown: 4, offline: 5 };
     return (order[a.status] ?? 6) - (order[b.status] ?? 6);
   });
 

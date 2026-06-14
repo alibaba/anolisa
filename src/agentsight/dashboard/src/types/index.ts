@@ -178,6 +178,8 @@ export interface AgentHealthStatus {
   error_message: string | null;
   /** 用于重启的完整命令行，undefined 表示不支持重启 */
   restart_cmd?: string[];
+  /** 进入 Offline 状态的时刻（Unix ms）。仅 offline 项有值。 */
+  offline_since?: number;
 }
 
 export interface AgentHealthResponse {
