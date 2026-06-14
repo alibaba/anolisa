@@ -75,10 +75,60 @@ cargo test --locked
 
 > **scope is mandatory** — CI will error if scope is missing.
 
-Format: `type(scope): description`
+### Subject line
+
+Format: `type(scope): imperative description`
+- **50 characters max** (type + scope + colon + space + description)
 - Language: **English only**
-- `description`: lowercase first letter, no trailing period
+- Imperative mood ("add", "fix", "remove" — not "added", "fixes", "removing")
+- Lowercase first letter, no trailing period
 - Breaking changes: append `!` before colon, e.g. `feat(cosh)!: remove legacy flag`
+
+### Body (when non-trivial)
+
+Separated from subject by a blank line. Cover three things:
+1. What architectural choice was made
+2. Why this approach over alternatives
+3. Known limitations or trade-offs
+
+Do **not** restate the diff line-by-line or paste design docs.
+
+### Trailers
+
+```
+Assisted-by: <tool>:<version>
+Signed-off-by: Name <email>
+```
+
+`Assisted-by` goes **above** `Signed-off-by`. Omit `Assisted-by` if no AI was involved.
+
+Use `--trailer` flags (not `-s`) to control ordering:
+
+```bash
+git commit \
+  --trailer "Assisted-by: Qoder:1.7.0" \
+  --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" \
+  -m '...'
+```
+
+**Tool identifier detection** (for reference when writing `Assisted-by`):
+
+| Detection method | Tool identifier |
+|---|---|
+| `$QODER_VERSION` env var | `Qoder:<ver>` |
+| `$CLAUDE_CODE_VERSION` env var | `Claude Code:<ver>` |
+| Parent process is Qoder.app / QoderWork.app | Read `CFBundleShortVersionString` from app bundle |
+| Parent process is Claude.app | `Claude:<ver>` |
+| Parent process is Cursor.app | `Cursor:<ver>` |
+
+When generating commits, detect the active tool and fill in the actual version. Do **not** hardcode a fixed string like `Qoder:latest`.
+
+### Atomicity
+
+- One commit = one logical change
+- Scope must match the actual files changed
+- Every commit in a PR must compile independently
+- Squash fixup commits before merge
 
 ### Scope Inference (by changed file path)
 
@@ -110,7 +160,17 @@ Closes #42
 
 ```
 feat(cosh): add --json flag to config command
+
+Scripts need machine-readable config output; chose flat JSON over
+nested to keep parsing trivial. Nested config support tracked in #55.
+
+Assisted-by: Qoder
+Signed-off-by: Zhang San <zhangsan@example.com>
+```
+
+```
 fix(sec-core): handle sandbox escape edge case
+feat(sight): add deadloop detection and auto-kill
 docs(docs): update installation guide for Linux
 chore(ci): pin ubuntu version to 22.04
 deps(deps): bump @types/node to 20.11.0
@@ -218,6 +278,16 @@ cd src/copilot-shell && make test
 
 Output schema is intentionally flat for now; nested config support tracked in #55.
 ```
+
+## Changelog Entries
+
+Each user-perceivable change requires a `CHANGELOG.md` entry in the affected component. Follow [Keep a Changelog](https://keepachangelog.com/) format (Added / Changed / Fixed).
+
+1. **One sentence per bullet** — max 25 English words / 40 Chinese characters
+2. **User perspective** — describe the behavior change ("X command now supports Y"), not the code change
+3. **No internal jargon** — command names and config keys are fine; kernel APIs, framework class names, and syscalls are not
+4. **One bullet, one change** — do not combine unrelated changes with "and"
+5. **Skip invisible changes** — pure refactors, test infra, and CI tweaks do not belong in the changelog
 
 ## Code Standards
 
