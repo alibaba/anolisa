@@ -14,8 +14,8 @@ pub struct TokenCommand {
     pub period: Option<String>,
 
     /// Query last N hours
-    #[structopt(long)]
-    pub hours: Option<u64>,
+    #[structopt(long, alias = "hours")]
+    pub last: Option<u64>,
 
     /// Compare with previous period
     #[structopt(long)]
@@ -49,7 +49,7 @@ impl TokenCommand {
         let query = agentsight::TokenQuery::new(&store);
 
         // Execute query
-        let result = if let Some(hours) = self.hours {
+        let result = if let Some(hours) = self.last {
             if self.compare {
                 query.by_hours_with_compare(hours)
             } else {
