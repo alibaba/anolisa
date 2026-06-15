@@ -17,7 +17,9 @@ fn binary_path() -> std::path::PathBuf {
 
 fn run_with_input(lines: &[&str]) -> Vec<Value> {
     let bin = binary_path();
+    let home = tempfile::tempdir().expect("temp home");
     let mut child = Command::new(&bin)
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -49,12 +51,23 @@ fn initialize_returns_system_init() {
     ]);
 
     assert!(!msgs.is_empty(), "expected at least one output message");
-    let first = &msgs[0];
-    assert_eq!(first["type"], "system");
-    assert_eq!(first["subtype"], "init");
-    assert!(first["session_id"].is_string());
-    assert!(first["model"].is_string());
-    assert!(first["tools"].is_array());
+    let capability = msgs
+        .iter()
+        .find(|m| m["type"] == "control_response")
+        .expect("initialize capability response");
+    assert_eq!(
+        capability["response"]["response"]["capabilities"]
+            ["can_handle_host_executed_shell_tool_result"],
+        true
+    );
+
+    let init = msgs
+        .iter()
+        .find(|m| m["type"] == "system" && m["subtype"] == "init")
+        .expect("system init");
+    assert!(init["session_id"].is_string());
+    assert!(init["model"].is_string());
+    assert!(init["tools"].is_array());
 }
 
 #[test]
@@ -65,10 +78,17 @@ fn user_message_returns_assistant_and_result() {
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
-    assert!(msgs.len() >= 2, "expected at least 2 messages, got {}", msgs.len());
+    assert!(
+        msgs.len() >= 2,
+        "expected at least 2 messages, got {}",
+        msgs.len()
+    );
 
-    let init = &msgs[0];
-    assert_eq!(init["type"], "system");
+    assert!(
+        msgs.iter()
+            .any(|m| m["type"] == "system" && m["subtype"] == "init"),
+        "expected system init"
+    );
 
     let has_result = msgs.iter().any(|m| m["type"] == "result");
     assert!(has_result, "expected a result message");
@@ -93,7 +113,10 @@ fn output_format_matches_cosh_shell_expectations() {
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
-    let init = &msgs[0];
+    let init = msgs
+        .iter()
+        .find(|m| m["type"] == "system" && m["subtype"] == "init")
+        .expect("system init");
 
     assert!(
         init.get("session_id").is_some(),
@@ -107,12 +130,6 @@ fn output_format_matches_cosh_shell_expectations() {
         init.get("tools").is_some(),
         "system init must have top-level tools"
     );
-    assert_eq!(
-        init.get("type").unwrap().as_str().unwrap(),
-        "system"
-    );
-    assert_eq!(
-        init.get("subtype").unwrap().as_str().unwrap(),
-        "init"
-    );
+    assert_eq!(init.get("type").unwrap().as_str().unwrap(), "system");
+    assert_eq!(init.get("subtype").unwrap().as_str().unwrap(), "init");
 }

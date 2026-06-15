@@ -17,7 +17,9 @@ fn binary_path() -> std::path::PathBuf {
 
 fn interact(messages: &[&str]) -> Vec<Value> {
     let bin = binary_path();
+    let home = tempfile::tempdir().expect("temp home");
     let mut child = Command::new(&bin)
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -50,7 +52,10 @@ fn initialize_then_shutdown() {
     ]);
 
     assert!(!msgs.is_empty());
-    let init = &msgs[0];
+    let init = msgs
+        .iter()
+        .find(|m| m["type"] == "system" && m["subtype"] == "init")
+        .expect("system init");
     assert_eq!(init["type"], "system");
     assert_eq!(init["subtype"], "init");
     assert!(init["session_id"].as_str().unwrap().len() > 10);

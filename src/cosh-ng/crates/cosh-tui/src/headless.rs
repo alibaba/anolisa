@@ -69,10 +69,11 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
 
         match msg {
             InputMessage::ControlRequest {
-                request_id: _,
+                request_id,
                 request,
             } => match request {
                 ShellControlRequest::Initialize => {
+                    engine.emit(&mut writer, &OutputMessage::initialize_success(&request_id));
                     let init_msg = OutputMessage::system_init(
                         &engine.session_id,
                         &engine.model,

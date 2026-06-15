@@ -172,6 +172,7 @@ impl CoshCore {
             let mut text_block_started = false;
             let mut thinking_block_started = false;
             let mut suppress_stream_text = false;
+            let mut tool_call_seen = false;
 
             self.emit(writer, &OutputMessage::stream_message_start());
 
@@ -179,10 +180,7 @@ impl CoshCore {
                 match event {
                     GenerateEvent::ThinkingDelta(delta) => {
                         if !thinking_block_started {
-                            self.emit(
-                                writer,
-                                &OutputMessage::stream_thinking_start(block_index),
-                            );
+                            self.emit(writer, &OutputMessage::stream_thinking_start(block_index));
                             thinking_block_started = true;
                         }
                         self.emit(
@@ -196,12 +194,12 @@ impl CoshCore {
                             block_index += 1;
                             thinking_block_started = false;
                         }
-                        if !text_block_started {
+                        if !tool_call_seen && !text_block_started {
                             self.emit(writer, &OutputMessage::stream_text_start(block_index));
                             text_block_started = true;
                         }
                         text_buf.push_str(&delta);
-                        if !suppress_stream_text {
+                        if !suppress_stream_text && !tool_call_seen {
                             if text_buf.contains("COSH_QUESTION:") {
                                 suppress_stream_text = true;
                             } else {
@@ -213,6 +211,7 @@ impl CoshCore {
                         }
                     }
                     GenerateEvent::ToolCallStart { index, id, name } => {
+                        tool_call_seen = true;
                         if thinking_block_started {
                             self.emit(writer, &OutputMessage::stream_block_stop(block_index));
                             block_index += 1;
@@ -230,10 +229,12 @@ impl CoshCore {
                         tool_calls[idx].id = id.clone();
                         tool_calls[idx].name = name.clone();
                         tool_calls[idx].block_index = block_index;
+                        tool_calls[idx].block_closed = false;
                         self.emit(
                             writer,
                             &OutputMessage::stream_tool_use_start(block_index, &id, &name),
                         );
+                        block_index += 1;
                     }
                     GenerateEvent::ToolCallDelta {
                         index,
@@ -255,7 +256,8 @@ impl CoshCore {
                         if idx < tool_calls.len() {
                             let bi = tool_calls[idx].block_index;
                             self.emit(writer, &OutputMessage::stream_block_stop(bi));
-                            block_index = bi + 1;
+                            tool_calls[idx].block_closed = true;
+                            block_index = block_index.max(bi + 1);
                         }
                     }
                     GenerateEvent::Usage { .. } => {}
@@ -271,18 +273,33 @@ impl CoshCore {
             }
             if text_block_started {
                 self.emit(writer, &OutputMessage::stream_block_stop(block_index));
+                block_index += 1;
             }
+            for tc in &mut tool_calls {
+                if !tc.id.is_empty() && !tc.block_closed {
+                    self.emit(writer, &OutputMessage::stream_block_stop(tc.block_index));
+                    tc.block_closed = true;
+                    block_index = block_index.max(tc.block_index + 1);
+                }
+            }
+            let emit_visible_text = tool_calls.is_empty()
+                && !text_buf.is_empty()
+                && !text_buf.contains("COSH_QUESTION:");
             let _ = block_index;
             self.emit(writer, &OutputMessage::stream_message_stop());
 
-            if !text_buf.is_empty() {
-                self.emit(writer, &OutputMessage::assistant_text(&self.session_id, &text_buf));
+            if emit_visible_text {
+                self.emit(
+                    writer,
+                    &OutputMessage::assistant_text(&self.session_id, &text_buf),
+                );
             }
 
             if tool_calls.is_empty() {
                 if let Some(synthetic) = parse_cosh_question_text(&text_buf) {
-                    let result =
-                        self.handle_ask_user("synthetic-ask", &synthetic, reader, writer).await;
+                    let result = self
+                        .handle_ask_user("synthetic-ask", &synthetic, reader, writer)
+                        .await;
                     if result.is_error {
                         self.messages.push(Message::assistant(&text_buf));
                         return Ok(());
@@ -329,10 +346,12 @@ impl CoshCore {
                     serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
 
                 if tc.name == "ask_user_question" {
-                    let result =
-                        self.handle_ask_user(&tc.id, &params, reader, writer).await;
-                    self.messages
-                        .push(Message::tool_result(&tc.id, &result.output, result.is_error));
+                    let result = self.handle_ask_user(&tc.id, &params, reader, writer).await;
+                    self.messages.push(Message::tool_result(
+                        &tc.id,
+                        &result.output,
+                        result.is_error,
+                    ));
                     if interrupted {
                         return Ok(());
                     }
@@ -342,17 +361,39 @@ impl CoshCore {
                 let outcome = self.classify_tool(&tc.name, &params);
 
                 let result = match outcome {
-                    Outcome::Allow => self.execute_tool(&tc.name, params, &ctx).await,
+                    Outcome::Allow => {
+                        let result = self.execute_tool(&tc.name, params, &ctx).await;
+                        self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                        result
+                    }
                     Outcome::RequireApproval => {
                         let request_id = self.next_request_id();
                         self.emit(
                             writer,
-                            &OutputMessage::can_use_tool(&request_id, &tc.name, params.clone(), &tc.id),
+                            &OutputMessage::can_use_tool(
+                                &request_id,
+                                &tc.name,
+                                params.clone(),
+                                &tc.id,
+                            ),
                         );
 
-                        match self.wait_for_approval(&request_id, reader).await {
+                        let accepts_host_executed_shell = self
+                            .tools
+                            .get(&tc.name)
+                            .map(|tool| tool.kind() == ToolKind::ShellExec)
+                            .unwrap_or(false);
+                        match self
+                            .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
+                            .await
+                        {
                             ApprovalResult::Allowed => {
-                                self.execute_tool(&tc.name, params, &ctx).await
+                                let result = self.execute_tool(&tc.name, params, &ctx).await;
+                                self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                                result
+                            }
+                            ApprovalResult::HostExecutedShell { llm_content } => {
+                                ToolResult::success(llm_content)
                             }
                             ApprovalResult::Denied(reason) => ToolResult::error(format!(
                                 "Tool call denied: {}",
@@ -369,8 +410,11 @@ impl CoshCore {
                     }
                 };
 
-                self.messages
-                    .push(Message::tool_result(&tc.id, &result.output, result.is_error));
+                self.messages.push(Message::tool_result(
+                    &tc.id,
+                    &result.output,
+                    result.is_error,
+                ));
 
                 if self.loop_detector.record_action(&tc.name, &tc.arguments) {
                     self.messages
@@ -384,6 +428,23 @@ impl CoshCore {
         }
 
         Err(format!("Agent exceeded max turns ({max_turns})"))
+    }
+
+    fn emit_provider_native_tool_result<W: Write>(
+        &self,
+        writer: &mut W,
+        tool_use_id: &str,
+        result: &ToolResult,
+    ) {
+        self.emit(
+            writer,
+            &OutputMessage::tool_result(
+                &self.session_id,
+                tool_use_id,
+                &result.output,
+                result.is_error,
+            ),
+        );
     }
 
     async fn execute_tool(
@@ -409,7 +470,7 @@ impl CoshCore {
 
     async fn handle_ask_user<W, R>(
         &self,
-        tool_use_id: &str,
+        _tool_use_id: &str,
         params: &serde_json::Value,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
@@ -509,6 +570,7 @@ impl CoshCore {
     async fn wait_for_approval<R: AsyncBufReadExt + Unpin>(
         &self,
         expected_request_id: &str,
+        accepts_host_executed_shell: bool,
         reader: &mut tokio::io::Lines<R>,
     ) -> ApprovalResult {
         while let Ok(Some(line)) = reader.next_line().await {
@@ -530,6 +592,21 @@ impl CoshCore {
                     match response.response.behavior.as_deref() {
                         Some("allow") => return ApprovalResult::Allowed,
                         Some("deny") => return ApprovalResult::Denied(response.response.message),
+                        Some("host_executed_shell") => {
+                            if !accepts_host_executed_shell {
+                                return ApprovalResult::Denied(Some(
+                                    "host_executed_shell is only valid for shell tools".to_string(),
+                                ));
+                            }
+                            let Some(result) = response.response.result else {
+                                return ApprovalResult::Denied(Some(
+                                    "host_executed_shell response missing result".to_string(),
+                                ));
+                            };
+                            return ApprovalResult::HostExecutedShell {
+                                llm_content: result.llm_content,
+                            };
+                        }
                         _ => return ApprovalResult::Denied(Some("unknown response".to_string())),
                     }
                 }
@@ -549,6 +626,7 @@ impl CoshCore {
 enum ApprovalResult {
     Allowed,
     Denied(Option<String>),
+    HostExecutedShell { llm_content: String },
     Interrupted,
 }
 
@@ -558,6 +636,7 @@ struct PendingToolCall {
     name: String,
     arguments: String,
     block_index: u32,
+    block_closed: bool,
 }
 
 fn parse_cosh_question_text(text: &str) -> Option<serde_json::Value> {
@@ -570,6 +649,12 @@ fn parse_cosh_question_text(text: &str) -> Option<serde_json::Value> {
 mod tests {
     use super::*;
     use crate::provider::mock::MockProvider;
+    use crate::tool::{Tool, ToolResult};
+    use async_trait::async_trait;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tokio::io::BufReader;
 
     async fn empty_reader() -> tokio::io::Lines<BufReader<&'static [u8]>> {
@@ -581,6 +666,44 @@ mod tests {
         config.agent.approval_mode = "trust".to_string();
         let tools = ToolRegistry::new();
         CoshCore::new(config, Box::new(provider), tools)
+    }
+
+    struct CountingShellTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingShellTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "counting shell"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" }
+                },
+                "required": ["command"]
+            })
+        }
+
+        fn kind(&self) -> ToolKind {
+            ToolKind::ShellExec
+        }
+
+        async fn invoke(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::success("provider-native shell executed"))
+        }
     }
 
     #[tokio::test]
@@ -670,7 +793,188 @@ mod tests {
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("hello"));
+        assert!(
+            output_str.find(r#""type":"user""#) < output_str.find("The command output was: hello"),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains(r#""type":"tool_result""#),
+            "{output_str}"
+        );
         assert!(core.messages.len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn text_after_tool_call_is_not_visible_before_tool_result() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::TextDelta("Preparing to run the command.".to_string()),
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::TextDelta("SHOULD NOT BE VISIBLE BEFORE TOOL RESULT".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("The command output was: hello".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::with_defaults();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        core.handle_user_message("run echo hello", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("Preparing to run the command."),
+            "{output_str}"
+        );
+        assert!(
+            !output_str.contains("SHOULD NOT BE VISIBLE BEFORE TOOL RESULT"),
+            "{output_str}"
+        );
+        assert!(
+            output_str.find(r#""type":"tool_result""#)
+                < output_str.find("The command output was: hello"),
+            "{output_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_block_is_closed_when_stream_ends_without_tool_call_end() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
+                },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("done".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::with_defaults();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        core.handle_user_message("run echo hello", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains(r#""type":"content_block_stop","index":0"#));
+        assert!(
+            output_str.find(r#""type":"content_block_stop","index":0"#)
+                < output_str.find(r#""type":"tool_result""#),
+            "{output_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_tool_call_blocks_are_closed_with_distinct_indexes_without_tool_call_end() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "first_unknown".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"value":1}"#.to_string(),
+                },
+                GenerateEvent::ToolCallStart {
+                    index: 1,
+                    id: "call-2".to_string(),
+                    name: "second_unknown".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 1,
+                    arguments_delta: r#"{"value":2}"#.to_string(),
+                },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("done".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::new();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        core.handle_user_message("run two tools", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let first_message = output_str
+            .split(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
+            .next()
+            .expect("first stream message");
+        assert_eq!(
+            first_message
+                .matches(r#""type":"content_block_start","index":0"#)
+                .count(),
+            1,
+            "{output_str}"
+        );
+        assert_eq!(
+            first_message
+                .matches(r#""type":"content_block_start","index":1"#)
+                .count(),
+            1,
+            "{output_str}"
+        );
+        assert_eq!(
+            first_message
+                .matches(r#""type":"content_block_stop","index":0"#)
+                .count(),
+            1,
+            "{output_str}"
+        );
+        assert_eq!(
+            first_message
+                .matches(r#""type":"content_block_stop","index":1"#)
+                .count(),
+            1,
+            "{output_str}"
+        );
+        assert!(
+            output_str.find(r#""type":"content_block_stop","index":1"#)
+                < output_str.find(r#""type":"tool_result""#),
+            "{output_str}"
+        );
     }
 
     #[tokio::test]
@@ -753,8 +1057,9 @@ mod tests {
 
         let tool_result = core.messages.iter().find(|m| m.role == "tool").unwrap();
         if let crate::provider::MessageContent::Blocks(blocks) = &tool_result.content {
-            if let crate::provider::MessageContentBlock::ToolResult { content, is_error, .. } =
-                &blocks[0]
+            if let crate::provider::MessageContentBlock::ToolResult {
+                content, is_error, ..
+            } = &blocks[0]
             {
                 assert!(is_error);
                 assert!(content.contains("denied"));
@@ -770,8 +1075,130 @@ mod tests {
         let input = format!("{mismatched}\n{correct}\n");
         let mut reader = BufReader::new(input.as_bytes()).lines();
 
-        let result = core.wait_for_approval("expected-id", &mut reader).await;
+        let result = core
+            .wait_for_approval("expected-id", false, &mut reader)
+            .await;
         assert!(matches!(result, ApprovalResult::Denied(_)));
+    }
+
+    #[tokio::test]
+    async fn approval_flow_host_executed_shell_uses_tool_result() {
+        let shell_calls = Arc::new(AtomicUsize::new(0));
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"command":"df -h"}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("Received shell evidence.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "suggest".to_string();
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(CountingShellTool {
+            calls: Arc::clone(&shell_calls),
+        }));
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_shell","result":{"llmContent":"ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed","returnDisplay":"df -h completed","metadata":{"command":"df -h","status":"completed","exit_code":0}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("check disk", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shell_calls.load(Ordering::SeqCst),
+            0,
+            "host-executed result must not run provider-native shell executor"
+        );
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("Received shell evidence."),
+            "{output_str}"
+        );
+        assert!(
+            !output_str.contains(r#""type":"tool_result""#),
+            "{output_str}"
+        );
+        let tool_result = core
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-1"))
+            .expect("tool result");
+        match &tool_result.content {
+            crate::provider::MessageContent::Text(content) => {
+                assert!(content.contains("ShellCommandCompleted evidence"));
+                assert!(content.contains("command: df -h"));
+            }
+            _ => panic!("expected text tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_flow_rejects_host_executed_for_non_shell_tool() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-write".to_string(),
+                    name: "write_file".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta:
+                        r#"{"file_path":"/tmp/cosh-host-executed-non-shell","content":"bad"}"#
+                            .to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("Rejected.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "suggest".to_string();
+        let tools = ToolRegistry::with_defaults();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_shell","result":{"llmContent":"should not be accepted","returnDisplay":null,"metadata":{"command":"echo bad","status":"completed","exit_code":0}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("write file", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let tool_result = core
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-write"))
+            .expect("tool result");
+        match &tool_result.content {
+            crate::provider::MessageContent::Text(content) => {
+                assert!(content.contains("host_executed_shell is only valid for shell tools"));
+                assert!(!content.contains("should not be accepted"));
+            }
+            _ => panic!("expected text tool result"),
+        }
     }
 
     #[tokio::test]
@@ -847,8 +1274,7 @@ mod tests {
             .expect("should have thinking_delta line");
         let v: serde_json::Value = serde_json::from_str(thinking_line).unwrap();
         assert_eq!(
-            v.pointer("/event/delta/thinking")
-                .and_then(|t| t.as_str()),
+            v.pointer("/event/delta/thinking").and_then(|t| t.as_str()),
             Some("Step 1: analyze...")
         );
     }

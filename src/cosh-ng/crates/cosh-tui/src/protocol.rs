@@ -85,12 +85,23 @@ pub struct ControlResponsePayload {
 pub struct ControlResponseBody {
     pub behavior: Option<String>,
     pub message: Option<String>,
+    pub result: Option<HostExecutedShellResult>,
     #[serde(rename = "toolUseID")]
     pub tool_use_id: Option<String>,
     #[serde(default, rename = "updatedPermissions")]
     pub updated_permissions: Option<Value>,
     pub answer: Option<String>,
     pub selected_options: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HostExecutedShellResult {
+    #[serde(rename = "llmContent")]
+    pub llm_content: String,
+    #[serde(rename = "returnDisplay")]
+    pub return_display: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 // =====================================================================
@@ -116,10 +127,21 @@ pub enum OutputMessage {
         message: AssistantMessage,
     },
 
+    #[serde(rename = "user")]
+    User {
+        session_id: String,
+        message: UserOutputMessage,
+    },
+
     #[serde(rename = "control_request")]
     ControlRequest {
         request_id: String,
         request: CoreControlRequest,
+    },
+
+    #[serde(rename = "control_response")]
+    ControlResponse {
+        response: CoreControlResponsePayload,
     },
 
     #[serde(rename = "result")]
@@ -140,6 +162,25 @@ pub enum OutputMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreControlResponsePayload {
+    pub subtype: String,
+    pub request_id: String,
+    pub response: CoreControlResponseBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreControlResponseBody {
+    pub subtype: String,
+    pub capabilities: CoreControlCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreControlCapabilities {
+    pub can_handle_can_use_tool: bool,
+    pub can_handle_host_executed_shell_tool_result: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SystemPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +199,12 @@ pub struct AssistantMessage {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct UserOutputMessage {
+    pub role: String,
+    pub content: Vec<UserContentBlock>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
@@ -167,6 +214,17 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: Value,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum UserContentBlock {
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        is_error: bool,
+        content: String,
     },
 }
 
@@ -267,6 +325,22 @@ impl OutputMessage {
         }
     }
 
+    pub fn initialize_success(request_id: &str) -> Self {
+        Self::ControlResponse {
+            response: CoreControlResponsePayload {
+                subtype: "success".to_string(),
+                request_id: request_id.to_string(),
+                response: CoreControlResponseBody {
+                    subtype: "initialize".to_string(),
+                    capabilities: CoreControlCapabilities {
+                        can_handle_can_use_tool: true,
+                        can_handle_host_executed_shell_tool_result: true,
+                    },
+                },
+            },
+        }
+    }
+
     pub fn system_status(status: &str) -> Self {
         Self::System {
             subtype: "status".to_string(),
@@ -283,6 +357,20 @@ impl OutputMessage {
             message: AssistantMessage {
                 content: vec![ContentBlock::Text {
                     text: text.to_string(),
+                }],
+            },
+        }
+    }
+
+    pub fn tool_result(session_id: &str, tool_use_id: &str, content: &str, is_error: bool) -> Self {
+        Self::User {
+            session_id: session_id.to_string(),
+            message: UserOutputMessage {
+                role: "user".to_string(),
+                content: vec![UserContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    is_error,
+                    content: content.to_string(),
                 }],
             },
         }
@@ -442,7 +530,10 @@ mod tests {
         let json = r#"{"request_id":"init-1","type":"control_request","request":{"subtype":"initialize"}}"#;
         let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
         match msg {
-            InputMessage::ControlRequest { request_id, request } => {
+            InputMessage::ControlRequest {
+                request_id,
+                request,
+            } => {
                 assert_eq!(request_id, "init-1");
                 assert!(matches!(request, ShellControlRequest::Initialize));
             }
@@ -453,16 +544,12 @@ mod tests {
     #[test]
     fn parse_control_response_allow() {
         let json = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow","updatedPermissions":[],"toolUseID":"toolu_abc"}}}"#;
-        let msg: InputMessage =
-            serde_json::from_str(json).expect("should parse control_response");
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse control_response");
         match msg {
             InputMessage::ControlResponse { response } => {
                 assert_eq!(response.request_id, "req-1");
                 assert_eq!(response.response.behavior.as_deref(), Some("allow"));
-                assert_eq!(
-                    response.response.tool_use_id.as_deref(),
-                    Some("toolu_abc")
-                );
+                assert_eq!(response.response.tool_use_id.as_deref(), Some("toolu_abc"));
             }
             _ => panic!("expected ControlResponse variant"),
         }
@@ -475,9 +562,32 @@ mod tests {
         match msg {
             InputMessage::ControlResponse { response } => {
                 assert_eq!(response.response.behavior.as_deref(), Some("deny"));
+                assert_eq!(response.response.message.as_deref(), Some("User denied"));
+            }
+            _ => panic!("expected ControlResponse"),
+        }
+    }
+
+    #[test]
+    fn parse_control_response_host_executed_shell() {
+        let json = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-3","response":{"behavior":"host_executed_shell","result":{"llmContent":"ShellCommandCompleted evidence\ncommand: df -h","returnDisplay":"df -h completed","metadata":{"command":"df -h","status":"completed","exit_code":0}}}}}"#;
+        let msg: InputMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            InputMessage::ControlResponse { response } => {
                 assert_eq!(
-                    response.response.message.as_deref(),
-                    Some("User denied")
+                    response.response.behavior.as_deref(),
+                    Some("host_executed_shell")
+                );
+                let result = response.response.result.expect("host result");
+                assert!(result.llm_content.contains("ShellCommandCompleted"));
+                assert_eq!(result.return_display.as_deref(), Some("df -h completed"));
+                assert_eq!(
+                    result
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("exit_code"))
+                        .and_then(Value::as_i64),
+                    Some(0)
                 );
             }
             _ => panic!("expected ControlResponse"),
@@ -497,6 +607,25 @@ mod tests {
         assert_eq!(v["subtype"], "init");
         assert_eq!(v["session_id"], "sess-1");
         assert_eq!(v["model"], "mock-model");
+    }
+
+    #[test]
+    fn serialize_initialize_success_capabilities() {
+        let msg = OutputMessage::initialize_success("init-1");
+        let json = serde_json::to_string(&msg).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "control_response");
+        assert_eq!(v["response"]["subtype"], "success");
+        assert_eq!(v["response"]["request_id"], "init-1");
+        assert_eq!(v["response"]["response"]["subtype"], "initialize");
+        assert_eq!(
+            v["response"]["response"]["capabilities"]["can_handle_can_use_tool"],
+            true
+        );
+        assert_eq!(
+            v["response"]["response"]["capabilities"]["can_handle_host_executed_shell_tool_result"],
+            true
+        );
     }
 
     #[test]
@@ -544,7 +673,12 @@ mod tests {
         assert_eq!(v.get("type").unwrap().as_str().unwrap(), "control_request");
         // cosh-shell checks: v["request"]["subtype"]
         assert_eq!(
-            v.get("request").unwrap().get("subtype").unwrap().as_str().unwrap(),
+            v.get("request")
+                .unwrap()
+                .get("subtype")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "can_use_tool"
         );
         // cosh-shell checks: v["request_id"]
@@ -629,7 +763,8 @@ mod tests {
 
     #[test]
     fn parse_interrupt_request() {
-        let json = r#"{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}"#;
+        let json =
+            r#"{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}"#;
         let msg: InputMessage = serde_json::from_str(json).unwrap();
         match msg {
             InputMessage::ControlRequest { request, .. } => {
@@ -641,7 +776,8 @@ mod tests {
 
     #[test]
     fn parse_shutdown_request() {
-        let json = r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#;
+        let json =
+            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#;
         let msg: InputMessage = serde_json::from_str(json).unwrap();
         match msg {
             InputMessage::ControlRequest { request, .. } => {
