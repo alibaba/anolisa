@@ -1,8 +1,44 @@
 # Changelog
 
-All notable changes to cosh-ng will be documented in this file.
+All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] — 2026-06-15
+
+### Added
+- **cosh-shell crate** — PTY-based AI-augmented shell host with OSC marker protocol
+- Claude, Qwen, Fake AI adapters with streaming support
+- Inline rendering engine (approval, question, recommendation, activity panels)
+- Governance layer with approval modes
+- Terminal recovery via signal handlers (SIGTERM/SIGHUP/SIGQUIT) and panic hook
+- Exit code classification with 8 categories (Smart/Auto/Manual analysis modes)
+- Tool display engine with per-tool-type parsing and ANSI color categories
+- Hook engine with built-in hooks (FailedCommandHook, TestFailureHook) and skill routing
+- External hook loading from ~/.config/cosh/hooks/ with subprocess execution
+- Native shell compatibility (rcfile loading, PS1, history, login shell detection)
+- Context window with sliding window (max commands, max age, token budget)
+- Prompt intent optimization (do → Bash tool, know → prose)
+- Natural language intercept with visual feedback
+- InputClassifier conservative mode for native mode
+- Analysis throttle (30s cooldown, max 3 consecutive)
+- Consultation card rendering with keyboard capture
+- Control protocol for tool approval round-trips
+- Startup banner with gradient ASCII art logo
+- `/mode` and `/hooks` slash commands
+- Architecture documentation
+
+### Fixed
+- Native mode input rendering with powerlevel10k dual-line prompts
+- Slash/NL intercept via buffered-then-judge strategy in native mode
+- Zsh preexec intercept for command_not_found
+- CandidateRedraw line clearing for CJK input and backspace
+- Suppress cosh-osc$ prompt leak in native mode
+- Tool display label matching in bash tool executor
+- Wide character placeholder cell handling in buffer extraction
+
+### Changed
+- Unified workspace version (0.3.0) for all crates (cosh-types, cosh-platform, cosh-cli, cosh-shell, cosh-tui)
 
 ## [0.2.0] - 2026-05-16
 
