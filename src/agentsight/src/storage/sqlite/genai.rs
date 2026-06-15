@@ -621,9 +621,24 @@ impl GenAISqliteStore {
                     );
                     return Ok(());
                 }
-                // No pending row found — fall through to plain insert below
+                // No pending row with status='pending' — check if the row
+                // already exists with a different status (e.g. 'interrupted'
+                // by crash detection).  If so, skip the fallback INSERT to
+                // avoid creating a duplicate row for the same call_id.
+                let existing: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM genai_events WHERE call_id = ?1",
+                    params![call.call_id],
+                    |row| row.get(0),
+                )?;
+                if existing > 0 {
+                    log::debug!(
+                        "[GenAI] Row already exists for call_id={} (non-pending), skipping insert",
+                        call.call_id
+                    );
+                    return Ok(());
+                }
                 log::debug!(
-                    "[GenAI] No pending row for call_id={}, inserting directly",
+                    "[GenAI] No row for call_id={}, inserting directly",
                     call.call_id
                 );
             }

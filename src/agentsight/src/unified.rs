@@ -688,7 +688,20 @@ impl AgentSight {
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {
-                    // Session_id not yet resolved — queue for deferred resolution
+                    // Session_id not yet resolved — queue for deferred resolution.
+                    // Write a pending row NOW so crash detection can see this call
+                    // during the deferral window (up to PENDING_SESSION_TIMEOUT).
+                    if let Some(ref info) = pending_info {
+                        if let Some(sqlite_store) = self.genai_sqlite_store.as_ref() {
+                            if let Err(e) = sqlite_store.insert_pending(info) {
+                                log::warn!(
+                                    "Failed to insert deferred pending call {}: {}",
+                                    info.call_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
                     self.pending_genai.push(PendingGenAI {
                         events: output.events,
                         response_id: output.pending_response_id.unwrap(),
@@ -903,6 +916,39 @@ impl AgentSight {
                     exporter.name()
                 );
             }
+        }
+    }
+
+    /// Complete deferred GenAI events: promote their pending DB rows to
+    /// 'complete', then export to non-SQLite exporters (or FFI).
+    ///
+    /// This mirrors the immediate path (try_process lines 717-744) but is used
+    /// when events were queued in `pending_genai` and are now being drained.
+    /// The pending row was written by the deferred-queue entry point; this
+    /// method updates it via `complete_pending` and avoids double-writing by
+    /// skipping the SQLite exporter in the fan-out.
+    fn complete_and_export_deferred_genai(&self, events: &[GenAISemanticEvent]) {
+        if let Some(sqlite_store) = self.genai_sqlite_store.as_ref() {
+            for event in events {
+                if let Err(e) = sqlite_store.complete_pending(event) {
+                    log::warn!("Failed to complete deferred pending call: {e}");
+                }
+            }
+            if let Some(ref sender) = self.ffi_sender {
+                for event in events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        sender.send(FfiEvent::Llm(call.clone()));
+                    }
+                }
+            } else {
+                for exporter in &self.genai_exporters {
+                    if exporter.name() != "sqlite" {
+                        exporter.export(events);
+                    }
+                }
+            }
+        } else {
+            self.export_genai_events(events);
         }
     }
 
@@ -1553,7 +1599,7 @@ impl AgentSight {
         self.pending_genai = still_pending;
 
         for events in &to_export {
-            self.export_genai_events(events);
+            self.complete_and_export_deferred_genai(events);
             self.detect_and_store_interruptions(events);
         }
     }
@@ -1584,7 +1630,7 @@ impl AgentSight {
         self.pending_genai = still_pending;
 
         for events in &to_export {
-            self.export_genai_events(events);
+            self.complete_and_export_deferred_genai(events);
             self.detect_and_store_interruptions(events);
         }
     }
@@ -1599,7 +1645,7 @@ impl AgentSight {
             );
         }
         for pending in pending_items {
-            self.export_genai_events(&pending.events);
+            self.complete_and_export_deferred_genai(&pending.events);
             self.detect_and_store_interruptions(&pending.events);
         }
     }
