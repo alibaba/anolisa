@@ -28,7 +28,7 @@ impl AuditStore {
 
         // Create table and indexes with dynamic table name
         let create_table_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type    TEXT NOT NULL,
                 timestamp_ns  INTEGER NOT NULL,
@@ -37,16 +37,14 @@ impl AuditStore {
                 comm          TEXT NOT NULL,
                 duration_ns   INTEGER DEFAULT 0,
                 extra         TEXT
-            );",
-            table_name
+            );"
         );
         let create_index_sql = format!(
-            "CREATE INDEX IF NOT EXISTS idx_{}_ts ON {}(timestamp_ns);
-             CREATE INDEX IF NOT EXISTS idx_{}_type ON {}(event_type);
-             CREATE INDEX IF NOT EXISTS idx_{}_pid ON {}(pid);",
-            table_name, table_name, table_name, table_name, table_name, table_name
+            "CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name}(timestamp_ns);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_type ON {table_name}(event_type);
+             CREATE INDEX IF NOT EXISTS idx_{table_name}_pid ON {table_name}(pid);"
         );
-        conn.execute_batch(&format!("{}{}", create_table_sql, create_index_sql))?;
+        conn.execute_batch(&format!("{create_table_sql}{create_index_sql}"))?;
 
         Ok(AuditStore { conn, table_name })
     }
@@ -121,8 +119,8 @@ impl AuditStore {
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse audit record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse audit record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -167,8 +165,8 @@ impl AuditStore {
         for row in rows {
             match row {
                 Ok(Ok(record)) => records.push(record),
-                Ok(Err(e)) => log::warn!("Failed to parse audit record: {}", e),
-                Err(e) => log::warn!("Failed to read row: {}", e),
+                Ok(Err(e)) => log::warn!("Failed to parse audit record: {e}"),
+                Err(e) => log::warn!("Failed to read row: {e}"),
             }
         }
 
@@ -288,18 +286,18 @@ impl AuditStore {
 
 /// Parse a database row into an AuditRecord
 fn row_to_record(row: &rusqlite::Row) -> Result<AuditRecord> {
-    let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let event_type_str: String = row.get(1).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let timestamp_ns: i64 = row.get(2).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let pid: u32 = row.get(3).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let ppid: Option<u32> = row.get(4).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let comm: String = row.get(5).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let duration_ns: i64 = row.get(6).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let extra_str: String = row.get(7).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let event_type_str: String = row.get(1).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let timestamp_ns: i64 = row.get(2).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pid: u32 = row.get(3).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ppid: Option<u32> = row.get(4).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let comm: String = row.get(5).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let duration_ns: i64 = row.get(6).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let extra_str: String = row.get(7).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event_type: AuditEventType = event_type_str
         .parse()
-        .map_err(|e: String| anyhow::anyhow!("{}", e))?;
+        .map_err(|e: String| anyhow::anyhow!("{e}"))?;
 
     let extra: AuditExtra =
         serde_json::from_str(&extra_str).context("Failed to deserialize extra JSON")?;

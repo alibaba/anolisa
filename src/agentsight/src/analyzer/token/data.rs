@@ -94,7 +94,7 @@ impl TokenData {
         let mut parts = Vec::new();
 
         if let Some(ref system) = self.system_prompt {
-            parts.push(format!("system: {}", system));
+            parts.push(format!("system: {system}"));
         }
 
         for msg in &self.request_messages {
@@ -102,7 +102,7 @@ impl TokenData {
         }
 
         for tool in &self.tools {
-            parts.push(format!("tool: {}", tool));
+            parts.push(format!("tool: {tool}"));
         }
 
         parts.join("\n")
@@ -113,7 +113,7 @@ impl TokenData {
         let mut parts = Vec::new();
 
         if let Some(ref reasoning) = self.reasoning_content {
-            parts.push(format!("reasoning: {}", reasoning));
+            parts.push(format!("reasoning: {reasoning}"));
         }
 
         for content in &self.response_content {
@@ -121,7 +121,7 @@ impl TokenData {
         }
 
         for tool_call in &self.tool_calls {
-            parts.push(format!("tool_call: {}", tool_call));
+            parts.push(format!("tool_call: {tool_call}"));
         }
 
         parts.join("\n")
@@ -138,9 +138,7 @@ impl TokenData {
             std::collections::HashMap::new();
 
         for msg in &self.request_messages {
-            map.entry(msg.role.clone())
-                .or_insert_with(Vec::new)
-                .push(msg);
+            map.entry(msg.role.clone()).or_default().push(msg);
         }
 
         map

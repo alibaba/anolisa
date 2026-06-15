@@ -120,8 +120,7 @@ impl TcpSniff {
             }
             Err(e) => {
                 log::info!(
-                    "TcpSniff: new tcp_recvmsg signature failed ({}), trying old (5.8-5.17)",
-                    e
+                    "TcpSniff: new tcp_recvmsg signature failed ({e}), trying old (5.8-5.17)"
                 );
                 let (obj, skel) = Self::load_skel(rb, true)
                     .context("failed to load tcpsniff with old tcp_recvmsg signature")?;
@@ -167,7 +166,7 @@ impl TcpSniff {
             // key[6..8] = 0 (pad)
 
             map.update(&key, &[dummy], MapFlags::ANY)
-                .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
+                .with_context(|| format!("failed to add target {target:?} to tcp_targets map"))?;
         }
 
         if wildcard_all {
@@ -203,9 +202,9 @@ impl TcpSniff {
         key[4..6].copy_from_slice(&port_be.to_ne_bytes());
 
         map.update(&key, &[dummy], MapFlags::ANY)
-            .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
+            .with_context(|| format!("failed to add target {target:?} to tcp_targets map"))?;
 
-        log::info!("TcpSniff: added runtime target {:?}", target);
+        log::info!("TcpSniff: added runtime target {target:?}");
         Ok(())
     }
 
@@ -261,8 +260,7 @@ impl TcpSniff {
         let n = links.len();
         self._links = links;
         log::info!(
-            "TcpSniff: attached {} BPF programs (tcp_sendmsg fentry, tcp_recvmsg fentry+fexit)",
-            n
+            "TcpSniff: attached {n} BPF programs (tcp_sendmsg fentry, tcp_recvmsg fentry+fexit)"
         );
         Ok(())
     }

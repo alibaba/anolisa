@@ -400,10 +400,7 @@ impl Probes {
         if let Some(ref mut tcp) = self.tcpsniff {
             tcp.add_target(target)
         } else {
-            log::warn!(
-                "TcpSniff not enabled, cannot add runtime target {:?}",
-                target
-            );
+            log::warn!("TcpSniff not enabled, cannot add runtime target {target:?}");
             Ok(())
         }
     }

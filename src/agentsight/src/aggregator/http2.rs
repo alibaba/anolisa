@@ -259,30 +259,24 @@ impl Http2Stream {
 
     /// Content-Encoding header from response headers (e.g. "gzip", "deflate")
     pub fn content_encoding(&self) -> Option<String> {
-        self.response_headers
-            .as_ref()
-            .map(|h| {
-                let headers = h.decode_headers_stateless();
-                headers
-                    .iter()
-                    .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                    .and_then(|(_, value)| value.clone())
-            })
-            .flatten()
+        self.response_headers.as_ref().and_then(|h| {
+            let headers = h.decode_headers_stateless();
+            headers
+                .iter()
+                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
+                .and_then(|(_, value)| value.clone())
+        })
     }
 
     /// Content-Encoding header from request headers
     pub fn request_content_encoding(&self) -> Option<String> {
-        self.request_headers
-            .as_ref()
-            .map(|h| {
-                let headers = h.decode_headers_stateless();
-                headers
-                    .iter()
-                    .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                    .and_then(|(_, value)| value.clone())
-            })
-            .flatten()
+        self.request_headers.as_ref().and_then(|h| {
+            let headers = h.decode_headers_stateless();
+            headers
+                .iter()
+                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
+                .and_then(|(_, value)| value.clone())
+        })
     }
 
     /// Get request body as decompressed string (concatenates all data frames)
@@ -694,10 +688,7 @@ impl Http2StreamAggregator {
                     }
                 }
                 log::debug!(
-                    "HPACK table size update: conn={:?} dir={:?} size={}",
-                    conn_id,
-                    direction,
-                    value
+                    "HPACK table size update: conn={conn_id:?} dir={direction:?} size={value}"
                 );
             }
         }
@@ -717,10 +708,7 @@ impl Http2StreamAggregator {
             if buffer.data.len() + payload.len() <= MAX_CONTINUATION_BUFFER {
                 buffer.data.extend_from_slice(payload);
             } else {
-                log::warn!(
-                    "CONTINUATION buffer overflow for stream {:?}, dropping",
-                    stream_id
-                );
+                log::warn!("CONTINUATION buffer overflow for stream {stream_id:?}, dropping");
                 self.continuation_buffers.remove(&stream_id);
                 return;
             }
@@ -769,10 +757,7 @@ impl Http2StreamAggregator {
             }
             Err(e) => {
                 log::warn!(
-                    "HPACK decode error for conn={:?} dir={:?}: {:?}, resetting decoder",
-                    conn_id,
-                    direction,
-                    e
+                    "HPACK decode error for conn={conn_id:?} dir={direction:?}: {e:?}, resetting decoder"
                 );
                 // Reset decoder for this direction
                 let state = self
@@ -1340,7 +1325,7 @@ mod tests {
     fn test_stateful_hpack_decode_static_table() {
         // Use hpack::Encoder to produce valid HPACK blocks
         let mut encoder = Encoder::new();
-        let headers = vec![
+        let headers = [
             (b":method".to_vec(), b"POST".to_vec()),
             (b":path".to_vec(), b"/v1/chat/completions".to_vec()),
             (b":scheme".to_vec(), b"https".to_vec()),
@@ -1378,7 +1363,7 @@ mod tests {
         let mut aggregator = Http2StreamAggregator::new();
 
         // First request: headers get added to dynamic table
-        let headers1 = vec![
+        let headers1 = [
             (b":method".to_vec(), b"POST".to_vec()),
             (b":path".to_vec(), b"/v1/chat/completions".to_vec()),
             (b"authorization".to_vec(), b"Bearer sk-test123".to_vec()),
@@ -1388,7 +1373,7 @@ mod tests {
         assert!(decoded1.is_some());
 
         // Second request: encoder reuses dynamic table entries (shorter encoding)
-        let headers2 = vec![
+        let headers2 = [
             (b":method".to_vec(), b"POST".to_vec()),
             (b":path".to_vec(), b"/v1/chat/completions".to_vec()),
             (b"authorization".to_vec(), b"Bearer sk-test123".to_vec()),
@@ -1425,7 +1410,7 @@ mod tests {
 
         // After reset, valid HPACK should decode fine
         let mut encoder = Encoder::new();
-        let headers = vec![
+        let headers = [
             (b":method".to_vec(), b"GET".to_vec()),
             (b":path".to_vec(), b"/health".to_vec()),
         ];
@@ -1441,7 +1426,7 @@ mod tests {
         let mut aggregator = Http2StreamAggregator::new();
         let mut encoder = Encoder::new();
 
-        let headers = vec![
+        let headers = [
             (b":method".to_vec(), b"POST".to_vec()),
             (b":path".to_vec(), b"/v1/chat/completions".to_vec()),
             (b":scheme".to_vec(), b"https".to_vec()),
@@ -1467,7 +1452,7 @@ mod tests {
 
         // Send response to complete the stream
         let mut resp_encoder = Encoder::new();
-        let resp_headers = vec![(b":status".to_vec(), b"200".to_vec())];
+        let resp_headers = [(b":status".to_vec(), b"200".to_vec())];
         let resp_encoded = resp_encoder.encode(resp_headers.iter().map(|(n, v)| (&n[..], &v[..])));
         let resp_event = create_test_event(400, 0x5000, 0, 2000);
         let resp_frame = create_test_frame(1, 1, 0x05, resp_encoded, resp_event);
@@ -1516,7 +1501,7 @@ mod tests {
         // The decoder should now have table_size=0
         // Encode with literal-only (since table_size=0 the encoder won't add to dynamic table)
         let mut encoder = Encoder::new();
-        let headers = vec![(b":status".to_vec(), b"200".to_vec())];
+        let headers = [(b":status".to_vec(), b"200".to_vec())];
         let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
         let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Response, &encoded);
         assert!(decoded.is_some());
@@ -1538,7 +1523,7 @@ mod tests {
         let mut resp_encoder = Encoder::new();
 
         // Encode request headers
-        let req_headers = vec![
+        let req_headers = [
             (b":method".to_vec(), b"POST".to_vec()),
             (b":path".to_vec(), b"/v1/chat/completions".to_vec()),
             (b":scheme".to_vec(), b"https".to_vec()),
@@ -1561,7 +1546,7 @@ mod tests {
         aggregator.process_frames(vec![req_hdr_frame, req_data_frame]);
 
         // Encode response headers
-        let resp_headers = vec![
+        let resp_headers = [
             (b":status".to_vec(), b"200".to_vec()),
             (b"content-type".to_vec(), b"application/json".to_vec()),
         ];
@@ -1607,13 +1592,13 @@ mod tests {
         let mut resp_encoder = Encoder::new();
 
         // Request direction decode
-        let req_h = vec![(b":method".to_vec(), b"GET".to_vec())];
+        let req_h = [(b":method".to_vec(), b"GET".to_vec())];
         let req_enc = req_encoder.encode(req_h.iter().map(|(n, v)| (&n[..], &v[..])));
         let req_dec = aggregator.decode_header_block(conn_id, StreamDirection::Request, &req_enc);
         assert!(req_dec.is_some());
 
         // Response direction decode (independent table)
-        let resp_h = vec![(b":status".to_vec(), b"404".to_vec())];
+        let resp_h = [(b":status".to_vec(), b"404".to_vec())];
         let resp_enc = resp_encoder.encode(resp_h.iter().map(|(n, v)| (&n[..], &v[..])));
         let resp_dec =
             aggregator.decode_header_block(conn_id, StreamDirection::Response, &resp_enc);

@@ -125,7 +125,7 @@ pub enum SkillMetricsAction {
 impl SkillMetricsCommand {
     pub fn execute(&self) {
         if let Err(e) = self.run() {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }
@@ -241,7 +241,7 @@ impl SkillMetricsCommand {
             if json {
                 println!("{{\"message\": \"No events found in the specified time range\"}}");
             } else {
-                eprintln!("No events found in the last {} hours.", last);
+                eprintln!("No events found in the last {last} hours.");
             }
             return Ok(());
         }
@@ -297,7 +297,7 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
             sorted.sort_by(|a, b| b.1.cmp(a.1));
             println!("  {:30} {:>8}", "Skill", "Count");
             for (name, count) in sorted {
-                println!("  {:30} {:>8}", name, count);
+                println!("  {name:30} {count:>8}");
             }
         }
         println!();
@@ -348,7 +348,7 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
             for entry in &h.rankings {
                 let delta = entry
                     .rank_delta
-                    .map(|d| format!("{:+}", d))
+                    .map(|d| format!("{d:+}"))
                     .unwrap_or_else(|| "-".to_string());
                 println!(
                     "  {:>4} {:30} {:>8} {:>8}",

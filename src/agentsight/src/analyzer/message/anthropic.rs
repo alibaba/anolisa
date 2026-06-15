@@ -57,9 +57,9 @@ impl AnthropicParser {
     /// ```
     pub fn parse_request(body: &serde_json::Value) -> Option<AnthropicRequest> {
         // Quick validation - must have model, messages, and max_tokens fields
-        if !body.get("model").is_some()
-            || !body.get("messages").is_some()
-            || !body.get("max_tokens").is_some()
+        if body.get("model").is_none()
+            || body.get("messages").is_none()
+            || body.get("max_tokens").is_none()
         {
             log::trace!(
                 "Anthropic request missing required fields: model, messages, or max_tokens"
@@ -78,7 +78,7 @@ impl AnthropicParser {
                 Some(request)
             }
             Err(e) => {
-                log::trace!("Failed to parse Anthropic request: {}", e);
+                log::trace!("Failed to parse Anthropic request: {e}");
                 None
             }
         }
@@ -122,7 +122,7 @@ impl AnthropicParser {
                     return Some(response);
                 }
                 Err(e) => {
-                    log::trace!("Failed to parse Anthropic response: {}", e);
+                    log::trace!("Failed to parse Anthropic response: {e}");
                 }
             }
         }
@@ -729,7 +729,7 @@ mod tests {
             AnthropicContentBlock::Text { text, .. } => {
                 assert_eq!(text, "Let me read that file.");
             }
-            other => panic!("Expected Text block, got {:?}", other),
+            other => panic!("Expected Text block, got {other:?}"),
         }
 
         // Second block: tool_use
@@ -739,7 +739,7 @@ mod tests {
                 assert_eq!(name, "Read");
                 assert_eq!(input["path"], "/src/main.rs");
             }
-            other => panic!("Expected ToolUse block, got {:?}", other),
+            other => panic!("Expected ToolUse block, got {other:?}"),
         }
 
         assert_eq!(resp.stop_reason, Some("tool_use".to_string()));
@@ -791,14 +791,14 @@ mod tests {
         // Both should be ToolUse
         match &resp.content[0] {
             AnthropicContentBlock::ToolUse { name, .. } => assert_eq!(name, "Bash"),
-            other => panic!("Expected ToolUse, got {:?}", other),
+            other => panic!("Expected ToolUse, got {other:?}"),
         }
         match &resp.content[1] {
             AnthropicContentBlock::ToolUse { name, input, .. } => {
                 assert_eq!(name, "Read");
                 assert_eq!(input["path"], "Cargo.toml");
             }
-            other => panic!("Expected ToolUse, got {:?}", other),
+            other => panic!("Expected ToolUse, got {other:?}"),
         }
     }
 
@@ -846,7 +846,7 @@ mod tests {
                 assert_eq!(input["path"], "/tmp/test.txt");
                 assert_eq!(input["content"], "hello");
             }
-            other => panic!("Expected ToolUse, got {:?}", other),
+            other => panic!("Expected ToolUse, got {other:?}"),
         }
     }
 }

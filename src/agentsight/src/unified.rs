@@ -168,11 +168,7 @@ impl AgentSight {
                 );
             }
         } else if let Some((path, e)) = config_load_err {
-            log::warn!(
-                "Failed to load config from {:?}: {}, using embedded defaults",
-                path,
-                e
-            );
+            log::warn!("Failed to load config from {path:?}: {e}, using embedded defaults");
         }
 
         let all_cmdline_rules = config.cmdline_rules.clone();
@@ -207,7 +203,7 @@ impl AgentSight {
                 Ok(addrs) => {
                     for addr in addrs {
                         if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-                            log::info!("http domain resolve: {} → {}", domain, ipv4);
+                            log::info!("http domain resolve: {domain} → {ipv4}");
                             tcp_targets.push(crate::config::TcpTarget {
                                 ip: Some(ipv4),
                                 port: None,
@@ -216,7 +212,7 @@ impl AgentSight {
                     }
                 }
                 Err(e) => {
-                    log::warn!("http domain resolve failed for {}: {}", domain, e);
+                    log::warn!("http domain resolve failed for {domain}: {e}");
                 }
             }
         }
@@ -242,7 +238,7 @@ impl AgentSight {
                 probes
                     .add_traced_cgroup(cg_id)
                     .context("Failed to register cgroup_id")?;
-                log::info!("Registered cgroup_id {}", cg_id);
+                log::info!("Registered cgroup_id {cg_id}");
             }
         }
 
@@ -312,7 +308,7 @@ impl AgentSight {
                     genai_exporters.push(Box::new(store));
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
                 }
             }
             // If Logtail is enabled at startup, also register it (dual-write)
@@ -370,7 +366,7 @@ impl AgentSight {
                         genai_exporters.push(Box::new(store));
                     }
                     Err(e) => {
-                        log::warn!("Failed to initialize SQLite GenAI store: {}", e);
+                        log::warn!("Failed to initialize SQLite GenAI store: {e}");
                     }
                 }
             } else {
@@ -385,7 +381,7 @@ impl AgentSight {
                         genai_exporters.push(Box::new(store));
                     }
                     Err(e) => {
-                        log::warn!("Failed to initialize SQLite GenAI exporter: {}", e);
+                        log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
                     }
                 }
             }
@@ -402,22 +398,19 @@ impl AgentSight {
 
                 match LlmTokenizer::from_file(tokenizer_path, &config_path) {
                     Ok(tokenizer) => {
-                        log::info!("Tokenizer loaded from: {:?}", tokenizer_path);
+                        log::info!("Tokenizer loaded from: {tokenizer_path:?}");
                         Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
                     }
                     Err(e) => {
                         log::warn!(
-                            "Failed to load tokenizer from {:?}: {}. Using analyzer without tokenizer.",
-                            tokenizer_path,
-                            e
+                            "Failed to load tokenizer from {tokenizer_path:?}: {e}. Using analyzer without tokenizer."
                         );
                         Analyzer::new()
                     }
                 }
             } else {
                 log::warn!(
-                    "Tokenizer file not found: {:?}. Using analyzer without tokenizer.",
-                    tokenizer_path
+                    "Tokenizer file not found: {tokenizer_path:?}. Using analyzer without tokenizer."
                 );
                 Analyzer::new()
             }
@@ -433,11 +426,11 @@ impl AgentSight {
                 .join("interruption_events.db");
             match InterruptionStore::new_with_path(&db_path) {
                 Ok(store) => {
-                    log::info!("Interruption events store initialized at {:?}", db_path);
+                    log::info!("Interruption events store initialized at {db_path:?}");
                     Some(Arc::new(store))
                 }
                 Err(e) => {
-                    log::warn!("Failed to initialize interruption store: {}", e);
+                    log::warn!("Failed to initialize interruption store: {e}");
                     None
                 }
             }
@@ -485,7 +478,7 @@ impl AgentSight {
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                         if let Err(e) = store_ref.mark_interrupted_stale(300) {
-                            log::warn!("Stale-pending scan failed: {}", e);
+                            log::warn!("Stale-pending scan failed: {e}");
                         }
                     }
                 })
@@ -558,20 +551,20 @@ impl AgentSight {
 
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
-        log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Attaching to pid {pid}, agent name: {agent_name}");
         if let Err(e) = probes.add_traced_pid(pid) {
-            log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
+            log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
         if let Err(e) = probes.attach_process(pid as i32) {
-            log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
+            log::error!("Failed to attach SSL probe to pid {pid}: {e}");
         } else {
-            log::info!("Attached to agent: {} (pid={})", agent_name, pid);
+            log::info!("Attached to agent: {agent_name} (pid={pid})");
         }
     }
 
     /// Detach SSL probes from a specific agent process
     pub fn detach_process(&mut self, pid: u32, agent_name: &str) {
-        log::debug!("Detaching from pid {}, agent name: {}", pid, agent_name);
+        log::debug!("Detaching from pid {pid}, agent name: {agent_name}");
         let _ = self.probes.remove_traced_pid(pid).inspect_err(|e| {
             log::error!("failed to delete {pid} from traced pid map: {e}");
         });
@@ -648,11 +641,7 @@ impl AgentSight {
                                     port: None,
                                 };
                                 if let Err(e) = self.probes.add_tcp_target(&target) {
-                                    log::warn!(
-                                        "[UDP-DNS] Failed to add tcp target {}: {}",
-                                        ipv4,
-                                        e
-                                    );
+                                    log::warn!("[UDP-DNS] Failed to add tcp target {ipv4}: {e}");
                                 }
                             }
                         }
@@ -720,7 +709,7 @@ impl AgentSight {
                             }
                             for event in &output.events {
                                 if let Err(e) = sqlite_store.complete_pending(event) {
-                                    log::warn!("Failed to complete pending call: {}", e);
+                                    log::warn!("Failed to complete pending call: {e}");
                                 }
                             }
                             // Export to non-SQLite exporters only (SQLite already written)
@@ -765,7 +754,7 @@ impl AgentSight {
             if self.ffi_sender.is_none() {
                 for analysis_result in &analysis_results {
                     if let Err(e) = self.storage.store(analysis_result) {
-                        log::warn!("Failed to store analysis result: {}", e);
+                        log::warn!("Failed to store analysis result: {e}");
                     } else {
                         log::debug!("Analysis result saved");
                     }
@@ -784,14 +773,11 @@ impl AgentSight {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
                 let cmdline_args =
-                    crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+                    crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {
-                    log::debug!(
-                        "ProcMon: pid={} denied by cmdline rule, skipping attach",
-                        pid
-                    );
+                    log::debug!("ProcMon: pid={pid} denied by cmdline rule, skipping attach");
                     return;
                 }
 
@@ -847,7 +833,7 @@ impl AgentSight {
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
             if let Some(result) = self.try_process() {
-                log::trace!("[Event {}] Processed", result);
+                log::trace!("[Event {result}] Processed");
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();
@@ -918,14 +904,14 @@ impl AgentSight {
         std::thread::Builder::new()
             .name("config-watcher".to_string())
             .spawn(move || {
-                log::info!("Config watcher started for {:?}", watch_path);
+                log::info!("Config watcher started for {watch_path:?}");
 
                 let (tx, rx) = std::sync::mpsc::channel::<notify::Result<NotifyEvent>>();
 
                 let mut watcher: RecommendedWatcher = match notify::recommended_watcher(tx) {
                     Ok(w) => w,
                     Err(e) => {
-                        log::warn!("Failed to create config file watcher: {}", e);
+                        log::warn!("Failed to create config file watcher: {e}");
                         return;
                     }
                 };
@@ -933,7 +919,7 @@ impl AgentSight {
                 // Watch the parent directory (inotify requires watching dirs)
                 let watch_dir = watch_path.parent().unwrap_or(Path::new("/"));
                 if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
-                    log::warn!("Failed to watch config directory {:?}: {}", watch_dir, e);
+                    log::warn!("Failed to watch config directory {watch_dir:?}: {e}");
                     return;
                 }
 
@@ -943,7 +929,7 @@ impl AgentSight {
                     let event = match event {
                         Ok(e) => e,
                         Err(e) => {
-                            log::warn!("Config watcher error: {}", e);
+                            log::warn!("Config watcher error: {e}");
                             continue;
                         }
                     };
@@ -968,7 +954,7 @@ impl AgentSight {
                     let content = match std::fs::read_to_string(&watch_path) {
                         Ok(c) => c,
                         Err(e) => {
-                            log::warn!("Config watcher: failed to read {:?}: {}", watch_path, e);
+                            log::warn!("Config watcher: failed to read {watch_path:?}: {e}");
                             continue;
                         }
                     };
@@ -991,8 +977,7 @@ impl AgentSight {
                         }
                         Some(Some(new_path)) => {
                             log::info!(
-                                "Config watcher: detected runtime.sls_logtail_path = {:?}",
-                                new_path
+                                "Config watcher: detected runtime.sls_logtail_path = {new_path:?}"
                             );
 
                             // Validate uid (strong check: abort process on failure)
@@ -1018,9 +1003,7 @@ impl AgentSight {
                                     trace_enabled,
                                 );
                                 log::info!(
-                                    "Config watcher: LogtailExporter created (path={}, uid={})",
-                                    new_path,
-                                    uid
+                                    "Config watcher: LogtailExporter created (path={new_path}, uid={uid})"
                                 );
                                 if let Ok(mut guard) = pending_logtail.lock() {
                                     *guard = Some(Box::new(exporter));
@@ -1028,8 +1011,7 @@ impl AgentSight {
                                 log::info!("Config watcher: SLS Logtail activated dynamically");
                             } else {
                                 log::info!(
-                                    "Config watcher: SLS Logtail re-activated with path={}",
-                                    new_path
+                                    "Config watcher: SLS Logtail re-activated with path={new_path}"
                                 );
                             }
                         }
@@ -1060,8 +1042,7 @@ impl AgentSight {
             .name("token-collector-watcher".to_string())
             .spawn(move || {
                 log::info!(
-                    "Token-collector watcher started (enable_file={}, logtail_cfg={}, target={:?})",
-                    ENABLE_FILE, LOGTAIL_CFG, config_path
+                    "Token-collector watcher started (enable_file={ENABLE_FILE}, logtail_cfg={LOGTAIL_CFG}, target={config_path:?})"
                 );
 
                 // Last applied state to avoid redundant writes:
@@ -1081,8 +1062,7 @@ impl AgentSight {
                             None => {
                                 if last_state != Some(None) {
                                     log::warn!(
-                                        "token-collector enabled but SLS_LOG_PATH missing/empty in {}",
-                                        LOGTAIL_CFG
+                                        "token-collector enabled but SLS_LOG_PATH missing/empty in {LOGTAIL_CFG}"
                                     );
                                 }
                                 continue;
@@ -1103,8 +1083,7 @@ impl AgentSight {
                         Ok(true) => {
                             match &desired {
                                 Some(p) => log::info!(
-                                    "token-collector enabled: set runtime.sls_logtail_path={:?}",
-                                    p
+                                    "token-collector enabled: set runtime.sls_logtail_path={p:?}"
                                 ),
                                 None => log::info!(
                                     "token-collector disabled: cleared runtime.sls_logtail_path"
@@ -1114,8 +1093,7 @@ impl AgentSight {
                         }
                         Err(e) => {
                             log::warn!(
-                                "token-collector failed to update {:?}: {}",
-                                config_path, e
+                                "token-collector failed to update {config_path:?}: {e}"
                             );
                         }
                     }
@@ -1131,7 +1109,7 @@ impl AgentSight {
         let content = match std::fs::read_to_string(cfg_path) {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("token-collector: failed to read {}: {}", cfg_path, e);
+                log::debug!("token-collector: failed to read {cfg_path}: {e}");
                 return None;
             }
         };
@@ -1167,9 +1145,9 @@ impl AgentSight {
     /// are preserved untouched.
     fn write_runtime_sls_path(config_path: &Path, new_path: Option<&str>) -> anyhow::Result<bool> {
         let content = std::fs::read_to_string(config_path)
-            .with_context(|| format!("read config {:?}", config_path))?;
+            .with_context(|| format!("read config {config_path:?}"))?;
         let mut value: serde_json::Value = serde_json::from_str(&content)
-            .with_context(|| format!("parse JSON {:?}", config_path))?;
+            .with_context(|| format!("parse JSON {config_path:?}"))?;
 
         let root = value
             .as_object_mut()
@@ -1202,7 +1180,7 @@ impl AgentSight {
         // Direct write so the existing config-watcher sees IN_CLOSE_WRITE
         // and re-loads runtime.sls_logtail_path.
         std::fs::write(config_path, new_content.as_bytes())
-            .with_context(|| format!("write config {:?}", config_path))?;
+            .with_context(|| format!("write config {config_path:?}"))?;
         Ok(true)
     }
 
@@ -1310,7 +1288,7 @@ impl AgentSight {
                             }
                         }
                         if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {}", e);
+                            log::warn!("Failed to store interruption event: {e}");
                         }
                         // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
                         // so the SLS index keeps interruption records co-located with LLM calls.
@@ -1372,36 +1350,26 @@ impl AgentSight {
                                         if new_count > self.deadloop_kill_after_count {
                                             if let Some(pid) = loop_event.pid {
                                                 log::error!(
-                                                    "DeadLoop auto-kill: escalating to SIGKILL for pid {} (conversation={}, detections={})",
-                                                    pid,
-                                                    cid,
-                                                    new_count
+                                                    "DeadLoop auto-kill: escalating to SIGKILL for pid {pid} (conversation={cid}, detections={new_count})"
                                                 );
                                                 let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
                                                 if ret != 0 {
                                                     let err = std::io::Error::last_os_error();
                                                     log::error!(
-                                                        "DeadLoop auto-kill: SIGKILL failed for pid {}: {}",
-                                                        pid,
-                                                        err
+                                                        "DeadLoop auto-kill: SIGKILL failed for pid {pid}: {err}"
                                                     );
                                                 }
                                             }
                                         } else if new_count == self.deadloop_kill_after_count {
                                             if let Some(pid) = loop_event.pid {
                                                 log::error!(
-                                                    "DeadLoop auto-kill: sending SIGTERM to pid {} (conversation={}, detections={})",
-                                                    pid,
-                                                    cid,
-                                                    new_count
+                                                    "DeadLoop auto-kill: sending SIGTERM to pid {pid} (conversation={cid}, detections={new_count})"
                                                 );
                                                 let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
                                                 if ret != 0 {
                                                     let err = std::io::Error::last_os_error();
                                                     log::error!(
-                                                        "DeadLoop auto-kill: SIGTERM failed for pid {}: {}",
-                                                        pid,
-                                                        err
+                                                        "DeadLoop auto-kill: SIGTERM failed for pid {pid}: {err}"
                                                     );
                                                 }
                                             }
@@ -1452,7 +1420,7 @@ impl AgentSight {
             ) {
                 if let Some(ref store) = self.genai_sqlite_store {
                     if let Err(e) = store.insert_pending(&pending) {
-                        log::warn!("[CrashDetect] Failed to persist pending call: {}", e);
+                        log::warn!("[CrashDetect] Failed to persist pending call: {e}");
                     }
                 }
             }
@@ -1469,9 +1437,7 @@ impl AgentSight {
 
         if pending_calls.is_empty() {
             log::debug!(
-                "[CrashDetect] Agent {} (pid={}) exited with no pending calls — normal shutdown",
-                agent_name,
-                pid,
+                "[CrashDetect] Agent {agent_name} (pid={pid}) exited with no pending calls — normal shutdown",
             );
             return;
         }
@@ -1519,11 +1485,7 @@ impl AgentSight {
                     Some(detail),
                 );
                 if let Err(e) = istore.insert(&event) {
-                    log::warn!(
-                        "[CrashDetect] Failed to record agent_crash for pid={}: {}",
-                        pid,
-                        e
-                    );
+                    log::warn!("[CrashDetect] Failed to record agent_crash for pid={pid}: {e}");
                 } else {
                     log::info!(
                         "[CrashDetect] Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s), oom={})",
@@ -1543,9 +1505,7 @@ impl AgentSight {
                 let itype = if is_oom { "oom_crash" } else { "agent_crash" };
                 if let Err(e) = store.mark_pending_interrupted_for_pid(pid as i32, itype) {
                     log::warn!(
-                        "[CrashDetect] Failed to mark pending interrupted for pid={}: {}",
-                        pid,
-                        e
+                        "[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}"
                     );
                 }
             }
@@ -1600,7 +1560,7 @@ impl AgentSight {
                     let pid = pending.pid;
 
                     if let Err(e) = store.insert_pending(&pending) {
-                        log::warn!("[DrainCheck] FAIL persist: {}", e);
+                        log::warn!("[DrainCheck] FAIL persist: {e}");
                         continue;
                     }
                     // Track for OOM detection below
@@ -1620,13 +1580,13 @@ impl AgentSight {
                         Ok(Some(ref real_session_id)) => {
                             if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
                                 if let Err(e) = store.update_session_id(&call_id, real_session_id) {
-                                    log::warn!("[DrainCheck] FAIL update session_id: {}", e);
+                                    log::warn!("[DrainCheck] FAIL update session_id: {e}");
                                 }
                             }
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            log::warn!("[DrainCheck] FAIL lookup session: {}", e);
+                            log::warn!("[DrainCheck] FAIL lookup session: {e}");
                         }
                     }
 
@@ -1744,7 +1704,7 @@ impl AgentSight {
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
                                             let wrapped =
-                                                format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                                                format!("<think>\n{all_reasoning}\n</think>\n\n");
                                             total += tokenizer.count(&wrapped).unwrap_or(0);
                                         }
                                         if !all_content.is_empty() {
@@ -1767,7 +1727,7 @@ impl AgentSight {
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
-                                log::warn!("[DrainCheck] FAIL enrich SSE: {}", e);
+                                log::warn!("[DrainCheck] FAIL enrich SSE: {e}");
                             }
                         }
                     }
@@ -1834,12 +1794,10 @@ impl AgentSight {
                         );
                         if let Err(e) = istore.insert(&event) {
                             log::warn!(
-                                "[DrainCheck] Failed to record OOM agent_crash for pid={}: {}",
-                                pid,
-                                e
+                                "[DrainCheck] Failed to record OOM agent_crash for pid={pid}: {e}"
                             );
                         } else {
-                            log::info!("[DrainCheck] Recorded OOM agent_crash for pid={}", pid);
+                            log::info!("[DrainCheck] Recorded OOM agent_crash for pid={pid}");
                         }
                         // Mark all pending calls for this PID as interrupted
                         if let Some(ref store) = self.genai_sqlite_store {
@@ -1847,9 +1805,7 @@ impl AgentSight {
                                 store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
                             {
                                 log::warn!(
-                                    "[DrainCheck] Failed to mark pending interrupted for pid={}: {}",
-                                    pid,
-                                    e
+                                    "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
                                 );
                             }
                         }
@@ -2044,7 +2000,7 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let pid = std::process::id();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("agentsight-tc-{}-{}-{}", pid, tag, n));
+        let dir = std::env::temp_dir().join(format!("agentsight-tc-{pid}-{tag}-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir

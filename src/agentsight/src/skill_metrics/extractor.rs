@@ -657,13 +657,11 @@ Some text after"#;
         let names = scan_skills_dir_recursive(&tmp.to_string_lossy(), 2);
         assert!(
             names.contains(&"install-copaw".to_string()),
-            "expected install-copaw in {:?}",
-            names
+            "expected install-copaw in {names:?}"
         );
         assert!(
             names.contains(&"network".to_string()),
-            "expected network in {:?}",
-            names
+            "expected network in {names:?}"
         );
 
         // cleanup
@@ -730,7 +728,7 @@ Some text after"#;
         for name in ["QwenCode", "qwen-code", "qwen_code", "qwencode-cli", "Qwen"] {
             let lower = name.to_lowercase();
             let matched = QWENCODE_AGENT_PATTERNS.iter().any(|&p| lower.contains(p));
-            assert!(matched, "expected '{}' to match QwenCode pattern", name);
+            assert!(matched, "expected '{name}' to match QwenCode pattern");
         }
     }
 
@@ -783,18 +781,15 @@ Some text after"#;
 
         assert!(
             names.contains(&"skill-a".to_string()),
-            "missing skill-a in {:?}",
-            names
+            "missing skill-a in {names:?}"
         );
         assert!(
             names.contains(&"skill-b".to_string()),
-            "missing skill-b in {:?}",
-            names
+            "missing skill-b in {names:?}"
         );
         assert!(
             names.contains(&"skill-c".to_string()),
-            "missing skill-c in {:?}",
-            names
+            "missing skill-c in {names:?}"
         );
 
         // Cleanup

@@ -80,7 +80,7 @@ impl OpenAIParser {
                 Some(request)
             }
             Err(e) => {
-                log::trace!("Failed to parse OpenAI request: {}", e);
+                log::trace!("Failed to parse OpenAI request: {e}");
                 None
             }
         }
@@ -181,7 +181,7 @@ impl OpenAIParser {
                     return Some(response);
                 }
                 Err(e) => {
-                    log::trace!("Failed to parse OpenAI response: {}", e);
+                    log::trace!("Failed to parse OpenAI response: {e}");
                 }
             }
         }

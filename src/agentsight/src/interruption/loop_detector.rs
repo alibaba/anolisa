@@ -357,7 +357,7 @@ mod tests {
 
     fn make_call(tool_names: Vec<&str>, output: &str, input_tokens: i64) -> RecentCallSummary {
         RecentCallSummary {
-            call_id: format!("call-{}", input_tokens),
+            call_id: format!("call-{input_tokens}"),
             tool_call_names: tool_names.into_iter().map(|s| s.to_string()).collect(),
             output_text_snippet: output.to_string(),
             input_tokens,

@@ -178,7 +178,7 @@ impl SysomParser {
 
         let params: SysomLlmParams = serde_json::from_str(llm_param_string)
             .map_err(|e| {
-                log::trace!("[SysomParser] Failed to decode llmParamString: {}", e);
+                log::trace!("[SysomParser] Failed to decode llmParamString: {e}");
             })
             .ok()?;
 
@@ -202,7 +202,7 @@ impl SysomParser {
         // Non-streaming: direct `choices` object
         if body.get("choices").is_some() {
             return serde_json::from_value::<SysomResponse>(body.clone())
-                .map_err(|e| log::trace!("[SysomParser] Failed to parse response: {}", e))
+                .map_err(|e| log::trace!("[SysomParser] Failed to parse response: {e}"))
                 .ok();
         }
 

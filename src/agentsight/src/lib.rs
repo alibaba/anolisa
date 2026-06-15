@@ -1,3 +1,11 @@
+// Crate-level clippy allows for lints that require architectural changes.
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::unnecessary_cast)]
+
 //! AgentSight - AI Agent observability library
 //!
 //! This crate provides eBPF-based observability for AI agents, including:

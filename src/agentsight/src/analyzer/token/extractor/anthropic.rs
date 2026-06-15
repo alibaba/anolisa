@@ -85,9 +85,7 @@ pub fn extract_token_data(
                             .unwrap_or("unknown");
                         if let Some(input) = block.get("input") {
                             if let Ok(input_str) = serde_json::to_string(input) {
-                                token_data
-                                    .tool_calls
-                                    .push(format!("{}: {}", name, input_str));
+                                token_data.tool_calls.push(format!("{name}: {input_str}"));
                                 has_content = true;
                             }
                         }

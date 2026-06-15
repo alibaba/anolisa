@@ -71,7 +71,7 @@ impl InterruptionDetector {
         // 修复：从 call.response.raw_body 读取响应体，而非 call.metadata（builder 不会写入 metadata）
         let error_text = call.error.as_deref().unwrap_or("");
         let response_body = call.response.raw_body.as_deref().unwrap_or("");
-        let combined_error = format!("{} {}", error_text, response_body).to_ascii_lowercase();
+        let combined_error = format!("{error_text} {response_body}").to_ascii_lowercase();
 
         let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")

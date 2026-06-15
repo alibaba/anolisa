@@ -135,9 +135,7 @@ impl HealthChecker {
                         let is_oom = pids.iter().any(|&p| was_pid_oom_killed(p));
                         if is_oom {
                             log::info!(
-                                "Agent {} (pids={:?}) was OOM-killed (confirmed via dmesg)",
-                                agent_name,
-                                pids
+                                "Agent {agent_name} (pids={pids:?}) was OOM-killed (confirmed via dmesg)"
                             );
                         }
 
@@ -159,10 +157,7 @@ impl HealthChecker {
                             );
                             if !seen_conv.insert(dedup_key) {
                                 log::debug!(
-                                    "Skipping duplicate agent_crash for {} session={:?} conversation={:?}",
-                                    agent_name,
-                                    session_id,
-                                    conversation_id
+                                    "Skipping duplicate agent_crash for {agent_name} session={session_id:?} conversation={conversation_id:?}"
                                 );
                                 continue;
                             }
@@ -222,9 +217,7 @@ impl HealthChecker {
                     } else {
                         // No pending calls — treat as normal/graceful shutdown.
                         log::debug!(
-                            "Agent {} (pids={:?}) exited with no pending calls — treating as normal shutdown",
-                            agent_name,
-                            pids
+                            "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
                         );
                     }
                 }
@@ -282,7 +275,7 @@ impl HealthChecker {
         let mut timed_out = false;
 
         for &port in ports {
-            let url = format!("http://127.0.0.1:{}/", port);
+            let url = format!("http://127.0.0.1:{port}/");
             let start = Instant::now();
 
             let result = ureq::AgentBuilder::new()
@@ -329,7 +322,7 @@ impl HealthChecker {
                     // ureq 的读超时 / 写超时消息均包含 "timed out"
                     if msg.to_lowercase().contains("timed out") {
                         timed_out = true;
-                        last_error = format!("响应超时 ({}ms): {}", latency, msg);
+                        last_error = format!("响应超时 ({latency}ms): {msg}");
                     } else {
                         last_error = msg.clone();
                     }
@@ -376,7 +369,7 @@ impl HealthChecker {
             match genai_store.list_pending_for_pids(pids) {
                 Ok(calls) => calls,
                 Err(e) => {
-                    log::warn!("Failed to query pending calls for pids={:?}: {}", pids, e);
+                    log::warn!("Failed to query pending calls for pids={pids:?}: {e}");
                     vec![]
                 }
             }
@@ -389,11 +382,7 @@ impl HealthChecker {
     fn mark_pending_interrupted(&self, pid: u32, itype: &str) {
         if let Some(ref genai_store) = self.genai_store {
             if let Err(e) = genai_store.mark_pending_interrupted_for_pid(pid as i32, itype) {
-                log::warn!(
-                    "Failed to mark pending calls as interrupted for pid={}: {}",
-                    pid,
-                    e
-                );
+                log::warn!("Failed to mark pending calls as interrupted for pid={pid}: {e}");
             }
         }
     }

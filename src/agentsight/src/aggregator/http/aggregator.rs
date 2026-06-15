@@ -295,8 +295,7 @@ impl HttpConnectionAggregator {
             }
             ConnectionState::SseActive { .. } => {
                 log::trace!(
-                    "[HttpAggregator] State transition: SseActive (unexpected response) | conn={:?}",
-                    connection_id
+                    "[HttpAggregator] State transition: SseActive (unexpected response) | conn={connection_id:?}"
                 );
                 // Response on SSE connection - shouldn't happen normally
                 // Restore state and return None
@@ -391,9 +390,7 @@ impl HttpConnectionAggregator {
                 let is_done = sse_event.is_done();
 
                 log::trace!(
-                    "[HttpAggregator] SSE event in SseActive | conn={:?} | is_done={}",
-                    connection_id,
-                    is_done,
+                    "[HttpAggregator] SSE event in SseActive | conn={connection_id:?} | is_done={is_done}",
                 );
 
                 // Add SSE event to the list
@@ -401,8 +398,7 @@ impl HttpConnectionAggregator {
 
                 if is_done {
                     log::trace!(
-                        "[HttpAggregator] State transition: SseActive -> Complete | conn={:?}",
-                        connection_id,
+                        "[HttpAggregator] State transition: SseActive -> Complete | conn={connection_id:?}",
                     );
 
                     // Build aggregated response with SSE events
@@ -437,8 +433,7 @@ impl HttpConnectionAggregator {
             }
             _ => {
                 log::trace!(
-                    "[HttpAggregator] SSE event in unexpected state | conn={:?}",
-                    connection_id
+                    "[HttpAggregator] SSE event in unexpected state | conn={connection_id:?}"
                 );
                 // Not in SSE active state, restore state
                 self.insert(*connection_id, state);
@@ -550,7 +545,7 @@ impl HttpConnectionAggregator {
         // 2. Determine which PIDs are dead
         let dead_pids: HashSet<u32> = pids
             .into_iter()
-            .filter(|pid| !std::path::Path::new(&format!("/proc/{}", pid)).exists())
+            .filter(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists())
             .collect();
 
         if dead_pids.is_empty() {
@@ -1094,7 +1089,7 @@ mod tests {
         let result = aggregator.process_sse_event(&conn_id, done);
         let pair = match result {
             Some(AggregatedResult::SseComplete(pair)) => pair,
-            other => panic!("expected SseComplete, got {:?}", other),
+            other => panic!("expected SseComplete, got {other:?}"),
         };
 
         assert_eq!(pair.response.sse_event_count(), 2);

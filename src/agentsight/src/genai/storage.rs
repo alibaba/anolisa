@@ -20,6 +20,7 @@ pub struct GenAIStore {
 
 impl GenAIStore {
     /// Create a new GenAI store with the given path
+    #[allow(clippy::ptr_arg)]
     pub fn new(path: &PathBuf) -> Self {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -44,7 +45,7 @@ impl GenAIStore {
 
         let mut writer = BufWriter::new(file);
         let json_line = serde_json::to_string(event)?;
-        writeln!(writer, "{}", json_line)?;
+        writeln!(writer, "{json_line}")?;
         writer.flush()?;
 
         Ok(())
@@ -63,7 +64,7 @@ impl GenAIStore {
         let mut writer = BufWriter::new(file);
         for event in events {
             let json_line = serde_json::to_string(event)?;
-            writeln!(writer, "{}", json_line)?;
+            writeln!(writer, "{json_line}")?;
         }
         writer.flush()?;
 
@@ -208,7 +209,7 @@ impl GenAIExporter for GenAIStore {
 
     fn export(&self, events: &[GenAISemanticEvent]) {
         if let Err(e) = self.add_batch(events) {
-            log::warn!("Failed to store GenAI events to JSONL: {}", e);
+            log::warn!("Failed to store GenAI events to JSONL: {e}");
         }
     }
 }

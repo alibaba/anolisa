@@ -177,9 +177,9 @@ impl TokenComparison {
         let percent = format!("{:.0}%", self.change_percent.abs());
 
         if self.change >= 0 {
-            format!("{}{} (+{}%)", sign, change_formatted, percent)
+            format!("{sign}{change_formatted} (+{percent}%)")
         } else {
-            format!("-{} (-{}%)", change_formatted, percent)
+            format!("-{change_formatted} (-{percent}%)")
         }
     }
 }
@@ -199,7 +199,7 @@ pub fn format_tokens(count: u64) -> String {
     } else if count >= 1_000 {
         format!("{:.1}K", count as f64 / 1_000.0)
     } else {
-        format!("{}", count)
+        format!("{count}")
     }
 }
 
@@ -239,7 +239,7 @@ impl TokenStore {
 
         // Create table if not exists
         let create_table_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_ns INTEGER NOT NULL,
                 pid INTEGER NOT NULL,
@@ -253,8 +253,7 @@ impl TokenStore {
                 cache_read_tokens INTEGER,
                 request_id TEXT,
                 endpoint TEXT
-            )",
-            table_name
+            )"
         );
         conn.execute(&create_table_sql, [])
             .expect("Failed to create token table");
@@ -262,8 +261,7 @@ impl TokenStore {
         // Create index on timestamp for efficient range queries
         conn.execute(
             &format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_timestamp ON {}(timestamp_ns)",
-                table_name, table_name
+                "CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp ON {table_name}(timestamp_ns)"
             ),
             [],
         )
@@ -271,10 +269,7 @@ impl TokenStore {
 
         // Create index on agent for breakdown queries
         conn.execute(
-            &format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_agent ON {}(agent)",
-                table_name, table_name
-            ),
+            &format!("CREATE INDEX IF NOT EXISTS idx_{table_name}_agent ON {table_name}(agent)"),
             [],
         )
         .expect("Failed to create agent index");
@@ -317,7 +312,7 @@ impl TokenStore {
                     record.endpoint,
                 ],
             )
-            .map_err(|e| anyhow::anyhow!("Failed to insert token record: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to insert token record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -480,13 +475,13 @@ impl TokenStore {
         let deleted = self
             .conn
             .execute(&sql, params![cutoff_ns as i64])
-            .map_err(|e| anyhow::anyhow!("Failed to purge token records: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to purge token records: {e}"))?;
         Ok(deleted as u64)
     }
 
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn).map_err(Into::into)
+        wal_checkpoint(&self.conn)
     }
 }
 
@@ -511,7 +506,7 @@ impl<'a> TokenQuery<'a> {
     /// Query last N hours
     pub fn by_hours(&self, hours: u64) -> TokenQueryResult {
         let records = self.store.by_last_hours(hours);
-        self.build_result(records, format!("最近 {} 小时", hours))
+        self.build_result(records, format!("最近 {hours} 小时"))
     }
 
     /// Query with comparison

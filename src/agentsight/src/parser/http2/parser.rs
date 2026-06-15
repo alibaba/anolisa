@@ -1,3 +1,4 @@
+#![allow(clippy::vec_init_then_push)]
 //! HTTP/2 Frame Parser - stateless binary frame parser
 //!
 //! Parses HTTP/2 binary frames from raw SSL event data.

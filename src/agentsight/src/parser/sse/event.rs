@@ -203,6 +203,12 @@ pub struct SSEEvents {
     pub consumed_bytes: usize,
 }
 
+impl Default for SSEEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SSEEvents {
     /// Create a new empty SSEEvents container
     pub fn new() -> Self {
@@ -342,18 +348,18 @@ impl SSEEvent {
         let mut result = String::new();
 
         if let Some(id) = &self.id {
-            result.push_str(&format!("id:{}\n", id));
+            result.push_str(&format!("id:{id}\n"));
         }
         if let Some(event) = &self.event {
-            result.push_str(&format!("event:{}\n", event));
+            result.push_str(&format!("event:{event}\n"));
         }
         if let Some(retry) = self.retry {
-            result.push_str(&format!("retry:{}\n", retry));
+            result.push_str(&format!("retry:{retry}\n"));
         }
 
         // Data can be multi-line
         for line in self.data.lines() {
-            result.push_str(&format!("data:{}\n", line));
+            result.push_str(&format!("data:{line}\n"));
         }
 
         result.push('\n'); // Empty line to terminate event
@@ -372,7 +378,7 @@ impl SSEEvent {
     pub fn to_chrome_trace_event(&self, pid: u32, tid: u64, timestamp_ns: u64) -> ChromeTraceEvent {
         // Build event name based on event type or data preview
         let name = match &self.event {
-            Some(event_type) => format!("SSE {}", event_type),
+            Some(event_type) => format!("SSE {event_type}"),
             None => "SSE Message".to_string(),
         };
 
@@ -682,7 +688,7 @@ mod tests {
             data.len(),
             ev,
         );
-        let debug = format!("{:?}", parsed);
+        let debug = format!("{parsed:?}");
         assert!(debug.contains("id1"));
         assert!(debug.contains("message"));
     }

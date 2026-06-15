@@ -219,7 +219,7 @@ impl IdResolver {
 /// crash 兑底 ID 与正常调用 ID 碰撞。
 pub fn crash_fallback_id(domain: &str, agent_name: &str, pid: i32, user_text: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(format!("crash-{}", domain).as_bytes());
+    hasher.update(format!("crash-{domain}").as_bytes());
     hasher.update(b"|");
     hasher.update(agent_name.as_bytes());
     hasher.update(b"|");
@@ -227,7 +227,7 @@ pub fn crash_fallback_id(domain: &str, agent_name: &str, pid: i32, user_text: &s
     hasher.update(b"|");
     hasher.update(user_text.as_bytes());
     let digest = hasher.finalize();
-    let full = format!("{:x}", digest);
+    let full = format!("{digest:x}");
     full[..32].to_string()
 }
 
@@ -251,7 +251,7 @@ fn domain_hash(domain: &str, first_response_id: &str) -> String {
     hasher.update(domain.as_bytes());
     hasher.update(first_response_id.as_bytes());
     let digest = hasher.finalize();
-    let full = format!("{:x}", digest);
+    let full = format!("{digest:x}");
     full[..32].to_string()
 }
 

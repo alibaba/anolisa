@@ -43,12 +43,12 @@ impl TokenlessStatsStore {
         match Connection::open_with_flags(path, flags) {
             Ok(conn) => {
                 if let Err(e) = conn.busy_timeout(Duration::from_millis(500)) {
-                    log::warn!("Failed to set busy_timeout on stats.db: {}", e);
+                    log::warn!("Failed to set busy_timeout on stats.db: {e}");
                 }
                 Some(TokenlessStatsStore { conn })
             }
             Err(e) => {
-                log::warn!("Failed to open stats.db at {:?}: {}", path, e);
+                log::warn!("Failed to open stats.db at {path:?}: {e}");
                 None
             }
         }
@@ -65,14 +65,13 @@ impl TokenlessStatsStore {
             let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation \
-                 FROM stats WHERE session_id IN ({})",
-                placeholders
+                 FROM stats WHERE session_id IN ({placeholders})"
             );
 
             let mut stmt = match self.conn.prepare(&sql) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("Failed to prepare stats query: {}", e);
+                    log::warn!("Failed to prepare stats query: {e}");
                     return Vec::new();
                 }
             };
@@ -95,7 +94,7 @@ impl TokenlessStatsStore {
             }) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    log::warn!("Failed to query stats.db: {}", e);
+                    log::warn!("Failed to query stats.db: {e}");
                     return Vec::new();
                 }
             };
@@ -104,7 +103,7 @@ impl TokenlessStatsStore {
                 match row {
                     Ok(r) => results.push(r),
                     Err(e) => {
-                        log::warn!("Error reading stats row: {}", e);
+                        log::warn!("Error reading stats row: {e}");
                     }
                 }
             }
@@ -124,14 +123,13 @@ impl TokenlessStatsStore {
             let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation \
-                 FROM stats WHERE tool_use_id IN ({})",
-                placeholders
+                 FROM stats WHERE tool_use_id IN ({placeholders})"
             );
 
             let mut stmt = match self.conn.prepare(&sql) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("Failed to prepare stats query by tool_use_id: {}", e);
+                    log::warn!("Failed to prepare stats query by tool_use_id: {e}");
                     return Vec::new();
                 }
             };
@@ -154,7 +152,7 @@ impl TokenlessStatsStore {
             }) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    log::warn!("Failed to query stats.db by tool_use_id: {}", e);
+                    log::warn!("Failed to query stats.db by tool_use_id: {e}");
                     return Vec::new();
                 }
             };
@@ -163,7 +161,7 @@ impl TokenlessStatsStore {
                 match row {
                     Ok(r) => results.push(r),
                     Err(e) => {
-                        log::warn!("Error reading stats row: {}", e);
+                        log::warn!("Error reading stats row: {e}");
                     }
                 }
             }

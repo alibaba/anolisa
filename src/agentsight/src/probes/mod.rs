@@ -1,3 +1,4 @@
+#![allow(clippy::module_inception)]
 pub mod filewatch;
 pub mod filewrite;
 pub mod probes;

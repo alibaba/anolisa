@@ -217,11 +217,10 @@ fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
     if !missing_in_header.is_empty() || !stale_in_header.is_empty() {
         panic!(
             "FFI header drift detected — update the `after_includes` block in cbindgen.toml.\n\
-             missing in header (declared in src/ffi.rs but absent from cbindgen.toml): {:?}\n\
-             stale in header   (declared in cbindgen.toml but absent from src/ffi.rs):  {:?}\n\
+             missing in header (declared in src/ffi.rs but absent from cbindgen.toml): {missing_in_header:?}\n\
+             stale in header   (declared in cbindgen.toml but absent from src/ffi.rs):  {stale_in_header:?}\n\
              NOTE: this guard checks NAMES only; signature drift (return type, \
              parameter types/order) is NOT detected — verify by hand.",
-            missing_in_header, stale_in_header,
         );
     }
 }

@@ -41,7 +41,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
             match flate2::read::GzDecoder::new(body).read_to_end(&mut decoded) {
                 Ok(_) => decoded,
                 Err(e) => {
-                    log::warn!("gzip decompression failed ({:?}), using raw body", e);
+                    log::warn!("gzip decompression failed ({e:?}), using raw body");
                     body.to_vec()
                 }
             }
@@ -51,7 +51,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
             match flate2::read::DeflateDecoder::new(body).read_to_end(&mut decoded) {
                 Ok(_) => decoded,
                 Err(e) => {
-                    log::warn!("deflate decompression failed ({:?}), using raw body", e);
+                    log::warn!("deflate decompression failed ({e:?}), using raw body");
                     body.to_vec()
                 }
             }

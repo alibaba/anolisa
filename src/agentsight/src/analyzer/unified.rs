@@ -122,7 +122,7 @@ pub fn count_request_tokens(
         match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
             Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
             Err(e) => {
-                log::warn!("Failed to apply chat template with tools: {}", e);
+                log::warn!("Failed to apply chat template with tools: {e}");
                 // Fallback: count raw content + tools separately
                 0
             }
@@ -249,7 +249,7 @@ pub fn count_response_tokens(
         has_content = true;
 
         // Format: <think>\n{reasoning}\n</think>\n\n
-        let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+        let reasoning_with_tags = format!("<think>\n{all_reasoning}\n</think>\n\n");
         let tokens = tokenizer
             .count(&reasoning_with_tags)
             .unwrap_or(all_reasoning.len() / 4);
@@ -339,7 +339,7 @@ pub fn count_response_tokens(
         } else {
             // Fallback: use raw arguments string
             tool_call_str.push_str(arguments);
-            tool_call_str.push_str("\n");
+            tool_call_str.push('\n');
         }
 
         tool_call_str.push_str("</function>\n</tool_call>");
@@ -641,7 +641,7 @@ impl Analyzer {
         let tokenizer = match get_global_tokenizer(model) {
             Ok(t) => t,
             Err(e) => {
-                log::debug!("Failed to get tokenizer for model '{}': {}", model, e);
+                log::debug!("Failed to get tokenizer for model '{model}': {e}");
                 return None;
             }
         };
@@ -654,65 +654,63 @@ impl Analyzer {
         };
 
         // Count input tokens from request messages using chat template
-        let input_tokens =
-            if let Some(messages) = request_json_ref.get("messages").and_then(|m| m.as_array()) {
-                if messages.is_empty() {
-                    0
-                } else {
-                    // Clone messages for in-place modification of tool_calls.arguments
-                    let mut msgs = messages.clone();
+        let input_tokens = if let Some(messages) =
+            request_json_ref.get("messages").and_then(|m| m.as_array())
+        {
+            if messages.is_empty() {
+                0
+            } else {
+                // Clone messages for in-place modification of tool_calls.arguments
+                let mut msgs = messages.clone();
 
-                    // Process tool_calls arguments: parse JSON string to object in place
-                    for msg in msgs.iter_mut() {
-                        if let Some(tool_calls) =
-                            msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
-                        {
-                            for tool_call in tool_calls.iter_mut() {
-                                if let Some(func) = tool_call.get_mut("function") {
-                                    if let Some(args) = func.get("arguments") {
-                                        if let Some(args_str) = args.as_str() {
-                                            // Try to parse arguments string as JSON object
-                                            if let Ok(parsed) =
-                                                serde_json::from_str::<serde_json::Value>(args_str)
-                                            {
-                                                func["arguments"] = parsed;
-                                            }
+                // Process tool_calls arguments: parse JSON string to object in place
+                for msg in msgs.iter_mut() {
+                    if let Some(tool_calls) =
+                        msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
+                    {
+                        for tool_call in tool_calls.iter_mut() {
+                            if let Some(func) = tool_call.get_mut("function") {
+                                if let Some(args) = func.get("arguments") {
+                                    if let Some(args_str) = args.as_str() {
+                                        // Try to parse arguments string as JSON object
+                                        if let Ok(parsed) =
+                                            serde_json::from_str::<serde_json::Value>(args_str)
+                                        {
+                                            func["arguments"] = parsed;
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
 
-                    // Extract tools JSON array for passing to template
-                    let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
-                        .get("tools")
-                        .and_then(|t| t.as_array())
-                        .map(|arr| arr.to_vec());
-                    let tools_slice = tools_json.as_deref();
+                // Extract tools JSON array for passing to template
+                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .map(|arr| arr.to_vec());
+                let tools_slice = tools_json.as_deref();
 
-                    // Apply chat template with tools to get the actual prompt sent to LLM
-                    match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
-                        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to apply chat template: {}, falling back to raw count",
-                                e
-                            );
-                            // Fallback: count raw message content
-                            let mut total = 0u64;
-                            for msg in &msgs {
-                                if let Ok(msg_str) = serde_json::to_string(msg) {
-                                    total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
-                                }
+                // Apply chat template with tools to get the actual prompt sent to LLM
+                match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
+                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
+                    Err(e) => {
+                        log::warn!("Failed to apply chat template: {e}, falling back to raw count");
+                        // Fallback: count raw message content
+                        let mut total = 0u64;
+                        for msg in &msgs {
+                            if let Ok(msg_str) = serde_json::to_string(msg) {
+                                total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
                             }
-                            total
                         }
+                        total
                     }
                 }
-            } else {
-                0
-            };
+            }
+        } else {
+            0
+        };
 
         // Count output tokens from SSE events content
         let output_tokens = {
@@ -746,7 +744,7 @@ impl Analyzer {
 
             // Count reasoning tokens
             if !all_reasoning.is_empty() {
-                let reasoning_with_tags = format!("<think>\n{}\n</think>\n\n", all_reasoning);
+                let reasoning_with_tags = format!("<think>\n{all_reasoning}\n</think>\n\n");
                 total += tokenizer.count(&reasoning_with_tags).unwrap_or(0) as u64;
             }
 

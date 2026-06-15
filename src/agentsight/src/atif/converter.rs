@@ -203,7 +203,7 @@ pub fn convert_session_to_atif(
 
 /// Parse event_json for all events upfront. Returns a Vec of Option<LLMCall>.
 fn parse_all_events(events: &[TraceEventDetail]) -> Vec<Option<LLMCall>> {
-    events.iter().map(|e| parse_event_json(e)).collect()
+    events.iter().map(parse_event_json).collect()
 }
 
 /// Try to deserialize event_json into an LLMCall.
@@ -635,7 +635,7 @@ fn collect_tool_responses(
                     results.push(AtifObservationResult {
                         source_call_id: Some(
                             id.clone()
-                                .unwrap_or_else(|| format!("auto_{}", positional_idx)),
+                                .unwrap_or_else(|| format!("auto_{positional_idx}")),
                         ),
                         content: Some(content_str),
                     });

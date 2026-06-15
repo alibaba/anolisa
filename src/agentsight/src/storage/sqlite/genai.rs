@@ -663,10 +663,7 @@ impl GenAISqliteStore {
             params![cutoff_ns],
         )?;
         if updated > 0 {
-            log::info!(
-                "[GenAI] Marked {} stale pending call(s) as interrupted",
-                updated
-            );
+            log::info!("[GenAI] Marked {updated} stale pending call(s) as interrupted");
         }
         Ok(updated)
     }
@@ -804,11 +801,7 @@ impl GenAISqliteStore {
             params![itype, pid],
         )?;
         if updated > 0 {
-            log::info!(
-                "Marked {} pending call(s) as interrupted for pid={}",
-                updated,
-                pid
-            );
+            log::info!("Marked {updated} pending call(s) as interrupted for pid={pid}");
         }
         Ok(updated)
     }
@@ -836,8 +829,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND status = 'pending'
-               AND pid IN ({})",
-            placeholders
+               AND pid IN ({placeholders})"
         );
         let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = pids
             .iter()
@@ -1144,8 +1136,7 @@ impl GenAISqliteStore {
 
         // When both start_ns and end_ns are present, rewrite with BETWEEN
         let sql = if start_ns.is_some() && end_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1160,10 +1151,9 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns BETWEEN ?2 AND ?3
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else if start_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1178,10 +1168,9 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns >= ?2
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else if end_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1196,7 +1185,7 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns <= ?2
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else {
             String::from(
                 "SELECT conversation_id,
@@ -1701,9 +1690,7 @@ impl GenAISqliteStore {
                         if err.extended_code == 13 && retries < MAX_PRUNE_RETRIES {
                             retries += 1;
                             log::warn!(
-                                "Database full (SQLITE_FULL), pruning old records (attempt {}/{})",
-                                retries,
-                                MAX_PRUNE_RETRIES
+                                "Database full (SQLITE_FULL), pruning old records (attempt {retries}/{MAX_PRUNE_RETRIES})"
                             );
                             self.prune_old_records()?;
                             self.checkpoint()?;
@@ -2036,7 +2023,7 @@ impl GenAISqliteStore {
             params![delete_count],
         )?;
 
-        log::info!("Deleted {} records", deleted);
+        log::info!("Deleted {deleted} records");
 
         Ok(())
     }
@@ -2083,7 +2070,7 @@ impl GenAIExporter for GenAISqliteStore {
     fn export(&self, events: &[GenAISemanticEvent]) {
         for event in events {
             if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event to SQLite: {}", e);
+                log::warn!("Failed to store GenAI event to SQLite: {e}");
             }
         }
     }
@@ -2276,7 +2263,7 @@ mod tests {
     #[test]
     fn test_parse_output_multiple_text_parts() {
         let json = r#"[{"role":"assistant","parts":[{"type":"text","content":"Part 1"},{"type":"text","content":"Part 2"}]}]"#;
-        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        let (_tools, text) = parse_output_messages_for_loop_detection(Some(json));
         assert_eq!(text, "Part 1 Part 2");
     }
 
@@ -2284,8 +2271,7 @@ mod tests {
     fn test_parse_output_text_truncated_at_200_chars() {
         let long_content = "a".repeat(300);
         let json = format!(
-            r#"[{{"role":"assistant","parts":[{{"type":"text","content":"{}"}}]}}]"#,
-            long_content
+            r#"[{{"role":"assistant","parts":[{{"type":"text","content":"{long_content}"}}]}}]"#
         );
         let (_, text) = parse_output_messages_for_loop_detection(Some(&json));
         assert_eq!(text.len(), 200);

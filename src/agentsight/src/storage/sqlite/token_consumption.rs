@@ -117,7 +117,7 @@ impl TokenConsumptionStore {
         let table_name = table_name.to_string();
 
         conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {table} (
+            "CREATE TABLE IF NOT EXISTS {table_name} (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_ns         INTEGER NOT NULL,
                 pid                  INTEGER NOT NULL DEFAULT 0,
@@ -131,10 +131,9 @@ impl TokenConsumptionStore {
                 by_role_json         TEXT    NOT NULL DEFAULT '{{}}',
                 output_by_type_json  TEXT    NOT NULL DEFAULT '{{}}'
             );
-            CREATE INDEX IF NOT EXISTS idx_{table}_ts   ON {table}(timestamp_ns);
-            CREATE INDEX IF NOT EXISTS idx_{table}_prov ON {table}(provider);
-            CREATE INDEX IF NOT EXISTS idx_{table}_model ON {table}(model);",
-            table = table_name,
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_ts   ON {table_name}(timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_prov ON {table_name}(provider);
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_model ON {table_name}(model);",
         ))?;
 
         Ok(TokenConsumptionStore { conn, table_name })
@@ -188,7 +187,7 @@ impl TokenConsumptionStore {
                     output_by_type_json,
                 ],
             )
-            .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -204,19 +203,19 @@ impl TokenConsumptionStore {
         let mut bind_idx = 1usize;
 
         if filter.start_ns.is_some() {
-            conditions.push(format!("timestamp_ns >= ?{}", bind_idx));
+            conditions.push(format!("timestamp_ns >= ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.end_ns.is_some() {
-            conditions.push(format!("timestamp_ns <= ?{}", bind_idx));
+            conditions.push(format!("timestamp_ns <= ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.provider.is_some() {
-            conditions.push(format!("provider = ?{}", bind_idx));
+            conditions.push(format!("provider = ?{bind_idx}"));
             bind_idx += 1;
         }
         if filter.model.is_some() {
-            conditions.push(format!("model = ?{}", bind_idx));
+            conditions.push(format!("model = ?{bind_idx}"));
         }
 
         let where_clause = if conditions.is_empty() {
@@ -354,7 +353,7 @@ impl TokenConsumptionStore {
 
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> anyhow::Result<()> {
-        wal_checkpoint(&self.conn).map_err(Into::into)
+        wal_checkpoint(&self.conn)
     }
 
     /// Number of stored records

@@ -37,7 +37,7 @@ impl TokenCommand {
         let data_path = self
             .data_file
             .as_ref()
-            .map(|p| std::path::PathBuf::from(p))
+            .map(std::path::PathBuf::from)
             .unwrap_or_else(|| SqliteConfig::default().db_path());
 
         self.execute_summary(&data_path);
@@ -62,12 +62,10 @@ impl TokenCommand {
             } else {
                 query.by_period(period)
             }
+        } else if self.compare {
+            query.by_period_with_compare(TimePeriod::Today)
         } else {
-            if self.compare {
-                query.by_period_with_compare(TimePeriod::Today)
-            } else {
-                query.by_period(TimePeriod::Today)
-            }
+            query.by_period(TimePeriod::Today)
         };
 
         // Output result

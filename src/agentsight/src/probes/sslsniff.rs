@@ -74,22 +74,22 @@ impl SslEvent {
         let buf = raw.buf[..buf_size.min(MAX_BUF_SIZE)].to_vec();
 
         // Convert ktime (nanoseconds since boot) to Unix timestamp
-        let ktime_ns = raw.timestamp_ns as u64;
+        let ktime_ns = raw.timestamp_ns;
         let unix_ts_ns = config::ktime_to_unix_ns(ktime_ns);
 
         Self {
-            source: raw.source as u32,
+            source: raw.source,
             timestamp_ns: unix_ts_ns,
-            delta_ns: raw.delta_ns as u64,
-            pid: raw.pid as u32,
-            tid: raw.tid as u32,
-            uid: raw.uid as u32,
-            len: raw.len as u32,
+            delta_ns: raw.delta_ns,
+            pid: raw.pid,
+            tid: raw.tid,
+            uid: raw.uid,
+            len: raw.len,
             rw: raw.rw,
             comm: Self::parse_comm(&raw.comm),
             buf,
             is_handshake: raw.is_handshake != 0,
-            ssl_ptr: raw.ssl_ptr as u64,
+            ssl_ptr: raw.ssl_ptr,
         }
     }
 
@@ -270,7 +270,7 @@ impl SslSniff {
             "[attach_process] pid={pid}: found {} libs: {:?}",
             libs.len(),
             libs.iter()
-                .map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k)))
+                .map(|(p, i, k)| (p.as_str(), *i, format!("{k:?}")))
                 .collect::<Vec<_>>()
         );
 
@@ -365,7 +365,7 @@ impl SslSniff {
         let mut rb_builder = RingBufferBuilder::new();
         let binding = self.skel.maps();
         rb_builder
-            .add(&binding.rb(), move |data: &[u8]| {
+            .add(binding.rb(), move |data: &[u8]| {
                 if data.len() < min_sz {
                     return 0;
                 }
@@ -540,7 +540,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         hs_matches[0]
     } else {
         // Multiple matches: choose the one closest before read_off.
-        match hs_matches.iter().filter(|&&o| o < read_off).last() {
+        match hs_matches.iter().filter(|&&o| o < read_off).next_back() {
             Some(&o) => o,
             None => {
                 if verbose {
@@ -680,7 +680,7 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             let path_str = if path_str.ends_with(" (deleted)") {
                 format!("/proc/{pid}/exe")
             } else {
-                format!("/proc/{pid}/root{}", path_str)
+                format!("/proc/{pid}/root{path_str}")
             };
             results.push((path_str, inode, kind));
         }
@@ -691,6 +691,7 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
 
 // ─── uprobe helpers ───────────────────────────────────────────────────────────
 
+#[allow(clippy::field_reassign_with_default)]
 fn make_sym_opts(sym: &str, retprobe: bool) -> UprobeOpts {
     let mut o = UprobeOpts::default();
     o.func_name = sym.to_string();

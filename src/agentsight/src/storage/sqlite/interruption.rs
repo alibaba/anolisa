@@ -260,22 +260,22 @@ impl InterruptionStore {
         let mut idx = 3usize;
 
         if let Some(a) = agent_name {
-            conditions.push(format!("agent_name = ?{}", idx));
+            conditions.push(format!("agent_name = ?{idx}"));
             args.push(Box::new(a.to_string()));
             idx += 1;
         }
         if let Some(t) = itype {
-            conditions.push(format!("interruption_type = ?{}", idx));
+            conditions.push(format!("interruption_type = ?{idx}"));
             args.push(Box::new(t.to_string()));
             idx += 1;
         }
         if let Some(s) = severity {
-            conditions.push(format!("severity = ?{}", idx));
+            conditions.push(format!("severity = ?{idx}"));
             args.push(Box::new(s.to_string()));
             idx += 1;
         }
         if let Some(r) = resolved {
-            conditions.push(format!("resolved = ?{}", idx));
+            conditions.push(format!("resolved = ?{idx}"));
             args.push(Box::new(r as i32));
             idx += 1;
         }
@@ -601,7 +601,7 @@ fn errors_match(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_store() -> InterruptionStore {
@@ -660,7 +660,7 @@ mod tests {
         let store = temp_store();
         for i in 0..3 {
             let mut event = make_event("conv-2", InterruptionType::DeadLoop);
-            event.interruption_id = format!("int-multi-{}", i);
+            event.interruption_id = format!("int-multi-{i}");
             store.insert(&event).unwrap();
         }
         let count = store.count_for_conversation("conv-2", &InterruptionType::DeadLoop);

@@ -90,9 +90,7 @@ impl ResponseSessionMapper {
 
             if let Some(response_id) = Self::extract_response_id(line) {
                 log::debug!(
-                    "ResponseSessionMapper: responseId={} → sessionId={}",
-                    response_id,
-                    session_id
+                    "ResponseSessionMapper: responseId={response_id} → sessionId={session_id}"
                 );
                 self.map.put(response_id, session_id.clone());
             }

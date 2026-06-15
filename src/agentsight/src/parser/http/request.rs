@@ -1,3 +1,4 @@
+#![allow(clippy::same_item_push)]
 //! HTTP Request types
 
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us};
@@ -255,7 +256,7 @@ mod tests {
     #[test]
     fn test_parsed_request_json_body() {
         let json_str = r#"{"key":"value"}"#;
-        let full = format!("POST / HTTP/1.1\r\n\r\n{}", json_str);
+        let full = format!("POST / HTTP/1.1\r\n\r\n{json_str}");
         let bytes = full.as_bytes();
         let event = make_ssl_event(bytes);
         let body_offset = bytes.len() - json_str.len();
@@ -390,7 +391,7 @@ mod tests {
             source_event: event,
             reassembled_body: None,
         };
-        let debug_str = format!("{:?}", req);
+        let debug_str = format!("{req:?}");
         assert!(debug_str.contains("GET"));
     }
 }

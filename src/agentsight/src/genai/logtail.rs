@@ -38,7 +38,7 @@ pub fn set_dynamic_logtail_path(path: &str) {
             *guard = None;
         } else {
             *guard = Some(path.to_string());
-            log::info!("Dynamic logtail path set: {}", path);
+            log::info!("Dynamic logtail path set: {path}");
         }
     }
 }
@@ -190,7 +190,7 @@ impl LogtailExporter {
         {
             Ok(f) => f,
             Err(e) => {
-                log::warn!("Failed to open logtail file {:?}: {}", target_path, e);
+                log::warn!("Failed to open logtail file {target_path:?}: {e}");
                 return;
             }
         };
@@ -199,19 +199,19 @@ impl LogtailExporter {
         for record in &records {
             match serde_json::to_string(record) {
                 Ok(json_line) => {
-                    if let Err(e) = writeln!(writer, "{}", json_line) {
-                        log::warn!("Failed to write logtail record: {}", e);
+                    if let Err(e) = writeln!(writer, "{json_line}") {
+                        log::warn!("Failed to write logtail record: {e}");
                         return;
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to serialize logtail record: {}", e);
+                    log::warn!("Failed to serialize logtail record: {e}");
                 }
             }
         }
 
         if let Err(e) = writer.flush() {
-            log::warn!("Failed to flush logtail file: {}", e);
+            log::warn!("Failed to flush logtail file: {e}");
         }
     }
 }
@@ -300,7 +300,7 @@ pub fn events_to_flat_records(
                 {
                     m.insert(
                         "gen_ai.response.finish_reasons".to_string(),
-                        format!("[\"{}\"]", reason),
+                        format!("[\"{reason}\"]"),
                     );
                 }
                 if let Some(temp) = call.request.temperature {
@@ -626,11 +626,7 @@ pub fn export_interruption_events(events: &[InterruptionEvent]) {
     let file = match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
-            log::warn!(
-                "Failed to open logtail file {:?} for interruption export: {}",
-                path,
-                e
-            );
+            log::warn!("Failed to open logtail file {path:?} for interruption export: {e}");
             return;
         }
     };
@@ -639,19 +635,19 @@ pub fn export_interruption_events(events: &[InterruptionEvent]) {
     for record in &records {
         match serde_json::to_string(record) {
             Ok(json_line) => {
-                if let Err(e) = writeln!(writer, "{}", json_line) {
-                    log::warn!("Failed to write interruption logtail record: {}", e);
+                if let Err(e) = writeln!(writer, "{json_line}") {
+                    log::warn!("Failed to write interruption logtail record: {e}");
                     return;
                 }
             }
             Err(e) => {
-                log::warn!("Failed to serialize interruption logtail record: {}", e);
+                log::warn!("Failed to serialize interruption logtail record: {e}");
             }
         }
     }
 
     if let Err(e) = writer.flush() {
-        log::warn!("Failed to flush logtail file (interruption): {}", e);
+        log::warn!("Failed to flush logtail file (interruption): {e}");
     }
 }
 
@@ -806,8 +802,7 @@ mod tests {
         for key in r.keys() {
             assert!(
                 !key.ends_with(".messages") && key != "gen_ai.system_instructions",
-                "unexpected conversation-content field leaked when traceEnabled=false: {}",
-                key,
+                "unexpected conversation-content field leaked when traceEnabled=false: {key}",
             );
         }
     }

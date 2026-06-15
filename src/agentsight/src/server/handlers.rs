@@ -269,13 +269,13 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
             Err(e) => {
                 return HttpResponse::InternalServerError()
                     .content_type("text/plain; version=0.0.4")
-                    .body(format!("# ERROR querying metrics: {}\n", e));
+                    .body(format!("# ERROR querying metrics: {e}\n"));
             }
         },
         Err(e) => {
             return HttpResponse::InternalServerError()
                 .content_type("text/plain; version=0.0.4")
-                .body(format!("# ERROR opening database: {}\n", e));
+                .body(format!("# ERROR opening database: {e}\n"));
         }
     };
 
@@ -450,12 +450,7 @@ pub async fn restart_agent_health(
     match Command::new(exe).args(args).spawn() {
         Ok(child) => {
             let new_pid = child.id();
-            log::info!(
-                "Restarted agent pid={} -> new pid={}, cmd={:?}",
-                pid,
-                new_pid,
-                cmd
-            );
+            log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
             // 从 store 中删除旧 PID 条目，下次扫描时新 PID 会自动加入
             data.health_store.write().unwrap().remove_by_pid(pid);
             HttpResponse::Ok().json(serde_json::json!({
