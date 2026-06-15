@@ -66,6 +66,8 @@ export default {
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
   '? for shortcuts': '? for shortcuts',
+  'Ctrl+C to exit': 'Ctrl+C to exit',
+  '/bash for shell': '/bash for shell',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':

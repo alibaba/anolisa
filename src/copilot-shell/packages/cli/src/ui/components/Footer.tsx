@@ -75,6 +75,10 @@ export const Footer: React.FC = () => {
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>
+      {t('Ctrl+C to exit')}
+      {' · '}
+      {t('/bash for shell')}
+      {' · '}
       {t('? for shortcuts')}
       {uiState.streamingState === StreamingState.WaitingForConfirmation &&
         ` · ${t('Press Esc to interrupt')}`}

@@ -325,9 +325,12 @@ describe('<Footer />', () => {
     const uiState = createMockUIState({
       streamingState: 'waiting_for_confirmation',
     });
-    const { lastFrame } = renderWithWidth(120, uiState);
+    const { lastFrame } = renderWithWidth(200, uiState);
+    expect(lastFrame()).toContain('Ctrl+C to exit');
+    expect(lastFrame()).toContain('/bash for shell');
     expect(lastFrame()).toContain('? for shortcuts');
-    expect(lastFrame()).toContain('Press Esc to interrupt');
+    expect(lastFrame()).toContain('Press Esc');
+    expect(lastFrame()).toContain('interrupt');
   });
 
   it('does not show esc interrupt hint when idle', () => {
@@ -336,6 +339,8 @@ describe('<Footer />', () => {
       streamingState: 'idle',
     });
     const { lastFrame } = renderWithWidth(120, uiState);
+    expect(lastFrame()).toContain('Ctrl+C to exit');
+    expect(lastFrame()).toContain('/bash for shell');
     expect(lastFrame()).toContain('? for shortcuts');
     expect(lastFrame()).not.toContain('Press Esc to interrupt');
   });
