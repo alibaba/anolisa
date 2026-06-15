@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-06-15
+
+### Added
+
+- `anolisa adapter enable` can now register installed adapters with OpenClaw.
+- `anolisa adapter disable` can now remove OpenClaw adapter registrations.
+- `anolisa adapter status` can now report OpenClaw adapter health.
+- `anolisa adapter scan` can now show installed adapter resources.
+
+### Changed
+
+- `anolisa install` now places adapter resources needed by later enablement.
+- `anolisa uninstall` now blocks components that still have enabled adapters.
+
 ## [0.1.7] - 2026-06-13
 
 ### Changed
@@ -145,6 +159,20 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.8] - 2026-06-15
+
+### 新增
+
+- `anolisa adapter enable` 现可将已安装适配器注册到 OpenClaw。
+- `anolisa adapter disable` 现可移除 OpenClaw 适配器注册。
+- `anolisa adapter status` 现可报告 OpenClaw 适配器健康状态。
+- `anolisa adapter scan` 现可显示已安装适配器资源。
+
+### 变更
+
+- `anolisa install` 现会放置后续启用所需的适配器资源。
+- `anolisa uninstall` 现会阻止移除仍有启用适配器的组件。
 
 ## [0.1.7] - 2026-06-13
 
