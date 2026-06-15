@@ -168,7 +168,7 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 - [eBPF Probes 设计](docs/design-docs/ebpf-probes.md)
 - [数据流水线设计](docs/design-docs/data-pipeline.md)
 - [GenAI 语义层设计](docs/design-docs/genai-semantic.md)
-- [常见踩坑记录](docs/PITFALLS.md) — AI agent 和新贡献者最容易犯的 11 个错误
+- [常见踩坑记录](docs/PITFALLS.md) — AI agent 和新贡献者最容易踩的坑
 - [架构决策记录（ADR）](docs/adr/) — 关键架构选型的背景和理由
 
 ## 11. Prerequisites
