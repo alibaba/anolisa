@@ -742,16 +742,16 @@ fn ffi_background_thread(
             match cmd {
                 ProbeCommand::AddCgroup(id) => {
                     if let Err(e) = sight.add_traced_cgroup(id) {
-                        log::warn!("add_traced_cgroup({id}) failed: {e}");
+                        log::warn!("add_traced_cgroup({}) failed: {}", id, e);
                     } else {
-                        log::info!("Added cgroup_id {id} to BPF filter");
+                        log::info!("Added cgroup_id {} to BPF filter", id);
                     }
                 }
                 ProbeCommand::RemoveCgroup(id) => {
                     if let Err(e) = sight.remove_traced_cgroup(id) {
-                        log::warn!("remove_traced_cgroup({id}) failed: {e}");
+                        log::warn!("remove_traced_cgroup({}) failed: {}", id, e);
                     } else {
-                        log::info!("Removed cgroup_id {id} from BPF filter");
+                        log::info!("Removed cgroup_id {} from BPF filter", id);
                     }
                 }
             }
@@ -901,10 +901,6 @@ pub unsafe extern "C" fn agentsight_read(
 /// Add a cgroup inode ID to the BPF cgroup_filter map at runtime.
 /// Returns 0 on success, -1 on failure (check agentsight_last_error()).
 /// Requires agentsight_start() to have been called first.
-///
-/// # Safety
-///
-/// `h` must be a valid pointer returned by `agentsight_new()`, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_add_traced_cgroup(
     h: *mut AgentsightHandle,
@@ -933,10 +929,6 @@ pub unsafe extern "C" fn agentsight_add_traced_cgroup(
 
 /// Remove a cgroup inode ID from the BPF cgroup_filter map at runtime.
 /// Returns 0 on success, -1 on failure (check agentsight_last_error()).
-///
-/// # Safety
-///
-/// `h` must be a valid pointer returned by `agentsight_new()`, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_remove_traced_cgroup(
     h: *mut AgentsightHandle,

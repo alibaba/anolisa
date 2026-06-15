@@ -613,7 +613,7 @@ jobs:
 
       - name: Install diff-cover
         if: github.event_name == 'pull_request'
-        run: pip install diff-cover
+        run: pip install --break-system-packages diff-cover
 
       - name: Incremental coverage gate (PR only)
         if: github.event_name == 'pull_request'
