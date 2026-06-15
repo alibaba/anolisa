@@ -4,6 +4,25 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-15
+
+### Added
+- JSONL wire protocol (InputMessage / OutputMessage) for cosh-shell ↔ cosh-tui communication
+- Provider abstraction with OpenAI-compatible streaming (DashScope, OpenAI, DeepSeek, Generic profiles)
+- Tool execution framework with 7 built-in tools (shell, read_file, write_file, edit, grep, todo, skill) and approval control
+- Context window management, message truncation, loop detection, conversation compression
+- Lifecycle hooks framework
+- CoshCore agent loop engine
+- TOML-based multi-provider config with environment variable expansion
+
+### Changed
+- **BREAKING**: Binary interface from ratatui interactive TUI to JSONL stdin/stdout backend
+- **BREAKING**: Config format from settings.json to config.toml
+- Rewrite session store with single-file JSON persistence
+
+### Removed
+- Legacy ratatui-based TUI code (app, commands, llm, logger, theme, tools, ui modules)
+
 ## [0.3.0] — 2026-06-15
 
 ### Added
