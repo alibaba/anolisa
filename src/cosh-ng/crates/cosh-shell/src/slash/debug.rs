@@ -17,6 +17,12 @@ pub(super) fn render_debug_command<W: Write>(
                     adapter.name().to_string(),
                 ),
                 debug_line(
+                    cosh_shell::MessageId::DebugProviderInvocationLine,
+                    adapter
+                        .provider_invocation()
+                        .unwrap_or_else(|| "<none>".to_string()),
+                ),
+                debug_line(
                     cosh_shell::MessageId::DebugProviderCommittedSessionLine,
                     adapter
                         .committed_session_id()
@@ -62,6 +68,7 @@ pub(super) fn render_debug_command<W: Write>(
                     .to_string(),
                 ));
             } else {
+                let latest_shell = state.evidence.latest_shell_command_completed();
                 body.push(debug_line(
                     cosh_shell::MessageId::DebugProviderPendingSessionLine,
                     "<none>".to_string(),
@@ -72,13 +79,32 @@ pub(super) fn render_debug_command<W: Write>(
                 ));
                 body.push(debug_line(
                     cosh_shell::MessageId::DebugHostExecutedShellResultLine,
-                    "<none>".to_string(),
+                    latest_shell
+                        .map(|evidence| evidence.provider_result_delivery_status.to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
                 ));
                 body.push(debug_line(
                     cosh_shell::MessageId::DebugSelectedShellExecutionPathLine,
-                    "<none>".to_string(),
+                    latest_shell
+                        .map(|evidence| evidence.selected_execution_path().to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
                 ));
             }
+            let latest_shell = state.evidence.latest_shell_command_completed();
+            body.push(debug_line(
+                cosh_shell::MessageId::DebugLatestProviderRequestLine,
+                latest_shell
+                    .and_then(|evidence| evidence.provider_request_id.as_deref())
+                    .unwrap_or("<none>")
+                    .to_string(),
+            ));
+            body.push(debug_line(
+                cosh_shell::MessageId::DebugLatestToolUseLine,
+                latest_shell
+                    .and_then(|evidence| evidence.tool_use_id.as_deref())
+                    .unwrap_or("<none>")
+                    .to_string(),
+            ));
             if let Some(evidence) = state.evidence.latest_recovery() {
                 body.push(debug_line(
                     cosh_shell::MessageId::DebugLatestRecoveryStatusLine,

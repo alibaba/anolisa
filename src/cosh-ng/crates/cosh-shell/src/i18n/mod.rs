@@ -150,6 +150,7 @@ pub enum MessageId {
     SlashHooksFeedbackClearFailedFooter,
     DebugSessionTitle,
     DebugAdapterLine,
+    DebugProviderInvocationLine,
     DebugProviderCommittedSessionLine,
     DebugActiveRunLine,
     DebugQueuedRunsLine,
@@ -157,6 +158,8 @@ pub enum MessageId {
     DebugProviderInitializeSeenLine,
     DebugHostExecutedShellResultLine,
     DebugSelectedShellExecutionPathLine,
+    DebugLatestProviderRequestLine,
+    DebugLatestToolUseLine,
     DebugLatestRecoveryStatusLine,
     DebugLatestRecoveryReasonLine,
     DebugUnknownTargetBody,
@@ -635,6 +638,7 @@ impl MessageId {
         MessageId::SlashHooksFeedbackClearFailedFooter,
         MessageId::DebugSessionTitle,
         MessageId::DebugAdapterLine,
+        MessageId::DebugProviderInvocationLine,
         MessageId::DebugProviderCommittedSessionLine,
         MessageId::DebugActiveRunLine,
         MessageId::DebugQueuedRunsLine,
@@ -642,6 +646,8 @@ impl MessageId {
         MessageId::DebugProviderInitializeSeenLine,
         MessageId::DebugHostExecutedShellResultLine,
         MessageId::DebugSelectedShellExecutionPathLine,
+        MessageId::DebugLatestProviderRequestLine,
+        MessageId::DebugLatestToolUseLine,
         MessageId::DebugLatestRecoveryStatusLine,
         MessageId::DebugLatestRecoveryReasonLine,
         MessageId::DebugUnknownTargetBody,
@@ -1246,6 +1252,7 @@ fn en_message(id: MessageId) -> &'static str {
         }
         MessageId::DebugSessionTitle => "Session debug",
         MessageId::DebugAdapterLine => "adapter: {value}",
+        MessageId::DebugProviderInvocationLine => "provider invocation: {value}",
         MessageId::DebugProviderCommittedSessionLine => "provider committed session: {value}",
         MessageId::DebugActiveRunLine => "active run: {value}",
         MessageId::DebugQueuedRunsLine => "queued runs: {value}",
@@ -1253,6 +1260,8 @@ fn en_message(id: MessageId) -> &'static str {
         MessageId::DebugProviderInitializeSeenLine => "provider initialize seen: {value}",
         MessageId::DebugHostExecutedShellResultLine => "host-executed shell result: {value}",
         MessageId::DebugSelectedShellExecutionPathLine => "selected shell execution path: {value}",
+        MessageId::DebugLatestProviderRequestLine => "latest provider request: {value}",
+        MessageId::DebugLatestToolUseLine => "latest tool use id: {value}",
         MessageId::DebugLatestRecoveryStatusLine => "latest recovery status: {value}",
         MessageId::DebugLatestRecoveryReasonLine => "latest recovery reason: {value}",
         MessageId::DebugUnknownTargetBody => "Unknown debug target: {target}",
@@ -1527,11 +1536,11 @@ fn en_message(id: MessageId) -> &'static str {
         MessageId::ActivitySkillLoadingSummary => "{skill} loading",
         MessageId::ActivitySkillLoadedSummary => "{skill} loaded",
         MessageId::ActivitySkillFailedSummary => "{skill} failed",
-        MessageId::ActivityToolCalledSummary => "{tool} called; [Details] {id}",
-        MessageId::ActivityToolRequestedSummary => "{tool} requested; [Details] {id}",
+        MessageId::ActivityToolCalledSummary => "{tool} called: {preview}; [Details] {id}",
+        MessageId::ActivityToolRequestedSummary => "{tool} requested: {preview}; [Details] {id}",
         MessageId::ActivityToolOutputCapturedSummary => "{stream} captured; [Details] {id}",
         MessageId::ActivityProviderNativeShellBypassSummary => {
-            "{tool} auto-approved by provider; [Details] {id}"
+            "{tool} auto-approved by provider: {preview}; [Details] {id}"
         }
         MessageId::ActivityToolNeedsForegroundShellSummary => {
             "may require foreground shell; [Send to shell] {handoff}; [Details] {id}"
@@ -1902,6 +1911,7 @@ fn zh_message(id: MessageId) -> &'static str {
         }
         MessageId::DebugSessionTitle => "会话调试",
         MessageId::DebugAdapterLine => "适配器: {value}",
+        MessageId::DebugProviderInvocationLine => "provider 调用路径: {value}",
         MessageId::DebugProviderCommittedSessionLine => "provider 已提交会话: {value}",
         MessageId::DebugActiveRunLine => "活跃运行: {value}",
         MessageId::DebugQueuedRunsLine => "排队运行: {value}",
@@ -1909,6 +1919,8 @@ fn zh_message(id: MessageId) -> &'static str {
         MessageId::DebugProviderInitializeSeenLine => "provider initialize 已收到: {value}",
         MessageId::DebugHostExecutedShellResultLine => "host-executed shell 结果: {value}",
         MessageId::DebugSelectedShellExecutionPathLine => "已选择 shell 执行路径: {value}",
+        MessageId::DebugLatestProviderRequestLine => "最近 provider request: {value}",
+        MessageId::DebugLatestToolUseLine => "最近 tool use id: {value}",
         MessageId::DebugLatestRecoveryStatusLine => "最近恢复状态: {value}",
         MessageId::DebugLatestRecoveryReasonLine => "最近恢复原因: {value}",
         MessageId::DebugUnknownTargetBody => "未知 debug 目标: {target}",
@@ -2147,11 +2159,11 @@ fn zh_message(id: MessageId) -> &'static str {
         MessageId::ActivitySkillLoadingSummary => "{skill} 加载中",
         MessageId::ActivitySkillLoadedSummary => "{skill} 已加载",
         MessageId::ActivitySkillFailedSummary => "{skill} 失败",
-        MessageId::ActivityToolCalledSummary => "{tool} 已调用；[Details] {id}",
-        MessageId::ActivityToolRequestedSummary => "{tool} 请求审批；[Details] {id}",
+        MessageId::ActivityToolCalledSummary => "{tool} 已调用：{preview}；[Details] {id}",
+        MessageId::ActivityToolRequestedSummary => "{tool} 请求审批：{preview}；[Details] {id}",
         MessageId::ActivityToolOutputCapturedSummary => "{stream} 已捕获；[Details] {id}",
         MessageId::ActivityProviderNativeShellBypassSummary => {
-            "{tool} 已由 provider 自动批准；[Details] {id}"
+            "{tool} 已由 provider 自动批准：{preview}；[Details] {id}"
         }
         MessageId::ActivityToolNeedsForegroundShellSummary => {
             "可能需要前台 shell；[Send to shell] {handoff}；[Details] {id}"

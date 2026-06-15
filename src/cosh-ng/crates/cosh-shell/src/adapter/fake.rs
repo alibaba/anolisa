@@ -97,6 +97,34 @@ impl AgentAdapter for FakeAgentAdapter {
                     .lines()
                     .find_map(|line| line.trim().strip_prefix("approval_id: "))
                     .unwrap_or("<unknown>");
+                if input.contains("structured-before-recovery")
+                    && !request
+                        .context_hints
+                        .iter()
+                        .any(|hint| hint.contains("disable provider resume"))
+                {
+                    return Ok(vec![
+                        AgentEvent::SkillLoadStarted {
+                            run_id: run_id.clone(),
+                            skill: "recovery-context".to_string(),
+                            reason: "captured before resume timeout".to_string(),
+                        },
+                        AgentEvent::SkillLoadCompleted {
+                            run_id: run_id.clone(),
+                            skill: "recovery-context".to_string(),
+                            summary: "structured context before recovery".to_string(),
+                        },
+                        AgentEvent::SkillLoadFailed {
+                            run_id: run_id.clone(),
+                            skill: "recovery-context".to_string(),
+                            error: "structured context failed before recovery".to_string(),
+                        },
+                        AgentEvent::AgentFailed {
+                            run_id,
+                            error: "Agent timed out: No provider response within 20s".to_string(),
+                        },
+                    ]);
+                }
                 if input.contains("trigger resume timeout")
                     && !request
                         .context_hints
@@ -282,6 +310,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::UserQuestion {
                         run_id: run_id.clone(),
+                        provider_request_id: None,
                         question,
                         options,
                         allow_free_text: true,

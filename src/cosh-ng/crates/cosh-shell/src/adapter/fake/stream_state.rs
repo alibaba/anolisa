@@ -22,6 +22,7 @@ pub(super) fn emit_fake_stale_question_stream(
     })?;
     sink(AgentEvent::UserQuestion {
         run_id: run_id.clone(),
+        provider_request_id: None,
         question: "Choose a color for the next step".to_string(),
         options: vec!["Green".to_string(), "Blue".to_string()],
         allow_free_text: true,
@@ -59,6 +60,7 @@ pub(super) fn emit_fake_late_card_or_artifact_stream(
     if input.contains("late card after cancel") {
         sink(AgentEvent::UserQuestion {
             run_id: run_id.clone(),
+            provider_request_id: None,
             question: "LATE QUESTION SHOULD NOT RENDER".to_string(),
             options: vec!["Yes".to_string(), "No".to_string()],
             allow_free_text: false,

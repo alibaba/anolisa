@@ -263,7 +263,7 @@ fn activity_panel_uses_zh_catalog_labels() {
                     kind: "tool",
                     status: "requested",
                     subject: "toolu-1",
-                    summary: "run_shell_command 请求审批；[Details] tool-1",
+                    summary: "run_shell_command 请求审批：$ df -h；[Details] tool-1",
                 },
             ],
         })
@@ -276,7 +276,7 @@ fn activity_panel_uses_zh_catalog_labels() {
     );
     assert!(text.contains("技能 失败: linux_memory"), "{text}");
     assert!(
-        text.contains("Tool 请求审批: run_shell_command 请求审批；[Details] tool-1"),
+        text.contains("Tool 请求审批: run_shell_command 请求审批：$ df -h；[Details] tool-1"),
         "{text}"
     );
     assert!(!text.contains("Activity"), "{text}");

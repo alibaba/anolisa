@@ -173,6 +173,92 @@ fn claude_stream_parser_extracts_streaming_bash_tool_use() {
 }
 
 #[test]
+fn claude_stream_parser_keeps_text_delta_streaming_before_streamed_tool_use() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"message_start"}}"#)
+        .is_empty());
+    let text_events = parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"PRE TOOL TEXT"}}}"#
+        );
+    assert!(matches!(
+        &text_events[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "PRE TOOL TEXT"
+    ));
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
+        )
+        .is_empty());
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
+        )
+        .is_empty());
+
+    let tool_events = parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#);
+
+    assert!(matches!(
+        &tool_events[..],
+        [AgentEvent::ToolCall { name, input, .. }] if name == "Bash" && input == "pwd"
+    ));
+    assert!(parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
+        .is_empty());
+}
+
+#[test]
+fn claude_stream_parser_deduplicates_streamed_final_snapshot_after_tool() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    assert!(parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"message_start"}}"#)
+        .is_empty());
+    assert!(matches!(
+        &parser.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"PRE"}}}"#
+        )[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "PRE"
+    ));
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
+        )
+        .is_empty());
+    assert!(parser
+        .parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
+        )
+        .is_empty());
+    assert!(matches!(
+        &parser.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#)[..],
+        [AgentEvent::ToolCall { name, input, .. }] if name == "Bash" && input == "pwd"
+    ));
+    assert!(parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
+        .is_empty());
+
+    assert!(parser
+        .parse_line(r#"{"type":"stream_event","event":{"type":"message_start"}}"#)
+        .is_empty());
+    let streamed_final = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"FINAL_SENTINEL"}}}"#,
+    );
+    let snapshot_final = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"FINAL_SENTINEL"}]}}"#,
+    );
+
+    assert!(matches!(
+        &streamed_final[..],
+        [AgentEvent::TextDelta { text, .. }] if text == "FINAL_SENTINEL"
+    ));
+    assert!(snapshot_final.is_empty());
+}
+
+#[test]
 fn claude_stream_parser_maps_tool_result_to_output_and_completion() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 

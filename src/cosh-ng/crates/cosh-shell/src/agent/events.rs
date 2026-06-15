@@ -67,7 +67,7 @@ pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,
     output: &mut W,
-    hold_stable_text: bool,
+    text_hold_reason: Option<TextHoldReason>,
 ) -> std::io::Result<()> {
     let mut governed =
         govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
@@ -77,7 +77,7 @@ pub(crate) fn render_active_agent_event<W: Write>(
         .first()
         .is_some_and(|event| matches!(event.event, AgentEvent::TextDelta { .. }))
     {
-        if hold_stable_text {
+        if text_hold_reason.is_some() {
             active_run.held_events.extend(governed.clone());
         } else {
             active_run.status_animation.clear(output)?;
@@ -97,6 +97,16 @@ pub(crate) fn render_active_agent_event<W: Write>(
     }
     active_run.governed_events.extend(governed);
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextHoldReason {
+    InteractionPending,
+    QueuedBeforeHeldText,
+    UnrenderedInteraction,
+    PostToolShellTranscript,
+    PostToolShellResult,
+    ForcedDeferredPoll,
 }
 
 pub(crate) fn state_has_pending_interaction(state: &InlineState) -> bool {
@@ -202,6 +212,9 @@ pub(crate) fn flush_held_agent_events<W: Write>(
     if state_has_pending_interaction(state) {
         return Ok(());
     }
+    if state.control.shell_handoff().has_active_handoff() {
+        return Ok(());
+    }
 
     if let Some(active_run) = state.agent_run.active.as_mut() {
         if active_run.held_events.is_empty() {
@@ -268,7 +281,7 @@ mod tests {
                 text: "before\n```cosh-request\nhistory\n```\nafter".to_string(),
             },
             &mut output,
-            false,
+            None,
         )
         .expect("render event");
 
@@ -281,6 +294,48 @@ mod tests {
             .governed_events
             .iter()
             .all(|event| !matches!(&event.event, AgentEvent::TextDelta { text, .. } if text.contains("cosh-request"))));
+    }
+
+    #[test]
+    fn text_delta_without_hold_reason_bypasses_hold_queue() {
+        let mut active_run = test_active_run();
+        let mut output = Vec::new();
+
+        render_active_agent_event(
+            &mut active_run,
+            AgentEvent::TextDelta {
+                run_id: "run-1".to_string(),
+                text: "TEXT ONLY STREAMS".to_string(),
+            },
+            &mut output,
+            None,
+        )
+        .expect("render event");
+
+        assert!(active_run.held_events.is_empty());
+        assert!(active_run.has_visible_text_delta);
+    }
+
+    #[test]
+    fn text_delta_with_post_tool_hold_reason_is_held() {
+        let mut active_run = test_active_run();
+        let mut output = Vec::new();
+
+        render_active_agent_event(
+            &mut active_run,
+            AgentEvent::TextDelta {
+                run_id: "run-1".to_string(),
+                text: "POST TOOL TEXT WAITS".to_string(),
+            },
+            &mut output,
+            Some(TextHoldReason::PostToolShellResult),
+        )
+        .expect("render event");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(!output.contains("POST TOOL TEXT WAITS"), "{output}");
+        assert_eq!(active_run.held_events.len(), 1);
+        assert!(!active_run.has_visible_text_delta);
     }
 
     fn test_active_run() -> ActiveAgentRun {

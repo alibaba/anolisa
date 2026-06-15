@@ -200,6 +200,7 @@ fn synthetic_question_from_value(run_id: &str, value: &Value) -> Option<AgentEve
 
     Some(AgentEvent::UserQuestion {
         run_id: run_id.to_string(),
+        provider_request_id: None,
         question,
         options,
         allow_free_text,

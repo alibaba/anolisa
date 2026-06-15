@@ -285,6 +285,9 @@ mod tests {
                 ApprovalDecision::HostExecutedShell { .. } => {
                     panic!("status response must not build host-executed result")
                 }
+                ApprovalDecision::Answer { .. } => {
+                    panic!("status response must not build question answer response")
+                }
             }
         }
     }

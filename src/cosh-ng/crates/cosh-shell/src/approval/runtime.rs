@@ -1,3 +1,4 @@
+use crate::agent::run::ActiveAgentRun;
 use crate::approval::broker::ApprovalOutcome;
 use crate::approval::cards::write_approval_receipt;
 use crate::approval::handoff::{queue_approved_shell_handoff, queue_interactive_shell_handoff};
@@ -130,8 +131,8 @@ pub(crate) fn render_approval_actions<W: Write>(
                 let outcome = approval_outcome_for_request(state, &decision.request);
                 if outcome == ApprovalOutcome::ProviderNativeShellFallback {
                     let response = provider_approval_response(&decision.request, ctrl_request_id);
-                    if let Some(active_run) = state.agent_run.active.as_ref() {
-                        let _ = active_run.handle.respond_approval(response);
+                    if let Some(active_run) = state.agent_run.active.as_mut() {
+                        respond_active_run_approval(active_run, response);
                     }
                     mark_provider_approval_resolved(state);
                     clear_active_approval_panel(state, output)?;
@@ -153,8 +154,8 @@ pub(crate) fn render_approval_actions<W: Write>(
                 }
 
                 let response = provider_approval_response(&decision.request, ctrl_request_id);
-                if let Some(active_run) = state.agent_run.active.as_ref() {
-                    let _ = active_run.handle.respond_approval(response);
+                if let Some(active_run) = state.agent_run.active.as_mut() {
+                    respond_active_run_approval(active_run, response);
                 }
                 if decision.request.status == ApprovalRequestStatus::Approved {
                     mark_provider_approval_resolved(state);
@@ -180,6 +181,17 @@ pub(crate) fn render_approval_actions<W: Write>(
     }
 
     Ok(())
+}
+
+fn respond_active_run_approval(
+    active_run: &mut ActiveAgentRun,
+    response: ApprovalResponse,
+) -> bool {
+    let responded = active_run.handle.respond_approval(response).is_ok();
+    if responded {
+        active_run.last_activity_at = std::time::Instant::now();
+    }
+    responded
 }
 
 pub(crate) fn render_approval_resolution<W: Write>(

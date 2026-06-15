@@ -54,6 +54,13 @@ pub(crate) fn record_activity_rows_with_policy(
     policy: ActivityRecordPolicy,
 ) -> Vec<String> {
     let mut ids = Vec::new();
+    let permission_tool_use_ids = governed_events
+        .iter()
+        .filter_map(|event| match &event.event {
+            AgentEvent::ToolPermissionRequest { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     for event in governed_events {
         let row = match &event.event {
             AgentEvent::SkillLoadStarted {
@@ -113,6 +120,9 @@ pub(crate) fn record_activity_rows_with_policy(
                 name,
                 input,
             } => {
+                let covered_by_control_permission = tool_id
+                    .as_deref()
+                    .is_some_and(|tool_id| permission_tool_use_ids.contains(tool_id));
                 if is_shell_tool_name(name) {
                     if let Some(tool_id) = tool_id.as_deref() {
                         state
@@ -123,8 +133,23 @@ pub(crate) fn record_activity_rows_with_policy(
                             .control
                             .record_pending_provider_shell_command(run_id, input);
                     }
+                    if covered_by_control_permission {
+                        continue;
+                    }
+                    let provider_shell_command =
+                        provider_shell_command_for_tool_call(state, tool_id.as_deref(), input);
                     if policy.suppress_provider_native_shell {
                         if provider_shell_transcript_seen(state, tool_id.as_deref()) {
+                            continue;
+                        }
+                        if provider_shell_command.as_deref().is_some_and(|command| {
+                            state
+                                .control
+                                .provider_foreground_shell_command_seen(command)
+                        }) {
+                            if let Some(tool_id) = tool_id.as_deref() {
+                                state.control.mark_provider_shell_transcript_seen(tool_id);
+                            }
                             continue;
                         }
                         Some(provider_native_shell_auto_approved_row(
@@ -145,6 +170,9 @@ pub(crate) fn record_activity_rows_with_policy(
                         ))
                     }
                 } else {
+                    if covered_by_control_permission {
+                        continue;
+                    }
                     Some(provider_tool_call_row(
                         state,
                         run_id,
@@ -166,6 +194,8 @@ pub(crate) fn record_activity_rows_with_policy(
                 if state
                     .control
                     .provider_tool_is_control_permission_shell(tool_id)
+                    || (state.control.provider_tool_is_shell(tool_id)
+                        && state.control.provider_shell_transcript_seen(tool_id))
                 {
                     continue;
                 } else {
@@ -206,6 +236,8 @@ pub(crate) fn record_activity_rows_with_policy(
                 if state
                     .control
                     .provider_tool_is_control_permission_shell(tool_id)
+                    || (state.control.provider_tool_is_shell(tool_id)
+                        && state.control.provider_shell_transcript_seen(tool_id))
                 {
                     continue;
                 } else {
@@ -225,6 +257,34 @@ pub(crate) fn record_activity_rows_with_policy(
 
 fn provider_shell_transcript_seen(state: &InlineState, tool_id: Option<&str>) -> bool {
     tool_id.is_some_and(|tool_id| state.control.provider_shell_transcript_seen(tool_id))
+}
+
+fn provider_shell_command_for_tool_call(
+    state: &InlineState,
+    tool_id: Option<&str>,
+    input: &str,
+) -> Option<String> {
+    tool_id
+        .and_then(|tool_id| state.control.provider_tool().command(tool_id))
+        .map(|command| command.command.clone())
+        .or_else(|| shell_command_from_tool_call_input(input))
+}
+
+fn shell_command_from_tool_call_input(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() || input.contains('\0') {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(|command| command.as_str())
+                .filter(|command| !command.is_empty() && !command.contains('\0'))
+                .map(ToString::to_string)
+        })
+        .or_else(|| Some(input.to_string()))
 }
 
 fn provider_native_shell_auto_approved_row(
@@ -253,6 +313,7 @@ fn provider_native_shell_auto_approved_row(
             truncate_activity_preview(text, 4_000)
         ));
     }
+    let preview = activity_summary_preview(&format!("$ {command}"), 120);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),
@@ -262,7 +323,7 @@ fn provider_native_shell_auto_approved_row(
         summary: activity_summary_message(
             state,
             MessageId::ActivityProviderNativeShellBypassSummary,
-            &[("tool", tool_name), ("id", &id)],
+            &[("tool", tool_name), ("preview", &preview), ("id", &id)],
         ),
         detail,
     }
@@ -286,7 +347,11 @@ fn provider_tool_call_row(
         summary: activity_summary_message(
             state,
             MessageId::ActivityToolCalledSummary,
-            &[("tool", tool_name), ("id", &id)],
+            &[
+                ("tool", tool_name),
+                ("preview", &activity_summary_preview(&info.preview, 120)),
+                ("id", &id),
+            ],
         ),
         detail: format!(
             "evidence: ProviderToolCall\nprovider: provider_native_stream\nexecution_path: provider_native_stream\ntool_id: {}\ntool_name: {tool_name}\ninput_preview: {}\nagent_result_visibility: provider_native_result",
@@ -305,7 +370,9 @@ fn provider_tool_request_row(
     tool_use_id: &str,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
-    let preview = provider_tool_input_preview(tool_input);
+    let input_str = serde_json::to_string(tool_input).unwrap_or_default();
+    let info = display_for_tool(tool_name, &input_str);
+    let preview = provider_tool_input_preview(tool_name, tool_input, &info.preview);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),
@@ -315,7 +382,11 @@ fn provider_tool_request_row(
         summary: activity_summary_message(
             state,
             MessageId::ActivityToolRequestedSummary,
-            &[("tool", tool_name), ("id", &id)],
+            &[
+                ("tool", &info.label),
+                ("preview", &activity_summary_preview(&preview, 120)),
+                ("id", &id),
+            ],
         ),
         detail: format!(
             "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\ninput_preview: {preview}\nagent_result_visibility: provider_native_result"
@@ -323,12 +394,20 @@ fn provider_tool_request_row(
     }
 }
 
-fn provider_tool_input_preview(tool_input: &serde_json::Value) -> String {
-    let preview = tool_input
-        .get("command")
-        .and_then(|value| value.as_str())
-        .map(|command| format!("$ {command}"))
-        .unwrap_or_else(|| serde_json::to_string(tool_input).unwrap_or_default());
+fn provider_tool_input_preview(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    display_preview: &str,
+) -> String {
+    let preview = if is_shell_tool_name(tool_name) {
+        tool_input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|command| format!("$ {command}"))
+            .unwrap_or_else(|| display_preview.to_string())
+    } else {
+        display_preview.to_string()
+    };
     truncate_activity_preview(&preview, 4_000)
 }
 
@@ -414,6 +493,10 @@ fn truncate_activity_preview(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn activity_summary_preview(value: &str, max_chars: usize) -> String {
+    truncate_activity_preview(&value.replace('\n', "\\n"), max_chars)
+}
+
 pub(crate) fn record_approved_shell_handoff_blocks(
     state: &mut InlineState,
     blocks: &[CommandBlock],
@@ -446,6 +529,9 @@ pub(crate) fn record_approved_shell_handoff_blocks(
         state
             .approvals
             .mark_foreground_shell_execution(&handoff_request.approval_id, &block.id);
+        state
+            .control
+            .mark_provider_foreground_shell_command(&block.command);
         let evidence = record_shell_handoff_completion(state, handoff_request, block, status);
         if let Some(tool_use_id) = handoff_request.tool_use_id.as_deref() {
             state
@@ -642,7 +728,7 @@ pub(crate) fn render_activity_rows<W: Write>(
                 .find(|row| row.id == *activity_id)
         })
         .filter(|row| state.debug || row.status != "loading")
-        .filter(|row| should_render_activity_row_with_debug(row, state.debug))
+        .filter(|row| should_render_activity_row_with_state(row, state))
         .map(|row| ActivityRowModel {
             id: &row.id,
             kind: row.kind.label(),
@@ -682,43 +768,57 @@ pub(crate) fn render_provider_native_shell_transcript<W: Write>(
     for row in rows {
         match row.kind {
             ActivityKind::ToolOutput => {
-                let Some(command) = provider_native_shell_command_from_detail(&row.detail) else {
+                let tool_id = row.subject.as_str();
+                let Some(command) = state
+                    .control
+                    .provider_tool()
+                    .command(tool_id)
+                    .map(|command| command.command.clone())
+                else {
                     continue;
                 };
-                if state
-                    .control
-                    .provider_shell_transcript_output_seen(&row.subject)
-                {
+                if state.control.provider_shell_transcript_output_seen(tool_id) {
                     continue;
                 }
                 if state
                     .control
-                    .claim_provider_shell_transcript_command(&row.subject)
+                    .claim_provider_shell_transcript_command(tool_id)
                 {
                     writeln!(output, "$ {command}")?;
                 }
-                let text = provider_tool_output_text_from_detail(&row.detail);
+                let text = state
+                    .control
+                    .provider_tool()
+                    .output_text(tool_id)
+                    .unwrap_or_default();
                 output.write_all(text.as_bytes())?;
                 if !text.is_empty() && !text.ends_with('\n') {
                     writeln!(output)?;
                 }
-                state
-                    .control
-                    .mark_provider_shell_transcript_output(&row.subject);
+                state.control.mark_provider_shell_transcript_output(tool_id);
             }
             ActivityKind::Tool => {
-                let Some(command) = provider_native_shell_command_from_detail(&row.detail) else {
+                if matches!(
+                    row.status.as_str(),
+                    "called" | "requested" | "auto-approved"
+                ) {
+                    continue;
+                }
+                let tool_id = row.subject.as_str();
+                let Some(command) = state
+                    .control
+                    .provider_tool()
+                    .command(tool_id)
+                    .map(|command| command.command.clone())
+                else {
                     continue;
                 };
-                if state
-                    .control
-                    .provider_shell_transcript_output_seen(&row.subject)
-                {
+                if state.control.provider_shell_transcript_output_seen(tool_id) {
                     continue;
                 }
                 if state
                     .control
-                    .claim_provider_shell_transcript_command(&row.subject)
+                    .claim_provider_shell_transcript_command(tool_id)
                 {
                     writeln!(output, "$ {command}")?;
                 }
@@ -736,30 +836,26 @@ pub(crate) fn render_provider_native_shell_transcript<W: Write>(
     output.flush()
 }
 
-fn provider_native_shell_command_from_detail(detail: &str) -> Option<&str> {
-    detail
-        .lines()
-        .find_map(|line| line.strip_prefix("provider_native_shell_command: "))
-}
-
-fn provider_tool_output_text_from_detail(detail: &str) -> &str {
-    detail
-        .split_once("output_ref: <hidden>\n")
-        .map(|(_, text)| text)
-        .unwrap_or("")
-}
-
-fn should_render_activity_row(row: &RuntimeActivityRow) -> bool {
+fn should_render_activity_row(row: &RuntimeActivityRow, approval_mode: CoshApprovalMode) -> bool {
     match row.kind {
         ActivityKind::Skill => row.status == "failed",
         ActivityKind::ShellHandoff => row.status != "completed",
         ActivityKind::ToolOutput => false,
         ActivityKind::Tool => {
+            if activity_row_is_question_tool(row) {
+                return false;
+            }
             let needs_foreground_shell = row
                 .detail
                 .contains("interactive_hint: may_require_foreground_shell");
             if activity_row_is_shell_tool(row) {
-                return needs_foreground_shell || row.status == "auto-approved";
+                return needs_foreground_shell;
+            }
+            if approval_mode != CoshApprovalMode::Recommend
+                && activity_row_is_control_permission(row)
+                && row.status == "requested"
+            {
+                return false;
             }
             matches!(row.status.as_str(), "error" | "failed" | "interrupted")
                 || needs_foreground_shell
@@ -768,11 +864,11 @@ fn should_render_activity_row(row: &RuntimeActivityRow) -> bool {
     }
 }
 
-fn should_render_activity_row_with_debug(row: &RuntimeActivityRow, debug: bool) -> bool {
-    if debug {
+fn should_render_activity_row_with_state(row: &RuntimeActivityRow, state: &InlineState) -> bool {
+    if state.debug {
         return !activity_row_is_shell_output_or_completion(row);
     }
-    should_render_activity_row(row)
+    should_render_activity_row(row, state.approval_mode)
 }
 
 fn activity_row_is_shell_output_or_completion(row: &RuntimeActivityRow) -> bool {
@@ -794,6 +890,22 @@ fn activity_row_is_shell_tool(row: &RuntimeActivityRow) -> bool {
         || row.detail.contains("provider_native_shell_command: ")
         || row.detail.contains("provider_tool_class: shell")
         || row.subject == "Bash"
+}
+
+fn activity_row_is_question_tool(row: &RuntimeActivityRow) -> bool {
+    row.detail
+        .lines()
+        .find_map(|line| line.strip_prefix("tool_name: "))
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "ask_user_question" | "AskUserQuestion" | "ask_user" | "AskUser"
+            )
+        })
+}
+
+fn activity_row_is_control_permission(row: &RuntimeActivityRow) -> bool {
+    row.detail.contains("evidence: ProviderToolRequest")
 }
 
 pub(crate) fn render_activity_details<W: Write>(
@@ -1011,7 +1123,10 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8 output");
 
         assert!(output.contains("Activity"), "{output}");
-        assert!(output.contains("Read called; [Details] tool-1"), "{output}");
+        assert!(
+            output.contains("Read called: Cargo.toml; [Details] tool-1"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1047,12 +1162,11 @@ mod tests {
         let ids = record_activity_rows(
             &mut state,
             &[
-                governed(AgentEvent::ToolPermissionRequest {
+                governed(AgentEvent::ToolCall {
                     run_id: "run-1".to_string(),
-                    request_id: "ctrl-1".to_string(),
-                    tool_name: "run_shell_command".to_string(),
-                    tool_input: serde_json::json!({ "command": "df -h" }),
-                    tool_use_id: "toolu-1".to_string(),
+                    tool_id: Some("toolu-1".to_string()),
+                    name: "run_shell_command".to_string(),
+                    input: serde_json::json!({ "command": "df -h" }).to_string(),
                 }),
                 governed(AgentEvent::ToolOutputDelta {
                     run_id: "run-1".to_string(),
@@ -1092,6 +1206,52 @@ mod tests {
         assert!(
             detail.contains("provider_native_shell_command: df -h"),
             "{detail}"
+        );
+    }
+
+    #[test]
+    fn provider_native_shell_transcript_uses_structured_tool_state() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[
+                governed(AgentEvent::ToolCall {
+                    run_id: "run-1".to_string(),
+                    tool_id: Some("toolu-1".to_string()),
+                    name: "run_shell_command".to_string(),
+                    input: serde_json::json!({ "command": "df -h" }).to_string(),
+                }),
+                governed(AgentEvent::ToolOutputDelta {
+                    run_id: "run-1".to_string(),
+                    tool_id: "toolu-1".to_string(),
+                    stream: "stdout".to_string(),
+                    text: "Filesystem\n/dev/disk1\n".to_string(),
+                }),
+            ],
+        );
+        let row = state
+            .activity
+            .rows
+            .iter_mut()
+            .find(|row| row.id == "out-1")
+            .expect("output row");
+        row.detail =
+            "tool: toolu-1\nstream: stdout\noutput_ref: <hidden>\nDETAIL_ONLY_SHOULD_NOT_RENDER\n"
+                .to_string();
+
+        let mut output = Vec::new();
+        render_provider_native_shell_transcript(&mut state, &ids, &mut output)
+            .expect("render shell transcript");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("$ df -h"), "{output}");
+        assert!(output.contains("Filesystem\n/dev/disk1\n"), "{output}");
+        assert!(
+            !output.contains("DETAIL_ONLY_SHOULD_NOT_RENDER"),
+            "{output}"
         );
     }
 
@@ -1151,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn control_protocol_policy_surfaces_provider_auto_approved_shell_transcript() {
+    fn control_protocol_policy_suppresses_provider_auto_approved_shell_activity() {
         let mut state = InlineState {
             language: cosh_shell::Language::EnUs,
             ..InlineState::default()
@@ -1197,10 +1357,13 @@ mod tests {
         assert!(output.contains("$ df -h"), "{output}");
         assert!(output.contains("Filesystem\n/dev/disk1\n"), "{output}");
         assert!(
-            output.contains("run_shell_command auto-approved by provider; [Details]"),
+            !output.contains("run_shell_command auto-approved by provider"),
             "{output}"
         );
-        assert!(output.contains("Read called; [Details]"), "{output}");
+        assert!(
+            output.contains("Read called: Cargo.toml; [Details]"),
+            "{output}"
+        );
         assert!(state.activity.rows.iter().any(|row| {
             row.detail.contains("evidence: ProviderNativeShellBypass")
                 && row
@@ -1211,6 +1374,203 @@ mod tests {
                     .contains("provider_auto_approval_status: auto_approved_by_provider")
                 && row.detail.contains("provider_native_shell_command: df -h")
         }));
+    }
+
+    #[test]
+    fn debug_mode_keeps_provider_auto_approved_shell_activity() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            debug: true,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows_with_policy(
+            &mut state,
+            &[governed(AgentEvent::ToolCall {
+                run_id: "run-1".to_string(),
+                tool_id: Some("toolu-shell".to_string()),
+                name: "run_shell_command".to_string(),
+                input: "df -h".to_string(),
+            })],
+            ActivityRecordPolicy {
+                suppress_provider_native_shell: true,
+            },
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(
+            output.contains("run_shell_command auto-approved by provider: $ df -h; [Details]"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn question_tool_call_is_hidden_when_question_card_handles_it() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[governed(AgentEvent::ToolCall {
+                run_id: "run-1".to_string(),
+                tool_id: Some("toolu-question".to_string()),
+                name: "ask_user_question".to_string(),
+                input: serde_json::json!({
+                    "question": "Pick one",
+                    "options": [{"label": "A"}, {"label": "B"}]
+                })
+                .to_string(),
+            })],
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(!output.contains("Activity"), "{output}");
+        assert!(!output.contains("ask_user_question called"), "{output}");
+    }
+
+    #[test]
+    fn control_permission_tool_request_is_hidden_when_approval_card_handles_it() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            approval_mode: CoshApprovalMode::Auto,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[governed(AgentEvent::ToolPermissionRequest {
+                run_id: "run-1".to_string(),
+                request_id: "ctrl-write".to_string(),
+                tool_name: "Write".to_string(),
+                tool_input: serde_json::json!({
+                    "file_path": "/tmp/cosh-write.txt",
+                    "content": "ok"
+                }),
+                tool_use_id: "toolu-write".to_string(),
+            })],
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(!output.contains("Activity"), "{output}");
+        assert!(!output.contains("Write requested"), "{output}");
+    }
+
+    #[test]
+    fn matching_tool_call_is_hidden_when_control_permission_card_handles_it() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            approval_mode: CoshApprovalMode::Auto,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[
+                governed(AgentEvent::ToolCall {
+                    run_id: "run-1".to_string(),
+                    tool_id: Some("toolu-write".to_string()),
+                    name: "Write".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "/tmp/cosh-write.txt",
+                        "content": "ok"
+                    })
+                    .to_string(),
+                }),
+                governed(AgentEvent::ToolPermissionRequest {
+                    run_id: "run-1".to_string(),
+                    request_id: "ctrl-write".to_string(),
+                    tool_name: "Write".to_string(),
+                    tool_input: serde_json::json!({
+                        "file_path": "/tmp/cosh-write.txt",
+                        "content": "ok"
+                    }),
+                    tool_use_id: "toolu-write".to_string(),
+                }),
+            ],
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(!output.contains("Activity"), "{output}");
+        assert!(!output.contains("Write called"), "{output}");
+        assert!(!output.contains("Write requested"), "{output}");
+    }
+
+    #[test]
+    fn recommend_mode_keeps_only_control_permission_row_for_matching_tool_call() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            approval_mode: CoshApprovalMode::Recommend,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[
+                governed(AgentEvent::ToolCall {
+                    run_id: "run-1".to_string(),
+                    tool_id: Some("toolu-read".to_string()),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({ "file_path": "Cargo.toml" }).to_string(),
+                }),
+                governed(AgentEvent::ToolPermissionRequest {
+                    run_id: "run-1".to_string(),
+                    request_id: "ctrl-read".to_string(),
+                    tool_name: "Read".to_string(),
+                    tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
+                    tool_use_id: "toolu-read".to_string(),
+                }),
+            ],
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(!output.contains("Read called"), "{output}");
+        assert!(
+            output.contains("Read requested: Cargo.toml; [Details]"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn recommend_mode_keeps_control_permission_tool_request_activity() {
+        let mut state = InlineState {
+            language: cosh_shell::Language::EnUs,
+            approval_mode: CoshApprovalMode::Recommend,
+            ..InlineState::default()
+        };
+        let ids = record_activity_rows(
+            &mut state,
+            &[governed(AgentEvent::ToolPermissionRequest {
+                run_id: "run-1".to_string(),
+                request_id: "ctrl-write".to_string(),
+                tool_name: "Write".to_string(),
+                tool_input: serde_json::json!({
+                    "file_path": "/tmp/cosh-write.txt",
+                    "content": "ok"
+                }),
+                tool_use_id: "toolu-write".to_string(),
+            })],
+        );
+
+        let mut output = Vec::new();
+        render_activity_rows(&state, &ids, &mut output).expect("render activity");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(
+            output.contains("Write requested: /tmp/cosh-write.txt (new file); [Details]"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1340,12 +1700,11 @@ mod tests {
         let ids = record_activity_rows(
             &mut state,
             &[
-                governed(AgentEvent::ToolPermissionRequest {
+                governed(AgentEvent::ToolCall {
                     run_id: "run-1".to_string(),
-                    request_id: "ctrl-1".to_string(),
-                    tool_name: "run_shell_command".to_string(),
-                    tool_input: serde_json::json!({ "command": "df -h" }),
-                    tool_use_id: "toolu-1".to_string(),
+                    tool_id: Some("toolu-1".to_string()),
+                    name: "run_shell_command".to_string(),
+                    input: serde_json::json!({ "command": "df -h" }).to_string(),
                 }),
                 governed(AgentEvent::ToolCompleted {
                     run_id: "run-1".to_string(),
@@ -1489,12 +1848,12 @@ mod tests {
         record_activity_rows(
             &mut state,
             &[
-                governed(AgentEvent::ToolPermissionRequest {
+                governed(AgentEvent::ToolCall {
                     run_id: "run-1".to_string(),
-                    request_id: "req-1".to_string(),
-                    tool_name: "Bash".to_string(),
-                    tool_input: serde_json::json!({ "command": "sudo systemctl status sshd" }),
-                    tool_use_id: "tool-use-1".to_string(),
+                    tool_id: Some("tool-use-1".to_string()),
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({ "command": "sudo systemctl status sshd" })
+                        .to_string(),
                 }),
                 governed(AgentEvent::ToolOutputDelta {
                     run_id: "run-1".to_string(),

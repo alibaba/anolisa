@@ -5,6 +5,7 @@ use crate::runtime::prelude::*;
 use cosh_shell::parser::agent_request_from_intercepted_input;
 use cosh_shell::raw_input::RawInputCapture;
 use cosh_shell::{
+    adapter::{ApprovalDecision, ApprovalResponse},
     agent_render::{QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer},
     types::{
         AgentEvent, AgentRequest, GovernedEvent, QuestionSelectionMode, ShellEvent, ShellEventKind,
@@ -22,6 +23,7 @@ pub(crate) struct RuntimeUserQuestion {
     custom_answer: String,
     allow_free_text: bool,
     selection_mode: QuestionSelectionMode,
+    provider_request_id: Option<String>,
     answer: Option<String>,
 }
 
@@ -29,6 +31,7 @@ pub(crate) struct QuestionAnswerRun {
     question_id: String,
     question: String,
     answer: String,
+    provider_request_id: Option<String>,
     pub(crate) request: AgentRequest,
 }
 
@@ -95,6 +98,10 @@ pub(crate) fn render_question_answer_actions<W: Write>(
         };
 
         render_question_answer_notice(state, &answer_run, output)?;
+        if respond_question_answer_to_provider(state, &answer_run) {
+            output.flush()?;
+            continue;
+        }
         stop_active_agent_run_without_rendering(state, output)?;
         start_agent_run(
             &answer_run.request,
@@ -107,6 +114,29 @@ pub(crate) fn render_question_answer_actions<W: Write>(
     }
 
     Ok(())
+}
+
+fn respond_question_answer_to_provider(
+    state: &InlineState,
+    answer_run: &QuestionAnswerRun,
+) -> bool {
+    let Some(request_id) = answer_run.provider_request_id.as_ref() else {
+        return false;
+    };
+    let Some(active_run) = state.agent_run.active.as_ref() else {
+        return true;
+    };
+    active_run
+        .handle
+        .respond_approval(ApprovalResponse {
+            request_id: request_id.clone(),
+            tool_use_id: None,
+            tool_input: None,
+            decision: ApprovalDecision::Answer {
+                answer: answer_run.answer.clone(),
+            },
+        })
+        .is_ok()
 }
 
 pub(crate) fn render_question_cancel_actions<W: Write>(
@@ -377,6 +407,9 @@ pub(crate) fn agent_request_from_pending_question_answer(
         question_id,
         question,
         answer,
+        provider_request_id: state.questions.items[question_index]
+            .provider_request_id
+            .clone(),
         request,
     })
 }
@@ -485,6 +518,7 @@ pub(crate) fn record_user_questions(
     for event in governed_events {
         let AgentEvent::UserQuestion {
             run_id: _,
+            provider_request_id,
             question,
             options,
             allow_free_text,
@@ -503,6 +537,7 @@ pub(crate) fn record_user_questions(
             custom_answer: String::new(),
             allow_free_text: *allow_free_text,
             selection_mode: *selection_mode,
+            provider_request_id: provider_request_id.clone(),
             answer: None,
         });
         state.questions.pending_id = Some(id.clone());

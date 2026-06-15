@@ -41,6 +41,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         None
     };
     if let Some(fallback) = resume_fallback {
+        render_recovery_context_before_notice(state, &active_run, output, adapter)?;
         render_fresh_turn_recovery_notice(state, output)?;
         start_agent_run(
             &fallback,
@@ -121,12 +122,55 @@ pub(crate) fn finish_active_agent_run<W: Write>(
 }
 
 fn active_run_provider_timed_out(active_run: &ActiveAgentRun) -> bool {
-    active_run.governed_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            AgentEvent::AgentFailed { error, .. } if error.contains("Agent timed out:")
-        )
-    })
+    active_run
+        .governed_events
+        .iter()
+        .any(governed_event_is_provider_timeout)
+}
+
+fn render_recovery_deferred_context<W: Write>(
+    active_run: &ActiveAgentRun,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let events = active_run
+        .deferred_events
+        .iter()
+        .filter(|event| !governed_event_is_provider_timeout(event))
+        .cloned()
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        return Ok(());
+    }
+    active_run.renderer.write_governed_events(output, &events)
+}
+
+fn render_recovery_context_before_notice<W: Write>(
+    state: &mut InlineState,
+    active_run: &ActiveAgentRun,
+    output: &mut W,
+    adapter: &AdapterInstance,
+) -> std::io::Result<()> {
+    render_recovery_deferred_context(active_run, output)?;
+    let remaining_structured_events = active_run.governed_events
+        [active_run.rendered_governed_event_count..]
+        .iter()
+        .filter(|event| !governed_event_is_provider_timeout(event))
+        .cloned()
+        .collect::<Vec<_>>();
+    render_agent_structured_events(
+        state,
+        &remaining_structured_events,
+        Some(&active_run.request),
+        output,
+        adapter,
+    )
+}
+
+fn governed_event_is_provider_timeout(event: &GovernedEvent) -> bool {
+    matches!(
+        &event.event,
+        AgentEvent::AgentFailed { error, .. } if error.contains("Agent timed out:")
+    )
 }
 
 fn trim_queued_requests_after_provider_timeout(state: &mut InlineState) -> usize {

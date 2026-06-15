@@ -288,6 +288,15 @@ impl AdapterInstance {
             Self::Fake(_) => None,
         }
     }
+
+    pub fn provider_invocation(&self) -> Option<String> {
+        match self {
+            Self::ClaudeCode(adapter) => Some(adapter.program.clone()),
+            Self::QwenCli(adapter) => Some(adapter.program.clone()),
+            Self::CoshTui(adapter) => Some(adapter.program.clone()),
+            Self::Fake(_) => None,
+        }
+    }
 }
 
 pub(super) fn commit_pending_session(

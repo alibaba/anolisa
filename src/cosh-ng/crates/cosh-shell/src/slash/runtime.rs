@@ -148,11 +148,14 @@ mod tests {
             .expect("render debug session");
 
         let rendered = String::from_utf8(output).expect("utf8 output");
+        assert!(rendered.contains("provider invocation: co"));
         assert!(rendered.contains("provider committed session: sess-123"));
         assert!(rendered.contains("provider pending session: <none>"));
         assert!(rendered.contains("provider initialize seen: <none>"));
         assert!(rendered.contains("host-executed shell result: <none>"));
         assert!(rendered.contains("selected shell execution path: <none>"));
+        assert!(rendered.contains("latest provider request: <none>"));
+        assert!(rendered.contains("latest tool use id: <none>"));
         assert!(rendered.contains("latest recovery status: <none>"));
         assert!(rendered.contains("latest recovery reason: <none>"));
         assert!(rendered.contains("fact 1 [user]"));
@@ -164,6 +167,8 @@ mod tests {
         let mut state = InlineState::default();
         let evidence = RuntimeShellCommandCompleted {
             approval_id: Some("req-1".to_string()),
+            provider_request_id: Some("ctrl-1".to_string()),
+            tool_use_id: Some("toolu-1".to_string()),
             shell_session_id: "raw-test".to_string(),
             command_block_id: "cmd-1".to_string(),
             command: "df -h".to_string(),
@@ -189,6 +194,8 @@ mod tests {
             .expect("render debug session");
 
         let rendered = String::from_utf8(output).expect("utf8 output");
+        assert!(rendered.contains("latest provider request: ctrl-1"));
+        assert!(rendered.contains("latest tool use id: toolu-1"));
         assert!(rendered.contains("latest recovery status: provider_run_not_active"));
         assert!(
             rendered.contains(

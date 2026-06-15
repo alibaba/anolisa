@@ -3,7 +3,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::tools::is_shell_tool_name;
 use crate::types::AgentEvent;
 
 use super::{
@@ -174,7 +173,6 @@ pub(super) fn start_control_protocol_claude_process(
         control_protocol::ControlProtocolCapabilities::default(),
     ));
     let control_capabilities_for_thread = Arc::clone(&control_capabilities);
-    let host_executed_shell_delivered = Arc::new(AtomicBool::new(false));
 
     let cancel_flag = Arc::clone(&cancelled);
     let cancel_pid = Arc::clone(&child_pid);
@@ -186,9 +184,8 @@ pub(super) fn start_control_protocol_claude_process(
     });
 
     let prompt = prepared.prompt.clone();
-    let shell_permission_request_seen = Arc::new(AtomicBool::new(
-        prompt.contains("ShellCommandCompleted evidence"),
-    ));
+    let prompt_for_writer = prompt.clone();
+    let prompt_for_loop = prompt.clone();
 
     let pending_session_for_thread = Arc::clone(&pending_session);
     let cancellation_artifacts_for_thread = cancellation_artifacts.clone();
@@ -235,7 +232,6 @@ pub(super) fn start_control_protocol_claude_process(
         // stdin writer thread
         let writer_done_for_thread = Arc::clone(&writer_done);
         let writer_cancelled = Arc::clone(&cancelled);
-        let writer_host_executed_shell_delivered = Arc::clone(&host_executed_shell_delivered);
         thread::spawn(move || {
             use std::io::Write;
             let mut writer = std::io::BufWriter::new(stdin);
@@ -244,8 +240,8 @@ pub(super) fn start_control_protocol_claude_process(
             let _ = writeln!(writer, "{init_msg}");
             let _ = writer.flush();
 
-            if !prompt.is_empty() {
-                let user_msg = control_protocol::serialize_user_message(&prompt, None);
+            if !prompt_for_writer.is_empty() {
+                let user_msg = control_protocol::serialize_user_message(&prompt_for_writer, None);
                 let _ = writeln!(writer, "{user_msg}");
                 let _ = writer.flush();
             }
@@ -273,11 +269,13 @@ pub(super) fn start_control_protocol_claude_process(
                         control_protocol::serialize_deny(&response.request_id, message)
                     }
                     ApprovalDecision::HostExecutedShell { result } => {
-                        writer_host_executed_shell_delivered.store(true, Ordering::SeqCst);
                         control_protocol::serialize_host_executed_shell_result(
                             &response.request_id,
                             result,
                         )
+                    }
+                    ApprovalDecision::Answer { answer } => {
+                        control_protocol::serialize_answer(&response.request_id, answer)
                     }
                 };
                 if writeln!(writer, "{msg}").is_err() {
@@ -293,9 +291,9 @@ pub(super) fn start_control_protocol_claude_process(
             run_id.clone(),
             Some(Arc::clone(&pending_session_for_thread)),
         );
+        let mut pending_control_tool_call =
+            control_protocol::PendingControlProtocolToolCall::default();
         let control_capabilities_for_loop = Arc::clone(&control_capabilities_for_thread);
-        let host_executed_shell_delivered_for_loop = Arc::clone(&host_executed_shell_delivered);
-        let shell_permission_request_seen_for_loop = Arc::clone(&shell_permission_request_seen);
         let approval_tx_for_loop = approval_tx_for_thread.clone();
         let mut completed = false;
         let mut failed = false;
@@ -324,19 +322,18 @@ pub(super) fn start_control_protocol_claude_process(
                             tool_input,
                             tool_use_id,
                         } => {
-                            if is_shell_tool_name(&tool_name)
-                                && (host_executed_shell_delivered_for_loop.load(Ordering::SeqCst)
-                                    || shell_permission_request_seen_for_loop
-                                        .swap(true, Ordering::SeqCst))
+                            let _ =
+                                pending_control_tool_call.take_matching_control_shell(&tool_use_id);
+                            if let Some(response) =
+                                control_protocol::analysis_continuation_shell_deny_response(
+                                    &prompt_for_loop,
+                                    &request_id,
+                                    &tool_name,
+                                    &tool_input,
+                                    &tool_use_id,
+                                )
                             {
-                                let _ = approval_tx_for_loop.send(ApprovalResponse {
-                                    request_id,
-                                    tool_use_id: Some(tool_use_id),
-                                    tool_input: Some(tool_input),
-                                    decision: ApprovalDecision::Deny {
-                                        message: "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.".to_string(),
-                                    },
-                                });
+                                let _ = approval_tx_for_loop.send(response);
                                 return Ok(ProviderLineProgress::AwaitingApproval);
                             }
                             send_agent_event(
@@ -354,6 +351,26 @@ pub(super) fn start_control_protocol_claude_process(
                         control_protocol::ControlRequest::Initialize { request_id } => {
                             let _ = request_id;
                         }
+                        control_protocol::ControlRequest::AskUser {
+                            request_id,
+                            question,
+                            options,
+                            allow_free_text,
+                            selection_mode,
+                        } => {
+                            send_agent_event(
+                                &event_tx,
+                                AgentEvent::UserQuestion {
+                                    run_id: run_id.clone(),
+                                    provider_request_id: Some(request_id),
+                                    question,
+                                    options,
+                                    allow_free_text,
+                                    selection_mode,
+                                },
+                            );
+                            return Ok(ProviderLineProgress::AwaitingApproval);
+                        }
                     }
                     return Ok(ProviderLineProgress::NoProgress);
                 }
@@ -361,12 +378,14 @@ pub(super) fn start_control_protocol_claude_process(
                 let events = parser.parse_line(&line);
                 let progressed = events.iter().any(agent_event_is_provider_progress);
                 for event in events {
-                    update_completion_flags(&event, &mut completed, &mut failed);
-                    if is_terminal_agent_event(&event) {
-                        writer_done.store(true, Ordering::SeqCst);
-                        terminal_events.push(event);
-                    } else {
-                        send_agent_event(&event_tx, event);
+                    for event in pending_control_tool_call.stage_or_emit(event) {
+                        update_completion_flags(&event, &mut completed, &mut failed);
+                        if is_terminal_agent_event(&event) {
+                            writer_done.store(true, Ordering::SeqCst);
+                            terminal_events.push(event);
+                        } else {
+                            send_agent_event(&event_tx, event);
+                        }
                     }
                 }
                 Ok(line_progress(progressed))
@@ -401,12 +420,14 @@ pub(super) fn start_control_protocol_claude_process(
         }
 
         let _ = parser.finish(&mut |event| {
-            update_completion_flags(&event, &mut completed, &mut failed);
-            if is_terminal_agent_event(&event) {
-                writer_done.store(true, Ordering::SeqCst);
-                terminal_events.push(event);
-            } else {
-                send_agent_event(&event_tx, event);
+            for event in pending_control_tool_call.stage_or_emit(event) {
+                update_completion_flags(&event, &mut completed, &mut failed);
+                if is_terminal_agent_event(&event) {
+                    writer_done.store(true, Ordering::SeqCst);
+                    terminal_events.push(event);
+                } else {
+                    send_agent_event(&event_tx, event);
+                }
             }
             Ok(())
         });

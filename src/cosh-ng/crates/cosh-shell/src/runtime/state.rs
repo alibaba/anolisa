@@ -364,6 +364,15 @@ impl ControlState {
         &mut self.provider_tool
     }
 
+    pub(crate) fn provider_host_executed_shell_result_delivered(
+        &self,
+        request_id: &str,
+        tool_use_id: Option<&str>,
+    ) -> bool {
+        self.provider_tool
+            .host_executed_shell_result_delivered(request_id, tool_use_id)
+    }
+
     pub(crate) fn claim_provider_shell_transcript_command(&mut self, tool_id: &str) -> bool {
         self.provider_tool.claim_shell_transcript_command(tool_id)
     }
@@ -382,6 +391,14 @@ impl ControlState {
 
     pub(crate) fn provider_shell_transcript_seen(&self, tool_id: &str) -> bool {
         self.provider_tool.shell_transcript_seen(tool_id)
+    }
+
+    pub(crate) fn mark_provider_foreground_shell_command(&mut self, command: &str) -> bool {
+        self.provider_tool.mark_foreground_shell_command(command)
+    }
+
+    pub(crate) fn provider_foreground_shell_command_seen(&self, command: &str) -> bool {
+        self.provider_tool.foreground_shell_command_seen(command)
     }
 
     pub(crate) fn provider_tool_is_shell(&self, tool_id: &str) -> bool {

@@ -308,6 +308,7 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
         },
         AgentEvent::UserQuestion {
             run_id: "run-1".to_string(),
+            provider_request_id: None,
             question: "继续吗？".to_string(),
             options: vec!["继续".to_string(), "停止".to_string()],
             allow_free_text: true,

@@ -328,6 +328,8 @@ pub enum AgentEvent {
     },
     UserQuestion {
         run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_request_id: Option<String>,
         question: String,
         options: Vec<String>,
         allow_free_text: bool,

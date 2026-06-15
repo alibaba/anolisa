@@ -63,6 +63,7 @@ impl EvidenceState {
             }
             evidence.continuation_state = ShellEvidenceContinuationState::RecoveryQueued;
             requests.push(evidence.clone());
+            break;
         }
         requests
     }
@@ -90,6 +91,10 @@ impl EvidenceState {
             .iter()
             .rev()
             .find(|evidence| evidence.recovery_reason.is_some())
+    }
+
+    pub(crate) fn latest_shell_command_completed(&self) -> Option<&RuntimeShellCommandCompleted> {
+        self.shell_command_completed.last()
     }
 
     pub(crate) fn has_open_provider_shell_evidence(&self) -> bool {
@@ -146,6 +151,8 @@ pub(crate) enum ShellEvidenceContinuationState {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeShellCommandCompleted {
     pub(crate) approval_id: Option<String>,
+    pub(crate) provider_request_id: Option<String>,
+    pub(crate) tool_use_id: Option<String>,
     pub(crate) shell_session_id: String,
     pub(crate) command_block_id: String,
     pub(crate) command: String,
@@ -171,6 +178,8 @@ impl RuntimeShellCommandCompleted {
         let delivery = ShellEvidenceDelivery::not_attempted();
         Self {
             approval_id: Some(handoff.approval_id.clone()),
+            provider_request_id: handoff.request_id.clone(),
+            tool_use_id: handoff.tool_use_id.clone(),
             shell_session_id: block.session_id.clone(),
             command_block_id: block.id.clone(),
             command: block.command.clone(),
@@ -327,6 +336,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stalled_provider_claim_only_marks_one_open_evidence_at_a_time() {
+        let mut state = EvidenceState::default();
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-1"),
+            true,
+            "delivered",
+            None,
+        ));
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-2"),
+            true,
+            "delivered",
+            None,
+        ));
+
+        let first = state.claim_stalled_provider_shell_handoff_continuations();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].approval_id.as_deref(), Some("req-1"));
+        assert_eq!(
+            state.shell_command_completed[0].continuation_state,
+            ShellEvidenceContinuationState::RecoveryQueued
+        );
+        assert_eq!(
+            state.shell_command_completed[1].continuation_state,
+            ShellEvidenceContinuationState::DeliveredToProvider
+        );
+
+        let second = state.claim_stalled_provider_shell_handoff_continuations();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].approval_id.as_deref(), Some("req-2"));
+    }
+
     fn shell_evidence(
         approval_id: Option<&str>,
         provider_result_delivered: bool,
@@ -335,6 +377,8 @@ mod tests {
     ) -> RuntimeShellCommandCompleted {
         RuntimeShellCommandCompleted {
             approval_id: approval_id.map(ToString::to_string),
+            provider_request_id: Some("ctrl-1".to_string()),
+            tool_use_id: Some("toolu-1".to_string()),
             shell_session_id: "raw-test".to_string(),
             command_block_id: "cmd-1".to_string(),
             command: "df -h".to_string(),

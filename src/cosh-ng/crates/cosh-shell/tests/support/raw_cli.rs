@@ -161,6 +161,52 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
     text
 }
 
+pub(crate) fn run_raw_cli_default_with_args_env_and_delayed_input(
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    chunks: Vec<(Vec<u8>, Duration)>,
+) -> String {
+    let _run_lock = raw_cli_run_lock();
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let mut command = Command::new(binary);
+    command
+        .args(["raw"])
+        .args(extra_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("COSH_SHELL_ISOLATED", "1")
+        .env("COSH_SHELL_RAW_SHELL", "bash")
+        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
+        .env("COSH_SHELL_LANG", "en-US")
+        .env("COSH_SHELL_BOOTSTRAP_PATH", "0");
+    apply_raw_cli_envs(&mut command, envs);
+    command.process_group(0);
+    let mut child = command.spawn().expect("spawn cosh-shell raw default");
+
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        for (bytes, delay) in chunks {
+            thread::sleep(delay);
+            stdin.write_all(&bytes).expect("write delayed input");
+            stdin.flush().expect("flush delayed input");
+        }
+    }
+
+    let output = wait_for_raw_cli_output(child);
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text
+}
+
 fn raw_cli_run_lock() -> std::sync::MutexGuard<'static, ()> {
     RAW_CLI_RUN_LOCK
         .get_or_init(|| Mutex::new(()))

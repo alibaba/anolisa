@@ -6,10 +6,12 @@ pub(crate) struct ProviderToolState {
     pending_shell_commands: Vec<PendingProviderShellCommand>,
     shell_tool_ids: HashSet<String>,
     control_permission_shell_tool_ids: HashSet<String>,
+    outputs: HashMap<String, String>,
     stderr: HashMap<String, String>,
     rendered_shell_transcript_commands: HashSet<String>,
     rendered_shell_transcript_outputs: HashSet<String>,
     delivered_host_executed_shell_results: HashSet<String>,
+    foreground_shell_commands: HashSet<String>,
 }
 
 impl ProviderToolState {
@@ -91,6 +93,10 @@ impl ProviderToolState {
         text: &str,
     ) {
         self.adopt_pending_shell_command(run_id, tool_id);
+        self.outputs
+            .entry(tool_id.to_string())
+            .or_default()
+            .push_str(text);
         if stream == "stderr" {
             self.stderr.insert(tool_id.to_string(), text.to_string());
         }
@@ -113,6 +119,10 @@ impl ProviderToolState {
 
     pub(crate) fn stderr(&self, tool_id: &str) -> Option<&str> {
         self.stderr.get(tool_id).map(String::as_str)
+    }
+
+    pub(crate) fn output_text(&self, tool_id: &str) -> Option<String> {
+        self.outputs.get(tool_id).cloned()
     }
 
     pub(crate) fn interactive_failure_command(
@@ -156,6 +166,18 @@ impl ProviderToolState {
             || self.rendered_shell_transcript_outputs.contains(tool_id)
     }
 
+    pub(crate) fn mark_foreground_shell_command(&mut self, command: &str) -> bool {
+        let Some(command) = shell_command_key(command) else {
+            return false;
+        };
+        self.foreground_shell_commands.insert(command)
+    }
+
+    pub(crate) fn foreground_shell_command_seen(&self, command: &str) -> bool {
+        shell_command_key(command)
+            .is_some_and(|command| self.foreground_shell_commands.contains(&command))
+    }
+
     pub(crate) fn claim_host_executed_shell_result(
         &mut self,
         request_id: &str,
@@ -170,6 +192,15 @@ impl ProviderToolState {
         } else {
             None
         }
+    }
+
+    pub(crate) fn host_executed_shell_result_delivered(
+        &self,
+        request_id: &str,
+        tool_use_id: Option<&str>,
+    ) -> bool {
+        self.delivered_host_executed_shell_results
+            .contains(&host_executed_shell_result_key(request_id, tool_use_id))
     }
 
     pub(crate) fn release_host_executed_shell_result(
@@ -218,6 +249,15 @@ fn provider_tool_command_from_text(input: &str) -> Option<String> {
         .or_else(|| Some(input.to_string()))
 }
 
+fn shell_command_key(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() || command.contains('\0') {
+        None
+    } else {
+        Some(command.to_string())
+    }
+}
+
 fn looks_interactive_tool_failure(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
     [
@@ -254,8 +294,11 @@ mod tests {
         assert!(state
             .claim_host_executed_shell_result("req-1", Some("call-1"))
             .is_none());
+        assert!(state.host_executed_shell_result_delivered("req-1", Some("call-1")));
+        assert!(!state.host_executed_shell_result_delivered("req-1", Some("call-2")));
 
         state.release_host_executed_shell_result(claim);
+        assert!(!state.host_executed_shell_result_delivered("req-1", Some("call-1")));
         assert!(state
             .claim_host_executed_shell_result("req-1", Some("call-1"))
             .is_some());

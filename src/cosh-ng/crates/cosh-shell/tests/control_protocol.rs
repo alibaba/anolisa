@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cosh_shell::adapter::{ApprovalDecision, ApprovalResponse, FakeAgentAdapter};
+use cosh_shell::adapter::{
+    ApprovalDecision, ApprovalResponse, FakeAgentAdapter, HostExecutedShellMetadata,
+    HostExecutedShellResult,
+};
 use cosh_shell::types::{AgentEvent, CoshApprovalMode};
 use cosh_shell::{AdapterInstance, AgentAdapter};
 
@@ -460,6 +463,226 @@ fn cosh_tui_auto_uses_control_approval_channel() {
         wait_for_session_id(&session_state, "mock-qwen-control", Duration::from_secs(1)),
         "session_id should be committed after cosh-tui control completion"
     );
+}
+
+#[test]
+fn cosh_tui_host_executed_shell_result_uses_control_response() {
+    let adapter = make_cosh_tui_adapter("mock_cosh_tui_host_executed_cli.sh");
+    let session_state = Arc::clone(&adapter.session_id);
+    let request = make_request("cosh-tui-test-host-executed");
+    let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+
+    let events = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::ToolPermissionRequest { .. })
+    });
+    let tool_req = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::ToolPermissionRequest { .. }))
+        .expect("expected cosh-tui ToolPermissionRequest");
+
+    if let AgentEvent::ToolPermissionRequest {
+        request_id,
+        tool_use_id,
+        ..
+    } = tool_req
+    {
+        handle
+            .respond_approval(ApprovalResponse {
+                request_id: request_id.clone(),
+                tool_use_id: Some(tool_use_id.clone()),
+                tool_input: None,
+                decision: ApprovalDecision::HostExecutedShell {
+                    result: Box::new(HostExecutedShellResult {
+                        llm_content:
+                            "ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed"
+                                .to_string(),
+                        return_display: Some("df -h completed".to_string()),
+                        metadata: HostExecutedShellMetadata {
+                            command: "df -h".to_string(),
+                            status: "completed".to_string(),
+                            exit_code: 0,
+                            signal: None,
+                            cwd: "/tmp".to_string(),
+                            end_cwd: "/tmp".to_string(),
+                            duration_ms: 12,
+                            output_ref: Some("terminal-output://test/cmd-1".to_string()),
+                            redaction_status: "bounded".to_string(),
+                            approval_id: Some("approval-1".to_string()),
+                            tool_use_id: Some(tool_use_id.clone()),
+                        },
+                    }),
+                },
+            })
+            .expect("cosh-tui host-executed approval response should succeed");
+    }
+
+    let remaining = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::AgentCompleted { .. })
+    });
+    assert!(
+        remaining
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "expected cosh-tui host-executed completion, got: {remaining:?}"
+    );
+    assert!(
+        wait_for_session_id(
+            &session_state,
+            "mock-cosh-tui-host-executed",
+            Duration::from_secs(1)
+        ),
+        "session_id should be committed after cosh-tui host-executed completion"
+    );
+    let capabilities = handle.control_capabilities();
+    assert!(capabilities.provider_initialize_seen);
+    assert!(capabilities.can_handle_can_use_tool);
+    assert!(capabilities.can_handle_host_executed_shell_tool_result);
+}
+
+#[test]
+fn cosh_tui_multi_host_executed_shell_results_stay_in_same_control_turn() {
+    let adapter = make_cosh_tui_adapter("mock_cosh_tui_host_executed_multi_cli.sh");
+    let session_state = Arc::clone(&adapter.session_id);
+    let request = make_request("cosh-tui-test-host-executed-multi");
+    let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+
+    let first = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::ToolPermissionRequest { .. })
+    });
+    respond_host_executed(&handle, &first, "df -h", "completed");
+
+    let second = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::ToolPermissionRequest { .. })
+    });
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text.contains("First host executed result received.")
+        )),
+        "expected provider to continue same turn after first host result, got: {second:?}"
+    );
+    respond_host_executed(&handle, &second, "du -sh .", "completed");
+
+    let remaining = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::AgentCompleted { .. })
+    });
+    assert!(
+        remaining.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text.contains("Second host executed result received.")
+        )),
+        "expected provider to continue after second host result, got: {remaining:?}"
+    );
+    assert!(
+        remaining
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "expected cosh-tui multi host-executed completion, got: {remaining:?}"
+    );
+    assert!(
+        wait_for_session_id(
+            &session_state,
+            "mock-cosh-tui-host-executed-multi",
+            Duration::from_secs(1)
+        ),
+        "session_id should be committed after multi host-executed completion"
+    );
+}
+
+#[test]
+fn cosh_tui_analysis_continuation_denies_reentrant_shell_request() {
+    let adapter = make_cosh_tui_adapter("mock_cosh_tui_analysis_continuation_shell_request.sh");
+    let session_state = Arc::clone(&adapter.session_id);
+    let mut request = make_request("cosh-tui-analysis-continuation-deny");
+    request.user_input =
+        Some("ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed".to_string());
+    request
+        .context_hints
+        .push("analysis-only continuation after foreground shell handoff".to_string());
+    let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+
+    let events = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            AgentEvent::AgentCompleted { .. } | AgentEvent::AgentFailed { .. }
+        )
+    });
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. }
+                if text.contains("Cosh-tui analysis continuation shell request was denied.")
+        )),
+        "expected cosh-tui provider to receive deny response, got: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "expected cosh-tui analysis continuation completion, got: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AgentEvent::ToolPermissionRequest { .. })),
+        "analysis-only shell request should be denied inside adapter, got: {events:?}"
+    );
+    assert!(
+        wait_for_session_id(
+            &session_state,
+            "mock-cosh-tui-analysis-continuation",
+            Duration::from_secs(1)
+        ),
+        "session_id should be committed after cosh-tui analysis continuation completion"
+    );
+}
+
+fn respond_host_executed(
+    handle: &cosh_shell::adapter::AgentRunHandle,
+    events: &[AgentEvent],
+    command: &str,
+    status: &str,
+) {
+    let tool_req = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::ToolPermissionRequest { .. }))
+        .expect("expected ToolPermissionRequest");
+
+    if let AgentEvent::ToolPermissionRequest {
+        request_id,
+        tool_use_id,
+        ..
+    } = tool_req
+    {
+        handle
+            .respond_approval(ApprovalResponse {
+                request_id: request_id.clone(),
+                tool_use_id: Some(tool_use_id.clone()),
+                tool_input: None,
+                decision: ApprovalDecision::HostExecutedShell {
+                    result: Box::new(HostExecutedShellResult {
+                        llm_content: format!(
+                            "ShellCommandCompleted evidence\ncommand: {command}\nstatus: {status}"
+                        ),
+                        return_display: Some(format!("{command} {status}")),
+                        metadata: HostExecutedShellMetadata {
+                            command: command.to_string(),
+                            status: status.to_string(),
+                            exit_code: 0,
+                            signal: None,
+                            cwd: "/tmp".to_string(),
+                            end_cwd: "/tmp".to_string(),
+                            duration_ms: 12,
+                            output_ref: Some("terminal-output://test/cmd-1".to_string()),
+                            redaction_status: "bounded".to_string(),
+                            approval_id: Some("approval-1".to_string()),
+                            tool_use_id: Some(tool_use_id.clone()),
+                        },
+                    }),
+                },
+            })
+            .expect("host-executed approval response should succeed");
+    }
 }
 
 #[test]

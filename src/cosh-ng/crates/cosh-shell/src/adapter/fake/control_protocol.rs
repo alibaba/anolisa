@@ -48,11 +48,16 @@ pub(super) fn emit_fake_control_protocol_stream(
     }
 
     if input.contains("provider resume timeout shell") {
+        let command = if input.contains("structured before recovery") {
+            "printf structured-before-recovery"
+        } else {
+            "ssh -V"
+        };
         sink(AgentEvent::ToolPermissionRequest {
             run_id,
             request_id: "ctrl-timeout-1".to_string(),
             tool_name: "run_shell_command".to_string(),
-            tool_input: serde_json::json!({ "command": "ssh -V" }),
+            tool_input: serde_json::json!({ "command": command }),
             tool_use_id: "toolu-timeout-1".to_string(),
         })?;
         return Ok(true);

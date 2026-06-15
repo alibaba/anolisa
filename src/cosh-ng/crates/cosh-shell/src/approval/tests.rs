@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::run::ActiveAgentRun;
 use crate::approval::handoff::{
     approval_shell_handoff_validation_message, command_matches_trust_key,
     fallback_bash_execution_path, trust_key_from_command, ApprovedBashExecutionPath,
@@ -9,6 +10,7 @@ use crate::approval::resolution::{
 };
 use cosh_shell::adapter::ApprovalDecision;
 use cosh_shell::types::{GovernanceDecision, GovernancePolicyDecision};
+use std::time::{Duration, Instant};
 
 #[test]
 fn trust_key_from_command_normalizes_full_command() {
@@ -306,6 +308,21 @@ fn non_shell_provider_permission_approval_stays_provider_owned() {
 }
 
 #[test]
+fn provider_approval_response_refreshes_active_run_idle_clock() {
+    let mut active_run = active_run_for_approval_test();
+    active_run.last_activity_at = Instant::now() - Duration::from_secs(60);
+    let mut request = provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    );
+    request.status = ApprovalRequestStatus::Cancelled;
+    let response = provider_approval_response(&request, "ctrl-1");
+
+    assert!(respond_active_run_approval(&mut active_run, response));
+    assert!(active_run.last_activity_at.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
 fn shell_handoff_validation_message_uses_active_language() {
     let zh = cosh_shell::I18n::new(cosh_shell::Language::ZhCn);
     let text = approval_shell_handoff_validation_message(
@@ -348,6 +365,64 @@ fn provider_tool_request(
         execution_path: Some("provider_control_protocol"),
         command_block_id: None,
         redaction_status: None,
+    }
+}
+
+fn active_run_for_approval_test() -> ActiveAgentRun {
+    let request = AgentRequest {
+        id: "request-1".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: CommandBlock {
+            id: "cmd-1".to_string(),
+            session_id: "session-1".to_string(),
+            command: "approval test".to_string(),
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            duration_ms: 1,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 0,
+            },
+        },
+        context_blocks: Vec::new(),
+        context_hints: Vec::new(),
+        user_input: Some("approval test".to_string()),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Recommend);
+    let renderer = RatatuiInlineRenderer::for_terminal();
+    ActiveAgentRun {
+        request,
+        handle,
+        provider_name: "fake",
+        language: cosh_shell::Language::EnUs,
+        renderer: renderer.clone(),
+        status_animation: renderer.status_animation(),
+        markdown_stream: renderer.stream_markdown_agent(),
+        governed_events: Vec::new(),
+        deferred_events: Vec::new(),
+        held_events: Vec::new(),
+        cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+        pending_cosh_requests: Vec::new(),
+        pending_cosh_request_audits: Vec::new(),
+        rendered_governed_event_count: 0,
+        selectable_after_event_index: None,
+        started_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_heartbeat_at: Instant::now(),
+        current_phase: String::new(),
+        current_message: String::new(),
+        has_visible_text_delta: false,
+        completed: false,
     }
 }
 

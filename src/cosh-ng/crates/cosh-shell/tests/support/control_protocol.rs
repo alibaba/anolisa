@@ -98,5 +98,6 @@ pub(crate) fn make_cosh_tui_adapter(mock_script: &str) -> CoshTuiAdapter {
         program: mock_cli_path(mock_script),
         allow_model_call: true,
         session_id: Arc::default(),
+        session_cwd: Arc::default(),
     }
 }

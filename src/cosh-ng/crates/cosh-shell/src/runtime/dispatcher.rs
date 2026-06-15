@@ -9,7 +9,7 @@ use crate::agent::failed_command::{
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
-use crate::agent::run::start_agent_run;
+use crate::agent::run::{start_agent_run, stop_active_agent_run_without_rendering};
 use crate::approval::runtime::render_approval_actions;
 use crate::hooks::runtime::{
     handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
@@ -98,6 +98,10 @@ fn render_inline_guidance_from_batch<W: Write>(
         .any(|event| event.kind == cosh_shell::types::ShellEventKind::ShellExited);
     let ledger = cosh_shell::ledger::build_command_blocks(events);
     state.session_blocks = ledger.blocks.clone();
+    if state.shell_exited {
+        stop_active_agent_run_without_rendering(state, output)?;
+        return Ok(());
+    }
     let shell_busy = shell_has_active_foreground_command(events);
     if shell_busy {
         let slash_actions = SlashConsumer::consume(
@@ -219,7 +223,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     )?;
     RuntimeDispatcher::apply_actions(approval_actions, state);
     flush_held_agent_events(state, output)?;
-    if !shell_busy {
+    if !shell_busy && !state.control.shell_handoff().has_active_handoff() {
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;

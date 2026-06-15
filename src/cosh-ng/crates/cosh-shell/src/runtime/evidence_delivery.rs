@@ -111,18 +111,24 @@ fn deliver_host_executed_shell_result_if_supported(
     };
 
     let result = host_executed_shell_result(handoff, evidence);
-    let delivered = match state.agent_run.active.as_ref() {
-        Some(run) => run
-            .handle
-            .respond_approval(ApprovalResponse {
-                request_id: request_id.clone(),
-                tool_use_id: handoff.tool_use_id.clone(),
-                tool_input: None,
-                decision: ApprovalDecision::HostExecutedShell {
-                    result: Box::new(result),
-                },
-            })
-            .is_ok(),
+    let delivered = match state.agent_run.active.as_mut() {
+        Some(run) => {
+            let delivered = run
+                .handle
+                .respond_approval(ApprovalResponse {
+                    request_id: request_id.clone(),
+                    tool_use_id: handoff.tool_use_id.clone(),
+                    tool_input: None,
+                    decision: ApprovalDecision::HostExecutedShell {
+                        result: Box::new(result),
+                    },
+                })
+                .is_ok();
+            if delivered {
+                run.last_activity_at = std::time::Instant::now();
+            }
+            delivered
+        }
         None => false,
     };
     if !delivered {
@@ -259,7 +265,16 @@ fn shell_handoff_continuation_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosh_shell::types::OutputRefs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use cosh_shell::adapter::{AgentRunPoll, CoshTuiAdapter};
+    use cosh_shell::agent_render::RatatuiInlineRenderer;
+    use cosh_shell::types::{AgentEvent, CoshApprovalMode, OutputRefs};
+
+    use crate::agent::run::ActiveAgentRun;
 
     #[test]
     fn host_executed_shell_result_uses_opaque_output_id_without_path() {
@@ -361,5 +376,294 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_executed_delivery_channel_closed_records_recovery_and_releases_claim() {
+        let request = test_request();
+        let handle = closed_cosh_tui_control_handle(&request);
+        assert!(
+            handle
+                .control_capabilities()
+                .can_handle_host_executed_shell_tool_result,
+            "mock provider must advertise host-executed support before exiting"
+        );
+
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run(request, handle));
+        let mut handoff = ShellHandoffRequest::new(
+            "df -h",
+            "$ df -h",
+            "provider-tool-call",
+            "agent",
+            "req-1",
+            "run-1",
+            10,
+        )
+        .expect("handoff");
+        handoff.request_id = Some("ctrl-closed".to_string());
+        handoff.tool_use_id = Some("toolu-closed".to_string());
+        let block = CommandBlock {
+            id: "cmd-closed".to_string(),
+            session_id: "raw-session".to_string(),
+            command: "df -h".to_string(),
+            cwd: "/repo".to_string(),
+            end_cwd: "/repo".to_string(),
+            started_at_ms: 10,
+            ended_at_ms: 20,
+            duration_ms: 10,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 32,
+            },
+        };
+        let evidence =
+            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+
+        let delivery =
+            deliver_host_executed_shell_result_if_supported(&mut state, &handoff, &evidence);
+
+        assert!(!delivery.delivered);
+        assert_eq!(delivery.status, "provider_channel_closed");
+        assert!(
+            delivery
+                .recovery_reason
+                .unwrap_or_default()
+                .contains("approval channel closed"),
+            "{delivery:?}"
+        );
+        assert!(
+            state
+                .control
+                .provider_tool_mut()
+                .claim_host_executed_shell_result("ctrl-closed", Some("toolu-closed"))
+                .is_some(),
+            "failed delivery must release duplicate guard claim"
+        );
+    }
+
+    #[test]
+    fn host_executed_delivery_refreshes_active_run_idle_clock() {
+        let request = test_request();
+        let (dir, handle) = open_cosh_tui_control_handle(&request);
+
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run(request, handle));
+        state
+            .agent_run
+            .active
+            .as_mut()
+            .expect("active run")
+            .last_activity_at = Instant::now() - Duration::from_secs(60);
+        let mut handoff = ShellHandoffRequest::new(
+            "df -h",
+            "$ df -h",
+            "provider-tool-call",
+            "agent",
+            "req-1",
+            "run-1",
+            10,
+        )
+        .expect("handoff");
+        handoff.request_id = Some("ctrl-open".to_string());
+        handoff.tool_use_id = Some("toolu-open".to_string());
+        let block = CommandBlock {
+            id: "cmd-open".to_string(),
+            session_id: "raw-session".to_string(),
+            command: "df -h".to_string(),
+            cwd: "/repo".to_string(),
+            end_cwd: "/repo".to_string(),
+            started_at_ms: 10,
+            ended_at_ms: 20,
+            duration_ms: 20_000,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 32,
+            },
+        };
+        let evidence =
+            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+
+        let delivery =
+            deliver_host_executed_shell_result_if_supported(&mut state, &handoff, &evidence);
+
+        let refreshed = state
+            .agent_run
+            .active
+            .as_ref()
+            .expect("active run")
+            .last_activity_at;
+        assert!(delivery.delivered, "{delivery:?}");
+        assert!(
+            refreshed.elapsed() < Duration::from_secs(2),
+            "host-executed delivery should reset provider idle clock; elapsed={:?}",
+            refreshed.elapsed()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn open_cosh_tui_control_handle(
+        request: &AgentRequest,
+    ) -> (PathBuf, cosh_shell::adapter::AgentRunHandle) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-open-control-{}-{unique}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let program = dir.join("cosh-tui-open-control.sh");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","model":"mock-cosh-tui","session_id":"mock-open-control"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ctrl-open","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"df -h"},"tool_use_id":"toolu-open"}}'
+if IFS= read -r response; then
+  case "$response" in
+    *'"behavior":"host_executed_shell"'*'df -h'*)
+      printf '%s\n' '{"type":"assistant","session_id":"mock-open-control","message":{"content":[{"type":"text","text":"host executed accepted"}]}}'
+      printf '%s\n' '{"type":"result","subtype":"success","session_id":"mock-open-control","is_error":false,"result":"done"}'
+      exit 0
+      ;;
+  esac
+fi
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"mock-open-control","is_error":true,"result":"missing host executed response"}'
+exit 1
+"#,
+        )
+        .expect("write mock cosh-tui");
+        let mut permissions = std::fs::metadata(&program)
+            .expect("mock metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-tui");
+        let adapter = CoshTuiAdapter {
+            program: program.to_string_lossy().to_string(),
+            allow_model_call: true,
+            session_id: Arc::default(),
+            session_cwd: Arc::default(),
+        };
+        let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_request = false;
+        while Instant::now() < deadline {
+            match handle.poll_event_timeout(Duration::from_millis(100)) {
+                Ok(AgentRunPoll::Event(AgentEvent::ToolPermissionRequest { .. })) => {
+                    saw_request = true;
+                    break;
+                }
+                Ok(AgentRunPoll::Event(_)) | Ok(AgentRunPoll::Timeout) => continue,
+                Ok(AgentRunPoll::Finished) => break,
+                Err(err) => panic!("mock cosh-tui control run failed: {err:?}"),
+            }
+        }
+        assert!(saw_request, "mock provider did not emit tool permission");
+        assert!(
+            handle
+                .control_capabilities()
+                .can_handle_host_executed_shell_tool_result,
+            "mock provider must advertise host-executed support"
+        );
+        (dir, handle)
+    }
+
+    fn closed_cosh_tui_control_handle(
+        request: &AgentRequest,
+    ) -> cosh_shell::adapter::AgentRunHandle {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let adapter = CoshTuiAdapter {
+            program: manifest_dir
+                .join("tests")
+                .join("mock_qwen_control_capabilities.sh")
+                .to_string_lossy()
+                .to_string(),
+            allow_model_call: true,
+            session_id: Arc::default(),
+            session_cwd: Arc::default(),
+        };
+        let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match handle.poll_event_timeout(Duration::from_millis(100)) {
+                Ok(AgentRunPoll::Event(AgentEvent::AgentCompleted { .. })) => break,
+                Ok(AgentRunPoll::Event(_)) | Ok(AgentRunPoll::Timeout) => continue,
+                Ok(AgentRunPoll::Finished) => break,
+                Err(err) => panic!("mock cosh-tui control run failed: {err:?}"),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        handle
+    }
+
+    fn test_active_run(
+        request: AgentRequest,
+        handle: cosh_shell::adapter::AgentRunHandle,
+    ) -> ActiveAgentRun {
+        let renderer = RatatuiInlineRenderer::for_terminal();
+        ActiveAgentRun {
+            request,
+            handle,
+            provider_name: "cosh-tui",
+            language: cosh_shell::Language::EnUs,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: false,
+        }
+    }
+
+    fn test_request() -> AgentRequest {
+        AgentRequest {
+            id: "request-1".to_string(),
+            session_id: "session-1".to_string(),
+            command_block: CommandBlock {
+                id: "cmd-request".to_string(),
+                session_id: "session-1".to_string(),
+                command: "df -h".to_string(),
+                cwd: "/repo".to_string(),
+                end_cwd: "/repo".to_string(),
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                duration_ms: 1,
+                exit_code: 0,
+                status: CommandStatus::Completed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+            },
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("check disk".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        }
     }
 }
