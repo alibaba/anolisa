@@ -304,6 +304,45 @@ h1 span{color:var(--accent-light)}
 }
 .source-link:hover{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
 .source-link:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.changelog-controls{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:18px;margin:0 0 22px;
+}
+.component-tabs{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.component-tab,.lang-btn{
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.04em;
+  border:1px solid var(--border);border-radius:6px;
+  background:rgba(10,20,27,0.46);color:var(--text-2);
+  cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+.component-tab{
+  padding:8px 11px;text-transform:uppercase;
+}
+.component-tab:hover,.lang-btn:hover{
+  color:var(--text);border-color:var(--border-hover);background:rgba(10,110,92,0.08);
+}
+.component-tab.active,.lang-btn.active{
+  color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim);
+}
+.component-tab:focus-visible,.lang-btn:focus-visible{
+  outline:2px solid var(--accent);outline-offset:3px;
+}
+.lang-toggle{
+  display:flex;gap:6px;flex-shrink:0;
+  padding:4px;border:1px solid rgba(255,255,255,0.05);
+  border-radius:8px;background:rgba(0,0,0,0.18);
+}
+.lang-btn{min-width:44px;padding:7px 10px}
+.lang-btn:disabled{
+  opacity:.38;cursor:not-allowed;color:var(--text-3);
+  border-color:rgba(255,255,255,0.05);background:rgba(255,255,255,0.02);
+}
+.component-summary{
+  margin:-8px 0 18px;color:var(--text-3);
+  font-size:0.8125rem;line-height:1.6;
+}
 .release-list{display:grid;gap:14px}
 .release{
   display:grid;grid-template-columns:150px 1fr;gap:24px;
@@ -379,6 +418,9 @@ h1 span{color:var(--accent-light)}
   #anolisa-cli-changelog{padding:56px 0 104px}
   .changelog-head{display:block}
   .source-link{display:inline-flex;margin-top:18px}
+  .changelog-controls{align-items:flex-start;flex-direction:column}
+  .component-tabs{gap:7px}
+  .component-tab{font-size:0.625rem;padding:7px 9px}
   .release{grid-template-columns:1fr;gap:14px;padding:18px}
   .top-btn{right:16px;bottom:16px}
   .cap-footer{flex-direction:column;gap:12px;text-align:center}
@@ -480,13 +522,23 @@ h1 span{color:var(--accent-light)}
       <div class="changelog-head reveal">
         <div class="changelog-copy">
           <div class="cap-label">Changelog</div>
-          <h2 class="cap-title">ANOLISA CLI release notes.</h2>
-          <p class="changelog-sub">Stable updates for the command-line runtime, installer, and agent operating layer.</p>
+          <h2 class="cap-title">ANOLISA component release notes.</h2>
+          <p class="changelog-sub">Stable updates across the CLI, runtime components, adapters, and agent operating layer.</p>
         </div>
-        <a class="source-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">Source changelog</a>
+        <a class="source-link" id="source-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">Source changelog</a>
       </div>
 
-      <div class="release-list">
+      <div class="changelog-controls">
+        <div class="component-tabs" id="component-tabs" role="tablist" aria-label="Component changelog"></div>
+        <div class="lang-toggle" aria-label="Changelog language">
+          <button class="lang-btn active" type="button" data-lang="en">EN</button>
+          <button class="lang-btn" type="button" data-lang="zh">中文</button>
+        </div>
+      </div>
+
+      <p class="component-summary" id="component-summary">Command-line runtime, installer, and agent operating layer.</p>
+
+      <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
         <article class="release reveal reveal-d1" id="anolisa-cli-0-1-7">
           <div class="release-meta">
@@ -627,8 +679,1197 @@ h1 span{color:var(--accent-light)}
       </div>
 
       <div class="changelog-more">
-        <a class="more-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">More on GitHub</a>
+        <a class="more-link" id="more-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">More on GitHub</a>
       </div>
+
+        <!-- ANOLISA_CHANGELOG_DATA_START -->
+        <script type="application/json" id="changelog-data">{
+  "limit": 5,
+  "latestVersion": "0.1.7",
+  "components": [
+    {
+      "id": "anolisa",
+      "label": "ANOLISA CLI",
+      "summary": "Command-line runtime, installer, and agent operating layer.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.1.7",
+              "date": "2026-06-13",
+              "sections": [
+                {
+                  "title": "Changed",
+                  "items": [
+                    "User-mode library paths now resolve to `~/.local/lib/anolisa`; other directories continue to follow `XDG_*` overrides."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa install` no longer requires a local catalog entry before downloading from the remote repository.",
+                    "`anolisa install --dry-run` can preview files and services without downloading the full package."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.6",
+              "date": "2026-06-12",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa osbase sandbox install gvisor` now supports standalone, containerd, and substrate deployments. (#851)",
+                    "`anolisa list` can derive the component catalog from `repo.toml` configuration. (#854)"
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Replaced the legacy \"capability\" model with a unified component lifecycle; old state auto-migrates on next write. (#876)"
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa list --enabled` now correctly shows installed components instead of an empty list. (#872)",
+                    "`anolisa list` no longer requires a separate local catalog file when `repo.toml` is configured. (#854)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.5",
+              "date": "2026-06-11",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa list` reads from a remote or local component catalog and returns structured JSON. (#850)",
+                    "`anolisa install \u003ccomponent>` downloads, verifies, and installs components from the remote repository. (#852)",
+                    "`anolisa uninstall` supports the new component model while preserving legacy fallback. (#852)"
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Simplified CLI help around `list`, `install`, `uninstall`, `status`, `doctor`, `logs`, `restart`, `update`. (#850)"
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa list` returns an empty list with a config hint when no catalog is configured. (#850)",
+                    "Failed installs now automatically roll back partially-written files. (#852)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.4",
+              "date": "2026-06-10",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa adapter scan` detects available framework integrations. (#808)",
+                    "`anolisa adapter install` downloads verified packages and registers adapters with the target framework.",
+                    "`anolisa adapter remove` safely removes only ANOLISA-managed files, with dry-run and JSON preview support.",
+                    "`anolisa adapter install tokenless openclaw` wires up the tokenless adapter via the OpenClaw CLI.",
+                    "`anolisa enable` fetches component metadata from the remote repository, with offline fallback.",
+                    "`anolisa status` now includes component health check results."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Renamed subscription commands to top-level `anolisa register` / `unregister`."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "Adapter install/remove failures now roll back or preserve state for retry."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.3",
+              "date": "2026-06-09",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa --help` now groups commands by category (everyday vs. management).",
+                    "`list` command shows its `ls` alias in help output.",
+                    "`anolisa update self` prints a changelog link on success."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Corrected package license metadata to Apache-2.0."
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": [
+            {
+              "version": "0.1.7",
+              "date": "2026-06-13",
+              "sections": [
+                {
+                  "title": "变更",
+                  "items": [
+                    "用户态库路径调整为 `~/.local/lib/anolisa`；其余目录继续遵循 `XDG_*` 环境变量覆盖。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "`anolisa install` 不再要求本地已有组件目录条目即可从远程仓库下载安装。",
+                    "`anolisa install --dry-run` 无需下载完整安装包即可预览文件和服务列表。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.6",
+              "date": "2026-06-12",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa osbase sandbox install gvisor` 支持 standalone、containerd 和 substrate 三种部署形态。(#851)",
+                    "`anolisa list` 可从 `repo.toml` 配置自动发现组件目录。(#854)"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "废弃旧版\"能力\"模型，统一为组件生命周期；旧状态在下次写入时自动迁移。(#876)"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "`anolisa list --enabled` 现在正确显示已安装组件，而非空列表。(#872)",
+                    "`anolisa list` 在已配置 `repo.toml` 时不再要求额外的本地目录文件。(#854)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.5",
+              "date": "2026-06-11",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa list` 从远程或本地组件目录读取并返回结构化 JSON。(#850)",
+                    "`anolisa install \u003c组件>` 从远程仓库下载、校验并安装组件。(#852)",
+                    "`anolisa uninstall` 支持新组件模型，同时保留旧版回退。(#852)"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "简化 CLI 帮助输出，围绕 `list`、`install`、`uninstall`、`status`、`doctor`、`logs`、`restart`、`update` 重新分组。(#850)"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "未配置组件目录时，`anolisa list` 返回空列表并提示配置方法。(#850)",
+                    "安装中途失败时自动回滚已写入的文件。(#852)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.4",
+              "date": "2026-06-10",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa adapter scan` 探测已安装的 Agent 框架集成。(#808)",
+                    "`anolisa adapter install` 下载校验后的安装包并注册到目标框架。",
+                    "`anolisa adapter remove` 安全移除 ANOLISA 管理的文件，支持预览和 dry-run。",
+                    "`anolisa adapter install tokenless openclaw` 通过 OpenClaw CLI 注册 tokenless 适配器。",
+                    "`anolisa enable` 从远程仓库获取组件元数据，离线时降级到本地缓存。",
+                    "`anolisa status` 输出中新增组件健康检查结果。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "订阅管理命令提升为顶层 `anolisa register` / `unregister`。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "adapter 安装或移除失败时自动回滚或保留状态以便重试。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.3",
+              "date": "2026-06-09",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa --help` 按类别分组展示命令（日常操作 vs. 管理命令）。",
+                    "`list` 命令在帮助中展示 `ls` 别名。",
+                    "`anolisa update self` 成功后输出 changelog 链接。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "修正包 license 元数据为 Apache-2.0。"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "copilot-shell",
+      "label": "Copilot Shell",
+      "summary": "Terminal-native agent shell and interactive CLI.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/copilot-shell/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "2.5.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fixed missing esc hint in tool confirmation footer status bar (#732)",
+                    "Fixed invisible cursor in provider/auth config inputs (#683)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "2.4.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fixed HookSystemMessage rendering as info and resolved Content/Thought duplication (#636)",
+                    "Fixed prompt ids to remain monotonic after shell remount (#628)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "2.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added DashScope Token Plan provider entry to the OpenAI-compatible auth dialog. (#598)",
+                    "Added UserPromptSubmit and PostToolUse hook reason surfacing in the UI. (#545)",
+                    "Added run_id field to HookInput for per-run event correlation. (#482)",
+                    "Fixed UserPromptSubmit hook decision merging to enforce safety priority over allow. (#597)",
+                    "Fixed missing tool_use_id in PreToolUse hook input. (#559)",
+                    "Fixed memory hooks lock takeover with atomic rename and async IO. (#550)",
+                    "Fixed auto-memory workspace cleanup wiping user-added directories. (#548)",
+                    "Fixed auto-memory session hook missing read_file events due to wrong arg key. (#547)",
+                    "Fixed run_id ordering by setting it before UserPromptSubmit hook fires. (#537)",
+                    "Fixed UserPromptSubmit hook firing on tool-result and Stop continuations. (#534)",
+                    "Updated installer to support multiple install profiles. (#541)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "2.3.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "**BREAKING** Removed qwen-oauth authentication support. (#455)",
+                    "Added auto memory background extraction system. (#465)",
+                    "Added full shell command display in hook-ask and exec confirm dialogs. (#452)",
+                    "Added esc key to cancel running slash commands. (#290)",
+                    "Fixed JavaScript heap out of memory during long sessions. (#462)",
+                    "Fixed missing allow decision reason in UI when systemMessage is absent. (#435)",
+                    "Improved test coverage with standalone tests for ExecCommandPreview. (#460)",
+                    "Updated hook docs to clarify difference between systemMessage and reason. (#436)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "2.2.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fixed initial chat being blocked during skill/subagent first-load discovery. (#418)",
+                    "Fixed missing tool_use_id in PostToolUse hook event payload. (#414)",
+                    "Fixed missing skill_context in PreToolUse hook input for resolved skill path. (#409)",
+                    "Fixed missing auto-completion for `/statusline` subcommands. (#408)",
+                    "Fixed unavailable agents appearing in the key sharing prompt. (#394)",
+                    "Fixed bash option not being restored after canceling from the provider screen. (#393)",
+                    "Fixed hook systemMessages to be concatenated with a `[name]` prefix for clarity. (#387)"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "agent-sec-core",
+      "label": "AgentSecCore",
+      "summary": "Security kernel, scanners, adapters, and policy enforcement.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/agent-sec-core/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.6.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Self-Protection — Tamper-resistance for agent-sec-core itself",
+                  "items": [
+                    "Added self-protect code-scan rules that block disabling/uninstalling agent-sec plugins on OpenClaw and Hermes. (#692)",
+                    "Optimized self-protect rules in code-scan to eliminate false positives on prefix-matched plugin names and cover Hermes uninstall/rm patterns. (#710)"
+                  ]
+                },
+                {
+                  "title": "Prompt Scanner",
+                  "items": [
+                    "Unified prompt-scan warning format across cosh-extension, hermes-plugin, and openclaw-plugin with structured fields (threat type, risk level, interception stage, model confidence). (#709)"
+                  ]
+                },
+                {
+                  "title": "Agent-Sec-CLI",
+                  "items": [
+                    "Added daemon process for agent-sec-cli to amortize startup latency across hook invocations. (#677)"
+                  ]
+                },
+                {
+                  "title": "Adapter & Manifest",
+                  "items": [
+                    "Added standalone ANOLISA adapter entry `anolisa-for-openclaw` to package sec-core OpenClaw adapter scripts and drive install/detect/uninstall via the adapter manifest. (#549)",
+                    "Added Hermes adapter runner: refactored the OpenClaw entry into a target-agnostic `anolisa-adapter-runner` and added `anolisa-for-hermes` wrapper, with per-agent adapter directory layout under sec-core. (#617)",
+                    "Centralized sec-core adapter manifest parsing across adapter scripts and moved the manifest under the cli package. (#617)"
+                  ]
+                },
+                {
+                  "title": "OpenClaw Integration",
+                  "items": [
+                    "Normalized OpenClaw state directory handling: use `OPENCLAW_STATE_DIR` for adapter filesystem state, unset `OPENCLAW_HOME` when invoking the OpenClaw CLI, and aligned plugin install/list/uninstall handling. (#641)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.5.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "PII Scanner — Personal information leak detection",
+                  "items": [
+                    "Added PIIChecker scan CLI with text/file input, regex/validator-based detection, redaction, and security middleware integration. (#525)",
+                    "Added PIIChecker hooks for cosh and OpenClaw with stdin-based input passing. (#539)",
+                    "Added Hermes PII checker hook. (#556)",
+                    "Fixed scan-pii module mode detection via subprocess. (#540)"
+                  ]
+                },
+                {
+                  "title": "Security Observability — Agent run metrics & posture insights",
+                  "items": [
+                    "Added security observability schema, metrics definition, and CLI with jsonl writer for agent runs. (#488)",
+                    "Added openclaw plugin for security observability. (#515)",
+                    "Added cosh hook for security observability. (#528)",
+                    "Persisted observability records to sqldb with CLI review command. (#544)",
+                    "Added observability plugin for hermes. (#553)",
+                    "Correlated security events with observability events and supported batch query. (#578)",
+                    "Respected trace-id filter in count queries. (#595)"
+                  ]
+                },
+                {
+                  "title": "Hermes Plugin — AI Agent integration framework",
+                  "items": [
+                    "Added hermes-plugin framework with abstract hook class and code scan capability. (#536)",
+                    "Added Hermes prompt-scan capability. (#579)",
+                    "Added Hermes PII checker hook. (#556)",
+                    "Added Hermes skill ledger hook. (#565)",
+                    "Added observability plugin for hermes. (#553)",
+                    "Supported correlation context in hermes agent plugin. (#590)",
+                    "Added hermes plugin install for rpmbuild and build from scratch. (#577)",
+                    "Stabilized Hermes skill-ledger warning delivery for non-pass skill checks. (#600)"
+                  ]
+                },
+                {
+                  "title": "Correlation & Tracing Context",
+                  "items": [
+                    "Unified caller tracing context across CLI, OpenClaw, and cosh with `--trace-context` JSON and SQLite schema v2. (#569)",
+                    "Supported correlation context in hermes agent plugin. (#590)",
+                    "Correlated security events with observability events. (#578)"
+                  ]
+                },
+                {
+                  "title": "Skill Ledger",
+                  "items": [
+                    "Integrated code-scanner with skill-ledger for unified security assessment. (#505)",
+                    "Updated skill ledger security interactions. (#529)",
+                    "Made openclaw skill ledger approval configurable. (#575)",
+                    "Added Hermes skill ledger hook. (#565)",
+                    "Refined skill ledger scan workflow and aligned documentation. (#529)",
+                    "Included skill-ledger e2e in install flows. (#573)",
+                    "Fixed skill-ledger hook scope limitation. (#497)",
+                    "Fixed managed skill dirs for discovery. (#510)",
+                    "Expanded home paths for skill-ledger. (#596)",
+                    "Hardened skill ledger recovery and key UX. (#575)"
+                  ]
+                },
+                {
+                  "title": "Code Scanner",
+                  "items": [
+                    "Added code-scan requireApproval config for openclaw. (#560)",
+                    "Added OpenClaw enableBlock hook policies. (#586)"
+                  ]
+                },
+                {
+                  "title": "Security Middleware & Event System",
+                  "items": [
+                    "Fixed TOCTOU race condition at sqldb read path. (#546)",
+                    "Made SQLAlchemy lazy import for non-DB subcommands. (#581)",
+                    "Lowered frequency for SQL maintenance operations. (#546)"
+                  ]
+                },
+                {
+                  "title": "Prompt Scanner",
+                  "items": [
+                    "Added Hermes prompt-scan capability via hermes plugin. (#579)",
+                    "Fixed warmup detection from error-string matching to file-based check. (#500)",
+                    "Fixed prompt text passing via stdin instead of argv. (#579)"
+                  ]
+                },
+                {
+                  "title": "Toolchain & CI",
+                  "items": [
+                    "Added build-all support with local space install for sec-core. (#527)",
+                    "Added hermes plugin install for rpmbuild and from-scratch build. (#577)",
+                    "Included skill-ledger e2e in install flows. (#573)",
+                    "Added adapter manifest for capability discovery. (#577)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Prompt Scanner",
+                  "items": [
+                    "Prompt scanner hook now asks user on missing model instead of fail-open. (#463)",
+                    "Added prompt injection detection benchmark dataset and evaluation toolkit. (#464)"
+                  ]
+                },
+                {
+                  "title": "Security Middleware & Event System",
+                  "items": [
+                    "Refactored security_events SQLite storage to SQLAlchemy ORM with multi-table extensibility and typed repositories. (#459)"
+                  ]
+                },
+                {
+                  "title": "Skill Ledger",
+                  "items": [
+                    "Fixed sign-skill auto-register config (exact awk match) and parse openclaw stdout unconditionally. (#445)",
+                    "Unified XDG paths under `agent-sec/skill-ledger` vendor namespace. (#445)",
+                    "Unified single-skill verify into structured result for consistent output. (#445)",
+                    "Converted integration tests from subprocess to Typer CliRunner. (#445)"
+                  ]
+                },
+                {
+                  "title": "OpenClaw Integration",
+                  "items": [
+                    "Registered plugin at openclaw gateway explicitly to support Gateway startup planning. (#446)"
+                  ]
+                },
+                {
+                  "title": "Refactoring",
+                  "items": [
+                    "Removed deprecated agent-sec-core skill directory; aligned README and spec with agent-sec-cli workflow. (#454)"
+                  ]
+                },
+                {
+                  "title": "Toolchain & CI",
+                  "items": [
+                    "Added coverage report for sec-core CI. (#431)",
+                    "Enabled rpmbuild and e2e test CI for main branch. (#432)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Prompt Scanner — Multi-layer prompt injection & jailbreak detection",
+                  "items": [
+                    "Added prompt injection/jailbreak detection scanner architecture with L1 rule engine (YAML-based) and L2 ML classifier (Prompt Guard 2). (#253)",
+                    "Integrated prompt scanner into cosh hook and openclaw plugin with security middleware lifecycle. (#261, #294)",
+                    "Added `list-scanners` command, improved CLI help, and made `--scanner-version` optional. (#284)",
+                    "Added prompt scan summary and backend tests. (#294)",
+                    "Added prompt-scanner skill definition. (#256)",
+                    "Added model warmup, audit logging, and comprehensive documentation. (#253)",
+                    "Stabilized batch scanning and verdict logic with thread-safe model loading. (#253)",
+                    "Unified prompt scanner response to use \"ask\" instead of \"block\". (#341)",
+                    "Added prompt-scanner e2e test suite and Makefile target. (#352)"
+                  ]
+                },
+                {
+                  "title": "Code Scanner — Static code security analysis",
+                  "items": [
+                    "Added code scanner component with rule-based detection for obfuscation, permission abuse, and more. (#234)",
+                    "Integrated code scanner into cosh hook (with ask decision support) and openclaw plugin adapter. (#234)",
+                    "Added code scanner CLI entry, error codes, and unit tests. (#234)",
+                    "Fixed code scan bugs and added e2e test. (#342)"
+                  ]
+                },
+                {
+                  "title": "Skill Ledger — Skill integrity tracking and signing",
+                  "items": [
+                    "Added skill-ledger CLI with middleware integration for skill integrity verification. (#252)",
+                    "Added skill-ledger skill definition. (#266)",
+                    "Added skill-ledger cosh hook for PreToolUse and openclaw-plugin capability. (#292, #281)",
+                    "Improved skill-ledger CLI and cleaned up imports. (#284)",
+                    "Restructured skill-ledger config defaults and documentation. (#296)",
+                    "Aligned skill-ledger tool name and added path validation. (#317)",
+                    "Reworked skill-ledger status, output, and check signing. (#335)",
+                    "Skill-ledger hook hardening, e2e suite, and posture integration. (#339)",
+                    "**Known limitation:** skill directory resolution assumes dir name matches SKILL.md `name` field; see #381."
+                  ]
+                },
+                {
+                  "title": "Security Middleware & Event System",
+                  "items": [
+                    "Added security middleware framework with unified CLI entry point and metrics integration. (#121, #220)",
+                    "Added sqldb writer & reader with query command at CLI interface for security event persistence. (#254)",
+                    "Fixed cross-process event loss in SecurityEventWriter. (#226)",
+                    "Applied corruption whitelist to stop false-positive DB rebuilds. (#338)",
+                    "Added e2e test and fixed bugs revealed during testing. (#330)"
+                  ]
+                },
+                {
+                  "title": "Linux Sandbox",
+                  "items": [
+                    "Added sandbox guard and failure handler hooks. (#362)"
+                  ]
+                },
+                {
+                  "title": "OpenClaw Integration",
+                  "items": [
+                    "Added hook plugin for openclaw with integrated security scanning capabilities. (#242)",
+                    "Added jq requires for openclaw hook package. (#370)"
+                  ]
+                },
+                {
+                  "title": "Cosh Extension Integration",
+                  "items": [
+                    "Integrated with new cosh extension API and added builtin commands. (#302)"
+                  ]
+                },
+                {
+                  "title": "Performance",
+                  "items": [
+                    "Lazy-load ML dependencies to speed up non-ML subcommands. (#318)"
+                  ]
+                },
+                {
+                  "title": "Toolchain & CI",
+                  "items": [
+                    "Migrated Python toolchain to uv package manager and pinned Python 3.11.6. (#227)",
+                    "Added sec-core RPM build CI and adapted nightly build pipeline. (#295)",
+                    "Initialized code format check CI with python-code-pretty. (#229)",
+                    "Added e2e test in RPM build CI. (#369)"
+                  ]
+                },
+                {
+                  "title": "Bug Fixes",
+                  "items": [
+                    "Preserved seharden wrapper defaults. (#236)",
+                    "Removed dynamic import at middleware router. (#277)",
+                    "Improved missing loongshield guidance. (#289)",
+                    "Fixed build errors. (#288)",
+                    "Removed openclaw hook examples and fixed documentation. (#282)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.2.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added Hardened skill signing pipeline and added `.skill-meta` layout. (#129)",
+                    "Added `Cargo.lock` to version control. (#149)",
+                    "Added `make install-sandbox` target. (#68)",
+                    "Fixed bubblewrap version compatibility for `--argv0` option. (#112)",
+                    "Changed Refactor SKILL.md to executable protocol and align sub-skills. (#130)"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "agentsight",
+      "label": "AgentSight",
+      "summary": "Agent observability, tracing, dashboard, and interruption insights.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/agentsight/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.6.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Add real-time agent_crash detection in trace mode.",
+                    "Add OOM crash detection.",
+                    "Add cgroup-level event filtering with v1/v2 compatibility.",
+                    "Support QwenCode skill discovery via per-user home scanning.",
+                    "Support SLS Logtail activation reversible via dynamic path.",
+                    "Support bridging ilogtail `SLS_LOG_PATH` into config via token-collector switch.",
+                    "Default `traceEnabled` to false to drop conversation content from SLS by default.",
+                    "Drop `gen_ai.system_instructions` from SLS uploads when `traceEnabled=false`.",
+                    "Refactor session_id and conversation_id derivation from response_id instead of message content.",
+                    "Fix CJK deadloop detection, `kill()` error check, and SIGKILL escalation.",
+                    "Fix SQLite read/write contention via VACUUM optimization.",
+                    "Fix rpm-build.sh agentsight build failures.",
+                    "Fix allow log path re-init on repeated new+start."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.6.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Add deadloop detection and auto-kill mechanism for runaway agent processes.",
+                    "Add retry storm detection and `/metrics` interruption counters.",
+                    "Add BPF-layer HTTP protocol filter and wildcard capture (`*`) for unknown IP/port targets.",
+                    "Add client-side hybrid encryption for sensitive message fields.",
+                    "Add `traceEnabled` configuration toggle with SLS upload layer enforcement.",
+                    "Add HTTP domain rules resolved to tcpsniff BPF map via DNS.",
+                    "Add default DashScope HTTPS rule and `anolisa_release` module.",
+                    "Add FFI interface for `tcp_targets` and `input_delta` config.",
+                    "Add CO-RE compatibility to UDP DNS probe for kernel 6.0+.",
+                    "Support runtime SLS logtail path via config hot-reload.",
+                    "Expand interruption types and add logtail export.",
+                    "Restructure config to `https`/`http` rules.",
+                    "Refactor query `stats.db` by `tool_use_id` and unify savings display.",
+                    "Refactor load encryption public key from `agentsight.json`.",
+                    "Fix decode HPACK Huffman headers.",
+                    "Fix BoringSSL probe attachment, FFI event delivery, and chunked-body panic.",
+                    "Fix preserve initial SSE chunk in event-stream responses.",
+                    "Fix `c_char` / BPF comm portability (i8 vs u8).",
+                    "Remove dead code and deprecated APIs."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.5.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Add Claude Code support including SSL probe attach for BoringSSL, Anthropic SSE thinking/tool_use content blocks, and `message.id`-based session correlation.",
+                    "Add tcpsniff probe for plain HTTP traffic capture with configurable IP/port filtering (disabled by default with empty `tcp_targets`).",
+                    "Add User-Agent based agent detection with `comm` fallback for simplified agent matching.",
+                    "Add UDP DNS probe for agent discovery (replacing TLS SNI probe) with QNAME parsing moved to userspace.",
+                    "Add TLS SNI probe module and refactor discovery to config-driven rules.",
+                    "Add connection scanner for pre-established LLM API connections.",
+                    "Add `tools` field to `AgentsightLLMData` FFI struct, passed through as raw JSON.",
+                    "Add container PID namespace support in BPF traced process filtering and event emission.",
+                    "Add agent matching rules and reduce BPF ring buffer to 32MB.",
+                    "Add `uid` field to SLS logs with `OnceLock` cache and startup validation.",
+                    "Support profile-based installs.",
+                    "Fix `duration_ns` calculation in LLM data.",
+                    "Fix SSL probe cleanup of stale inodes on process exit.",
+                    "Fix BPF verifier `-E2BIG` issues by removing nested `#pragma unroll` in `udpdns.bpf.c` and masking `payload_len` on older kernels.",
+                    "Fix skill extraction for Hermes agent architecture.",
+                    "Fix Node.js `process.title` change handling in OpenClaw matcher."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Add HTTP/1.1 request body reassembly for fragmented SSL writes.",
+                    "Add skill metrics analysis with cosh filesystem-based discovery.",
+                    "Add SLS upload and Logtail file exporter for GenAI events.",
+                    "Add hermes agent matcher for LLM process discovery.",
+                    "Detect uv Python static OpenSSL in SSL sniffer.",
+                    "Remove AK/SK-based SLS direct upload, keep Logtail file export."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fix simplify agent_crash detection and fix multi-process dedup. (#411)",
+                    "Fix use SqliteConfig for audit CLI db path. (#399)",
+                    "Fix hide Cosh from agent health UI and remove keepalive support. (#401)",
+                    "Fix API endpoint table in AGENTS.md. (#397)"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "agent-memory",
+      "label": "Agent Memory",
+      "summary": "Filesystem memory server, indexing, snapshots, and MCP tools.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/agent-memory/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.1.0",
+              "date": "2026-05-27",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Initial release: filesystem memory MCP server for AI agents (Linux only).",
+                    "19 MCP tools over stdio JSON-RPC 2.0 in three tiers:",
+                    "Tier A file ops: `mem_read` / `mem_write` / `mem_append` / `mem_edit` / `mem_list` / `mem_grep` / `mem_diff` / `mem_mkdir` / `mem_remove` / `mem_promote` / `mem_session_log`.",
+                    "Tier B structured search: `memory_search` (BM25) / `memory_observe` / `memory_get_context`.",
+                    "Tier C governance: `mem_snapshot` / `mem_snapshot_list` / `mem_snapshot_restore` / `mem_log` / `mem_revert`.",
+                    "Per-namespace mount under `~/.anolisa/memory/\u003cns>/` with optional Linux user-namespace + private tmpfs isolation; pluggable `auto` / `userland` / `userns` strategies.",
+                    "Path sandbox via `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` on every Tier A file open; `fdopendir` + `fstatat` + `unlinkat` for recursive removal so symlink swaps cannot race.",
+                    "SQLite FTS5 BM25 background index with transactional upsert, schema-versioned migrations, trigram tokenizer for CJK, inotify-driven debounced flush, and full rescan on overflow.",
+                    "Optional git versioning with auto-commit serialized under a per-handle mutex; commits offloaded via `tokio::task::spawn_blocking`; empty trees skipped.",
+                    "tar.gz snapshots with strict id whitelist, atomic per-entry rename swap on restore, and rollback entries preserved under `.anolisa/trash/` instead of deleted.",
+                    "Optional cgroup v2 `memory.max` self-limit applied before the tokio runtime starts.",
+                    "JSONL audit log opened with `O_NOFOLLOW | O_CLOEXEC` and held as `Mutex\u003cFile>`; optional systemd-journald fan-out.",
+                    "Profile gating (`basic` / `advanced` / `expert`) enforced at both `tools/list` and `tools/call`; `deny_unknown_fields` on every config struct so misspelt keys hard-fail at load.",
+                    "Per-session scratch and log under `/run/anolisa/sessions/\u003csid>/` with `0700` permissions; tmpfiles.d snippet ships the directory.",
+                    "systemd user template `anolisa-memory@.service` with hardening (`ProtectKernelTunables/Modules/Logs`, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, `RestrictNamespaces` allowlist `user mnt`, `RestrictAddressFamilies=AF_UNIX`).",
+                    "RPM packaging with offline vendor tarball (`Source1`); single statically-linked binary (bundled SQLite + vendored libgit2).",
+                    "OpenClaw plugin `memory-anolisa` bundled under `/usr/share/anolisa/adapters/agent-memory/openclaw/`: 4 OpenClaw memory contract tools (`memory_search` / `memory_get` / `memory_observe` / `memory_get_context`) routed to the agent-memory MCP server as a stdio child with lazy start, bounded respawn (3 attempts), per-method timeouts, env allowlist, and a bounded stderr ring buffer. `install.sh` / `uninstall.sh` register/clean via the OpenClaw CLI; RPM `%preun` auto-cleans `plugins.{allow,entries,slots}` from `openclaw.json`.",
+                    "Single-source version sync: `Cargo.toml` is the authority, Makefile `sync-versions` propagates the value (via `jq`, idempotent) into `manifest.json` / `package.json` / `package-lock.json` / `openclaw.plugin.json` / `mcp-server.json`, and esbuild `--define` injects the same constant into the bundle's `PLUGIN_VERSION` — so the RPM header, binary, plugin manifest, and MCP `initialize.clientInfo.version` always agree.",
+                    "Interactive `mcp-harness` example for manual tool-call verification; 140 automated Rust tests across 12 integration suites plus lib/main unit tests covering all 19 tools, plus TypeScript unit tests for the OpenClaw plugin's config validation and tool-name mapping."
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "os-skills",
+      "label": "OS Skills",
+      "summary": "Install skills and operating-system level agent workflows.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/os-skills/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.5.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added `anolisa-register` skill. (#829)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added auto-install tokenless plugin support for agent install skills. (#731)",
+                    "Added OpenClaw dependency precheck. (#719)",
+                    "Improved OpenClaw non-interactive setup. (#687)",
+                    "Added Hermes adapter runner. (#617)",
+                    "Added standalone ANOLISA adapter entry. (#549)",
+                    "Fixed OpenClaw state dir handling normalization. (#641)",
+                    "Improved Makefile install paths and contract. (#541)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added `hermes-agent-install` skill. (#353)",
+                    "Added `clawhub-skill-mng` skill with npm install support and YAML description matching. (#315)",
+                    "Fixed AgentSight custom db path issue, using default paths instead. (#366)",
+                    "Fixed AgentSight token savings query support. (#355)",
+                    "Fixed AgentSight interruption CLI and aligned `conversation_id` naming. (#334)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.2.2",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Support enable AgentSight dashboard in `agentsight` skill. (#222)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.2.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Upgraded `xlsx` skill with MiniMax open-source implementation. (#218)",
+                    "Updated skill descriptions from \"suitable for alinux4\" to \"rpm-base linux\". (#182)"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "tokenless",
+      "label": "Tokenless",
+      "summary": "Prompt compression, token optimization, and agent adapters.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/tokenless/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.5.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "add --json output to stats summary",
+                    "implement unified tool categorization and 3-layer compression strategy",
+                    "add rtk grep fallback pattern fix patch",
+                    "add rtk pytest error report patch"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.5.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "add Hermes adapter runner",
+                    "drop TOON wrapper prefix and slim diagnostic tags",
+                    "unify rtk rewrite exit code 3 handling across adapters",
+                    "secure shell variable interpolation in env-fix and hooks",
+                    "add subprocess returncode checks and extract shared hook utilities",
+                    "secure resolveBinaryPath and improve binary cache invalidation",
+                    "use mktemp in tests and safe home expansion",
+                    "bound SchemaCompressor recursion to prevent stack overflow",
+                    "propagate env-fix subprocess failures instead of returning stdout",
+                    "anchor home lookup on getpwuid_r and trust-check candidate binaries",
+                    "harden env-fix install paths with uid trust check and divert stderr to log",
+                    "recover from poisoned mutex in stats recorder instead of failing",
+                    "add input size limit and validate db path",
+                    "reserve truncation marker length in response compressor",
+                    "rename openclaw plugin Name to Tokenless and ID to tokenless",
+                    "add qoder CLI adapter",
+                    "compress-schema on array input",
+                    "warn when compression is skipped",
+                    "stats command syntax",
+                    "add Claude Code adapter plugin",
+                    "error on TTY stdin instead of hang",
+                    "add codex adapter plugin",
+                    "fix compression pipeline output inflation, truncation and hook timeouts",
+                    "harden env-fix, version extraction, file trust, schema, permissions",
+                    "address review findings — trailing newline, chmod guard, rate-limited log, comment",
+                    "make env attribution reachable for skip-tools entries",
+                    "add selective-claw context engine plugin",
+                    "address review findings for selective-claw plugin",
+                    "remove invalid \"2\" dependency from selective-claw",
+                    "restore indentation in compress_response_hook.py",
+                    "harden hook exit-code handling + trust model consistency",
+                    "only warn on truly unexpected rtk exit codes",
+                    "dedup rewrite_hook, import from hook_utils"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.4.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "fix version_ge 3-segment truncation in env_check.rs (compare all segments)",
+                    "add qoder, claude-code, codex adapter plugins and documentation",
+                    "sync manifest.json with template to include all six agents",
+                    "update README and user manuals for new agent integrations",
+                    "add __pycache__ to root .gitignore",
+                    "update response-compression.md with all agent integration paths",
+                    "derive Makefile version from Cargo.toml, fix spec changelog weekday",
+                    "normalize adapter version numbers to 0.4.0",
+                    "derive adapter plugin versions from Cargo.toml instead of hardcoding"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "correct 5 bugs in stats, naming, SQL, paths and permissions",
+                    "align FHS paths, restructure adapter dir, remove install.sh",
+                    "address code review findings across schema, env-check, hooks, and plugin",
+                    "add hermes agent plugin",
+                    "security hardening & critical algorithm correctness",
+                    "behavioral correctness & logic fixes",
+                    "dedup, dead code removal & cosmetic cleanup",
+                    "support staged installs",
+                    "support Debian/Ubuntu FHS paths and harden binary resolution",
+                    "build OpenClaw plugin to dist/index.js"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.2",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "replace spoofable home-dir uid derivation with libc::getuid() syscall for trust chain integrity",
+                    "replace subprocess toon -e calls with in-process toon_format::encode_default() library call",
+                    "replace rtk/toon git submodules with crates.io deps and inline toon-format source",
+                    "hard-fail on rtk stats patch failure in justfile setup-rtk recipe",
+                    "unify compress-toon/compress-schema/compress-response error exit codes (all exit 2)",
+                    "remove 2>/dev/null || true from Makefile toon install (hard fail on missing binary)",
+                    "remove redundant #[source] attribute on thiserror variants that already have #[from]",
+                    "deduplicate Python hook FHS path constants into shared hook_utils module",
+                    "add libc to workspace dependencies for uid syscall",
+                    "add detailed rust >= 1.89 comment in spec.in explaining CI pin rationale"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "ws-ckpt",
+      "label": "WS Ckpt",
+      "summary": "Workspace checkpoint, rollback, and policy controls.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/ws-ckpt/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.3.3",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Features",
+                  "items": [
+                    "Added per-workspace policy override with hermes/openclaw plugin support (#721)",
+                    "Added `/proc` cwd occupant guard for init and rollback (#684)",
+                    "Added Hermes adapter runner script (#617)"
+                  ]
+                },
+                {
+                  "title": "Bug Fixes",
+                  "items": [
+                    "Fixed write lock contention and cwd guard deadlock in rollback (#721, #684)",
+                    "Fixed input validation for non-UTF-8 paths and path-traversal snapshot IDs (#695, #678)",
+                    "Fixed seccomp arch selection, workspace registry concurrency, and RPM packaging (#695, #684)"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.2",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fixed openclaw uninstall to remove tool whitelist from config",
+                    "Fixed parent path refusal to apply as workspace-level rules for skill and openclaw plugin"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Fixed plugin workspace config registration and auto-loading",
+                    "Reject workspace paths that are hermes cwd itself or parent",
+                    "Fixed plugin tool to prefer explicit workspace parameter over config",
+                    "Fixed skill delete requiring --force flag",
+                    "Fixed daemon workspace path validation and fswatch fd leak",
+                    "Removed unused btrfs_ops.rs module"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added openclaw plugin scaffolding for ws-ckpt",
+                    "Added hermes plugin scaffolding for ws-ckpt",
+                    "Made ws-ckpt skill agent-agnostic and prompted for workspace at invocation",
+                    "Followed `make install` contract for build-all integration",
+                    "Fixed bugs in list and diff sub-commands",
+                    "Made daemon stateful"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.2.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added auto_cleanup feature and switch",
+                    "Unified config modification entry through the TOML file",
+                    "Added global CLI warning when any workspace>1000 snapshots or filesystem usage>90%",
+                    "Fixed backend detection and daemon state recovery logic",
+                    "Fixed image size configuration not taking effect after daemon restart",
+                    "Removed obsolete fs_warn_threshold_percent parameter",
+                    "Fixed config.toml to ship as a sample file"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    }
+  ]
+}</script>
+        <!-- ANOLISA_CHANGELOG_DATA_END -->
 
       <footer class="cap-footer">
         <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
@@ -651,11 +1892,102 @@ const toast=document.getElementById('copy-toast');
 const hero=document.querySelector('.hero');
 const capabilities=document.getElementById('capabilities');
 const changelog=document.getElementById('anolisa-cli-changelog');
+const changelogDataEl=document.getElementById('changelog-data');
+const changelogData=JSON.parse(changelogDataEl?.textContent||'{"components":[]}');
+const tabsEl=document.getElementById('component-tabs');
+const releaseList=document.getElementById('release-list');
+const componentSummary=document.getElementById('component-summary');
+const sourceLink=document.getElementById('source-link');
+const moreLink=document.getElementById('more-link');
+const langButtons=[...document.querySelectorAll('.lang-btn')];
 const topBtn=document.getElementById('top-btn');
+let activeComponentId=changelogData.components?.[0]?.id||'';
+let activeLang='en';
 let toastTimer;
 let scrollLock=false;
 
 function fallbackCopy(t){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a)}
+
+function escapeHtml(value){
+  return String(value)
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;');
+}
+
+function renderInline(markdown){
+  let html=escapeHtml(markdown);
+  html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
+  html=html.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  return html;
+}
+
+function versionAnchor(component,version){
+  return `${component.id}-${version.replaceAll('.','-')}`;
+}
+
+function renderRelease(component,release,index){
+  const delay=Math.min(index+1,5);
+  const sections=release.sections.map(section=>`          <div class="release-body-section">
+            <h3>${escapeHtml(section.title)}</h3>
+            <ul>
+${section.items.map(item=>`              <li>${renderInline(item)}</li>`).join('\n')}
+            </ul>
+          </div>`).join('\n');
+  return `        <article class="release reveal reveal-d${delay}" id="${versionAnchor(component,release.version)}">
+          <div class="release-meta">
+            <div class="release-version">${escapeHtml(release.version)}</div>
+            <div class="release-date">${escapeHtml(release.date)}</div>
+          </div>
+          <div class="release-body">
+${sections}
+          </div>
+        </article>`;
+}
+
+function activeComponent(){
+  return changelogData.components.find(component=>component.id===activeComponentId)||changelogData.components[0];
+}
+
+function hasLanguage(component,lang){
+  return Boolean(component?.languages?.[lang]?.releases?.length);
+}
+
+function renderTabs(){
+  if(!tabsEl)return;
+  tabsEl.innerHTML=changelogData.components.map(component=>`<button class="component-tab${component.id===activeComponentId?' active':''}" type="button" role="tab" aria-selected="${component.id===activeComponentId}" data-component="${component.id}">${escapeHtml(component.label)}</button>`).join('');
+  tabsEl.querySelectorAll('.component-tab').forEach(tab=>{
+    tab.addEventListener('click',()=>{
+      activeComponentId=tab.dataset.component;
+      if(!hasLanguage(activeComponent(),'zh'))activeLang='en';
+      renderChangelog();
+    });
+  });
+}
+
+function updateLanguageButtons(component){
+  langButtons.forEach(button=>{
+    const lang=button.dataset.lang;
+    const available=hasLanguage(component,lang);
+    button.disabled=!available;
+    button.classList.toggle('active',lang===activeLang&&available);
+  });
+}
+
+function renderChangelog(){
+  const component=activeComponent();
+  if(!component||!releaseList)return;
+  if(!hasLanguage(component,activeLang))activeLang='en';
+  const releases=component.languages[activeLang].releases;
+  renderTabs();
+  updateLanguageButtons(component);
+  componentSummary.textContent=component.summary;
+  sourceLink.href=component.sourceUrl;
+  moreLink.href=component.sourceUrl;
+  releaseList.innerHTML=`        <!-- ANOLISA_CLI_CHANGELOG_START -->\n${releases.map((release,index)=>renderRelease(component,release,index)).join('\n\n')}\n        <!-- ANOLISA_CLI_CHANGELOG_END -->`;
+  if(window.observeReveals)window.observeReveals(releaseList);
+}
 
 function scrollToSection(section){
   scrollLock=true;
@@ -700,10 +2032,22 @@ window.addEventListener('wheel',e=>{
 window.addEventListener('scroll',updateTopButton,{passive:true});
 updateTopButton();
 
+langButtons.forEach(button=>{
+  button.addEventListener('click',()=>{
+    if(button.disabled)return;
+    activeLang=button.dataset.lang;
+    renderChangelog();
+  });
+});
+
 const io=new IntersectionObserver(entries=>{
   entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');io.unobserve(e.target)}})
 },{threshold:0.12,rootMargin:'0px 0px -60px 0px'});
-document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+window.observeReveals=(root=document)=>{
+  root.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+};
+renderChangelog();
+window.observeReveals();
 </script>
 </body>
 </html>
