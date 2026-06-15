@@ -37,35 +37,35 @@ impl InterruptionType {
     /// String identifier stored in the database
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::AgentCrash         => "agent_crash",
-            Self::RateLimit          => "rate_limit",
-            Self::AuthError          => "auth_error",
-            Self::NetworkTimeout     => "network_timeout",
+            Self::AgentCrash => "agent_crash",
+            Self::RateLimit => "rate_limit",
+            Self::AuthError => "auth_error",
+            Self::NetworkTimeout => "network_timeout",
             Self::ServiceUnavailable => "service_unavailable",
-            Self::SafetyFilter       => "safety_filter",
-            Self::SseTruncated       => "sse_truncated",
-            Self::ContextOverflow    => "context_overflow",
-            Self::TokenLimit         => "token_limit",
-            Self::LlmError           => "llm_error",
-            Self::RetryStorm         => "retry_storm",
-            Self::DeadLoop           => "dead_loop",
+            Self::SafetyFilter => "safety_filter",
+            Self::SseTruncated => "sse_truncated",
+            Self::ContextOverflow => "context_overflow",
+            Self::TokenLimit => "token_limit",
+            Self::LlmError => "llm_error",
+            Self::RetryStorm => "retry_storm",
+            Self::DeadLoop => "dead_loop",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "agent_crash"         => Some(Self::AgentCrash),
-            "rate_limit"          => Some(Self::RateLimit),
-            "auth_error"          => Some(Self::AuthError),
-            "network_timeout"     => Some(Self::NetworkTimeout),
+            "agent_crash" => Some(Self::AgentCrash),
+            "rate_limit" => Some(Self::RateLimit),
+            "auth_error" => Some(Self::AuthError),
+            "network_timeout" => Some(Self::NetworkTimeout),
             "service_unavailable" => Some(Self::ServiceUnavailable),
-            "safety_filter"       => Some(Self::SafetyFilter),
-            "sse_truncated"       => Some(Self::SseTruncated),
-            "context_overflow"    => Some(Self::ContextOverflow),
-            "token_limit"         => Some(Self::TokenLimit),
-            "llm_error"           => Some(Self::LlmError),
-            "retry_storm"         => Some(Self::RetryStorm),
-            "dead_loop"           => Some(Self::DeadLoop),
+            "safety_filter" => Some(Self::SafetyFilter),
+            "sse_truncated" => Some(Self::SseTruncated),
+            "context_overflow" => Some(Self::ContextOverflow),
+            "token_limit" => Some(Self::TokenLimit),
+            "llm_error" => Some(Self::LlmError),
+            "retry_storm" => Some(Self::RetryStorm),
+            "dead_loop" => Some(Self::DeadLoop),
             _ => None,
         }
     }
@@ -73,18 +73,18 @@ impl InterruptionType {
     /// Default severity for this interruption type
     pub fn default_severity(&self) -> Severity {
         match self {
-            Self::AgentCrash         => Severity::Critical,
-            Self::RateLimit          => Severity::Medium,
-            Self::AuthError          => Severity::High,
-            Self::NetworkTimeout     => Severity::High,
+            Self::AgentCrash => Severity::Critical,
+            Self::RateLimit => Severity::Medium,
+            Self::AuthError => Severity::High,
+            Self::NetworkTimeout => Severity::High,
             Self::ServiceUnavailable => Severity::High,
-            Self::SafetyFilter       => Severity::Medium,
-            Self::SseTruncated       => Severity::High,
-            Self::ContextOverflow    => Severity::High,
-            Self::TokenLimit         => Severity::Medium,
-            Self::LlmError           => Severity::High,
-            Self::RetryStorm         => Severity::Critical,
-            Self::DeadLoop           => Severity::Critical,
+            Self::SafetyFilter => Severity::Medium,
+            Self::SseTruncated => Severity::High,
+            Self::ContextOverflow => Severity::High,
+            Self::TokenLimit => Severity::Medium,
+            Self::LlmError => Severity::High,
+            Self::RetryStorm => Severity::Critical,
+            Self::DeadLoop => Severity::Critical,
         }
     }
 }
@@ -103,9 +103,9 @@ impl Severity {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Critical => "critical",
-            Self::High     => "high",
-            Self::Medium   => "medium",
-            Self::Low      => "low",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
         }
     }
 
@@ -113,9 +113,9 @@ impl Severity {
     pub fn weight(&self) -> u8 {
         match self {
             Self::Critical => 4,
-            Self::High     => 3,
-            Self::Medium   => 2,
-            Self::Low      => 1,
+            Self::High => 3,
+            Self::Medium => 2,
+            Self::Low => 1,
         }
     }
 }
@@ -195,10 +195,16 @@ mod tests {
         assert_eq!(InterruptionType::RateLimit.as_str(), "rate_limit");
         assert_eq!(InterruptionType::AuthError.as_str(), "auth_error");
         assert_eq!(InterruptionType::NetworkTimeout.as_str(), "network_timeout");
-        assert_eq!(InterruptionType::ServiceUnavailable.as_str(), "service_unavailable");
+        assert_eq!(
+            InterruptionType::ServiceUnavailable.as_str(),
+            "service_unavailable"
+        );
         assert_eq!(InterruptionType::SafetyFilter.as_str(), "safety_filter");
         assert_eq!(InterruptionType::SseTruncated.as_str(), "sse_truncated");
-        assert_eq!(InterruptionType::ContextOverflow.as_str(), "context_overflow");
+        assert_eq!(
+            InterruptionType::ContextOverflow.as_str(),
+            "context_overflow"
+        );
         assert_eq!(InterruptionType::TokenLimit.as_str(), "token_limit");
         assert_eq!(InterruptionType::LlmError.as_str(), "llm_error");
         assert_eq!(InterruptionType::RetryStorm.as_str(), "retry_storm");
@@ -207,36 +213,108 @@ mod tests {
 
     #[test]
     fn test_interruption_type_from_str() {
-        assert_eq!(InterruptionType::from_str("agent_crash"), Some(InterruptionType::AgentCrash));
-        assert_eq!(InterruptionType::from_str("rate_limit"), Some(InterruptionType::RateLimit));
-        assert_eq!(InterruptionType::from_str("auth_error"), Some(InterruptionType::AuthError));
-        assert_eq!(InterruptionType::from_str("network_timeout"), Some(InterruptionType::NetworkTimeout));
-        assert_eq!(InterruptionType::from_str("service_unavailable"), Some(InterruptionType::ServiceUnavailable));
-        assert_eq!(InterruptionType::from_str("safety_filter"), Some(InterruptionType::SafetyFilter));
-        assert_eq!(InterruptionType::from_str("sse_truncated"), Some(InterruptionType::SseTruncated));
-        assert_eq!(InterruptionType::from_str("context_overflow"), Some(InterruptionType::ContextOverflow));
-        assert_eq!(InterruptionType::from_str("token_limit"), Some(InterruptionType::TokenLimit));
-        assert_eq!(InterruptionType::from_str("llm_error"), Some(InterruptionType::LlmError));
-        assert_eq!(InterruptionType::from_str("retry_storm"), Some(InterruptionType::RetryStorm));
-        assert_eq!(InterruptionType::from_str("dead_loop"), Some(InterruptionType::DeadLoop));
+        assert_eq!(
+            InterruptionType::from_str("agent_crash"),
+            Some(InterruptionType::AgentCrash)
+        );
+        assert_eq!(
+            InterruptionType::from_str("rate_limit"),
+            Some(InterruptionType::RateLimit)
+        );
+        assert_eq!(
+            InterruptionType::from_str("auth_error"),
+            Some(InterruptionType::AuthError)
+        );
+        assert_eq!(
+            InterruptionType::from_str("network_timeout"),
+            Some(InterruptionType::NetworkTimeout)
+        );
+        assert_eq!(
+            InterruptionType::from_str("service_unavailable"),
+            Some(InterruptionType::ServiceUnavailable)
+        );
+        assert_eq!(
+            InterruptionType::from_str("safety_filter"),
+            Some(InterruptionType::SafetyFilter)
+        );
+        assert_eq!(
+            InterruptionType::from_str("sse_truncated"),
+            Some(InterruptionType::SseTruncated)
+        );
+        assert_eq!(
+            InterruptionType::from_str("context_overflow"),
+            Some(InterruptionType::ContextOverflow)
+        );
+        assert_eq!(
+            InterruptionType::from_str("token_limit"),
+            Some(InterruptionType::TokenLimit)
+        );
+        assert_eq!(
+            InterruptionType::from_str("llm_error"),
+            Some(InterruptionType::LlmError)
+        );
+        assert_eq!(
+            InterruptionType::from_str("retry_storm"),
+            Some(InterruptionType::RetryStorm)
+        );
+        assert_eq!(
+            InterruptionType::from_str("dead_loop"),
+            Some(InterruptionType::DeadLoop)
+        );
         assert_eq!(InterruptionType::from_str("unknown"), None);
         assert_eq!(InterruptionType::from_str(""), None);
     }
 
     #[test]
     fn test_interruption_type_default_severity() {
-        assert_eq!(InterruptionType::AgentCrash.default_severity(), Severity::Critical);
-        assert_eq!(InterruptionType::RateLimit.default_severity(), Severity::Medium);
-        assert_eq!(InterruptionType::AuthError.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::NetworkTimeout.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::ServiceUnavailable.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::SafetyFilter.default_severity(), Severity::Medium);
-        assert_eq!(InterruptionType::SseTruncated.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::ContextOverflow.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::TokenLimit.default_severity(), Severity::Medium);
-        assert_eq!(InterruptionType::LlmError.default_severity(), Severity::High);
-        assert_eq!(InterruptionType::RetryStorm.default_severity(), Severity::Critical);
-        assert_eq!(InterruptionType::DeadLoop.default_severity(), Severity::Critical);
+        assert_eq!(
+            InterruptionType::AgentCrash.default_severity(),
+            Severity::Critical
+        );
+        assert_eq!(
+            InterruptionType::RateLimit.default_severity(),
+            Severity::Medium
+        );
+        assert_eq!(
+            InterruptionType::AuthError.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::NetworkTimeout.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::ServiceUnavailable.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::SafetyFilter.default_severity(),
+            Severity::Medium
+        );
+        assert_eq!(
+            InterruptionType::SseTruncated.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::ContextOverflow.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::TokenLimit.default_severity(),
+            Severity::Medium
+        );
+        assert_eq!(
+            InterruptionType::LlmError.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::RetryStorm.default_severity(),
+            Severity::Critical
+        );
+        assert_eq!(
+            InterruptionType::DeadLoop.default_severity(),
+            Severity::Critical
+        );
     }
 
     #[test]
@@ -293,7 +371,12 @@ mod tests {
     fn test_interruption_event_new_no_detail() {
         let event = InterruptionEvent::new(
             InterruptionType::AgentCrash,
-            None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             500_000,
             None,
         );
@@ -340,7 +423,12 @@ mod tests {
 
     #[test]
     fn test_severity_serde_roundtrip() {
-        let severities = vec![Severity::Critical, Severity::High, Severity::Medium, Severity::Low];
+        let severities = vec![
+            Severity::Critical,
+            Severity::High,
+            Severity::Medium,
+            Severity::Low,
+        ];
         for s in severities {
             let json = serde_json::to_string(&s).unwrap();
             let back: Severity = serde_json::from_str(&json).unwrap();

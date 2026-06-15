@@ -1,10 +1,10 @@
 //! SQLite storage for interruption_events table.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::sync::Mutex;
 
-use crate::interruption::{InterruptionEvent, InterruptionType};
 use super::connection::create_connection;
+use crate::interruption::{InterruptionEvent, InterruptionType};
 
 // ─── API response types ────────────────────────────────────────────────────────
 
@@ -43,7 +43,9 @@ pub struct InterruptionStore {
 impl InterruptionStore {
     pub fn new_with_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = create_connection(path)?;
-        let store = InterruptionStore { conn: Mutex::new(conn) };
+        let store = InterruptionStore {
+            conn: Mutex::new(conn),
+        };
         store.init_tables()?;
         Ok(store)
     }
@@ -75,9 +77,8 @@ impl InterruptionStore {
             CREATE INDEX IF NOT EXISTS idx_interruption_conversation ON interruption_events(conversation_id);",
         )?;
         // Migration: add conversation_id column for existing databases
-        let _ = conn.execute_batch(
-            "ALTER TABLE interruption_events ADD COLUMN conversation_id TEXT;",
-        );
+        let _ =
+            conn.execute_batch("ALTER TABLE interruption_events ADD COLUMN conversation_id TEXT;");
         Ok(())
     }
 
@@ -110,7 +111,10 @@ impl InterruptionStore {
     }
 
     /// Insert multiple events, ignoring duplicates.
-    pub fn insert_batch(&self, events: &[InterruptionEvent]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn insert_batch(
+        &self,
+        events: &[InterruptionEvent],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for e in events {
             self.insert(e)?;
         }
@@ -127,7 +131,9 @@ impl InterruptionStore {
                AND detail LIKE '%\"oom\":true%'",
             params![pid, occurred_at_ns],
             |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     /// Return the maximum occurred_at_ns of OOM-sourced agent_crash events.
@@ -139,7 +145,8 @@ impl InterruptionStore {
              WHERE interruption_type='agent_crash' AND detail LIKE '%\"oom\":true%'",
             [],
             |row| row.get::<_, i64>(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     }
 
     /// Deduplication check: return true if a row with same call_id + type already exists.
@@ -149,7 +156,9 @@ impl InterruptionStore {
             "SELECT COUNT(*) FROM interruption_events WHERE call_id=?1 AND interruption_type=?2",
             params![call_id, itype.as_str()],
             |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     /// Deduplication check: return true if an unresolved row with same
@@ -160,7 +169,12 @@ impl InterruptionStore {
     /// compared via substring containment.  This handles cases where the same
     /// error appears as a clean message in one call and as raw JSON in another.
     /// When `error_msg` is None, any unresolved row with same (conversation_id, type) matches.
-    pub fn exists_for_conversation(&self, conversation_id: &str, itype: &InterruptionType, error_msg: Option<&str>) -> bool {
+    pub fn exists_for_conversation(
+        &self,
+        conversation_id: &str,
+        itype: &InterruptionType,
+        error_msg: Option<&str>,
+    ) -> bool {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT detail FROM interruption_events
@@ -186,7 +200,8 @@ impl InterruptionStore {
                     // Compare normalized error keys (handles nested JSON vs clean message)
                     if let Some(ref detail_str) = detail_opt {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail_str) {
-                            let stored_error = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                            let stored_error =
+                                v.get("error").and_then(|e| e.as_str()).unwrap_or("");
                             if errors_match(stored_error, target) {
                                 return true;
                             }
@@ -239,13 +254,9 @@ impl InterruptionStore {
         let conn = self.conn.lock().unwrap();
 
         // Build dynamic WHERE clause
-        let mut conditions = vec![
-            "occurred_at_ns BETWEEN ?1 AND ?2".to_string(),
-        ];
-        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-            Box::new(start_ns),
-            Box::new(end_ns),
-        ];
+        let mut conditions = vec!["occurred_at_ns BETWEEN ?1 AND ?2".to_string()];
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(start_ns), Box::new(end_ns)];
         let mut idx = 3usize;
 
         if let Some(a) = agent_name {
@@ -282,7 +293,8 @@ impl InterruptionStore {
         );
         args.push(Box::new(limit));
 
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            args.iter().map(|b| b.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok(InterruptionRecord {
@@ -302,12 +314,17 @@ impl InterruptionStore {
             })
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
     /// Get a single interruption by ID.
-    pub fn get_by_id(&self, interruption_id: &str) -> Result<Option<InterruptionRecord>, Box<dyn std::error::Error>> {
+    pub fn get_by_id(
+        &self,
+        interruption_id: &str,
+    ) -> Result<Option<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
@@ -335,7 +352,10 @@ impl InterruptionStore {
     }
 
     /// Get all interruptions for a session.
-    pub fn list_by_session(&self, session_id: &str) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
+    pub fn list_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
@@ -362,11 +382,16 @@ impl InterruptionStore {
             })
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
-    pub fn list_by_conversation(&self, conversation_id: &str) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
+    pub fn list_by_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
@@ -393,7 +418,9 @@ impl InterruptionStore {
             })
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
@@ -419,7 +446,9 @@ impl InterruptionStore {
             })
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
@@ -449,7 +478,9 @@ impl InterruptionStore {
             ))
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
@@ -478,7 +509,9 @@ impl InterruptionStore {
             ))
         })?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
@@ -498,7 +531,9 @@ impl InterruptionStore {
              WHERE interruption_type='agent_crash' AND pid=?1 AND occurred_at_ns > ?2",
             params![pid, cutoff_ns],
             |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     /// Purge interruption events older than cutoff_ns.
@@ -537,7 +572,11 @@ fn normalize_error_key(raw: &str) -> String {
 fn extract_message_from_json(s: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(s).ok()?;
     // Try "error.message"
-    if let Some(msg) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+    if let Some(msg) = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
         return Some(msg.to_string());
     }
     // Try top-level "message"
@@ -567,15 +606,25 @@ mod tests {
 
     fn temp_store() -> InterruptionStore {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_interruption_{}.db",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos()));
+        let path = dir.join(format!(
+            "test_interruption_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
         InterruptionStore::new_with_path(&path).unwrap()
     }
 
     fn make_event(conversation_id: &str, itype: InterruptionType) -> InterruptionEvent {
         InterruptionEvent {
-            interruption_id: format!("int-{}",
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos()),
+            interruption_id: format!(
+                "int-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ),
             session_id: Some("sess-1".to_string()),
             trace_id: None,
             conversation_id: Some(conversation_id.to_string()),

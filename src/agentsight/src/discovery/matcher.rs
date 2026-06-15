@@ -160,7 +160,10 @@ mod tests {
 
     #[test]
     fn test_cmdline_glob_matcher() {
-        let matcher = CmdlineGlobMatcher::new("Claude Code", vec!["node".to_string(), "*claude*".to_string()]);
+        let matcher = CmdlineGlobMatcher::new(
+            "Claude Code",
+            vec!["node".to_string(), "*claude*".to_string()],
+        );
         let ctx = ProcessContext {
             comm: "node".to_string(),
             cmdline_args: vec!["node".to_string(), "/path/claude-code".to_string()],

@@ -3,11 +3,11 @@
 //! Handles table creation, record insertion, and querying for audit events.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 
 /// SQLite-based audit event store
 pub struct AuditStore {
@@ -100,10 +100,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![
-                Box::new(since_ns as i64),
-                Box::new(type_str.clone()),
-            ];
+            query_params = vec![Box::new(since_ns as i64), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
@@ -118,9 +115,7 @@ impl AuditStore {
             query_params.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -151,10 +146,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![
-                Box::new(pid),
-                Box::new(type_str.clone()),
-            ];
+            query_params = vec![Box::new(pid), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
@@ -169,9 +161,7 @@ impl AuditStore {
             query_params.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(row_to_record(row))
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(row_to_record(row)))?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -189,10 +179,7 @@ impl AuditStore {
     ///
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
-        let sql = format!(
-            "DELETE FROM {} WHERE timestamp_ns < ?1",
-            self.table_name
-        );
+        let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
         let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
         Ok(deleted as u64)
     }
@@ -230,12 +217,10 @@ impl AuditStore {
             std::collections::HashMap::new();
 
         {
-            let mut stmt = self.conn.prepare(
-                &format!(
-                    "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
-                    self.table_name
-                ),
-            )?;
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
+                self.table_name
+            ))?;
             let rows = stmt.query_map(params![since_ns as i64], |row| {
                 let extra_str: String = row.get(0)?;
                 Ok(extra_str)
@@ -243,16 +228,16 @@ impl AuditStore {
 
             for row in rows.flatten() {
                 if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row) {
-                    total_input_tokens +=
-                        extra.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    total_input_tokens += extra
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     total_output_tokens += extra
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     if let Some(provider) = extra.get("provider").and_then(|v| v.as_str()) {
-                        *provider_counts
-                            .entry(provider.to_string())
-                            .or_insert(0) += 1;
+                        *provider_counts.entry(provider.to_string()).or_insert(0) += 1;
                     }
                 }
             }

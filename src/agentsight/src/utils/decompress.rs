@@ -63,10 +63,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
 /// Convenience: decompress and then convert to String.
 ///
 /// Returns `None` if the (decompressed) body is empty or not valid UTF-8.
-pub fn decompress_body_to_string(
-    body: &[u8],
-    content_encoding: Option<&str>,
-) -> Option<String> {
+pub fn decompress_body_to_string(body: &[u8], content_encoding: Option<&str>) -> Option<String> {
     let decompressed = decompress_body(body, content_encoding);
     if decompressed.is_empty() {
         None

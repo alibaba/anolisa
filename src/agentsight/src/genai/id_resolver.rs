@@ -135,9 +135,7 @@ impl IdResolver {
 
         let key = compose_key(agent_name, pid, text);
         let first_response_id = {
-            let mut guard = cache
-                .lock()
-                .expect("IdResolver LRU mutex poisoned");
+            let mut guard = cache.lock().expect("IdResolver LRU mutex poisoned");
             // 已有条目时直接复用首个 response_id；否则把当前 response_id
             // 写入作为锚点，让同一 key 后续调用得到稳定结果。
             if let Some(existing) = guard.get(&key) {
@@ -268,9 +266,13 @@ mod tests {
     #[test]
     fn resolve_session_id_is_stable_across_calls() {
         let resolver = IdResolver::new();
-        let first = resolver.resolve_session_id(A, P, "user-A", "resp-1").unwrap();
+        let first = resolver
+            .resolve_session_id(A, P, "user-A", "resp-1")
+            .unwrap();
         // 即便后续 response_id 变了，同一 (agent, pid, first_user_text) 仍返回首次结果
-        let again = resolver.resolve_session_id(A, P, "user-A", "resp-2").unwrap();
+        let again = resolver
+            .resolve_session_id(A, P, "user-A", "resp-2")
+            .unwrap();
         assert_eq!(first, again);
         assert_eq!(first.len(), 32);
     }
@@ -281,8 +283,12 @@ mod tests {
         // response_id；只要首次看到的 response_id 不同，得到的 session_id
         // 就会不同。
         let resolver = IdResolver::new();
-        let a = resolver.resolve_session_id(A, P, "user-A", "resp-1").unwrap();
-        let b = resolver.resolve_session_id(A, P, "user-B", "resp-2").unwrap();
+        let a = resolver
+            .resolve_session_id(A, P, "user-A", "resp-1")
+            .unwrap();
+        let b = resolver
+            .resolve_session_id(A, P, "user-B", "resp-2")
+            .unwrap();
         assert_ne!(a, b, "不同首次 response_id 应产生不同 session_id");
     }
 
@@ -303,14 +309,22 @@ mod tests {
     fn resolve_returns_none_when_response_id_empty() {
         let resolver = IdResolver::new();
         assert!(resolver.resolve_session_id(A, P, "user-A", "").is_none());
-        assert!(resolver.resolve_conversation_id(A, P, "turn-1", "").is_none());
+        assert!(
+            resolver
+                .resolve_conversation_id(A, P, "turn-1", "")
+                .is_none()
+        );
     }
 
     #[test]
     fn resolve_returns_none_when_text_empty() {
         let resolver = IdResolver::new();
         assert!(resolver.resolve_session_id(A, P, "", "resp-1").is_none());
-        assert!(resolver.resolve_conversation_id(A, P, "", "resp-1").is_none());
+        assert!(
+            resolver
+                .resolve_conversation_id(A, P, "", "resp-1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -390,12 +404,8 @@ mod tests {
     #[test]
     fn peek_session_id_returns_none_when_lru_empty() {
         let resolver = IdResolver::new();
-        assert!(resolver
-            .peek_session_id(A, P, "unseen")
-            .is_none());
-        assert!(resolver
-            .peek_conversation_id(A, P, "unseen")
-            .is_none());
+        assert!(resolver.peek_session_id(A, P, "unseen").is_none());
+        assert!(resolver.peek_conversation_id(A, P, "unseen").is_none());
     }
 
     #[test]
@@ -406,17 +416,13 @@ mod tests {
         let normal = resolver
             .resolve_session_id(A, P, "hello", "chatcmpl-A")
             .unwrap();
-        let peeked = resolver
-            .peek_session_id(A, P, "hello")
-            .unwrap();
+        let peeked = resolver.peek_session_id(A, P, "hello").unwrap();
         assert_eq!(normal, peeked, "peek 应返回与正常路径一致的 session_id");
 
         let normal_conv = resolver
             .resolve_conversation_id(A, P, "world", "chatcmpl-B")
             .unwrap();
-        let peeked_conv = resolver
-            .peek_conversation_id(A, P, "world")
-            .unwrap();
+        let peeked_conv = resolver.peek_conversation_id(A, P, "world").unwrap();
         assert_eq!(normal_conv, peeked_conv);
     }
 

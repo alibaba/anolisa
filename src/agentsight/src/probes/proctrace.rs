@@ -21,7 +21,12 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));
@@ -72,7 +77,7 @@ impl VariableEvent {
 
         // SAFETY: BPF guarantees proper alignment and layout
         let raw_header = unsafe { &*(data.as_ptr() as *const ProcEventHeader) };
-        
+
         // Convert ktime to Unix timestamp
         let mut header = *raw_header;
         header.timestamp_ns = config::ktime_to_unix_ns(raw_header.timestamp_ns);
@@ -360,13 +365,7 @@ impl ProcTrace {
         traced_processes: Option<&MapHandle>,
         rb: Option<&MapHandle>,
     ) -> Result<Self> {
-        Self::new_with_target_and_maps(
-            target_pids,
-            target_uid,
-            traced_processes,
-            rb,
-            false,
-        )
+        Self::new_with_target_and_maps(target_pids, target_uid, traced_processes, rb, false)
     }
 
     /// Create a new ProcTrace with extra control over the cgroup-level filter.
@@ -502,7 +501,12 @@ impl ProcTrace {
             .maps_mut()
             .cgroup_filter()
             .delete(&key)
-            .with_context(|| format!("failed to remove cgroup_id {} from cgroup_filter", cgroup_id))
+            .with_context(|| {
+                format!(
+                    "failed to remove cgroup_id {} from cgroup_filter",
+                    cgroup_id
+                )
+            })
     }
 
     /// Create a MapHandle from the cgroup_filter map for cross-probe reuse.

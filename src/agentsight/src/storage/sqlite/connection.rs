@@ -61,15 +61,15 @@ mod tests {
     #[test]
     fn test_create_connection() {
         let test_path = PathBuf::from("/tmp/test_agentsight_connection.db");
-        
+
         // Clean up if exists
         let _ = fs::remove_file(&test_path);
-        
+
         let conn = create_connection(&test_path).unwrap();
         drop(conn);
-        
+
         assert!(test_path.exists());
-        
+
         // Cleanup
         fs::remove_file(&test_path).ok();
     }

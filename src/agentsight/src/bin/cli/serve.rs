@@ -22,7 +22,8 @@ pub struct ServeCommand {
 
 impl ServeCommand {
     pub fn execute(&self) {
-        let db_path = self.db
+        let db_path = self
+            .db
             .as_ref()
             .map(|p| std::path::PathBuf::from(p))
             // Default to genai_events.db — the same file the tracer writes to

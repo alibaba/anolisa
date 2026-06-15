@@ -210,22 +210,22 @@ impl ChromeTraceEvent {
     }
 
     /// Create flow events connecting two Chrome Trace Events
-    /// 
+    ///
     /// This generates a pair of flow events (s and f phases) that create
     /// an arrow in Perfetto from the start event to the end event.
-    /// 
+    ///
     /// Flow events only carry the arrow connection, no args.
     /// The semantic information should be in the accompanying complete/instant events.
-    /// 
+    ///
     /// Flow ID is automatically generated using a global atomic counter.
-    /// 
+    ///
     /// # Arguments
     /// * `start` - The source event (arrow starts here)
     /// * `end` - The target event (arrow ends here)
-    /// 
+    ///
     /// # Returns
     /// A tuple of (flow_start, flow_end, flow_id) events
-    /// 
+    ///
     /// # Example
     /// ```rust,ignore
     /// let request_event = ChromeTraceEvent::complete("GET /api", "http", pid1, tid1, ts1, dur1);
@@ -239,21 +239,25 @@ impl ChromeTraceEvent {
     }
 
     /// Create flow events connecting two Chrome Trace Events with a given flow_id
-    /// 
+    ///
     /// This generates a pair of flow events (s and f phases) that create
     /// an arrow in Perfetto from the start event to the end event.
-    /// 
+    ///
     /// Flow events only carry the arrow connection, no args.
     /// The semantic information should be in the accompanying complete/instant events.
-    /// 
+    ///
     /// # Arguments
     /// * `start` - The source event (arrow starts here)
     /// * `end` - The target event (arrow ends here)
     /// * `flow_id` - Unique identifier to link the flow events
-    /// 
+    ///
     /// # Returns
     /// A tuple of (flow_start, flow_end) events
-    pub fn flow_from_events_with_id(start: &ChromeTraceEvent, end: &ChromeTraceEvent, flow_id: u64) -> (Self, Self) {
+    pub fn flow_from_events_with_id(
+        start: &ChromeTraceEvent,
+        end: &ChromeTraceEvent,
+        flow_id: u64,
+    ) -> (Self, Self) {
         let flow_start = ChromeTraceEvent {
             name: "flow".to_string(),
             cat: "flow".to_string(),
@@ -266,7 +270,7 @@ impl ChromeTraceEvent {
             id: Some(flow_id),
             bp: None,
         };
-        
+
         let flow_end = ChromeTraceEvent {
             name: "flow".to_string(),
             cat: "flow".to_string(),
@@ -279,7 +283,7 @@ impl ChromeTraceEvent {
             id: Some(flow_id),
             bp: Some("e".to_string()),
         };
-        
+
         (flow_start, flow_end)
     }
 
@@ -356,7 +360,9 @@ fn trace_file_path() -> &'static std::path::PathBuf {
     static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M");
-        std::env::current_dir().unwrap_or_default().join(format!("trace-{}.json", datetime))
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(format!("trace-{}.json", datetime))
     })
 }
 
@@ -396,7 +402,7 @@ pub fn append_trace_event(event: &ChromeTraceEvent) {
 }
 
 /// Export trace events to file if enabled
-/// 
+///
 /// This function checks if chrome trace export is enabled via environment variable
 /// AGENTSIGHT_CHROME_TRACE, and if so, writes the events to trace.json.
 pub fn export_trace_events<T: ToChromeTraceEvent>(result: &T) {
@@ -559,8 +565,7 @@ mod tests {
 
     #[test]
     fn test_with_trace_args_trait() {
-        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0)
-            .with_trace_args(&MockTraceArgs);
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_trace_args(&MockTraceArgs);
         assert_eq!(e.args.unwrap()["custom"], true);
     }
 
@@ -573,8 +578,7 @@ mod tests {
 
     #[test]
     fn test_with_trace_args_empty_object() {
-        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0)
-            .with_trace_args(&EmptyTraceArgs);
+        let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_trace_args(&EmptyTraceArgs);
         // Empty object should not be set
         assert!(e.args.is_none());
     }

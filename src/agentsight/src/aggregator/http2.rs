@@ -4,16 +4,16 @@
 //! by their stream_id and correlating request (client->server) with response (server->client)
 //! to form complete HTTP/2 request/response pairs.
 
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use lru::LruCache;
-use hpack::Decoder;
-use crate::config::DEFAULT_CONNECTION_CAPACITY;
-use crate::parser::http2::{ParsedHttp2Frame, Http2FrameType};
-use crate::parser::sse::SSEParser;
 use crate::aggregator::http::ConnectionId;
 use crate::aggregator::result::AggregatedResult;
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us};
+use crate::config::DEFAULT_CONNECTION_CAPACITY;
+use crate::parser::http2::{Http2FrameType, ParsedHttp2Frame};
+use crate::parser::sse::SSEParser;
+use hpack::Decoder;
+use lru::LruCache;
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 const MAX_CONTINUATION_BUFFER: usize = 65536;
 
@@ -34,7 +34,8 @@ impl HpackConnectionState {
 
 impl std::fmt::Debug for HpackConnectionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HpackConnectionState").finish_non_exhaustive()
+        f.debug_struct("HpackConnectionState")
+            .finish_non_exhaustive()
     }
 }
 
@@ -258,10 +259,12 @@ impl Http2Stream {
 
     /// Content-Encoding header from response headers (e.g. "gzip", "deflate")
     pub fn content_encoding(&self) -> Option<String> {
-        self.response_headers.as_ref()
+        self.response_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
                     .and_then(|(_, value)| value.clone())
             })
@@ -270,10 +273,12 @@ impl Http2Stream {
 
     /// Content-Encoding header from request headers
     pub fn request_content_encoding(&self) -> Option<String> {
-        self.request_headers.as_ref()
+        self.request_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
                     .and_then(|(_, value)| value.clone())
             })
@@ -287,7 +292,9 @@ impl Http2Stream {
             None
         } else {
             crate::utils::decompress::decompress_body_to_string(
-                &body, self.request_content_encoding().as_deref())
+                &body,
+                self.request_content_encoding().as_deref(),
+            )
         }
     }
 
@@ -298,7 +305,9 @@ impl Http2Stream {
             None
         } else {
             crate::utils::decompress::decompress_body_to_string(
-                &body, self.content_encoding().as_deref())
+                &body,
+                self.content_encoding().as_deref(),
+            )
         }
     }
 
@@ -315,22 +324,23 @@ impl Http2Stream {
     }
 
     /// Parse response body as SSE events and return JSON array of event data
-    /// 
+    ///
     /// This method parses the response body as SSE (Server-Sent Events) stream
     /// and returns a JSON array containing each event's data field.
     /// If the body is not valid SSE format, returns None.
     pub fn response_sse_json_array(&self) -> Option<serde_json::Value> {
         let body_str = self.response_body_str()?;
-        
+
         // Use legacy SSEParser to parse the stream (returns owned data)
         let sse_events = SSEParser::parse_stream(&body_str);
-        
+
         if sse_events.events.is_empty() {
             return None;
         }
-        
+
         // Extract JSON data from each event
-        let json_array: Vec<serde_json::Value> = sse_events.events
+        let json_array: Vec<serde_json::Value> = sse_events
+            .events
             .iter()
             .filter_map(|event| {
                 // Skip [DONE] marker
@@ -341,7 +351,7 @@ impl Http2Stream {
                 serde_json::from_str::<serde_json::Value>(&event.data).ok()
             })
             .collect();
-        
+
         if json_array.is_empty() {
             None
         } else {
@@ -351,10 +361,12 @@ impl Http2Stream {
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
-        self.response_headers.as_ref()
+        self.response_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                     .and_then(|(_, value)| value.clone())
                     .map(|ct| ct.contains("text/event-stream"))
@@ -371,10 +383,12 @@ impl Http2Stream {
                 return v.clone();
             }
         }
-        self.request_headers.as_ref()
+        self.request_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name == ":method")
                     .and_then(|(_, value)| value.clone())
                     .unwrap_or_else(|| "POST".to_string())
@@ -390,10 +404,12 @@ impl Http2Stream {
                 return v.clone();
             }
         }
-        self.request_headers.as_ref()
+        self.request_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name == ":path")
                     .and_then(|(_, value)| value.clone())
                     .unwrap_or_default()
@@ -409,10 +425,12 @@ impl Http2Stream {
                 return v.parse().unwrap_or(0);
             }
         }
-        self.response_headers.as_ref()
+        self.response_headers
+            .as_ref()
             .map(|h| {
                 let headers = h.decode_headers_stateless();
-                headers.iter()
+                headers
+                    .iter()
                     .find(|(name, _)| name == ":status")
                     .and_then(|(_, value)| value.clone())
                     .and_then(|v| v.parse().ok())
@@ -424,7 +442,8 @@ impl Http2Stream {
     /// Get request headers as JSON string
     pub fn request_headers_json(&self) -> String {
         if let Some(ref headers) = self.request_headers {
-            let decoded = headers.decode_headers_stateless()
+            let decoded = headers
+                .decode_headers_stateless()
                 .into_iter()
                 .filter_map(|(name, value)| value.map(|v| (name, v)))
                 .collect::<std::collections::HashMap<String, String>>();
@@ -437,7 +456,8 @@ impl Http2Stream {
     /// Get response headers as JSON string
     pub fn response_headers_json(&self) -> String {
         if let Some(ref headers) = self.response_headers {
-            let decoded = headers.decode_headers_stateless()
+            let decoded = headers
+                .decode_headers_stateless()
                 .into_iter()
                 .filter_map(|(name, value)| value.map(|v| (name, v)))
                 .collect::<std::collections::HashMap<String, String>>();
@@ -449,21 +469,39 @@ impl Http2Stream {
 
     /// Get process command name from source event
     pub fn comm(&self) -> String {
-        self.request_headers.as_ref()
+        self.request_headers
+            .as_ref()
             .map(|h| h.source_event.comm_str())
-            .or_else(|| self.request_data_frames.first().map(|f| f.source_event.comm_str()))
-            .or_else(|| self.response_headers.as_ref().map(|h| h.source_event.comm_str()))
-            .or_else(|| self.response_data_frames.first().map(|f| f.source_event.comm_str()))
+            .or_else(|| {
+                self.request_data_frames
+                    .first()
+                    .map(|f| f.source_event.comm_str())
+            })
+            .or_else(|| {
+                self.response_headers
+                    .as_ref()
+                    .map(|h| h.source_event.comm_str())
+            })
+            .or_else(|| {
+                self.response_data_frames
+                    .first()
+                    .map(|f| f.source_event.comm_str())
+            })
             .unwrap_or_default()
     }
 
     /// Get process ID from source event
     pub fn pid(&self) -> u32 {
-        self.request_headers.as_ref()
+        self.request_headers
+            .as_ref()
             .map(|h| h.source_event.pid)
             .or_else(|| self.request_data_frames.first().map(|f| f.source_event.pid))
             .or_else(|| self.response_headers.as_ref().map(|h| h.source_event.pid))
-            .or_else(|| self.response_data_frames.first().map(|f| f.source_event.pid))
+            .or_else(|| {
+                self.response_data_frames
+                    .first()
+                    .map(|f| f.source_event.pid)
+            })
             .unwrap_or(0)
     }
 }
@@ -560,10 +598,13 @@ impl Http2StreamAggregator {
                     // No END_HEADERS — start buffering for CONTINUATION
                     let fragment = strip_headers_framing(frame.payload(), frame.flags);
                     if fragment.len() <= MAX_CONTINUATION_BUFFER {
-                        self.continuation_buffers.insert(stream_id, ContinuationBuffer {
-                            data: fragment.to_vec(),
-                            direction,
-                        });
+                        self.continuation_buffers.insert(
+                            stream_id,
+                            ContinuationBuffer {
+                                data: fragment.to_vec(),
+                                direction,
+                            },
+                        );
                     }
                     None
                 };
@@ -584,7 +625,9 @@ impl Http2StreamAggregator {
                     Http2StreamState::Complete(stream) => {
                         completed.push(self.finalize_stream(stream_id, stream));
                     }
-                    _ => { self.insert_stream_state(stream_id, state); }
+                    _ => {
+                        self.insert_stream_state(stream_id, state);
+                    }
                 }
                 continue;
             }
@@ -603,7 +646,9 @@ impl Http2StreamAggregator {
                 Http2StreamState::Complete(stream) => {
                     completed.push(self.finalize_stream(stream_id, stream));
                 }
-                _ => { self.insert_stream_state(stream_id, state); }
+                _ => {
+                    self.insert_stream_state(stream_id, state);
+                }
             }
         }
 
@@ -611,7 +656,12 @@ impl Http2StreamAggregator {
     }
 
     /// Handle SETTINGS frame: update HPACK decoder dynamic table size
-    fn handle_settings_frame(&mut self, frame: &ParsedHttp2Frame, conn_id: ConnectionId, direction: StreamDirection) {
+    fn handle_settings_frame(
+        &mut self,
+        frame: &ParsedHttp2Frame,
+        conn_id: ConnectionId,
+        direction: StreamDirection,
+    ) {
         // ACK frames have no payload
         if frame.flags & 0x01 != 0 {
             return;
@@ -632,12 +682,23 @@ impl Http2StreamAggregator {
             // Per RFC 7540 §6.5.2: SETTINGS from peer X constrains the OTHER
             // direction's encoder, so we resize the decoder for the opposite direction.
             if id == 0x01 {
-                let state = self.hpack_states.get_or_insert_mut(conn_id, HpackConnectionState::new);
+                let state = self
+                    .hpack_states
+                    .get_or_insert_mut(conn_id, HpackConnectionState::new);
                 match direction {
-                    StreamDirection::Request => state.resp_decoder.set_max_table_size(value as usize),
-                    StreamDirection::Response => state.req_decoder.set_max_table_size(value as usize),
+                    StreamDirection::Request => {
+                        state.resp_decoder.set_max_table_size(value as usize)
+                    }
+                    StreamDirection::Response => {
+                        state.req_decoder.set_max_table_size(value as usize)
+                    }
                 }
-                log::debug!("HPACK table size update: conn={:?} dir={:?} size={}", conn_id, direction, value);
+                log::debug!(
+                    "HPACK table size update: conn={:?} dir={:?} size={}",
+                    conn_id,
+                    direction,
+                    value
+                );
             }
         }
     }
@@ -656,7 +717,10 @@ impl Http2StreamAggregator {
             if buffer.data.len() + payload.len() <= MAX_CONTINUATION_BUFFER {
                 buffer.data.extend_from_slice(payload);
             } else {
-                log::warn!("CONTINUATION buffer overflow for stream {:?}, dropping", stream_id);
+                log::warn!(
+                    "CONTINUATION buffer overflow for stream {:?}, dropping",
+                    stream_id
+                );
                 self.continuation_buffers.remove(&stream_id);
                 return;
             }
@@ -682,7 +746,9 @@ impl Http2StreamAggregator {
             return Some(Vec::new());
         }
 
-        let state = self.hpack_states.get_or_insert_mut(conn_id, HpackConnectionState::new);
+        let state = self
+            .hpack_states
+            .get_or_insert_mut(conn_id, HpackConnectionState::new);
         let decoder = match direction {
             StreamDirection::Request => &mut state.req_decoder,
             StreamDirection::Response => &mut state.resp_decoder,
@@ -693,17 +759,25 @@ impl Http2StreamAggregator {
                 let result: Vec<(String, String)> = headers
                     .into_iter()
                     .map(|(name, value)| {
-                        (String::from_utf8_lossy(&name).into_owned(),
-                         String::from_utf8_lossy(&value).into_owned())
+                        (
+                            String::from_utf8_lossy(&name).into_owned(),
+                            String::from_utf8_lossy(&value).into_owned(),
+                        )
                     })
                     .collect();
                 Some(result)
             }
             Err(e) => {
-                log::warn!("HPACK decode error for conn={:?} dir={:?}: {:?}, resetting decoder",
-                    conn_id, direction, e);
+                log::warn!(
+                    "HPACK decode error for conn={:?} dir={:?}: {:?}, resetting decoder",
+                    conn_id,
+                    direction,
+                    e
+                );
                 // Reset decoder for this direction
-                let state = self.hpack_states.get_or_insert_mut(conn_id, HpackConnectionState::new);
+                let state = self
+                    .hpack_states
+                    .get_or_insert_mut(conn_id, HpackConnectionState::new);
                 match direction {
                     StreamDirection::Request => state.req_decoder = Decoder::new(),
                     StreamDirection::Response => state.resp_decoder = Decoder::new(),
@@ -754,9 +828,16 @@ impl Http2StreamAggregator {
         direction: StreamDirection,
         stream_id: &StreamId,
     ) -> Http2StreamState {
-        log::debug!("Processing http/2 frame in state: {}, stream_id: {:?}", state.state_name(), stream_id);
+        log::debug!(
+            "Processing http/2 frame in state: {}, stream_id: {:?}",
+            state.state_name(),
+            stream_id
+        );
         match state {
-            Http2StreamState::WaitingRequestData { mut request_headers, mut request_data_frames } => {
+            Http2StreamState::WaitingRequestData {
+                mut request_headers,
+                mut request_data_frames,
+            } => {
                 if direction == StreamDirection::Request {
                     if frame.is_headers() {
                         request_headers = Some(frame.clone());
@@ -791,18 +872,25 @@ impl Http2StreamAggregator {
                 }
             }
 
-            Http2StreamState::RequestComplete { request_headers, request_data_frames } => {
+            Http2StreamState::RequestComplete {
+                request_headers,
+                request_data_frames,
+            } => {
                 if direction == StreamDirection::Response {
                     let mut response_headers = None;
                     let mut response_data_frames = Vec::new();
-                    
+
                     if frame.is_headers() {
                         response_headers = Some(frame.clone());
                         if frame.has_end_stream() {
                             // Response is complete (no body)
-                            let mut stream = Http2Stream::new(*stream_id, 
-                                request_headers.as_ref().map(|h| h.source_event.timestamp_ns)
-                                    .unwrap_or(frame.source_event.timestamp_ns));
+                            let mut stream = Http2Stream::new(
+                                *stream_id,
+                                request_headers
+                                    .as_ref()
+                                    .map(|h| h.source_event.timestamp_ns)
+                                    .unwrap_or(frame.source_event.timestamp_ns),
+                            );
                             stream.request_headers = request_headers;
                             stream.request_data_frames = request_data_frames;
                             stream.request_complete = true;
@@ -815,9 +903,13 @@ impl Http2StreamAggregator {
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() {
                             // Response is complete
-                            let mut stream = Http2Stream::new(*stream_id,
-                                request_headers.as_ref().map(|h| h.source_event.timestamp_ns)
-                                    .unwrap_or(frame.source_event.timestamp_ns));
+                            let mut stream = Http2Stream::new(
+                                *stream_id,
+                                request_headers
+                                    .as_ref()
+                                    .map(|h| h.source_event.timestamp_ns)
+                                    .unwrap_or(frame.source_event.timestamp_ns),
+                            );
                             stream.request_headers = request_headers;
                             stream.request_data_frames = request_data_frames;
                             stream.request_complete = true;
@@ -828,7 +920,7 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     }
-                    
+
                     // Continue receiving response data
                     Http2StreamState::ReceivingResponse {
                         request_headers,
@@ -856,9 +948,13 @@ impl Http2StreamAggregator {
                         response_headers = Some(frame.clone());
                         if frame.has_end_stream() {
                             // Response is complete
-                            let mut stream = Http2Stream::new(*stream_id,
-                                request_headers.as_ref().map(|h| h.source_event.timestamp_ns)
-                                    .unwrap_or(frame.source_event.timestamp_ns));
+                            let mut stream = Http2Stream::new(
+                                *stream_id,
+                                request_headers
+                                    .as_ref()
+                                    .map(|h| h.source_event.timestamp_ns)
+                                    .unwrap_or(frame.source_event.timestamp_ns),
+                            );
                             stream.request_headers = request_headers;
                             stream.request_data_frames = request_data_frames;
                             stream.request_complete = true;
@@ -872,9 +968,13 @@ impl Http2StreamAggregator {
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() {
                             // Response is complete
-                            let mut stream = Http2Stream::new(*stream_id,
-                                request_headers.as_ref().map(|h| h.source_event.timestamp_ns)
-                                    .unwrap_or(frame.source_event.timestamp_ns));
+                            let mut stream = Http2Stream::new(
+                                *stream_id,
+                                request_headers
+                                    .as_ref()
+                                    .map(|h| h.source_event.timestamp_ns)
+                                    .unwrap_or(frame.source_event.timestamp_ns),
+                            );
                             stream.request_headers = request_headers;
                             stream.request_data_frames = request_data_frames;
                             stream.request_complete = true;
@@ -937,32 +1037,47 @@ impl Http2StreamAggregator {
     }
 
     /// Convert a stream state to a Http2Stream if possible
-    fn stream_from_state(&self, state: Http2StreamState, stream_id: StreamId) -> Option<Http2Stream> {
+    fn stream_from_state(
+        &self,
+        state: Http2StreamState,
+        stream_id: StreamId,
+    ) -> Option<Http2Stream> {
         match state {
             Http2StreamState::Complete(stream) => Some(stream),
-            Http2StreamState::RequestComplete { request_headers, request_data_frames } => {
-                let timestamp_ns = request_headers.as_ref()
+            Http2StreamState::RequestComplete {
+                request_headers,
+                request_data_frames,
+            } => {
+                let timestamp_ns = request_headers
+                    .as_ref()
                     .map(|h| h.source_event.timestamp_ns)
-                    .unwrap_or_else(|| request_data_frames.first()
-                        .map(|f| f.source_event.timestamp_ns)
-                        .unwrap_or(0));
+                    .unwrap_or_else(|| {
+                        request_data_frames
+                            .first()
+                            .map(|f| f.source_event.timestamp_ns)
+                            .unwrap_or(0)
+                    });
                 let mut stream = Http2Stream::new(stream_id, timestamp_ns);
                 stream.request_headers = request_headers;
                 stream.request_data_frames = request_data_frames;
                 stream.request_complete = true;
                 Some(stream)
             }
-            Http2StreamState::ReceivingResponse { 
-                request_headers, 
-                request_data_frames, 
-                response_headers, 
-                response_data_frames 
+            Http2StreamState::ReceivingResponse {
+                request_headers,
+                request_data_frames,
+                response_headers,
+                response_data_frames,
             } => {
-                let timestamp_ns = request_headers.as_ref()
+                let timestamp_ns = request_headers
+                    .as_ref()
                     .map(|h| h.source_event.timestamp_ns)
-                    .unwrap_or_else(|| request_data_frames.first()
-                        .map(|f| f.source_event.timestamp_ns)
-                        .unwrap_or(0));
+                    .unwrap_or_else(|| {
+                        request_data_frames
+                            .first()
+                            .map(|f| f.source_event.timestamp_ns)
+                            .unwrap_or(0)
+                    });
                 let mut stream = Http2Stream::new(stream_id, timestamp_ns);
                 stream.request_headers = request_headers;
                 stream.request_data_frames = request_data_frames;
@@ -987,7 +1102,10 @@ impl ToChromeTraceEvent for Http2Stream {
     fn to_chrome_trace_events(&self) -> Vec<ChromeTraceEvent> {
         let mut events = Vec::new();
         let ts_us = ns_to_us(self.start_timestamp_ns);
-        let dur_us = ns_to_us(self.end_timestamp_ns.saturating_sub(self.start_timestamp_ns));
+        let dur_us = ns_to_us(
+            self.end_timestamp_ns
+                .saturating_sub(self.start_timestamp_ns),
+        );
         const MIN_DUR_US: u64 = 1_000;
         let actual_dur = dur_us.max(MIN_DUR_US);
 
@@ -1024,9 +1142,9 @@ impl ToChromeTraceEvent for Http2Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
-    use hpack::Encoder;
     use crate::probes::sslsniff::SslEvent;
+    use hpack::Encoder;
+    use std::rc::Rc;
 
     fn create_test_event(pid: u32, ssl_ptr: u64, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {
         Rc::new(SslEvent {
@@ -1104,13 +1222,16 @@ mod tests {
     #[test]
     fn test_aggregator_process_request_response() {
         let mut aggregator = Http2StreamAggregator::new();
-        let _conn_id = ConnectionId { pid: 1234, ssl_ptr: 0x1000 };
+        let _conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x1000,
+        };
 
         // Create request HEADERS frame (rw=1, write) with END_STREAM (no body)
         let req_event = create_test_event(1234, 0x1000, 1, 1000);
         let req_headers = create_test_frame(
-            1, // stream_id
-            1, // HEADERS
+            1,    // stream_id
+            1,    // HEADERS
             0x05, // END_HEADERS | END_STREAM - request has no body
             b":method: POST\n:path: /api/test".to_vec(),
             req_event,
@@ -1124,8 +1245,8 @@ mod tests {
         // Create response HEADERS frame (rw=0, read)
         let resp_event = create_test_event(1234, 0x1000, 0, 2000);
         let resp_headers = create_test_frame(
-            1, // stream_id
-            1, // HEADERS
+            1,    // stream_id
+            1,    // HEADERS
             0x05, // END_HEADERS | END_STREAM
             b":status: 200".to_vec(),
             resp_event,
@@ -1134,7 +1255,7 @@ mod tests {
         // Process response
         let completed = aggregator.process_frames(vec![resp_headers]);
         assert_eq!(completed.len(), 1);
-        
+
         let stream = &completed[0];
         assert_eq!(stream.stream_id.stream_id, 1);
         assert!(stream.request_complete);
@@ -1227,21 +1348,33 @@ mod tests {
         let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
 
         let mut aggregator = Http2StreamAggregator::new();
-        let conn_id = ConnectionId { pid: 100, ssl_ptr: 0x2000 };
+        let conn_id = ConnectionId {
+            pid: 100,
+            ssl_ptr: 0x2000,
+        };
         let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Request, &encoded);
 
         assert!(decoded.is_some());
         let hdrs = decoded.unwrap();
         assert_eq!(hdrs.iter().find(|(n, _)| n == ":method").unwrap().1, "POST");
-        assert_eq!(hdrs.iter().find(|(n, _)| n == ":path").unwrap().1, "/v1/chat/completions");
-        assert_eq!(hdrs.iter().find(|(n, _)| n == ":scheme").unwrap().1, "https");
+        assert_eq!(
+            hdrs.iter().find(|(n, _)| n == ":path").unwrap().1,
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            hdrs.iter().find(|(n, _)| n == ":scheme").unwrap().1,
+            "https"
+        );
     }
 
     #[test]
     fn test_stateful_hpack_decode_dynamic_table() {
         // Verify that the second request using dynamic table refs decodes correctly
         let mut encoder = Encoder::new();
-        let conn_id = ConnectionId { pid: 200, ssl_ptr: 0x3000 };
+        let conn_id = ConnectionId {
+            pid: 200,
+            ssl_ptr: 0x3000,
+        };
         let mut aggregator = Http2StreamAggregator::new();
 
         // First request: headers get added to dynamic table
@@ -1267,14 +1400,23 @@ mod tests {
         let decoded2 = aggregator.decode_header_block(conn_id, StreamDirection::Request, &encoded2);
         assert!(decoded2.is_some());
         let hdrs = decoded2.unwrap();
-        assert_eq!(hdrs.iter().find(|(n, _)| n == ":path").unwrap().1, "/v1/chat/completions");
-        assert_eq!(hdrs.iter().find(|(n, _)| n == "authorization").unwrap().1, "Bearer sk-test123");
+        assert_eq!(
+            hdrs.iter().find(|(n, _)| n == ":path").unwrap().1,
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            hdrs.iter().find(|(n, _)| n == "authorization").unwrap().1,
+            "Bearer sk-test123"
+        );
     }
 
     #[test]
     fn test_stateful_hpack_error_recovery() {
         let mut aggregator = Http2StreamAggregator::new();
-        let conn_id = ConnectionId { pid: 300, ssl_ptr: 0x4000 };
+        let conn_id = ConnectionId {
+            pid: 300,
+            ssl_ptr: 0x4000,
+        };
 
         // Feed corrupt data — should fail and reset decoder
         let corrupt = vec![0xFF, 0xFF, 0xFF, 0xFF];
@@ -1337,15 +1479,31 @@ mod tests {
         // Decoded request headers should be available
         assert!(stream.decoded_request_headers.is_some());
         let req_hdrs = stream.decoded_request_headers.as_ref().unwrap();
-        assert_eq!(req_hdrs.iter().find(|(n, _)| n == ":method").unwrap().1, "POST");
-        assert_eq!(req_hdrs.iter().find(|(n, _)| n == ":path").unwrap().1, "/v1/chat/completions");
-        assert_eq!(req_hdrs.iter().find(|(n, _)| n == "content-type").unwrap().1, "application/json");
+        assert_eq!(
+            req_hdrs.iter().find(|(n, _)| n == ":method").unwrap().1,
+            "POST"
+        );
+        assert_eq!(
+            req_hdrs.iter().find(|(n, _)| n == ":path").unwrap().1,
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            req_hdrs
+                .iter()
+                .find(|(n, _)| n == "content-type")
+                .unwrap()
+                .1,
+            "application/json"
+        );
     }
 
     #[test]
     fn test_settings_table_size_update() {
         let mut aggregator = Http2StreamAggregator::new();
-        let conn_id = ConnectionId { pid: 500, ssl_ptr: 0x6000 };
+        let conn_id = ConnectionId {
+            pid: 500,
+            ssl_ptr: 0x6000,
+        };
 
         // SETTINGS frame with HEADER_TABLE_SIZE = 0 (disable dynamic table)
         // Format: 2-byte id (0x0001) + 4-byte value (0x00000000)
@@ -1358,13 +1516,19 @@ mod tests {
         // The decoder should now have table_size=0
         // Encode with literal-only (since table_size=0 the encoder won't add to dynamic table)
         let mut encoder = Encoder::new();
-        let headers = vec![
-            (b":status".to_vec(), b"200".to_vec()),
-        ];
+        let headers = vec![(b":status".to_vec(), b"200".to_vec())];
         let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
         let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Response, &encoded);
         assert!(decoded.is_some());
-        assert_eq!(decoded.unwrap().iter().find(|(n, _)| n == ":status").unwrap().1, "200");
+        assert_eq!(
+            decoded
+                .unwrap()
+                .iter()
+                .find(|(n, _)| n == ":status")
+                .unwrap()
+                .1,
+            "200"
+        );
     }
 
     #[test]
@@ -1387,7 +1551,9 @@ mod tests {
 
         // Request DATA with END_STREAM
         let req_data_frame = create_test_frame(
-            3, 0, 0x01,
+            3,
+            0,
+            0x01,
             b"{\"model\":\"qwen\",\"messages\":[]}".to_vec(),
             req_event,
         );
@@ -1407,7 +1573,9 @@ mod tests {
 
         // Response DATA with END_STREAM
         let resp_data_frame = create_test_frame(
-            3, 0, 0x01,
+            3,
+            0,
+            0x01,
             b"{\"id\":\"chatcmpl-1\",\"choices\":[]}".to_vec(),
             resp_event,
         );
@@ -1430,7 +1598,10 @@ mod tests {
     fn test_independent_req_resp_decoders() {
         // Request and response decoders are independent per connection
         let mut aggregator = Http2StreamAggregator::new();
-        let conn_id = ConnectionId { pid: 700, ssl_ptr: 0x8000 };
+        let conn_id = ConnectionId {
+            pid: 700,
+            ssl_ptr: 0x8000,
+        };
 
         let mut req_encoder = Encoder::new();
         let mut resp_encoder = Encoder::new();
@@ -1444,8 +1615,12 @@ mod tests {
         // Response direction decode (independent table)
         let resp_h = vec![(b":status".to_vec(), b"404".to_vec())];
         let resp_enc = resp_encoder.encode(resp_h.iter().map(|(n, v)| (&n[..], &v[..])));
-        let resp_dec = aggregator.decode_header_block(conn_id, StreamDirection::Response, &resp_enc);
+        let resp_dec =
+            aggregator.decode_header_block(conn_id, StreamDirection::Response, &resp_enc);
         assert!(resp_dec.is_some());
-        assert_eq!(resp_dec.unwrap()[0], (":status".to_string(), "404".to_string()));
+        assert_eq!(
+            resp_dec.unwrap()[0],
+            (":status".to_string(), "404".to_string())
+        );
     }
 }

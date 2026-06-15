@@ -39,7 +39,10 @@ impl DiscoverCommand {
         println!();
 
         // Use CmdlineGlobMatcher to list agent info
-        for matcher in agentsight::default_cmdline_rules().iter().filter_map(|rule| CmdlineGlobMatcher::from_config(rule)) {
+        for matcher in agentsight::default_cmdline_rules()
+            .iter()
+            .filter_map(|rule| CmdlineGlobMatcher::from_config(rule))
+        {
             let agent = matcher.info();
             println!("  {} ({})", agent.name, agent.category);
             println!("    Process names: {}", agent.process_names.join(", "));

@@ -10,8 +10,8 @@ use libbpf_rs::{
     Link, MapHandle, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::os::fd::AsFd;
 use procfs::process::Process;
+use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -27,7 +27,12 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    dead_code,
+    non_snake_case
+)]
 pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/sslsniff.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/sslsniff.rs"));
@@ -39,7 +44,7 @@ const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 const POLL_TIMEOUT_MS: u64 = 100;
 
 /// User-space SslEvent - lightweight version of BPF probe_SSL_data_t
-/// 
+///
 /// Unlike the BPF version which has a 512KB fixed-size buffer, this struct
 /// only stores the actual data received, significantly reducing memory usage.
 #[derive(Debug, Clone)]
@@ -93,11 +98,7 @@ impl SslEvent {
     fn parse_comm<T>(comm: &[T; 16]) -> String {
         debug_assert_eq!(mem::size_of::<T>(), 1);
         let bytes = unsafe { slice::from_raw_parts(comm.as_ptr() as *const u8, 16) };
-        let bytes: Vec<u8> = bytes
-            .iter()
-            .copied()
-            .take_while(|&b| b != 0)
-            .collect();
+        let bytes: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -113,7 +114,9 @@ impl SslEvent {
     }
 
     pub fn is_http_request(&self) -> bool {
-        const METHODS: &[&[u8]] = &[b"GET ", b"POST", b"PUT ", b"DELE", b"HEAD", b"OPTI", b"PATC"];
+        const METHODS: &[&[u8]] = &[
+            b"GET ", b"POST", b"PUT ", b"DELE", b"HEAD", b"OPTI", b"PATC",
+        ];
         METHODS.iter().any(|m| self.buf.starts_with(m))
     }
 
@@ -132,9 +135,8 @@ impl SslEvent {
             return false;
         }
         // Parse 3-byte frame length
-        let length = ((self.buf[0] as usize) << 16)
-            | ((self.buf[1] as usize) << 8)
-            | (self.buf[2] as usize);
+        let length =
+            ((self.buf[0] as usize) << 16) | ((self.buf[1] as usize) << 8) | (self.buf[2] as usize);
         // Frame type must be a known type (0..=9)
         let frame_type = self.buf[3];
         if frame_type > 9 {
@@ -198,11 +200,14 @@ impl SslSniff {
     }
 
     /// Create a new SslSniff with an optional external traced_processes map and shared ring buffer
-    /// 
+    ///
     /// # Arguments
     /// * `traced_processes` - Optional external MapHandle for traced_processes (for map reuse)
     /// * `rb` - Optional external MapHandle for shared ring buffer (for map reuse)
-    pub fn new_with_traced_processes(traced_processes: Option<&MapHandle>, rb: Option<&MapHandle>) -> Result<Self> {
+    pub fn new_with_traced_processes(
+        traced_processes: Option<&MapHandle>,
+        rb: Option<&MapHandle>,
+    ) -> Result<Self> {
         // ── Open + load skeleton ───────────────────────────────────────
         let mut builder = SslsniffSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
@@ -261,9 +266,12 @@ impl SslSniff {
         }
 
         // Debug: print all libs found
-        log::debug!("[attach_process] pid={pid}: found {} libs: {:?}", 
-            libs.len(), 
-            libs.iter().map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k))).collect::<Vec<_>>()
+        log::debug!(
+            "[attach_process] pid={pid}: found {} libs: {:?}",
+            libs.len(),
+            libs.iter()
+                .map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k)))
+                .collect::<Vec<_>>()
         );
 
         let mut attached_inodes = Vec::new();
@@ -282,31 +290,25 @@ impl SslSniff {
                 SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
                 SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
                 SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
-                SslLibKind::Boring => {
-                    match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
-                        Ok(ls) => Ok(ls),
-                        Err(sym_err) => {
-                            log::debug!(
-                                "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                            );
-                            match find_boringssl_offsets(&path) {
-                                Some(off) => attach_boringssl_by_offset(
-                                    &mut self.skel,
-                                    &path,
-                                    &off,
-                                    false,
-                                    -1,
-                                ),
-                                None => {
-                                    log::warn!(
-                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
-                                    );
-                                    continue;
-                                }
+                SslLibKind::Boring => match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
+                    Ok(ls) => Ok(ls),
+                    Err(sym_err) => {
+                        log::debug!(
+                            "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                        );
+                        match find_boringssl_offsets(&path) {
+                            Some(off) => {
+                                attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
+                            }
+                            None => {
+                                log::warn!(
+                                    "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
+                                );
+                                continue;
                             }
                         }
                     }
-                }
+                },
             };
 
             match result {
@@ -339,7 +341,10 @@ impl SslSniff {
             for inode in &inodes {
                 self.traced_files.remove(inode);
             }
-            log::debug!("[detach_process] pid={pid}: removed {} inodes from traced_files", inodes.len());
+            log::debug!(
+                "[detach_process] pid={pid}: removed {} inodes from traced_files",
+                inodes.len()
+            );
         }
     }
 

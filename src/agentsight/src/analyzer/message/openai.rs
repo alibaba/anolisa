@@ -26,7 +26,10 @@
 //! }
 //! ```
 
-use super::types::{OpenAIRequest, OpenAIResponse, OpenAIChoice, OpenAIChatMessage, MessageRole, OpenAIContent, OpenAiSseChunk};
+use super::types::{
+    MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
+    OpenAiSseChunk,
+};
 
 /// Parser for OpenAI Chat Completions API
 ///
@@ -112,7 +115,9 @@ impl OpenAIParser {
                             messages.push(serde_json::json!({"role": "user", "content": text}));
                         }
                         _ => {
-                            messages.push(serde_json::json!({"role": "user", "content": item.to_string()}));
+                            messages.push(
+                                serde_json::json!({"role": "user", "content": item.to_string()}),
+                            );
                         }
                     }
                 } else {
@@ -286,10 +291,7 @@ impl OpenAIParser {
         let mut usage: Option<serde_json::Value> = None;
 
         for chunk in chunks {
-            let event_type = chunk
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "response.output_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
@@ -432,7 +434,8 @@ impl OpenAIParser {
                     if let Some(calls) = &choice.delta.tool_calls {
                         for tc in calls {
                             let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let entry = tool_call_map.entry(idx)
+                            let entry = tool_call_map
+                                .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
                             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                                 if !id.is_empty() {
@@ -463,56 +466,65 @@ impl OpenAIParser {
         } else {
             let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
             sorted_indices.sort();
-            let merged: Vec<serde_json::Value> = sorted_indices.into_iter().filter_map(|idx| {
-                tool_call_map.remove(&idx).map(|(id, name, arguments)| {
-                    serde_json::json!({
-                        "id": id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments
-                        }
+            let merged: Vec<serde_json::Value> = sorted_indices
+                .into_iter()
+                .filter_map(|idx| {
+                    tool_call_map.remove(&idx).map(|(id, name, arguments)| {
+                        serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments
+                            }
+                        })
                     })
                 })
-            }).collect();
-            if merged.is_empty() { None } else { Some(merged) }
+                .collect();
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
         };
 
         // Build aggregated response from chunks
         first_chunk.and_then(|first| {
-            serde_json::from_value::<OpenAiSseChunk>(first.clone()).ok().map(|chunk| {
-                let combined_content = content_parts.join("");
-                let combined_reasoning = if reasoning_parts.is_empty() {
-                    None
-                } else {
-                    Some(reasoning_parts.join(""))
-                };
-                OpenAIResponse {
-                    id: chunk.id,
-                    object: "chat.completion".to_string(),
-                    created: chunk.created,
-                    model: chunk.model,
-                    choices: vec![OpenAIChoice {
-                        index: 0,
-                        message: OpenAIChatMessage {
-                            role: MessageRole::Assistant,
-                            content: Some(OpenAIContent::Text(combined_content)),
-                            reasoning_content: combined_reasoning,
-                            refusal: None,
-                            function_call: None,
-                            tool_calls,
-                            tool_call_id: None,
-                            name: None,
-                            annotations: None,
-                            audio: None,
-                        },
-                        finish_reason,
-                        logprobs: None,
-                    }],
-                    usage: None,
-                    system_fingerprint: chunk.system_fingerprint,
-                }
-            })
+            serde_json::from_value::<OpenAiSseChunk>(first.clone())
+                .ok()
+                .map(|chunk| {
+                    let combined_content = content_parts.join("");
+                    let combined_reasoning = if reasoning_parts.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_parts.join(""))
+                    };
+                    OpenAIResponse {
+                        id: chunk.id,
+                        object: "chat.completion".to_string(),
+                        created: chunk.created,
+                        model: chunk.model,
+                        choices: vec![OpenAIChoice {
+                            index: 0,
+                            message: OpenAIChatMessage {
+                                role: MessageRole::Assistant,
+                                content: Some(OpenAIContent::Text(combined_content)),
+                                reasoning_content: combined_reasoning,
+                                refusal: None,
+                                function_call: None,
+                                tool_calls,
+                                tool_call_id: None,
+                                name: None,
+                                annotations: None,
+                                audio: None,
+                            },
+                            finish_reason,
+                            logprobs: None,
+                        }],
+                        usage: None,
+                        system_fingerprint: chunk.system_fingerprint,
+                    }
+                })
         })
     }
 
@@ -669,7 +681,9 @@ mod tests {
     fn test_matches_path() {
         assert!(OpenAIParser::matches_path("/v1/chat/completions"));
         assert!(OpenAIParser::matches_path("/v1/completions"));
-        assert!(OpenAIParser::matches_path("https://api.openai.com/v1/chat/completions"));
+        assert!(OpenAIParser::matches_path(
+            "https://api.openai.com/v1/chat/completions"
+        ));
         assert!(!OpenAIParser::matches_path("/v1/messages"));
         assert!(!OpenAIParser::matches_path("/v1/embeddings"));
     }
@@ -707,7 +721,10 @@ mod tests {
         assert!(response.is_some());
 
         let response = response.unwrap();
-        assert_eq!(response.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
     }
 
     // ---- Responses API tests ----
@@ -715,7 +732,9 @@ mod tests {
     #[test]
     fn test_matches_path_responses() {
         assert!(OpenAIParser::matches_path("/v1/responses"));
-        assert!(OpenAIParser::matches_path("https://dashscope.aliyuncs.com/compatible-mode/v1/responses"));
+        assert!(OpenAIParser::matches_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
         // bare /responses should NOT match (too broad, would catch non-LLM traffic)
         assert!(!OpenAIParser::matches_path("/responses"));
         assert!(!OpenAIParser::matches_path("/api/survey/responses"));
@@ -790,7 +809,10 @@ mod tests {
         });
 
         let request = OpenAIParser::parse_request(&json);
-        assert!(request.is_some(), "role item with typed array content must parse");
+        assert!(
+            request.is_some(),
+            "role item with typed array content must parse"
+        );
 
         let req = request.unwrap();
         assert_eq!(req.model, "gpt-4.1");
@@ -854,12 +876,18 @@ mod tests {
         assert!(response.is_some());
 
         let resp = response.unwrap();
-        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         let func = tc[0].get("function").unwrap();
         assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
-        assert_eq!(func.get("arguments").unwrap().as_str().unwrap(), "{\"city\":\"Beijing\"}");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
     }
 
     #[test]
@@ -930,7 +958,10 @@ mod tests {
         });
 
         let response = OpenAIParser::parse_response(&json);
-        assert!(response.is_some(), "Failed to parse real-format Responses API response");
+        assert!(
+            response.is_some(),
+            "Failed to parse real-format Responses API response"
+        );
         let resp = response.unwrap();
         assert_eq!(resp.model, "qwen-plus");
         assert_eq!(resp.id, "resp_d3352584-cb0f-98e7-867d-cc6a30ac04dd");
@@ -972,7 +1003,10 @@ mod tests {
 
         let resp = response.unwrap();
         // finish_reason must be "tool_calls" even when text is present
-        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         // text content should also be preserved
@@ -1000,13 +1034,19 @@ mod tests {
 
         let resp = response.unwrap();
         // Tool call should still be captured via post-loop flush
-        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_trunc");
         let func = tc[0].get("function").unwrap();
         assert_eq!(func.get("name").unwrap().as_str().unwrap(), "search");
-        assert_eq!(func.get("arguments").unwrap().as_str().unwrap(), "{\"q\":\"test\"}");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"q\":\"test\"}"
+        );
     }
 
     #[test]
@@ -1025,12 +1065,18 @@ mod tests {
         assert!(response.is_some());
 
         let resp = response.unwrap();
-        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_001");
         let func = tc[0].get("function").unwrap();
         assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
-        assert_eq!(func.get("arguments").unwrap().as_str().unwrap(), "{\"city\":\"Beijing\"}");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
     }
 }

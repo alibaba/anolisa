@@ -60,9 +60,7 @@ fn default_filter(verbose: bool) -> Filter {
     } else {
         LevelFilter::Warn
     };
-    env_filter::Builder::new()
-        .filter_level(level)
-        .build()
+    env_filter::Builder::new().filter_level(level).build()
 }
 
 fn open_log_writer(log_path: Option<&str>) -> LogWriter {
@@ -180,10 +178,7 @@ mod tests {
 
     #[test]
     fn log_writer_file_append_and_write() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentsight-log-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("agentsight-log-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tempdir");
         let path = dir.join("test.log");
 
@@ -209,10 +204,8 @@ mod tests {
 
     #[test]
     fn logger_reconfigure_swaps_writer() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentsight-log-reconfig-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("agentsight-log-reconfig-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tempdir");
         let path_a = dir.join("a.log");
         let path_b = dir.join("b.log");

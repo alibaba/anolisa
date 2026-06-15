@@ -1,8 +1,8 @@
+use anyhow::Context;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use anyhow::Context;
 
 // ==================== Default Constants ====================
 
@@ -42,7 +42,7 @@ pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
 pub const HF_ENDPOINT: &str = "https://hf-mirror.com";
 
 /// Get the HF_HOME path, expanding `~` to the user's home directory.
-/// 
+///
 /// Uses `$HOME` on Unix and `$USERPROFILE` on Windows as fallback.
 /// Returns `./.agentsight/tokenizers` if home directory cannot be determined.
 pub fn hf_home() -> PathBuf {
@@ -144,7 +144,10 @@ impl FromStr for TcpTarget {
 
         // Full wildcard shortcuts: "*", "*:*", ":*"
         if s == "*" || s == "*:*" || s == ":*" {
-            return Ok(TcpTarget { ip: None, port: None });
+            return Ok(TcpTarget {
+                ip: None,
+                port: None,
+            });
         }
 
         // Helper: parse `"*"` as wildcard, otherwise as IPv4.
@@ -187,7 +190,6 @@ impl FromStr for TcpTarget {
         }
     }
 }
-
 
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
@@ -304,7 +306,9 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
         for group in https_groups {
             for pat in &group.rule {
                 if !pat.is_empty() {
-                    https_rules.push(HttpsRule { pattern: pat.clone() });
+                    https_rules.push(HttpsRule {
+                        pattern: pat.clone(),
+                    });
                 }
             }
         }
@@ -330,12 +334,13 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
 /// Parse a JSON config string into cmdline rules, https rules, and http targets.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
-pub fn parse_json_rules(json: &str) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
-    let parsed: JsonFullConfig = serde_json::from_str(json)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+pub fn parse_json_rules(
+    json: &str,
+) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
+    let parsed: JsonFullConfig =
+        serde_json::from_str(json).map_err(|e| format!("JSON parse error: {}", e))?;
     Ok(extract_rules(&parsed))
 }
-
 
 /// Ensure the agents configuration file exists at the given path.
 ///
@@ -357,8 +362,8 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
 /// Load default cmdline rules (embedded), without touching the filesystem.
 pub fn default_cmdline_rules() -> Vec<CmdlineRule> {
-    let (rules, _, _) = parse_json_rules(DEFAULT_AGENTS_JSON)
-        .expect("embedded DEFAULT_AGENTS_JSON is valid");
+    let (rules, _, _) =
+        parse_json_rules(DEFAULT_AGENTS_JSON).expect("embedded DEFAULT_AGENTS_JSON is valid");
     rules
 }
 
@@ -529,8 +534,13 @@ impl Default for AgentsightConfig {
             log_path: None,
 
             // Tokenizer defaults (read from env vars)
-            tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH").ok().map(PathBuf::from),
-            tokenizer_url: Some("https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json".to_owned()),
+            tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH")
+                .ok()
+                .map(PathBuf::from),
+            tokenizer_url: Some(
+                "https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json"
+                    .to_owned(),
+            ),
 
             // FFI Rule defaults
             cmdline_rules: Vec::new(),
@@ -632,8 +642,8 @@ impl AgentsightConfig {
     ///
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
-        let mut parsed: JsonFullConfig = serde_json::from_str(json)
-            .map_err(|e| format!("JSON parse error: {}", e))?;
+        let mut parsed: JsonFullConfig =
+            serde_json::from_str(json).map_err(|e| format!("JSON parse error: {}", e))?;
 
         if let Some(t) = parsed.trace_enabled {
             self.trace_enabled = t;
@@ -662,7 +672,8 @@ impl AgentsightConfig {
                         Err(e) => {
                             log::warn!(
                                 "Failed to read encryption public_key_path {:?}: {}, encryption disabled",
-                                trimmed, e
+                                trimmed,
+                                e
                             );
                         }
                     }
@@ -757,7 +768,10 @@ impl AgentsightConfig {
     /// # Panics
     /// Panics if `config_path` was not set via `set_config_path` (CLI `--config`).
     pub fn resolve_config_path(&self) -> PathBuf {
-        assert!(self.config_path.is_some(), "config_path must be set via --config");
+        assert!(
+            self.config_path.is_some(),
+            "config_path must be set via --config"
+        );
         self.config_path.clone().unwrap()
     }
 }
@@ -1040,14 +1054,20 @@ mod tests {
     fn test_set_tokenizer_path() {
         let config = AgentsightConfig::new()
             .set_tokenizer_path(Some(PathBuf::from("/path/to/tokenizer.json")));
-        assert_eq!(config.tokenizer_path, Some(PathBuf::from("/path/to/tokenizer.json")));
+        assert_eq!(
+            config.tokenizer_path,
+            Some(PathBuf::from("/path/to/tokenizer.json"))
+        );
     }
 
     #[test]
     fn test_set_tokenizer_url() {
-        let config = AgentsightConfig::new()
-            .set_tokenizer_url(Some("https://example.com/tok.json".into()));
-        assert_eq!(config.tokenizer_url, Some("https://example.com/tok.json".to_string()));
+        let config =
+            AgentsightConfig::new().set_tokenizer_url(Some("https://example.com/tok.json".into()));
+        assert_eq!(
+            config.tokenizer_url,
+            Some("https://example.com/tok.json".to_string())
+        );
     }
 
     #[test]
@@ -1067,7 +1087,10 @@ mod tests {
         let config = AgentsightConfig::new().add_cmdline_rule(rule);
         assert_eq!(config.cmdline_rules.len(), 1);
         assert_eq!(config.cmdline_rules[0].patterns, vec!["node", "*claude*"]);
-        assert_eq!(config.cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
+        assert_eq!(
+            config.cmdline_rules[0].agent_name,
+            Some("Claude Code".to_string())
+        );
         assert!(config.cmdline_rules[0].allow);
     }
 
@@ -1086,7 +1109,9 @@ mod tests {
 
     #[test]
     fn test_add_https_rule() {
-        let rule = HttpsRule { pattern: "*.openai.com".to_string() };
+        let rule = HttpsRule {
+            pattern: "*.openai.com".to_string(),
+        };
         let config = AgentsightConfig::new().add_https_rule(rule);
         assert_eq!(config.https_rules.len(), 1);
         assert_eq!(config.https_rules[0].pattern, "*.openai.com");
@@ -1105,8 +1130,12 @@ mod tests {
                 agent_name: Some("Agent2".to_string()),
                 allow: true,
             })
-            .add_https_rule(HttpsRule { pattern: "*.openai.com".to_string() })
-            .add_https_rule(HttpsRule { pattern: "*.anthropic.com".to_string() });
+            .add_https_rule(HttpsRule {
+                pattern: "*.openai.com".to_string(),
+            })
+            .add_https_rule(HttpsRule {
+                pattern: "*.anthropic.com".to_string(),
+            });
         assert_eq!(config.cmdline_rules.len(), 2);
         assert_eq!(config.https_rules.len(), 2);
     }
@@ -1118,7 +1147,8 @@ mod tests {
         // All should be allow rules
         assert!(rules.iter().all(|r| r.allow));
         // Should contain Hermes, Cosh, OpenClaw agent names
-        let names: Vec<&str> = rules.iter()
+        let names: Vec<&str> = rules
+            .iter()
             .filter_map(|r| r.agent_name.as_deref())
             .collect();
         assert!(names.contains(&"Hermes"));
@@ -1128,7 +1158,8 @@ mod tests {
 
     #[test]
     fn test_default_agents_json_valid() {
-        let (cmdline_rules, https_rules, http_targets) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
+        let (cmdline_rules, https_rules, http_targets) =
+            parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
         // https rules: dashscope.aliyuncs.com configured by default
         assert_eq!(https_rules.len(), 1);

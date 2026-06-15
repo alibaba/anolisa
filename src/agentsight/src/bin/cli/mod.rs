@@ -7,15 +7,15 @@
 //! - `discover`: Discover running AI agents
 //! - `interruption`: Query and manage session interruption events
 
-pub mod token;
-pub mod trace;
 pub mod audit;
 pub mod discover;
-pub mod metrics;
 pub mod interruption;
+pub mod metrics;
 #[cfg(feature = "server")]
 pub mod serve;
 pub mod skill_metrics;
+pub mod token;
+pub mod trace;
 
 /// Parse period string into TimePeriod
 pub fn parse_period(s: &str) -> agentsight::TimePeriod {

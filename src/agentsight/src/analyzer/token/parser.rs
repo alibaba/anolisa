@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use super::{detect_provider_from_usage, extract_usage_object, LLMProvider, TokenUsage};
+use super::{LLMProvider, TokenUsage, detect_provider_from_usage, extract_usage_object};
 use crate::parser::sse::ParsedSseEvent;
 
 /// Token parser for extracting usage from SSE events
@@ -218,7 +218,10 @@ mod tests {
 
         let event = create_test_event(data);
         let usage = parser.parse_event(&event);
-        assert!(usage.is_some(), "Should extract usage from SSE streaming data");
+        assert!(
+            usage.is_some(),
+            "Should extract usage from SSE streaming data"
+        );
 
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, 61744);

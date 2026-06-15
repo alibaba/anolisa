@@ -30,8 +30,7 @@ static RESPONSE_ID_RE: Lazy<Regex> =
 
 /// Regex to match Anthropic/Claude Code message id format: `"id":"msg_<uuid>"`.
 /// Only matches values starting with `msg_` to avoid false positives from other "id" fields.
-static ANTHROPIC_MSG_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#""id":"(msg_[^"]+)"#).unwrap());
+static ANTHROPIC_MSG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""id":"(msg_[^"]+)"#).unwrap());
 
 /// Processes FileWrite events to build an in-memory responseId → sessionId mapping.
 /// Uses an LRU cache to bound memory usage.
@@ -50,9 +49,7 @@ impl ResponseSessionMapper {
     /// Create a new empty mapper with default capacity.
     pub fn new() -> Self {
         ResponseSessionMapper {
-            map: LruCache::new(
-                NonZeroUsize::new(MAX_RESPONSE_MAP_ENTRIES).unwrap(),
-            ),
+            map: LruCache::new(NonZeroUsize::new(MAX_RESPONSE_MAP_ENTRIES).unwrap()),
         }
     }
 
@@ -156,9 +153,8 @@ mod tests {
 
     #[test]
     fn test_extract_session_id_simple() {
-        let id = ResponseSessionMapper::extract_session_id(
-            "550e8400-e29b-41d4-a716-446655440000.jsonl",
-        );
+        let id =
+            ResponseSessionMapper::extract_session_id("550e8400-e29b-41d4-a716-446655440000.jsonl");
         assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
     }
 
@@ -182,7 +178,8 @@ mod tests {
 
     #[test]
     fn test_extract_response_id() {
-        let line = r#"{"responseId":"chatcmpl-03a158a1-8982-90cd-adb1-6c8a1176f1f8","other":"data"}"#;
+        let line =
+            r#"{"responseId":"chatcmpl-03a158a1-8982-90cd-adb1-6c8a1176f1f8","other":"data"}"#;
         let id = ResponseSessionMapper::extract_response_id(line);
         assert_eq!(
             id.as_deref(),
