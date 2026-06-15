@@ -551,7 +551,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
-          components: 'rustfmt, llvm-tools-preview'
+          components: 'rustfmt, clippy, llvm-tools-preview'
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -565,6 +565,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config
           sudo apt-get install -y perl
+
+      - name: Check formatting
+        run: |
+          cd src/agentsight
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/agentsight
+          cargo clippy --all-targets -- -D warnings
 
       - name: Run tests with coverage
         run: |

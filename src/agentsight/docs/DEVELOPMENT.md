@@ -137,6 +137,8 @@ CI (`ci.yaml` 的 `test-agentsight` job) 对每次 PR 执行以下检查：
 
 | 检查项 | 命令 | 失败条件 |
 |--------|------|----------|
+| 格式化 | `cargo fmt --all --check` | 代码未格式化 |
+| Lint | `cargo clippy --all-targets -- -D warnings` | 存在 clippy 警告 |
 | 单元测试 | `cargo test`（通过 `cargo llvm-cov`） | 任何测试失败 |
 | 增量覆盖率 | `diff-cover --fail-under=80` | 新增/修改代码行覆盖率 < 80% |
 

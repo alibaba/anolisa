@@ -77,6 +77,11 @@ uninstall:
 test: ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
 
+.PHONY: lint
+lint: ## Check formatting + clippy
+	cd $(CURDIR) && cargo fmt --all --check
+	cd $(CURDIR) && cargo clippy --all-targets -- -D warnings
+
 .PHONY: test-coverage
 test-coverage: ## Run unit tests with coverage (same as CI)
 	cd $(CURDIR) && cargo llvm-cov --cobertura --output-path coverage.xml \
