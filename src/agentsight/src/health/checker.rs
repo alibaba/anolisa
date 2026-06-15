@@ -245,8 +245,14 @@ impl HealthChecker {
             .map(|a| (a.pid, a.agent_info.name.clone()))
             .collect();
 
+        // Pre-scan listening ports per pid (also avoids scanning /proc twice).
+        let ports_by_pid: HashMap<u32, Vec<u16>> = agents
+            .iter()
+            .map(|a| (a.pid, detect_listening_ports(a.pid)))
+            .collect();
+
         for agent in &agents {
-            let ports = detect_listening_ports(agent.pid);
+            let ports = ports_by_pid.get(&agent.pid).cloned().unwrap_or_default();
             // Cosh has no daemon process and does not support keepalive/restart.
             // Build restart_cmd only for agents that support it.
             let restart_cmd = if agent.agent_info.name == "Cosh" {
@@ -258,17 +264,29 @@ impl HealthChecker {
             // Read parent PID from /proc/<pid>/stat for role inference
             let ppid = read_ppid(agent.pid);
 
-            // Infer role: Gateway (has ports) > Worker (parent is same agent) > Client
+            // Infer role:
+            //   1. ports != empty            → Gateway (real service with TCP port)
+            //   2. parent is same agent_name → Worker (genuine fork, fold under parent)
+            //   3. otherwise                 → Gateway (independent process, own card)
+            //
+            // Two separately-launched hermes/openclaw client instances are
+            // independent (no parent-child link, different terminals), so they
+            // each deserve their own primary card; only true forks go into the
+            // associated-processes drawer of their parent.
             let role = if !ports.is_empty() {
                 AgentRole::Gateway
             } else if let Some(pp) = ppid {
-                if agent_name_by_pid.get(&pp).map(|n| n == &agent.agent_info.name).unwrap_or(false) {
+                if agent_name_by_pid
+                    .get(&pp)
+                    .map(|n| n == &agent.agent_info.name)
+                    .unwrap_or(false)
+                {
                     AgentRole::Worker
                 } else {
-                    AgentRole::Client
+                    AgentRole::Gateway
                 }
             } else {
-                AgentRole::Client
+                AgentRole::Gateway
             };
 
             let status = if ports.is_empty() {

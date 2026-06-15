@@ -54,9 +54,23 @@ const AgentCard: React.FC<{
   onRestart: (pid: number) => void;
   restarting: boolean;
 }> = ({ agent, onDelete, onRestart, restarting }) => {
-  const dotColor = STATUS_COLORS[agent.status] || 'bg-gray-400';
-  const label = STATUS_LABELS[agent.status] || agent.status;
-  const tooltip = STATUS_TOOLTIPS[agent.status] || '';
+  // 区分：真 Gateway = 本身在监听端口的服务进程（如 OpenClaw Gateway）
+  //       升格 Gateway = 被升格为主卡的单进程 agent（如 Hermes Python CLI）—
+  //       这种不该贴“Gateway”标签，他们业务上没有 gateway 概念。
+  const hasPorts = (agent.ports?.length ?? 0) > 0;
+  const isRealGateway = agent.role === 'gateway' && hasPorts;
+  const isPromotedGateway = agent.role === 'gateway' && !hasPorts;
+
+  // 状态显示：升格 Gateway + status=no_port 用“运行中”绿色，避免
+  // 路用原 no_port 的“客户端进程”灰色语义与主卡身份冲突。
+  const useRunningStatus = isPromotedGateway && agent.status === 'no_port';
+  const dotColor = useRunningStatus
+    ? 'bg-green-500'
+    : STATUS_COLORS[agent.status] || 'bg-gray-400';
+  const label = useRunningStatus ? '运行中' : STATUS_LABELS[agent.status] || agent.status;
+  const tooltip = useRunningStatus
+    ? '单进程 agent，本身不提供服务端口，运行正常'
+    : STATUS_TOOLTIPS[agent.status] || '';
   const isOffline = agent.status === 'offline';
   const isHung = agent.status === 'hung';
   const isUnhealthy = agent.status === 'unhealthy';
@@ -97,7 +111,7 @@ const AgentCard: React.FC<{
         <span className={`font-medium text-sm truncate ${nameColor}`}>
           {agent.agent_name}
         </span>
-        {agent.role === 'gateway' && (
+        {isRealGateway && (
           <span className="text-[10px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-medium">
             Gateway
           </span>
@@ -166,6 +180,39 @@ const AgentCard: React.FC<{
   );
 };
 
+/** 主卡下方按 agent_name 展示同名 client/worker 进程的折叠子列表。
+ *  默认折起以免侧栏过长；点击可展开查看。 */
+const RelatedProcesses: React.FC<{
+  agentName: string;
+  related: AgentHealthStatus[];
+}> = ({ agentName: _agentName, related }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="text-[11px] text-gray-500 hover:text-gray-700 flex items-center gap-1"
+      >
+        <span className={`transition-transform ${open ? 'rotate-90' : ''}`}>▶</span>
+        关联进程 ({related.length})
+      </button>
+      {open && (
+        <div className="mt-1 ml-2 border-l-2 border-gray-200 pl-2 space-y-1">
+          {related.map(ca => (
+            <div key={ca.pid} className="text-[11px] text-gray-500 flex items-center gap-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300" />
+              <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100">
+                {ca.role === 'worker' ? 'Worker' : '客户端'}
+              </span>
+              <span className="text-gray-400">PID {ca.pid}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const AgentHealthSidebar: React.FC = () => {
   const [agents, setAgents] = useState<AgentHealthStatus[]>([]);
   const [clientAgents, setClientAgents] = useState<AgentHealthStatus[]>([]);
@@ -189,7 +236,8 @@ export const AgentHealthSidebar: React.FC = () => {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await fetchAgentHealth();
+      // 一次拉全部（包含 client/worker），后续按 agent_name 分组挂到各自主卡下面
+      const data = await fetchAgentHealth({ includeClients: true });
 
       // 检测新增离线和卡顿 agent
       data.agents.forEach(a => {
@@ -213,15 +261,11 @@ export const AgentHealthSidebar: React.FC = () => {
         if (a.status !== 'hung') notifiedOfflineRef.current.delete(-a.pid);
       });
 
-      setAgents(data.agents);
+      // gateway = 主卡列表；others = client/worker，按 agent_name 挂到各主卡下
+      setAgents(data.agents.filter(a => a.role === 'gateway'));
+      setClientAgents(data.agents.filter(a => a.role !== 'gateway'));
       setLastScan(data.last_scan_time);
       setError(null);
-
-      // 如果当前展开了客户端进程，同步刷新
-      if (showClients) {
-        const allData = await fetchAgentHealth({ includeClients: true });
-        setClientAgents(allData.agents.filter(a => a.role !== 'gateway'));
-      }
     } catch (e: any) {
       if (agents.length === 0) {
         setError(e.message || '\u8bf7\u6c42\u5931\u8d25');
@@ -229,7 +273,7 @@ export const AgentHealthSidebar: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [addToast, showClients]);
+  }, [addToast]);
 
   const handleDelete = async (pid: number) => {
     try {
@@ -325,51 +369,60 @@ export const AgentHealthSidebar: React.FC = () => {
           <div className="px-3 py-6 text-center text-xs text-gray-400">暂无已发现的 Agent</div>
         ) : (
           <div>
-            {sorted.map(agent => (
-              <AgentCard
-                key={agent.pid}
-                agent={agent}
-                onDelete={handleDelete}
-                onRestart={handleRestart}
-                restarting={restartingPids.has(agent.pid)}
-              />
-            ))}
-            {/* 关联客户端进程折叠区 */}
-            <div className="px-3 py-2 border-t border-gray-100">
-              <button
-                onClick={async () => {
-                  const next = !showClients;
-                  setShowClients(next);
-                  if (next) {
-                    const allData = await fetchAgentHealth({ includeClients: true });
-                    setClientAgents(allData.agents.filter(a => a.role !== 'gateway'));
-                  } else {
-                    setClientAgents([]);
-                  }
-                }}
-                className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
-              >
-                <span className={`transition-transform ${showClients ? 'rotate-90' : ''}`}>▶</span>
-                关联进程{clientAgents.length > 0 ? ` (${clientAgents.length})` : ''}
-              </button>
-              {showClients && clientAgents.length > 0 && (
-                <div className="mt-1 ml-2 border-l-2 border-gray-100 pl-2 space-y-1">
-                  {clientAgents.map(ca => (
-                    <div key={ca.pid} className="text-[11px] text-gray-500 flex items-center gap-1.5">
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300" />
-                      <span className="font-medium">{ca.agent_name}</span>
-                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100">
-                        {ca.role === 'worker' ? 'Worker' : '客户端'}
-                      </span>
-                      <span className="text-gray-400">PID {ca.pid}</span>
+            {sorted.map(agent => {
+              // 只把 parent_pid 与当前主卡 pid 严格匹配的 Worker 进程挂为关联进程，
+              // 避免同名独立实例（两个独立终端各开一个 hermes）被错误合并。
+              const related = clientAgents.filter(c => c.parent_pid === agent.pid);
+              return (
+                <React.Fragment key={agent.pid}>
+                  <AgentCard
+                    agent={agent}
+                    onDelete={handleDelete}
+                    onRestart={handleRestart}
+                    restarting={restartingPids.has(agent.pid)}
+                  />
+                  {related.length > 0 && (
+                    <RelatedProcesses agentName={agent.agent_name} related={related} />
+                  )}
+                </React.Fragment>
+              );
+            })}
+            {/* 孤儿关联进程：Worker 但父进程不是任何主卡（不应出现，兑底）。
+             *  过滤 status=offline 的进程——它们 5 分钟后会被 TTL 自动清理，
+             *  不需要提前震出来干扰视线。*/}
+            {(() => {
+              const gatewayPids = new Set(sorted.map(a => a.pid));
+              const orphans = clientAgents.filter(c =>
+                c.status !== 'offline' &&
+                (c.parent_pid === undefined || c.parent_pid === null || !gatewayPids.has(c.parent_pid))
+              );
+              if (orphans.length === 0) return null;
+              return (
+                <div className="px-3 py-2 border-t border-gray-100">
+                  <button
+                    onClick={() => setShowClients(s => !s)}
+                    className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                  >
+                    <span className={`transition-transform ${showClients ? 'rotate-90' : ''}`}>▶</span>
+                    孤儿关联进程 ({orphans.length})
+                  </button>
+                  {showClients && (
+                    <div className="mt-1 ml-2 border-l-2 border-gray-100 pl-2 space-y-1">
+                      {orphans.map(ca => (
+                        <div key={ca.pid} className="text-[11px] text-gray-500 flex items-center gap-1.5">
+                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300" />
+                          <span className="font-medium">{ca.agent_name}</span>
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100">
+                            {ca.role === 'worker' ? 'Worker' : '客户端'}
+                          </span>
+                          <span className="text-gray-400">PID {ca.pid}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-              {showClients && clientAgents.length === 0 && (
-                <div className="mt-1 ml-4 text-[11px] text-gray-400 italic">无关联客户端进程</div>
-              )}
-            </div>
+              );
+            })()}
           </div>
         )}
 
