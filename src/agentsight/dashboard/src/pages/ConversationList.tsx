@@ -7,6 +7,7 @@ import {
 import { InterruptionBadge } from '../components/InterruptionBadge';
 import { InterruptionPanel, ResolvedEventInfo } from '../components/InterruptionPanel';
 import { DateTimePicker } from '../components/DateTimePicker';
+import { SessionIdHelp } from '../components/SessionIdHelp';
 import {
   fetchSessions,
   fetchTraces,
@@ -1129,7 +1130,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[220px]">
-                        Session ID
+                        <span className="inline-flex items-center gap-1.5">
+                          <span>Session ID</span>
+                          <SessionIdHelp />
+                        </span>
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[120px]">
                         Agent

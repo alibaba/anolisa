@@ -6,6 +6,7 @@ import {
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
+import { SessionIdHelp } from '../components/SessionIdHelp';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -537,7 +538,10 @@ export const TokenSavingsPage: React.FC = () => {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  Session ID
+                  <span className="inline-flex items-center gap-1.5">
+                    <span>Session ID</span>
+                    <SessionIdHelp />
+                  </span>
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
                   Agent
