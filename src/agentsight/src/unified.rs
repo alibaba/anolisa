@@ -94,9 +94,6 @@ pub struct AgentSight {
     pid_agent_name_cache: HashMap<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
-    /// Flag indicating SLS Logtail has been activated (irreversible)
-    #[allow(dead_code)]
-    sls_activated: Arc<AtomicBool>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
     pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
     /// DeadLoop auto-kill: enabled flag
@@ -452,6 +449,9 @@ impl AgentSight {
         let pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>> =
             Arc::new(Mutex::new(None));
 
+        // Create `running` flag early so background threads can observe shutdown.
+        let running = Arc::new(AtomicBool::new(true));
+
         // Spawn config file watcher for runtime hot-reload
         if let Some(ref cfg_path) = config.config_path {
             Self::start_config_watcher(
@@ -460,23 +460,31 @@ impl AgentSight {
                 Arc::clone(&pending_logtail),
                 config.encryption_public_key.clone(),
                 config.trace_enabled,
+                Arc::clone(&running),
             );
             // Spawn token-collector watcher to bridge ilogtail SLS_LOG_PATH into
             // runtime.sls_logtail_path. Triggered by /etc/anolisa/enable_token_collector
             // file presence; cleared when the file is removed.
-            Self::start_token_collector_watcher(cfg_path.clone());
+            Self::start_token_collector_watcher(cfg_path.clone(), Arc::clone(&running));
         }
 
         // Spawn background thread that marks stale PENDING calls as 'interrupted'.
         // Fires every 60 seconds; any pending call older than 5 minutes is assumed lost.
         if let Some(ref sqlite_store) = genai_sqlite_store {
             let store_ref = Arc::clone(sqlite_store);
+            let stop = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("genai-stale-scanner".to_string())
                 .spawn(move || {
                     log::info!("GenAI stale-pending scanner started (interval=60s, timeout=300s)");
                     loop {
-                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        for _ in 0..60 {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            if !stop.load(Ordering::SeqCst) {
+                                log::info!("GenAI stale-pending scanner stopped");
+                                return;
+                            }
+                        }
                         if let Err(e) = store_ref.mark_interrupted_stale(300) {
                             log::warn!("Stale-pending scan failed: {e}");
                         }
@@ -498,7 +506,7 @@ impl AgentSight {
             storage,
             scanner,
             _poller,
-            running: Arc::new(AtomicBool::new(true)),
+            running,
             event_count: 0,
             filewatch_callback: None,
             response_mapper: ResponseSessionMapper::new(),
@@ -507,7 +515,6 @@ impl AgentSight {
             last_drain_check: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
-            sls_activated,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
@@ -909,6 +916,7 @@ impl AgentSight {
         pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
         encryption_pem: Option<String>,
         trace_enabled: bool,
+        stop: Arc<AtomicBool>,
     ) {
         use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -937,7 +945,12 @@ impl AgentSight {
 
                 let target_filename = watch_path.file_name().map(|f| f.to_os_string());
 
-                for event in rx {
+                while stop.load(Ordering::SeqCst) {
+                    let event = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                        Ok(event) => event,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
                     let event = match event {
                         Ok(e) => e,
                         Err(e) => {
@@ -1045,7 +1058,7 @@ impl AgentSight {
     ///
     /// The actual SLS activation is then handled by `start_config_watcher`, which
     /// reacts to the resulting config file change.
-    fn start_token_collector_watcher(config_path: PathBuf) {
+    fn start_token_collector_watcher(config_path: PathBuf, stop: Arc<AtomicBool>) {
         const ENABLE_FILE: &str = "/etc/anolisa/enable_token_collector";
         const LOGTAIL_CFG: &str = "/etc/anolisa/ilogtail.cfg";
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -1063,7 +1076,7 @@ impl AgentSight {
                 //   Some(None)       — last wrote disabled
                 let mut last_state: Option<Option<String>> = None;
 
-                loop {
+                while stop.load(Ordering::SeqCst) {
                     std::thread::sleep(POLL_INTERVAL);
 
                     let enabled = Path::new(ENABLE_FILE).exists();
@@ -1110,6 +1123,7 @@ impl AgentSight {
                         }
                     }
                 }
+                log::info!("Token-collector watcher stopped");
             })
             .ok();
     }
