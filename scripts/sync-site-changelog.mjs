@@ -319,14 +319,6 @@ function replaceReleaseList(html, releases) {
   return html.replace(releaseListPattern, `$1${block}$2`);
 }
 
-function updateBadge(html, version) {
-  const badgePattern = /(<div class="badge"><span class="badge-dot"><\/span>ANOLISA v)[^<]+(<\/div>)/;
-  if (!badgePattern.test(html)) {
-    throw new Error('could not find ANOLISA version badge in index.html');
-  }
-  return html.replace(badgePattern, `$1${version}$2`);
-}
-
 async function buildChangelogData(limit) {
   const components = [];
 
@@ -369,7 +361,7 @@ async function gitConfig(key) {
 async function buildCommitInfo(version) {
   const title = `docs(site): sync changelog to v${version}`;
   const body = [
-    `- Update homepage version badge to v${version}`,
+    '- Refresh component changelog data from upstream releases',
     '- Add component changelog tabs and language toggle',
   ];
   const name = await gitConfig('user.name');
@@ -407,7 +399,6 @@ async function main() {
 
   const indexPath = path.resolve(args.index);
   let html = await readFile(indexPath, 'utf8');
-  html = updateBadge(html, changelogData.latestVersion);
   html = replaceReleaseList(html, defaultReleases);
   html = replaceChangelogData(html, changelogData);
 
