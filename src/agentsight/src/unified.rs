@@ -701,6 +701,11 @@ impl AgentSight {
                                 );
                             }
                         }
+                    } else {
+                        log::warn!(
+                            "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
+                            output.pending_response_id.as_deref().unwrap_or("unknown")
+                        );
                     }
                     self.pending_genai.push(PendingGenAI {
                         events: output.events,
@@ -921,6 +926,11 @@ impl AgentSight {
 
     /// Complete deferred GenAI events: promote their pending DB rows to
     /// 'complete', then export to non-SQLite exporters (or FFI).
+    ///
+    /// # Preconditions
+    ///
+    /// A `status='pending'` row for each event's `call_id` must already exist
+    /// in `genai_events` (written by `insert_pending` at queue time).
     ///
     /// This mirrors the immediate path (try_process lines 717-744) but is used
     /// when events were queued in `pending_genai` and are now being drained.
