@@ -28,7 +28,24 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 
 详见 → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-## 3. Module Map
+## 3. 代码表面增长控制（Footprint Ladder）
+
+新功能必须选择能解决问题的**最高级别**（最少代码表面）。只有当高级别确实无法实现时，才降级到下一级。
+
+| 级别 | 手段 | 新增代码表面 | 何时使用 | 示例 |
+|------|------|------------|---------|------|
+| **1** | 扩展现有函数/方法 | 最少 | 功能可通过修改现有逻辑实现 | 在 `AgentScanner` 中新增一个 Agent 匹配规则 |
+| **2** | 模块内新增 helper 函数 | 少 | 需要复用逻辑但不改变模块接口 | 在 `parser/sse/` 中提取内部解析 helper |
+| **3** | 新增模块文件 | 中 | 职责明确独立，现有模块无法容纳 | 新建 `src/interruption/` 模块 |
+| **4** | 新增 eBPF 探针 | 大 | 需要捕获新的内核/用户态事件 | 新增 `src/bpf/gotls.bpf.c` + Rust wrapper |
+| **5** | 新增 `extern "C"` FFI 导出 | 最大 | 需要暴露新能力给 C 调用方 | 新增 FFI 函数（须同步 cbindgen.toml + drift guard） |
+
+**规则**：
+- 从级别 1 开始评估，逐级下降，在 PR 描述中说明为什么当前级别不够
+- 禁止直接跳到级别 3-5 而不先考虑是否可以扩展现有代码
+- 级别 4-5 的变更必须在 PR 中附带架构影响说明
+
+## 4. Module Map
 
 | 模块 | 位置 | 职责 | 关键类型 |
 |------|------|------|----------|
@@ -47,14 +64,14 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Config** | `src/config.rs` | 统一配置 | `AgentsightConfig` |
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 
-## 4. Critical Code Paths
+## 5. Critical Code Paths
 
 1. **SSL 捕获流程**: `sslsniff.bpf.c` → `Probes::run()` → `Event::Ssl` → `Parser::parse_ssl_event()` → `HttpConnectionAggregator` → `Analyzer::analyze_aggregated()` → `Storage::store()`
 2. **Agent 自动发现**: `procmon.bpf.c` → `Event::ProcMon::Exec` → `AgentSight::handle_procmon_event()` → `AgentScanner::on_process_create()` → `Probes::attach_process()`
 3. **Token 提取**: `SSE Parser` → `TokenParser::parse_event()` → `TokenRecord` → `TokenStore::add()`
 4. **GenAI 语义构建**: `AnalysisResult` → `GenAIBuilder::build()` → `GenAISemanticEvent::LLMCall` → `GenAIExporter::export()`
 
-## 5. eBPF Probes
+## 6. eBPF Probes
 
 | 探针 | BPF 程序 | 功能 |
 |------|----------|------|
@@ -68,7 +85,7 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 
 构建时 `build.rs` 通过 `libbpf-cargo` 自动生成 eBPF skeleton。
 
-## 6. CLI Subcommands
+## 7. CLI Subcommands
 
 | 命令 | 入口 | 功能 |
 |------|------|------|
@@ -126,7 +143,7 @@ agentsight interruption resolve <INTERRUPTION_ID>
 agentsight interruption --db /path/to/interruption_events.db list --last 48
 ```
 
-## 7. API Endpoints
+## 8. API Endpoints
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
@@ -155,21 +172,21 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/sessions/{id}/interruptions` | GET | 指定 session 的所有中断 |
 | `/api/conversations/{id}/interruptions` | GET | 指定 conversation 的所有中断 |
 
-## 8. Frontend
+## 9. Frontend
 
 React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm run dev`(localhost:3004)，嵌入构建: `npm run build:embed`。
 
-## 9. Configuration
+## 10. Configuration
 
 `AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`。
 
-## 10. Design Docs
+## 11. Design Docs
 
 - [eBPF Probes 设计](docs/design-docs/ebpf-probes.md)
 - [数据流水线设计](docs/design-docs/data-pipeline.md)
 - [GenAI 语义层设计](docs/design-docs/genai-semantic.md)
 
-## 11. Prerequisites
+## 12. Prerequisites
 
 - Linux kernel >= 5.8（BTF 支持）
 - Rust >= 1.80
