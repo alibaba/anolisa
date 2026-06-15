@@ -29,6 +29,17 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 const URL_FETCH_TIMEOUT_MS = 10000;
 const MAX_CONTENT_LENGTH = 100000;
 
+const REFUSAL_PATTERNS: RegExp[] = [
+  /(?:无法|不能|没有(?:能力|权限|办法))\s*(?:访问|浏览|打开|读取|获取|抓取)\s*(?:外部|网站|网页|链接|URL|互联网|网络)/,
+  /(?:cannot|can't|unable\s+to)\s+(?:access|browse|fetch|retrieve|open|read)\s+(?:external|the\s+)?(?:website|webpage|web\s+page|URL|link|internet)/i,
+  /(?:please|请)\s*(?:paste|provide|share|copy|粘贴|提供|分享)\s*(?:the\s+)?(?:content|text|document|文档|内容|网页)/i,
+];
+
+function isRefusalResponse(text: string): boolean {
+  const prefix = text.substring(0, 500);
+  return REFUSAL_PATTERNS.some((pattern) => pattern.test(prefix));
+}
+
 /**
  * Parameters for the WebFetch tool
  */
@@ -84,9 +95,9 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       }
 
       html = await response.text();
-      byteLength = html.length;
+      byteLength = Buffer.byteLength(html, 'utf8');
       console.debug(
-        `[WebFetchTool] Successfully fetched content from ${url} (${byteLength} chars)`,
+        `[WebFetchTool] Successfully fetched content from ${url} (${byteLength} bytes)`,
       );
     } catch (e) {
       const error = e as Error;
@@ -174,6 +185,12 @@ ${textContent}
       const reason = !isValidFinish
         ? `sub-model finishReason=${finishReason}`
         : 'sub-model returned empty text';
+      console.warn(`[WebFetchTool] ${reason} for ${this.params.url}`);
+      return this.buildRawFallbackResult(textContent, stats, reason);
+    }
+
+    if (isRefusalResponse(resultText)) {
+      const reason = 'sub-model returned a refusal response';
       console.warn(`[WebFetchTool] ${reason} for ${this.params.url}`);
       return this.buildRawFallbackResult(textContent, stats, reason);
     }

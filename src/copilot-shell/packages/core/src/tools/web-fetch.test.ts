@@ -136,6 +136,78 @@ describe('WebFetchTool', () => {
       expect(result.llmContent).toContain('Safe doc content');
     });
 
+    it('should degrade to raw content when sub-model returns a Chinese refusal', async () => {
+      vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(false);
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            '<html><body>Alinux4 Agentic Edition docs</body></html>',
+          ),
+      } as Response);
+      mockGenerateContent.mockResolvedValue({
+        candidates: [
+          {
+            finishReason: 'STOP',
+            content: {
+              parts: [
+                {
+                  text: '很抱歉，我无法访问外部网站或链接。请您将文档内容粘贴到对话中，我来帮您分析。',
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://help.aliyun.com/zh/alinux/agentic-os',
+        prompt: 'what is different about agentic edition',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('refusal response');
+      expect(result.llmContent).toContain('Alinux4 Agentic Edition docs');
+      expect(result.returnDisplay).toContain('returned raw content');
+    });
+
+    it('should degrade to raw content when sub-model returns an English refusal', async () => {
+      vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(false);
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        text: () =>
+          Promise.resolve('<html><body>Real page content here</body></html>'),
+      } as Response);
+      mockGenerateContent.mockResolvedValue({
+        candidates: [
+          {
+            finishReason: 'STOP',
+            content: {
+              parts: [
+                {
+                  text: "I'm sorry, but I cannot access external websites or URLs. Please paste the content you'd like me to analyze.",
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://example.com/docs',
+        prompt: 'summarize this page',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('refusal response');
+      expect(result.llmContent).toContain('Real page content here');
+      expect(result.returnDisplay).toContain('returned raw content');
+    });
+
     it('should include fetch and extraction stats in returnDisplay on success', async () => {
       vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(false);
       const html = '<html><body>Hello</body></html>';
