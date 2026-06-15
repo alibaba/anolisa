@@ -18,10 +18,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::claim::AdapterClaim;
+
 /// Current `installed.toml` schema version. Bump on incompatible changes.
 /// When bumped, [`InstalledState::load`] must migrate older on-disk versions
 /// into the current in-memory shape before returning.
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 added the `adapter_claims` array (adapter receipts). The field
+/// default-deserializes, so v1 files load unchanged and are silently
+/// upgraded to v2 on the next save.
+pub const STATE_SCHEMA_VERSION: u32 = 2;
 
 /// Default for `bool` fields that should serialise to `true` when absent.
 fn default_true() -> bool {
@@ -283,6 +289,11 @@ pub struct InstalledState {
     /// Lightweight operation history mirrored by central logs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<OperationRecord>,
+    /// Adapter receipts written by `anolisa adapter enable`. Per-user
+    /// state: each records a framework driver's takeover of framework-side
+    /// state for one component. Empty on fresh and pre-v2 state files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapter_claims: Vec<AdapterClaim>,
 }
 
 impl Default for InstalledState {
@@ -296,6 +307,7 @@ impl Default for InstalledState {
             objects: Vec::new(),
             backups: Vec::new(),
             operations: Vec::new(),
+            adapter_claims: Vec::new(),
         }
     }
 }
@@ -444,6 +456,49 @@ impl InstalledState {
     /// Append an operation record.
     pub fn append_operation(&mut self, op: OperationRecord) {
         self.operations.push(op);
+    }
+
+    /// Find an adapter receipt by `(component, framework)`.
+    pub fn find_adapter_claim(&self, component: &str, framework: &str) -> Option<&AdapterClaim> {
+        self.adapter_claims
+            .iter()
+            .find(|c| c.component == component && c.framework == framework)
+    }
+
+    /// Insert or replace an adapter receipt, deduped by
+    /// `(component, framework)`.
+    pub fn upsert_adapter_claim(&mut self, claim: AdapterClaim) {
+        if let Some(slot) = self
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == claim.component && c.framework == claim.framework)
+        {
+            *slot = claim;
+        } else {
+            self.adapter_claims.push(claim);
+        }
+    }
+
+    /// Remove an adapter receipt by `(component, framework)`, returning the
+    /// removed value.
+    pub fn remove_adapter_claim(
+        &mut self,
+        component: &str,
+        framework: &str,
+    ) -> Option<AdapterClaim> {
+        let idx = self
+            .adapter_claims
+            .iter()
+            .position(|c| c.component == component && c.framework == framework)?;
+        Some(self.adapter_claims.remove(idx))
+    }
+
+    /// All adapter receipts for a component, across frameworks.
+    pub fn adapter_claims_for_component(&self, component: &str) -> Vec<&AdapterClaim> {
+        self.adapter_claims
+            .iter()
+            .filter(|c| c.component == component)
+            .collect()
     }
 }
 

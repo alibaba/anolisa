@@ -201,6 +201,28 @@ pub enum InstallError {
 pub fn read_embedded_component_manifest(
     artifact: &Path,
 ) -> Result<Option<crate::manifest::ComponentManifest>, InstallError> {
+    let Some(text) = read_embedded_component_manifest_text(artifact)? else {
+        return Ok(None);
+    };
+    let manifest = crate::manifest::ComponentManifest::from_toml_str(&text)
+        .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
+    Ok(Some(manifest))
+}
+
+/// Extract the embedded `.anolisa/component.toml` text from a tar.gz
+/// artifact.
+///
+/// Returns `Ok(None)` when the archive has no such entry. This is used when
+/// callers need to persist the published component contract byte-for-byte as
+/// local install metadata.
+///
+/// # Errors
+/// [`InstallError::Io`] when the archive cannot be opened or read;
+/// [`InstallError::Archive`] when gzip/tar decoding fails;
+/// [`InstallError::EmbeddedManifestParse`] when the entry is not valid UTF-8.
+pub fn read_embedded_component_manifest_text(
+    artifact: &Path,
+) -> Result<Option<String>, InstallError> {
     let io_err = |source: std::io::Error| InstallError::Io {
         path: artifact.to_path_buf(),
         source,
@@ -223,9 +245,7 @@ pub fn read_embedded_component_manifest(
             entry.read_to_end(&mut bytes).map_err(io_err)?;
             let text = String::from_utf8(bytes)
                 .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
-            let manifest = crate::manifest::ComponentManifest::from_toml_str(&text)
-                .map_err(|e| InstallError::EmbeddedManifestParse(e.to_string()))?;
-            return Ok(Some(manifest));
+            return Ok(Some(text));
         }
     }
     Ok(None)

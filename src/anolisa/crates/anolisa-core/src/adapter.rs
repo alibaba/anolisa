@@ -20,6 +20,12 @@ use anolisa_platform::fs_layout::FsLayout;
 
 use crate::manifest::AdapterSpec;
 
+pub mod claim;
+pub mod driver;
+pub mod manager;
+pub mod openclaw;
+pub mod registry;
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -34,6 +40,122 @@ pub enum AdapterError {
         placeholder: String,
         /// The full template string that contained it.
         template: String,
+    },
+
+    /// No driver is registered for the requested framework.
+    #[error("no built-in driver for framework '{framework}'")]
+    UnknownFramework {
+        /// Framework name with no registered driver.
+        framework: String,
+    },
+
+    /// The caller omitted the framework and the component ships adapters
+    /// for more than one, so the choice is ambiguous.
+    #[error(
+        "component '{component}' has adapters for multiple frameworks ({}); specify one",
+        .frameworks.join(", ")
+    )]
+    AmbiguousFramework {
+        /// Component the caller asked about.
+        component: String,
+        /// Candidate frameworks discovered for it.
+        frameworks: Vec<String>,
+    },
+
+    /// `enable` requires the framework to be usable on the host, but
+    /// detection failed (e.g. the framework CLI is not installed).
+    #[error("framework '{framework}' not detected: {reason}")]
+    FrameworkNotDetected {
+        /// Framework that could not be detected.
+        framework: String,
+        /// Human-readable detection failure reason.
+        reason: String,
+    },
+
+    /// The component is not installed in any visible (user or system)
+    /// state, so its adapters cannot be enabled.
+    #[error("component '{component}' is not installed")]
+    ComponentNotInstalled {
+        /// Component the caller asked to enable.
+        component: String,
+    },
+
+    /// The installed component manifest does not declare the requested
+    /// framework adapter.
+    #[error("component '{component}' does not declare an adapter for framework '{framework}'")]
+    AdapterNotDeclared {
+        /// Component the caller asked to enable.
+        component: String,
+        /// Framework absent from the installed component manifest.
+        framework: String,
+    },
+
+    /// The installed component manifest required by adapter enable is
+    /// missing, unreadable, or inconsistent with state.
+    #[error("invalid installed component manifest for '{component}' at {path}: {reason}")]
+    AdapterManifest {
+        /// Component whose installed manifest was read.
+        component: String,
+        /// Manifest path that failed.
+        path: PathBuf,
+        /// Human-readable failure detail.
+        reason: String,
+    },
+
+    /// No resource directory was found for the component/framework under
+    /// any visible `{datadir}/adapters/<component>/<framework>/` root.
+    #[error("no adapter resources found for '{component}/{framework}' under any datadir root")]
+    ResourceRootNotFound {
+        /// Component name.
+        component: String,
+        /// Framework name.
+        framework: String,
+    },
+
+    /// The resource bundle is missing required files or is otherwise
+    /// unreadable by the driver.
+    #[error("invalid adapter bundle at {root}: {reason}")]
+    BundleInvalid {
+        /// Resource root inspected.
+        root: PathBuf,
+        /// What was wrong.
+        reason: String,
+    },
+
+    /// A framework CLI invocation failed to spawn, exited non-zero, or was
+    /// killed after the timeout.
+    #[error("framework CLI '{program}' failed: {reason}")]
+    FrameworkCli {
+        /// Program that was invoked.
+        program: String,
+        /// Failure detail (exit status, spawn error, or timeout).
+        reason: String,
+    },
+
+    /// A receipt's claim resources failed re-validation.
+    #[error("adapter claim validation failed: {0}")]
+    ClaimValidation(#[from] claim::ClaimValidationError),
+
+    /// Failed to take the install lock.
+    #[error("install lock error: {0}")]
+    Lock(#[from] crate::lock::LockError),
+
+    /// Failed to read or write installed state.
+    #[error("installed state error: {0}")]
+    State(#[from] crate::state::StateError),
+
+    /// Failed to append to the central log.
+    #[error("central log error: {0}")]
+    Log(#[from] crate::central_log::CentralLogError),
+
+    /// Filesystem error while discovering resources or computing a digest.
+    #[error("io error while accessing {path}: {source}")]
+    Io {
+        /// Path that failed.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
     },
 }
 

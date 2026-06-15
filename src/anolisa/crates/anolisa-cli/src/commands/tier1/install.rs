@@ -17,12 +17,15 @@
 
 use clap::Parser;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_core::install_runner::{
-    InstallRunner, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES, read_embedded_component_manifest,
+    InstallRunner, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES,
+    read_embedded_component_manifest_text,
 };
 use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
@@ -96,6 +99,14 @@ struct PreparedInstall {
     artifact_path: PathBuf,
     files: Vec<ResolvedInstallFile>,
     services: Vec<String>,
+    manifest_toml: String,
+}
+
+/// Parsed install contract plus the TOML persisted as the local install fact.
+struct LoadedInstallContract {
+    manifest: ComponentManifest,
+    source: InstallContractSource,
+    toml: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,8 +378,7 @@ fn build_install_preview(
         ));
     }
 
-    let Some((manifest, source)) = load_lightweight_install_contract(ctx, layout, &resolution)?
-    else {
+    let Some(contract) = load_lightweight_install_contract(ctx, layout, &resolution)? else {
         resolution.warnings.push(format!(
             "dry-run did not download artifact {}; file and service details are unavailable",
             resolution.artifact_url
@@ -381,14 +391,14 @@ fn build_install_preview(
     };
 
     let (files, services) = match resolve_manifest_contract(
-        &manifest,
+        &contract.manifest,
         layout,
         &resolution,
         ctx.install_mode.as_str(),
-        source,
+        contract.source,
     ) {
-        Ok(contract) => contract,
-        Err(err) if source == InstallContractSource::LocalCatalog => {
+        Ok(contract_files) => contract_files,
+        Err(err) if contract.source == InstallContractSource::LocalCatalog => {
             resolution.warnings.push(format!(
                 "local catalog manifest does not match resolved artifact; file and service details are unavailable: {}",
                 err.reason()
@@ -431,14 +441,14 @@ fn prepare_raw_execution(
             ),
         })?;
 
-    let (manifest, source) =
+    let contract =
         load_execution_install_contract(ctx, layout, &resolution, &artifact.cached_path)?;
     let (files, services) = resolve_manifest_contract(
-        &manifest,
+        &contract.manifest,
         layout,
         &resolution,
         ctx.install_mode.as_str(),
-        source,
+        contract.source,
     )?;
 
     Ok(PreparedInstall {
@@ -446,6 +456,7 @@ fn prepare_raw_execution(
         artifact_path: artifact.cached_path,
         files,
         services,
+        manifest_toml: contract.toml,
     })
 }
 
@@ -453,11 +464,11 @@ fn load_execution_install_contract(
     ctx: &CliContext,
     layout: &FsLayout,
     resolution: &RawResolution,
-    artifact_path: &std::path::Path,
-) -> Result<(ComponentManifest, InstallContractSource), CliError> {
+    artifact_path: &Path,
+) -> Result<LoadedInstallContract, CliError> {
     match resolution.entry.artifact_type {
         ArtifactType::TarGz => {
-            let manifest = read_embedded_component_manifest(artifact_path)
+            let toml = read_embedded_component_manifest_text(artifact_path)
                 .map_err(|err| CliError::Runtime {
                     command: COMMAND.to_string(),
                     reason: format!(
@@ -472,7 +483,20 @@ fn load_execution_install_contract(
                         resolution.package
                     ),
                 })?;
-            Ok((manifest, InstallContractSource::EmbeddedArtifact))
+            let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| {
+                CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "failed to parse embedded component manifest from {}: {err}",
+                        resolution.artifact_url
+                    ),
+                }
+            })?;
+            Ok(LoadedInstallContract {
+                manifest,
+                source: InstallContractSource::EmbeddedArtifact,
+                toml,
+            })
         }
         ArtifactType::Binary => {
             load_lightweight_install_contract(ctx, layout, resolution)?.ok_or_else(|| {
@@ -500,19 +524,18 @@ fn load_lightweight_install_contract(
     ctx: &CliContext,
     layout: &FsLayout,
     resolution: &RawResolution,
-) -> Result<Option<(ComponentManifest, InstallContractSource)>, CliError> {
-    if let Some(manifest) = fetch_sidecar_meta_manifest(layout, resolution)? {
-        return Ok(Some((manifest, InstallContractSource::SidecarMeta)));
+) -> Result<Option<LoadedInstallContract>, CliError> {
+    if let Some(contract) = fetch_sidecar_meta_manifest(layout, resolution)? {
+        return Ok(Some(contract));
     }
 
-    Ok(load_catalog_manifest(ctx, &resolution.component)?
-        .map(|manifest| (manifest, InstallContractSource::LocalCatalog)))
+    load_catalog_manifest(ctx, &resolution.component)
 }
 
 fn fetch_sidecar_meta_manifest(
     layout: &FsLayout,
     resolution: &RawResolution,
-) -> Result<Option<ComponentManifest>, CliError> {
+) -> Result<Option<LoadedInstallContract>, CliError> {
     let Some(meta_url) = sidecar_meta_url(
         &resolution.artifact_url,
         &resolution.entry.component,
@@ -535,7 +558,7 @@ fn fetch_sidecar_meta_manifest(
             });
         }
     };
-    let text =
+    let toml =
         std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
@@ -543,20 +566,44 @@ fn fetch_sidecar_meta_manifest(
                 downloaded.cached_path.display()
             ),
         })?;
-    ComponentManifest::from_toml_str(&text)
-        .map(Some)
-        .map_err(|err| CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
-        })
+    let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+    })?;
+    Ok(Some(LoadedInstallContract {
+        manifest,
+        source: InstallContractSource::SidecarMeta,
+        toml,
+    }))
 }
 
 fn load_catalog_manifest(
     ctx: &CliContext,
     component: &str,
-) -> Result<Option<ComponentManifest>, CliError> {
+) -> Result<Option<LoadedInstallContract>, CliError> {
     let catalog = common::load_bundled_catalog(ctx, COMMAND)?;
-    Ok(catalog.component(component).cloned())
+    let Some(manifest) = catalog.component(component).cloned() else {
+        return Ok(None);
+    };
+    let toml = serialize_manifest_toml(&manifest, InstallContractSource::LocalCatalog)?;
+    Ok(Some(LoadedInstallContract {
+        manifest,
+        source: InstallContractSource::LocalCatalog,
+        toml,
+    }))
+}
+
+fn serialize_manifest_toml(
+    manifest: &ComponentManifest,
+    source: InstallContractSource,
+) -> Result<String, CliError> {
+    toml::to_string_pretty(manifest).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "failed to serialize {} for local install metadata: {err}",
+            source.label()
+        ),
+    })
 }
 
 fn manifest_digest_sha256(digest: Option<&str>) -> Result<Option<&str>, CliError> {
@@ -632,7 +679,7 @@ fn resolve_manifest_contract(
         });
     }
 
-    let files = resolve_manifest_files(manifest, layout, &resolution.component)?;
+    let mut files = resolve_manifest_files(manifest, layout, &resolution.component)?;
     if files.is_empty() {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
@@ -642,6 +689,15 @@ fn resolve_manifest_contract(
             ),
         });
     }
+    // Adapter resources are laid alongside the component's own files, from
+    // the same artifact. Install only *places* them under the standard
+    // `{datadir}/adapters/<component>/<framework>/` tree — enabling them
+    // against a framework is the separate `anolisa adapter enable` step.
+    files.extend(resolve_adapter_files(
+        manifest,
+        layout,
+        &resolution.component,
+    )?);
 
     Ok((files, manifest.install.services.clone()))
 }
@@ -707,6 +763,89 @@ fn resolve_manifest_files(
     Ok(files)
 }
 
+/// Render the manifest's `[[adapters]]` entries into install file mappings.
+///
+/// Install only *places* adapter resources under the standard
+/// `{datadir}/adapters/<component>/<framework>/` tree; it never runs a
+/// framework CLI or touches user framework state — that is
+/// `anolisa adapter enable`.
+///
+/// Each entry is linted up front for the fields install needs: a framework,
+/// a source, and a destination. The framework does not have to be supported
+/// by this ANOLISA build; install only lays data down, while
+/// `anolisa adapter enable` decides whether a built-in driver exists.
+fn resolve_adapter_files(
+    manifest: &ComponentManifest,
+    layout: &FsLayout,
+    component: &str,
+) -> Result<Vec<ResolvedInstallFile>, CliError> {
+    if manifest.adapters.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::with_capacity(manifest.adapters.len());
+    for adapter in &manifest.adapters {
+        let framework = adapter
+            .framework
+            .as_deref()
+            .ok_or_else(|| CliError::InvalidArgument {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "component '{component}' has an [[adapters]] entry with no framework"
+                ),
+            })?;
+        let source = adapter
+            .source
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| CliError::InvalidArgument {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "component '{component}' adapter for '{framework}' declares no source"
+                ),
+            })?;
+        let dest_template = adapter
+            .dest
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| CliError::InvalidArgument {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "component '{component}' adapter for '{framework}' declares no dest"
+                ),
+            })?;
+        let dest = expand_layout_placeholders(dest_template, layout, &[("component", component)])
+            .map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to expand adapter dest '{dest_template}': {err}"),
+        })?;
+        validate_owned_path(layout, &dest).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "adapter destination '{}' failed path safety check: {err}",
+                dest.display()
+            ),
+        })?;
+        // The runner lays an entire archive subtree only when the source key
+        // ends with '/'. An adapter bundle is always a directory, so force
+        // directory-prefix semantics regardless of how the manifest wrote it.
+        let source = if source.ends_with('/') {
+            source.to_string()
+        } else {
+            format!("{source}/")
+        };
+        files.push(ResolvedInstallFile {
+            source: Some(source),
+            dest,
+            // Bundle contents are framework-loaded data, not directly
+            // executed by ANOLISA; lay them 0644. Per-file modes inside a
+            // bundle are not expressible in `[[adapters]]` in the MVP.
+            mode: Some("0644".to_string()),
+            kind: FileKind::Data,
+        });
+    }
+    Ok(files)
+}
+
 /// Execute the resolved install: download+verify, copy files under the
 /// install lock, persist state, and append the audit record. Files already
 /// on disk are rolled back when a later step fails, so no phantom install
@@ -722,6 +861,7 @@ fn execute_raw(
         artifact_path,
         files,
         services,
+        manifest_toml,
     } = prepared;
     let started_at = now_iso8601();
 
@@ -765,8 +905,16 @@ fn execute_raw(
         })?;
 
     // From this point files are on disk — failures must roll them back.
+    let manifest_path =
+        match write_installed_component_manifest(layout, &resolution.component, &manifest_toml) {
+            Ok(path) => path,
+            Err(err) => {
+                rollback_installed_files(&outcome.files);
+                return Err(err);
+            }
+        };
 
-    let owned_files: Vec<OwnedFile> = outcome
+    let mut owned_files: Vec<OwnedFile> = outcome
         .files
         .iter()
         .map(|f| OwnedFile {
@@ -775,11 +923,17 @@ fn execute_raw(
             sha256: Some(f.sha256.clone()),
         })
         .collect();
-    let installed_paths: Vec<String> = outcome
+    owned_files.push(OwnedFile {
+        path: manifest_path.clone(),
+        owner: FileOwner::Anolisa,
+        sha256: None,
+    });
+    let mut installed_paths: Vec<String> = outcome
         .files
         .iter()
         .map(|f| f.path.display().to_string())
         .collect();
+    installed_paths.push(manifest_path.display().to_string());
 
     let service_manager = match ctx.install_mode {
         crate::context::InstallMode::System => "systemd",
@@ -844,6 +998,7 @@ fn execute_raw(
     let state_path = layout.state_dir.join("installed.toml");
     if let Err(err) = state.save(&state_path) {
         rollback_installed_files(&outcome.files);
+        rollback_installed_manifest(&manifest_path);
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
@@ -1137,6 +1292,55 @@ fn rollback_installed_files(files: &[anolisa_core::InstalledFile]) {
     }
 }
 
+fn write_installed_component_manifest(
+    layout: &FsLayout,
+    component: &str,
+    toml: &str,
+) -> Result<PathBuf, CliError> {
+    let path = common::installed_component_manifest_path(layout, component, COMMAND)?;
+    write_atomic_text(&path, toml).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "failed to write installed component manifest at {}: {err}",
+            path.display()
+        ),
+    })?;
+    Ok(path)
+}
+
+fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("component.toml");
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let tmp = parent.join(format!(".{name}.tmp-{}-{nanos}", std::process::id()));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    drop(file);
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn rollback_installed_manifest(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
 /// ISO 8601 UTC timestamp with second precision.
 fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -1231,6 +1435,97 @@ type = "executable"
             (".anolisa/component.toml", manifest.as_bytes()),
             (bin_path.as_str(), payload.as_bytes()),
         ])
+    }
+
+    /// Build a manifest with a single `[[adapters]]` entry, optionally
+    /// overriding the framework and whether source/dest are present.
+    fn adapter_manifest(framework: &str, source: Option<&str>, dest: Option<&str>) -> String {
+        let mut toml = String::from(
+            "[component]\nname = \"tokenless\"\nversion = \"0.1.0\"\n\n\
+             [component.layout]\nmodes = [\"system\"]\n\n\
+             [[adapters]]\n",
+        );
+        toml.push_str(&format!("framework = \"{framework}\"\n"));
+        if let Some(s) = source {
+            toml.push_str(&format!("source = \"{s}\"\n"));
+        }
+        if let Some(d) = dest {
+            toml.push_str(&format!("dest = \"{d}\"\n"));
+        }
+        toml
+    }
+
+    #[test]
+    fn resolve_adapter_files_lays_bundle_under_datadir() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = adapter_manifest(
+            "openclaw",
+            Some("adapters/tokenless/openclaw"),
+            Some("{datadir}/adapters/{component}/openclaw/"),
+        );
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let files = resolve_adapter_files(&manifest, &layout, "tokenless").expect("resolve");
+
+        assert_eq!(files.len(), 1);
+        let f = &files[0];
+        // Source is normalized to a directory prefix so the whole bundle
+        // tree is laid down by the runner.
+        assert_eq!(f.source.as_deref(), Some("adapters/tokenless/openclaw/"));
+        assert_eq!(f.dest, layout.datadir.join("adapters/tokenless/openclaw"));
+        assert_eq!(f.kind, FileKind::Data);
+        assert_eq!(f.mode.as_deref(), Some("0644"));
+    }
+
+    #[test]
+    fn resolve_adapter_files_allows_unknown_framework() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = adapter_manifest(
+            "hermes",
+            Some("adapters/tokenless/hermes"),
+            Some("{datadir}/adapters/{component}/hermes/"),
+        );
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let files = resolve_adapter_files(&manifest, &layout, "tokenless").expect("resolve");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].source.as_deref(),
+            Some("adapters/tokenless/hermes/")
+        );
+        assert_eq!(
+            files[0].dest,
+            layout.datadir.join("adapters/tokenless/hermes")
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_files_rejects_missing_source() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = adapter_manifest(
+            "openclaw",
+            None,
+            Some("{datadir}/adapters/{component}/openclaw/"),
+        );
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let err = resolve_adapter_files(&manifest, &layout, "tokenless")
+            .expect_err("missing source must be rejected");
+        assert!(
+            matches!(err, CliError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_files_empty_when_no_adapters() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = component_manifest_toml("tokenless", "0.1.0", &["system"]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let files = resolve_adapter_files(&manifest, &layout, "tokenless").expect("resolve");
+        assert!(files.is_empty());
     }
 
     fn write_empty_repo(root: &Path) -> String {
@@ -1753,6 +2048,17 @@ base_url = "https://example.com/yum-repo"
         let layout = FsLayout::system(Some(prefix));
         let bin = layout.bin_dir.join("agentsight");
         assert!(bin.exists(), "binary must be installed at {{bindir}}");
+        let manifest_path =
+            common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+                .expect("manifest path");
+        assert!(
+            manifest_path.exists(),
+            "installed component manifest must be persisted"
+        );
+        let saved_manifest =
+            ComponentManifest::from_file(&manifest_path).expect("saved manifest parses");
+        assert_eq!(saved_manifest.component.name, "agentsight");
+        assert_eq!(saved_manifest.component.version, "0.2.0");
 
         let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
             .expect("state must load");
@@ -1761,7 +2067,11 @@ base_url = "https://example.com/yum-repo"
             .expect("component object must be recorded");
         assert_eq!(obj.version, "0.2.0");
         assert_eq!(obj.status, ObjectStatus::Installed);
-        assert_eq!(obj.files.len(), 1);
+        assert_eq!(obj.files.len(), 2);
+        assert!(
+            obj.files.iter().any(|file| file.path == manifest_path),
+            "installed manifest must be tracked as an owned file"
+        );
         assert!(
             obj.distribution_source
                 .as_deref()

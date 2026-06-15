@@ -7,8 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anolisa_core::{
-    Catalog, CatalogLayers, DistributionIndex, FetchFailure, HttpFetch, InstalledState,
-    ObjectStatus, UreqFetch,
+    Catalog, CatalogLayers, FetchFailure, HttpFetch, InstalledState, ObjectStatus, UreqFetch,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -20,12 +19,11 @@ use crate::response::CliError;
 /// Subdirectory under `datadir` and `etc_dir` where component
 /// manifests live (e.g. `share/anolisa/manifests`, `etc/anolisa/manifests`).
 const MANIFESTS_SUBDIR: &str = "manifests";
-
-/// Subdirectory under `manifests/` that holds DistributionIndex files.
-const DIST_INDEX_SUBDIR: &str = "distribution-index";
-
-/// Default file name for the bundled DistributionIndex.
-const DIST_INDEX_FILE: &str = "index.toml";
+/// State subdirectory where install stores the exact component contract
+/// used for each installed component.
+const INSTALLED_COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
+/// Filename used for the locally persisted installed component contract.
+const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 
 /// Build the layout for the active install mode, honoring `--prefix`
 /// (system-mode) and resolving `$HOME` via `EnvService::detect` (user-mode).
@@ -51,6 +49,36 @@ pub fn load_installed_state(ctx: &CliContext, command: &str) -> Result<Installed
             path.display()
         ),
     })
+}
+
+/// Path for the component manifest saved as part of an installed component's
+/// local state.
+pub fn installed_component_manifest_path(
+    layout: &FsLayout,
+    component: &str,
+    command: &str,
+) -> Result<PathBuf, CliError> {
+    validate_component_path_segment(component, command)?;
+    Ok(layout
+        .state_dir
+        .join(INSTALLED_COMPONENT_MANIFESTS_SUBDIR)
+        .join(component)
+        .join(INSTALLED_COMPONENT_MANIFEST_FILE))
+}
+
+fn validate_component_path_segment(component: &str, command: &str) -> Result<(), CliError> {
+    if component.trim().is_empty()
+        || component == "."
+        || component == ".."
+        || component.contains('/')
+        || component.contains('\\')
+    {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!("component name '{component}' cannot be used as a local path segment"),
+        });
+    }
+    Ok(())
 }
 
 /// Load the layered catalog.
@@ -112,58 +140,6 @@ fn dev_tree_manifests() -> Option<PathBuf> {
         .join("..")
         .join("manifests");
     candidate.is_dir().then_some(candidate)
-}
-
-/// Load the `DistributionIndex`. Search order mirrors
-/// [`load_bundled_catalog`]'s layering so an overlay can substitute the
-/// index without rebuilding the bundle:
-///
-///   1. `manifests_overlay/distribution-index/index.toml` (e.g.
-///      `/etc/anolisa/manifests/...` in system mode,
-///      `~/.config/anolisa/manifests/...` in user mode).
-///   2. Packaged: `datadir/manifests/distribution-index/index.toml`.
-///   3. Dev-tree fallback so `cargo run` works without an install.
-///
-/// Returns `Ok(None)` when no index file is present anywhere — callers may
-/// treat that as "no prebuilt artifacts known" rather than an error so
-/// fresh checkouts without an index still produce a useful plan. The
-/// `enable --dry-run` handler in particular substitutes an empty
-/// [`DistributionIndex`] in that case so the plan still renders.
-///
-/// Today the overlay fully replaces the bundled index when present (no
-/// per-entry merging). The launch spec leaves merge semantics for a later
-/// milestone; document the current behavior in the user-facing docs.
-pub fn load_distribution_index(
-    ctx: &CliContext,
-    command: &str,
-) -> Result<Option<DistributionIndex>, CliError> {
-    let layout = resolve_layout(ctx);
-    let path = distribution_index_path(&layout);
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    DistributionIndex::load(&path)
-        .map(Some)
-        .map_err(|err| CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "failed to load distribution index at {}: {err}",
-                path.display(),
-            ),
-        })
-}
-
-fn distribution_index_path(layout: &FsLayout) -> Option<PathBuf> {
-    let overlay_candidate = layout
-        .manifests_overlay
-        .join(DIST_INDEX_SUBDIR)
-        .join(DIST_INDEX_FILE);
-    if overlay_candidate.is_file() {
-        return Some(overlay_candidate);
-    }
-    let manifests_root = packaged_manifests_root(layout).or_else(dev_tree_manifests)?;
-    let candidate = manifests_root.join(DIST_INDEX_SUBDIR).join(DIST_INDEX_FILE);
-    candidate.is_file().then_some(candidate)
 }
 
 // ── Component catalog URL resolution ────────────────────────────────

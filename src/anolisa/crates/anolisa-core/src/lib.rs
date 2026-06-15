@@ -31,6 +31,12 @@ pub mod state;
 pub mod transaction;
 pub mod upload;
 
+pub use adapter::claim::{AdapterClaim, ClaimResource, ClaimResourceKind, ClaimStatus};
+pub use adapter::driver::{AdapterStatusReport, AdapterSummary, ConditionStatus, DriverPlan};
+pub use adapter::manager::{
+    AdapterManager, DisableOutcome, EnableOutcome, ScanReport, StatusReport,
+};
+pub use adapter::registry::DriverRegistry;
 pub use adapter::{AdapterError, DetectResult, detect_framework, expand_layout_placeholders};
 pub use backup::{BackupEntry, BackupSet};
 pub use catalog::{Catalog, CatalogError, CatalogLayers};

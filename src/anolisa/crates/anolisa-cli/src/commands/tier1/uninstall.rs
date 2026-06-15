@@ -95,6 +95,28 @@ pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
             ),
         });
     }
+    // Adapter receipts must be released before the component is removed.
+    // Uninstall does not auto-cascade into framework state (a framework CLI
+    // might be unavailable, and silently orphaning a registered plugin is
+    // worse than refusing). Block the real run and point the user at
+    // `adapter disable`; a dry-run still renders its preview.
+    if !ctx.dry_run {
+        let claims = installed.adapter_claims_for_component(target);
+        if !claims.is_empty() {
+            let mut frameworks: Vec<&str> = claims.iter().map(|c| c.framework.as_str()).collect();
+            frameworks.sort_unstable();
+            frameworks.dedup();
+            return Err(CliError::InvalidArgument {
+                command,
+                reason: format!(
+                    "'{target}' has enabled adapters ({}); run `anolisa adapter disable {target}` \
+                     for each framework before uninstalling",
+                    frameworks.join(", ")
+                ),
+            });
+        }
+    }
+
     let plan = match operation {
         LifecycleOperation::Uninstall => LifecyclePlan::for_component_uninstall(target, &installed),
         LifecycleOperation::Purge => LifecyclePlan::for_component_purge(target, &installed),
