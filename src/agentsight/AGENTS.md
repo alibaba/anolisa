@@ -2,6 +2,34 @@
 
 > AI Agent 可观测性工具，基于 eBPF 捕获 LLM API 调用、Token 消耗和进程行为，无需修改 Agent 代码。
 
+## 0. 硬性规则
+
+### 代码
+- 提交前必须运行 `cargo fmt` + `cargo clippy --all-targets -- -D warnings` + `cargo test`
+- 禁止在非测试代码中使用 `unwrap()` 或 `expect()` — 用 `?`、`match` 或 `unwrap_or` 替代
+- 禁止使用 `dbg!()` — 用 `log::debug!()` 或 `tracing::debug!()` 替代
+- 禁止添加 `#[allow(clippy::...)]` 除非附带注释说明原因
+- PR diff 不应超过 800 行；复杂逻辑变更应控制在 500 行以内，超出则拆分为多个可 review 的阶段
+
+### 架构
+- 禁止高层模块直接 import 低层模块（如 `server/` → `probes/`），遵循 [ARCHITECTURE.md](docs/ARCHITECTURE.md) 中 L0–L8 层级约束
+- 优先扩展现有模块，而非创建新文件
+- 单模块目标 < 500 行（不含测试）；超过 2,000 行的文件在增加代码前必须先有拆分计划
+
+### 测试
+- 流水线逻辑变更（probes → parser → aggregator → analyzer → genai → storage）必须包含集成测试
+- 跨模块行为优先写集成测试，而非单元测试
+- 测试代码放在独立的 `*_tests.rs` 文件或 `#[cfg(test)] mod tests` 中，避免在主实现中添加仅测试用的函数
+
+### FFI
+- 修改 FFI 函数签名时必须同步更新 `cbindgen.toml` 并确认 `build.rs` drift guard 通过
+- FFI 类型必须使用 `#[repr(C)]`
+- 禁止 panic 穿越 FFI 边界 — 使用 `std::panic::catch_unwind`
+
+### eBPF
+- 禁止修改 BPF 程序而不验证 kernel >= 5.8 兼容性
+- BPF 变更必须在真实内核上测试，仅编译通过不够
+
 ## 1. Quick Start
 
 ```bash
