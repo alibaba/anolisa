@@ -87,6 +87,7 @@ fn print_human_readable(result: &TokenQueryResult, show_compare: bool) {
     );
 
     // Comparison
+    #[allow(clippy::collapsible_if)]
     if show_compare {
         if let Some(ref comp) = result.comparison {
             let trend = match comp.trend {

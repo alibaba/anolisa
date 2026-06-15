@@ -5,6 +5,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 #![allow(clippy::doc_overindented_list_items)]
 #![allow(clippy::unnecessary_cast)]
+#![allow(clippy::collapsible_if)]
 
 //! AgentSight - AI Agent observability library
 //!
