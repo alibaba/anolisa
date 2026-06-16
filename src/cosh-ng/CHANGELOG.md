@@ -4,6 +4,19 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-06-16
+
+### Added
+- P0 hook system with 5 lifecycle events (`on_session_start`, `on_turn_start`, `on_turn_end`, `on_tool_call`, `on_session_end`) in cosh-tui
+- Shell approval classification and hook origin tracking in cosh-shell
+- Migrate current cosh shell into monorepo workspace
+
+### Fixed
+- Address approval review findings in cosh-shell
+- Harden shell evidence continuation to prevent dropped context
+- Normalize tool call streaming protocol in cosh-tui
+- Fix passthrough for subcommands in cosh-shell
+
 ## [0.5.0] — 2026-06-15
 
 ### Added
