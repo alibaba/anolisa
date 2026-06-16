@@ -571,6 +571,11 @@ jobs:
           cd src/agentsight
           cargo fmt --all --check
 
+      - name: Check architecture boundaries
+        run: |
+          cd src/agentsight
+          python3 scripts/check-arch-boundaries.py
+
       - name: Lint
         run: |
           cd src/agentsight
