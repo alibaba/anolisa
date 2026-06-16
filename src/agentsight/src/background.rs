@@ -2,6 +2,7 @@ use crate::genai::GenAIExporter;
 use crate::genai::logtail::LogtailExporter;
 use crate::storage::sqlite::GenAISqliteStore;
 use anyhow::Context;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,83 @@ pub(crate) fn stale_scanner_loop(store: &GenAISqliteStore, stop: &AtomicBool, in
     }
 }
 
+/// True if a filesystem event is a "file fully written" (CloseWrite) event.
+///
+/// Pure helper extracted so the config-watcher's event filtering is unit-testable
+/// without spawning a real inotify watcher.
+pub(crate) fn is_close_write(kind: &notify::EventKind) -> bool {
+    matches!(
+        kind,
+        notify::EventKind::Access(notify::event::AccessKind::Close(
+            notify::event::AccessMode::Write
+        ))
+    )
+}
+
+/// True if any of `paths` has a file name equal to `target`.
+///
+/// Pure helper extracted from the config-watcher's path filtering.
+pub(crate) fn path_matches_target(paths: &[PathBuf], target: &Option<OsString>) -> bool {
+    paths
+        .iter()
+        .any(|p| p.file_name().map(|f| f.to_os_string()) == *target)
+}
+
+/// Decision produced by [`decide_sls_config_change`]: what the config watcher
+/// should do in response to a parsed `runtime.sls_logtail_path` value.
+///
+/// Side effects (process exit, exporter construction, mailbox write) are carried
+/// out by the thread shell so the decision logic stays pure and testable.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SlsConfigAction {
+    /// Field missing / parse error, or empty path while already inactive: no-op.
+    NoChange,
+    /// Empty path while active: SLS was just deactivated (dynamic path cleared).
+    Deactivated,
+    /// Non-empty path but uid fetch failed: the shell must abort the process.
+    AbortUidMissing,
+    /// Non-empty path, first activation: shell should build a LogtailExporter for
+    /// `path` and deposit it into the mailbox.
+    Activate { path: String },
+    /// Non-empty path, already active: dynamic path swapped, no new exporter.
+    Reactivated { path: String },
+}
+
+/// Decide how to react to a parsed `runtime.sls_logtail_path`, mutating the
+/// shared `sls_activated` flag and the process-global dynamic logtail path.
+///
+/// `uid` is passed in (not fetched here) because `get_owner_account_id` blocks on
+/// ECS metadata and `process::exit`s the test harness; the shell fetches it and
+/// this function only inspects whether it is empty.
+pub(crate) fn decide_sls_config_change(
+    parsed: Option<Option<String>>,
+    sls_activated: &AtomicBool,
+    uid: &str,
+) -> SlsConfigAction {
+    match parsed {
+        None => SlsConfigAction::NoChange,
+        Some(None) => {
+            if sls_activated.swap(false, Ordering::SeqCst) {
+                crate::genai::logtail::set_dynamic_logtail_path("");
+                SlsConfigAction::Deactivated
+            } else {
+                SlsConfigAction::NoChange
+            }
+        }
+        Some(Some(new_path)) => {
+            if uid.is_empty() {
+                return SlsConfigAction::AbortUidMissing;
+            }
+            crate::genai::logtail::set_dynamic_logtail_path(&new_path);
+            if !sls_activated.swap(true, Ordering::SeqCst) {
+                SlsConfigAction::Activate { path: new_path }
+            } else {
+                SlsConfigAction::Reactivated { path: new_path }
+            }
+        }
+    }
+}
+
 pub(crate) fn start_config_watcher(
     config_path: PathBuf,
     sls_activated: Arc<AtomicBool>,
@@ -36,7 +114,7 @@ pub(crate) fn start_config_watcher(
     trace_enabled: bool,
     stop: Arc<AtomicBool>,
 ) {
-    use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use notify::{Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
 
     let watch_path = config_path.clone();
     std::thread::Builder::new()
@@ -76,17 +154,10 @@ pub(crate) fn start_config_watcher(
                     }
                 };
 
-                match event.kind {
-                    EventKind::Access(notify::event::AccessKind::Close(
-                        notify::event::AccessMode::Write,
-                    )) => {}
-                    _ => continue,
+                if !is_close_write(&event.kind) {
+                    continue;
                 }
-
-                let is_target = event.paths.iter().any(|p| {
-                    p.file_name().map(|f| f.to_os_string()) == target_filename
-                });
-                if !is_target {
+                if !path_matches_target(&event.paths, &target_filename) {
                     continue;
                 }
 
@@ -98,51 +169,42 @@ pub(crate) fn start_config_watcher(
                     }
                 };
 
-                match crate::config::parse_runtime_sls_path(&content) {
-                    None => continue,
-                    Some(None) => {
-                        if sls_activated.swap(false, Ordering::SeqCst) {
-                            crate::genai::logtail::set_dynamic_logtail_path("");
-                            log::info!(
-                                "Config watcher: SLS Logtail deactivated \
-                                 (runtime.sls_logtail_path cleared)"
-                            );
-                        }
-                    }
-                    Some(Some(new_path)) => {
+                let parsed = crate::config::parse_runtime_sls_path(&content);
+                let uid: String = match &parsed {
+                    Some(Some(_)) => crate::genai::instance_id::get_owner_account_id().to_string(),
+                    _ => String::new(),
+                };
+                match decide_sls_config_change(parsed, &sls_activated, &uid) {
+                    SlsConfigAction::NoChange => {}
+                    SlsConfigAction::Deactivated => {
                         log::info!(
-                            "Config watcher: detected runtime.sls_logtail_path = {new_path:?}"
+                            "Config watcher: SLS Logtail deactivated \
+                             (runtime.sls_logtail_path cleared)"
                         );
-
-                        let uid = crate::genai::instance_id::get_owner_account_id();
-                        if uid.is_empty() {
-                            log::error!(
-                                "Config watcher: SLS activation requested but uid fetch failed. \
-                                 Terminating process."
-                            );
-                            std::process::exit(1);
+                    }
+                    SlsConfigAction::AbortUidMissing => {
+                        log::error!(
+                            "Config watcher: SLS activation requested but uid fetch failed. \
+                             Terminating process."
+                        );
+                        std::process::exit(1);
+                    }
+                    SlsConfigAction::Activate { path } => {
+                        let exporter = LogtailExporter::new_with_path(
+                            &path,
+                            encryption_pem.as_deref(),
+                            trace_enabled,
+                        );
+                        log::info!(
+                            "Config watcher: LogtailExporter created (path={path}, uid={uid})"
+                        );
+                        if let Ok(mut guard) = pending_logtail.lock() {
+                            *guard = Some(Box::new(exporter));
                         }
-
-                        crate::genai::logtail::set_dynamic_logtail_path(&new_path);
-
-                        if !sls_activated.swap(true, Ordering::SeqCst) {
-                            let exporter = LogtailExporter::new_with_path(
-                                &new_path,
-                                encryption_pem.as_deref(),
-                                trace_enabled,
-                            );
-                            log::info!(
-                                "Config watcher: LogtailExporter created (path={new_path}, uid={uid})"
-                            );
-                            if let Ok(mut guard) = pending_logtail.lock() {
-                                *guard = Some(Box::new(exporter));
-                            }
-                            log::info!("Config watcher: SLS Logtail activated dynamically");
-                        } else {
-                            log::info!(
-                                "Config watcher: SLS Logtail re-activated with path={new_path}"
-                            );
-                        }
+                        log::info!("Config watcher: SLS Logtail activated dynamically");
+                    }
+                    SlsConfigAction::Reactivated { path } => {
+                        log::info!("Config watcher: SLS Logtail re-activated with path={path}");
                     }
                 }
             }
@@ -150,6 +212,52 @@ pub(crate) fn start_config_watcher(
             log::info!("Config watcher exiting");
         })
         .ok();
+}
+
+/// Decision produced by [`decide_token_collector_action`].
+#[derive(Debug, PartialEq)]
+pub(crate) enum TokenCollectorAction {
+    /// Desired state equals last applied state (or enabled-but-path-missing): skip.
+    Skip,
+    /// Enabled but SLS_LOG_PATH is missing/empty in ilogtail.cfg; warn once.
+    WarnMissingPath,
+    /// Apply `desired` to runtime.sls_logtail_path (Some=set, None=clear).
+    Apply { desired: Option<String> },
+}
+
+/// Decide what the token-collector watcher should do for one poll tick.
+///
+/// Pure decision over the trigger-file state and the resolved logtail path; the
+/// shell performs the actual `write_runtime_sls_path` and updates `last_state`.
+/// `enabled` is whether the trigger file exists; `logtail_path` is the parsed
+/// SLS_LOG_PATH (None when the file is absent/empty); `last_state` is the
+/// previously-applied desired value.
+pub(crate) fn decide_token_collector_action(
+    enabled: bool,
+    logtail_path: Option<String>,
+    last_state: &Option<Option<String>>,
+) -> TokenCollectorAction {
+    let desired: Option<String> = if enabled {
+        match logtail_path {
+            Some(p) => Some(p),
+            None => {
+                // Enabled but no usable path: warn (once) unless we already
+                // recorded the disabled state.
+                if *last_state != Some(None) {
+                    return TokenCollectorAction::WarnMissingPath;
+                }
+                return TokenCollectorAction::Skip;
+            }
+        }
+    } else {
+        None
+    };
+
+    if last_state.as_ref() == Some(&desired) {
+        TokenCollectorAction::Skip
+    } else {
+        TokenCollectorAction::Apply { desired }
+    }
 }
 
 pub(crate) fn start_token_collector_watcher(config_path: PathBuf, stop: Arc<AtomicBool>) {
@@ -170,46 +278,39 @@ pub(crate) fn start_token_collector_watcher(config_path: PathBuf, stop: Arc<Atom
                 std::thread::sleep(POLL_INTERVAL);
 
                 let enabled = Path::new(ENABLE_FILE).exists();
-
-                let desired: Option<String> = if enabled {
-                    match read_logtail_sls_path(LOGTAIL_CFG) {
-                        Some(p) => Some(p),
-                        None => {
-                            if last_state != Some(None) {
-                                log::warn!(
-                                    "token-collector enabled but SLS_LOG_PATH missing/empty in {LOGTAIL_CFG}"
-                                );
-                            }
-                            continue;
-                        }
-                    }
+                let logtail_path = if enabled {
+                    read_logtail_sls_path(LOGTAIL_CFG)
                 } else {
                     None
                 };
 
-                if last_state.as_ref() == Some(&desired) {
-                    continue;
-                }
-
-                match write_runtime_sls_path(&config_path, desired.as_deref()) {
-                    Ok(false) => {
-                        last_state = Some(desired);
-                    }
-                    Ok(true) => {
-                        match &desired {
-                            Some(p) => log::info!(
-                                "token-collector enabled: set runtime.sls_logtail_path={p:?}"
-                            ),
-                            None => log::info!(
-                                "token-collector disabled: cleared runtime.sls_logtail_path"
-                            ),
-                        }
-                        last_state = Some(desired);
-                    }
-                    Err(e) => {
+                match decide_token_collector_action(enabled, logtail_path, &last_state) {
+                    TokenCollectorAction::Skip => {}
+                    TokenCollectorAction::WarnMissingPath => {
                         log::warn!(
-                            "token-collector failed to update {config_path:?}: {e}"
+                            "token-collector enabled but SLS_LOG_PATH missing/empty in {LOGTAIL_CFG}"
                         );
+                    }
+                    TokenCollectorAction::Apply { desired } => {
+                        match write_runtime_sls_path(&config_path, desired.as_deref()) {
+                            Ok(false) => {
+                                last_state = Some(desired);
+                            }
+                            Ok(true) => {
+                                match &desired {
+                                    Some(p) => log::info!(
+                                        "token-collector enabled: set runtime.sls_logtail_path={p:?}"
+                                    ),
+                                    None => log::info!(
+                                        "token-collector disabled: cleared runtime.sls_logtail_path"
+                                    ),
+                                }
+                                last_state = Some(desired);
+                            }
+                            Err(e) => {
+                                log::warn!("token-collector failed to update {config_path:?}: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -530,6 +631,186 @@ mod tests {
             store.mark_interrupted_stale(0).unwrap(),
             0,
             "loop body should have already marked the stale pending row"
+        );
+    }
+
+    // ── is_close_write ──────────────────────────────────────────────
+    #[test]
+    fn test_is_close_write() {
+        use notify::EventKind;
+        use notify::event::{AccessKind, AccessMode};
+        assert!(is_close_write(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        // Other access modes / kinds are not "fully written".
+        assert!(!is_close_write(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_close_write(&EventKind::Access(AccessKind::Open(
+            AccessMode::Write
+        ))));
+        assert!(!is_close_write(&EventKind::Modify(
+            notify::event::ModifyKind::Any
+        )));
+    }
+
+    // ── path_matches_target ─────────────────────────────────────────
+    #[test]
+    fn test_path_matches_target() {
+        let target = Some(OsString::from("agentsight.json"));
+        assert!(path_matches_target(
+            &[PathBuf::from("/etc/anolisa/agentsight.json")],
+            &target
+        ));
+        // Non-matching file name.
+        assert!(!path_matches_target(
+            &[PathBuf::from("/etc/anolisa/other.json")],
+            &target
+        ));
+        // Matches when any path in the list matches.
+        assert!(path_matches_target(
+            &[
+                PathBuf::from("/etc/anolisa/other.json"),
+                PathBuf::from("/etc/anolisa/agentsight.json"),
+            ],
+            &target
+        ));
+        // Empty list never matches.
+        assert!(!path_matches_target(&[], &target));
+        // None target never matches a named file.
+        assert!(!path_matches_target(
+            &[PathBuf::from("/etc/anolisa/agentsight.json")],
+            &None
+        ));
+    }
+
+    // ── decide_sls_config_change ────────────────────────────────────
+    #[test]
+    fn test_decide_sls_none_is_nochange() {
+        let flag = AtomicBool::new(false);
+        assert_eq!(
+            decide_sls_config_change(None, &flag, "uid"),
+            SlsConfigAction::NoChange
+        );
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_decide_sls_empty_while_inactive_is_nochange() {
+        let flag = AtomicBool::new(false);
+        assert_eq!(
+            decide_sls_config_change(Some(None), &flag, "uid"),
+            SlsConfigAction::NoChange
+        );
+    }
+
+    #[test]
+    fn test_decide_sls_empty_while_active_deactivates() {
+        let flag = AtomicBool::new(true);
+        assert_eq!(
+            decide_sls_config_change(Some(None), &flag, "uid"),
+            SlsConfigAction::Deactivated
+        );
+        assert!(!flag.load(Ordering::SeqCst), "flag cleared on deactivation");
+    }
+
+    #[test]
+    fn test_decide_sls_path_but_no_uid_aborts() {
+        let flag = AtomicBool::new(false);
+        assert_eq!(
+            decide_sls_config_change(Some(Some("/p.log".into())), &flag, ""),
+            SlsConfigAction::AbortUidMissing
+        );
+        // Flag must NOT be set when uid is missing.
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_decide_sls_first_activation() {
+        let flag = AtomicBool::new(false);
+        let action = decide_sls_config_change(Some(Some("/p.log".into())), &flag, "ecs-uid");
+        assert_eq!(
+            action,
+            SlsConfigAction::Activate {
+                path: "/p.log".to_string()
+            }
+        );
+        assert!(flag.load(Ordering::SeqCst), "flag set on activation");
+        // Reset global dynamic path mutated by the call.
+        crate::genai::logtail::set_dynamic_logtail_path("");
+    }
+
+    #[test]
+    fn test_decide_sls_reactivation() {
+        let flag = AtomicBool::new(true); // already active
+        let action = decide_sls_config_change(Some(Some("/p2.log".into())), &flag, "ecs-uid");
+        assert_eq!(
+            action,
+            SlsConfigAction::Reactivated {
+                path: "/p2.log".to_string()
+            }
+        );
+        assert!(flag.load(Ordering::SeqCst));
+        crate::genai::logtail::set_dynamic_logtail_path("");
+    }
+
+    // ── decide_token_collector_action ───────────────────────────────
+    #[test]
+    fn test_decide_tc_disabled_first_time_applies_clear() {
+        // Not enabled, no prior state -> apply None (clear).
+        assert_eq!(
+            decide_token_collector_action(false, None, &None),
+            TokenCollectorAction::Apply { desired: None }
+        );
+    }
+
+    #[test]
+    fn test_decide_tc_enabled_with_path_applies() {
+        assert_eq!(
+            decide_token_collector_action(true, Some("/p.log".into()), &None),
+            TokenCollectorAction::Apply {
+                desired: Some("/p.log".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_decide_tc_enabled_missing_path_warns_once() {
+        // Enabled but no path, and not yet recorded disabled -> warn.
+        assert_eq!(
+            decide_token_collector_action(true, None, &None),
+            TokenCollectorAction::WarnMissingPath
+        );
+        // Already recorded disabled -> skip (no repeated warning).
+        assert_eq!(
+            decide_token_collector_action(true, None, &Some(None)),
+            TokenCollectorAction::Skip
+        );
+    }
+
+    #[test]
+    fn test_decide_tc_skip_when_unchanged() {
+        // Desired equals last applied -> skip.
+        let last = Some(Some("/p.log".to_string()));
+        assert_eq!(
+            decide_token_collector_action(true, Some("/p.log".into()), &last),
+            TokenCollectorAction::Skip
+        );
+        // Disabled and last already None -> skip.
+        assert_eq!(
+            decide_token_collector_action(false, None, &Some(None)),
+            TokenCollectorAction::Skip
+        );
+    }
+
+    #[test]
+    fn test_decide_tc_apply_when_path_changes() {
+        let last = Some(Some("/old.log".to_string()));
+        assert_eq!(
+            decide_token_collector_action(true, Some("/new.log".into()), &last),
+            TokenCollectorAction::Apply {
+                desired: Some("/new.log".to_string())
+            }
         );
     }
 }
