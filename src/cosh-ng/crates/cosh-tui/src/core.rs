@@ -108,12 +108,7 @@ impl CoshCore {
         }
 
         if kind == ToolKind::ShellExec {
-            if let Some(command) = params.get("command").and_then(|v| v.as_str()) {
-                match audit::parse_action_string(command) {
-                    Ok(action) => return audit::classify(&action, &self.loaded_policy).outcome,
-                    Err(_) => return Outcome::RequireApproval,
-                }
-            }
+            return Outcome::RequireApproval;
         }
 
         if kind == ToolKind::FileEdit && mode == "auto" {
