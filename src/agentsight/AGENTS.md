@@ -214,7 +214,17 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 - [数据流水线设计](docs/design-docs/data-pipeline.md)
 - [GenAI 语义层设计](docs/design-docs/genai-semantic.md)
 
-## 12. Prerequisites
+## 12. Scoped Rules
+
+高风险模块有独立的边界约束文件：
+
+| 模块 | 规则文件 | 关注点 |
+|------|----------|--------|
+| FFI 导出层 | [src/FFI_AGENTS.md](src/FFI_AGENTS.md) | ABI 安全、cbindgen 同步、panic 隔离 |
+| 主编排器 | [src/UNIFIED_AGENTS.md](src/UNIFIED_AGENTS.md) | 禁止业务逻辑、保持委托模式 |
+| 存储层 | [src/storage/AGENTS.md](src/storage/AGENTS.md) | SQL 注入防护、schema 兼容、mutex 处理 |
+
+## 13. Prerequisites
 
 - Linux kernel >= 5.8（BTF 支持）
 - Rust >= 1.80
