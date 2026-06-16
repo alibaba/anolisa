@@ -35,6 +35,7 @@ LAYER_MAP = {
 
 # Allowed dependency edges. A set lists allowed targets; "*" allows any module.
 ALLOWED_DEPS = {
+    "event":       {"probes"},
     "probes":      {"event"},
     "parser":      {"probes", "event"},
     "aggregator":  {"parser", "probes", "event"},
@@ -127,6 +128,9 @@ def extract_imports(text: str):
         # Detect cfg(test) attribute on its own line — applies to the next item.
         if CFG_TEST_RE.search(line):
             pending_cfg_test = True
+        elif pending_cfg_test and not MOD_RE.search(line) and stripped:
+            # Reset pending if the next non-empty line is not a `mod` declaration.
+            pending_cfg_test = False
 
         # If we have a pending cfg(test), look for `mod ... {` to enter a block.
         if pending_cfg_test and not in_test_block and MOD_RE.search(line):

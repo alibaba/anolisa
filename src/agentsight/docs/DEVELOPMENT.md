@@ -138,9 +138,17 @@ CI (`ci.yaml` 的 `test-agentsight` job) 对每次 PR 执行以下检查：
 | 检查项 | 命令 | 失败条件 |
 |--------|------|----------|
 | 格式化 | `cargo fmt --all --check` | 代码未格式化 |
+| 架构边界 | `python3 scripts/check-arch-boundaries.py` | 存在未声明的跨模块依赖 |
 | Lint | `cargo clippy --all-targets -- -D warnings` | 存在 clippy 警告 |
 | 单元测试 | `cargo test`（通过 `cargo llvm-cov`） | 任何测试失败 |
 | 增量覆盖率 | `diff-cover --fail-under=80` | 新增/修改代码行覆盖率 < 80% |
+
+**架构边界检查**：脚本验证 `use crate::` 跨模块引用是否符合 `ARCHITECTURE.md` 声明的层级依赖。若需要新增跨模块依赖，先确认是否合理，然后更新脚本中的 `ALLOWED_DEPS` 和 `ARCHITECTURE.md` 依赖图。若为暂时无法修复的历史违规，添加到 `KNOWN_VIOLATIONS` 并附 issue 链接。
+
+本地运行：
+```bash
+python3 scripts/check-arch-boundaries.py
+```
 
 覆盖率报告在 CI 运行结果页的 **Step Summary** 中可见，完整的 Cobertura XML 可从 **Artifacts** 下载。
 
