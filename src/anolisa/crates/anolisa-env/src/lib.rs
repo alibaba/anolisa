@@ -34,7 +34,18 @@ pub struct EnvFacts {
     pub kernel: Option<String>,
     /// Package base family derived from `/etc/os-release`
     /// (e.g. `"anolis23"`, `"anolis8"`).
+    ///
+    /// Kept as an Anolis-specific identifier for backward compatibility
+    /// with existing callers; broader rpm/deb inference is available via
+    /// [`pkg_base_from_id`].
     pub pkg_base: Option<String>,
+    /// Raw `ID` field from `/etc/os-release` (e.g. `"alinux"`,
+    /// `"ubuntu"`, `"debian"`, `"anolis"`). `None` on non-Linux hosts
+    /// or when `/etc/os-release` is missing / unreadable.
+    pub os_id: Option<String>,
+    /// Raw `VERSION_ID` field from `/etc/os-release` (e.g. `"4"`,
+    /// `"24.04"`, `"12"`). `None` when unavailable.
+    pub os_version: Option<String>,
     /// Whether `/sys/kernel/btf/vmlinux` exists.
     pub btf: Option<bool>,
     /// Best-effort `CAP_BPF` availability from Linux effective capabilities.
@@ -57,6 +68,22 @@ pub struct EnvFacts {
     pub home: PathBuf,
 }
 
+/// Parsed view of `/etc/os-release` relevant to environment detection.
+///
+/// Returned by [`parse_os_release`]; fields are independently `Option`
+/// so callers can use whichever pieces are present.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OsReleaseInfo {
+    /// Raw `ID` field (e.g. `"alinux"`, `"ubuntu"`, `"anolis"`).
+    pub id: Option<String>,
+    /// Raw `VERSION_ID` field (e.g. `"4"`, `"24.04"`, `"23"`).
+    pub version_id: Option<String>,
+    /// Anolis-family package base hint (`"anolis23"`, `"anolis8"`,
+    /// `"anolis"`); `None` for distros outside that family. Kept for
+    /// backward compatibility with [`EnvFacts::pkg_base`].
+    pub pkg_base: Option<String>,
+}
+
 /// Stateless façade exposing environment detection entry points.
 pub struct EnvService;
 
@@ -76,7 +103,7 @@ impl EnvService {
         let arch = std::env::consts::ARCH.to_string();
         let libc = detect_libc(target_os);
         let kernel = detect_kernel();
-        let pkg_base = detect_pkg_base();
+        let os_release = detect_os_release(target_os);
         let btf = detect_btf(target_os);
         let cap_bpf = detect_cap_bpf(target_os);
         let container = detect_container();
@@ -87,7 +114,9 @@ impl EnvService {
             arch,
             libc,
             kernel,
-            pkg_base,
+            pkg_base: os_release.pkg_base,
+            os_id: os_release.id,
+            os_version: os_release.version_id,
             btf,
             cap_bpf,
             container,
@@ -132,13 +161,16 @@ fn detect_kernel() -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Parse an `os-release(5)` document and return a normalized
-/// `pkg_base` identifier such as `"anolis23"` when the distro is
-/// (or claims compatibility with) Anolis OS.
+/// Parse an `os-release(5)` document into an [`OsReleaseInfo`].
 ///
-/// Returns `None` for distros outside the Anolis family — callers
-/// can fall back to a different probe / default.
-pub fn parse_os_release(content: &str) -> Option<String> {
+/// `id` / `version_id` mirror the corresponding `/etc/os-release`
+/// fields verbatim (after unquoting). `pkg_base` is the legacy
+/// Anolis-family hint — `"anolis{major}"` when the distro is (or
+/// claims compatibility with) Anolis OS, otherwise `None`.
+///
+/// Callers that need a broader rpm/deb classification can pass
+/// `id` to [`pkg_base_from_id`].
+pub fn parse_os_release(content: &str) -> OsReleaseInfo {
     let mut id: Option<String> = None;
     let mut id_like: Option<String> = None;
     let mut version_id: Option<String> = None;
@@ -166,16 +198,38 @@ pub fn parse_os_release(content: &str) -> Option<String> {
             })
             .unwrap_or(false);
 
-    if !is_anolis {
-        return None;
+    let pkg_base = if is_anolis {
+        let major = version_id.as_deref().and_then(version_major);
+        Some(match major {
+            Some(m) => format!("anolis{m}"),
+            None => "anolis".to_string(),
+        })
+    } else {
+        None
+    };
+
+    OsReleaseInfo {
+        id,
+        version_id,
+        pkg_base,
     }
+}
 
-    let major = version_id.as_deref().and_then(version_major);
-
-    Some(match major {
-        Some(m) => format!("anolis{m}"),
-        None => "anolis".to_string(),
-    })
+/// Map a `/etc/os-release` `ID` value to a coarse package-base family
+/// (`"rpm"` / `"deb"`). Returns `None` for distros outside the known
+/// rpm- / deb-based families.
+///
+/// This is an opt-in helper; [`EnvFacts::pkg_base`] keeps its legacy
+/// Anolis-specific semantics for backward compatibility.
+pub fn pkg_base_from_id(id: &str) -> Option<String> {
+    match id {
+        "alinux" | "anolis" | "openanolis" | "rhel" | "centos" | "fedora" | "rocky"
+        | "almalinux" | "ol" => Some("rpm".to_string()),
+        "ubuntu" | "debian" | "linuxmint" | "pop" | "elementary" | "raspbian" => {
+            Some("deb".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn version_major(version_id: &str) -> Option<String> {
@@ -195,9 +249,14 @@ fn unquote(value: &str) -> String {
         .to_string()
 }
 
-fn detect_pkg_base() -> Option<String> {
-    let content = std::fs::read_to_string("/etc/os-release").ok()?;
-    parse_os_release(&content)
+fn detect_os_release(target_os: &str) -> OsReleaseInfo {
+    if target_os != "linux" {
+        return OsReleaseInfo::default();
+    }
+    match std::fs::read_to_string("/etc/os-release") {
+        Ok(content) => parse_os_release(&content),
+        Err(_) => OsReleaseInfo::default(),
+    }
 }
 
 fn detect_btf(target_os: &str) -> Option<bool> {
@@ -336,6 +395,15 @@ mod tests {
         assert!(facts.libc.is_none(), "libc should be None off-Linux");
         assert!(facts.btf.is_none(), "btf should be None off-Linux");
         assert!(facts.cap_bpf.is_none(), "cap_bpf should be None off-Linux");
+        assert!(facts.os_id.is_none(), "os_id should be None off-Linux");
+        assert!(
+            facts.os_version.is_none(),
+            "os_version should be None off-Linux"
+        );
+        assert!(
+            facts.pkg_base.is_none(),
+            "pkg_base should be None off-Linux"
+        );
     }
 
     #[test]
@@ -344,7 +412,10 @@ mod tests {
                        VERSION=\"23.0\"\n\
                        ID=\"anolis\"\n\
                        VERSION_ID=\"23\"\n";
-        assert_eq!(parse_os_release(content).as_deref(), Some("anolis23"));
+        let info = parse_os_release(content);
+        assert_eq!(info.id.as_deref(), Some("anolis"));
+        assert_eq!(info.version_id.as_deref(), Some("23"));
+        assert_eq!(info.pkg_base.as_deref(), Some("anolis23"));
     }
 
     #[test]
@@ -353,25 +424,82 @@ mod tests {
                        ID=customdistro\n\
                        ID_LIKE=\"anolis rhel\"\n\
                        VERSION_ID=\"8.6\"\n";
-        assert_eq!(parse_os_release(content).as_deref(), Some("anolis8"));
+        let info = parse_os_release(content);
+        assert_eq!(info.id.as_deref(), Some("customdistro"));
+        assert_eq!(info.version_id.as_deref(), Some("8.6"));
+        assert_eq!(info.pkg_base.as_deref(), Some("anolis8"));
     }
 
     #[test]
-    fn parse_os_release_unknown_distro_returns_none() {
+    fn parse_os_release_unknown_distro_returns_no_pkg_base() {
         let content = "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"22.04\"\n";
-        assert!(parse_os_release(content).is_none());
+        let info = parse_os_release(content);
+        assert_eq!(info.id.as_deref(), Some("ubuntu"));
+        assert_eq!(info.version_id.as_deref(), Some("22.04"));
+        assert!(info.pkg_base.is_none());
+    }
+
+    #[test]
+    fn parse_os_release_alinux_keeps_id_and_version() {
+        let content = "NAME=\"Alibaba Cloud Linux\"\n\
+                       ID=\"alinux\"\n\
+                       VERSION_ID=\"4\"\n";
+        let info = parse_os_release(content);
+        assert_eq!(info.id.as_deref(), Some("alinux"));
+        assert_eq!(info.version_id.as_deref(), Some("4"));
+        // pkg_base stays Anolis-specific for backward compatibility.
+        assert!(info.pkg_base.is_none());
     }
 
     #[test]
     fn parse_os_release_missing_version_falls_back_to_anolis() {
         let content = "ID=anolis\n";
-        assert_eq!(parse_os_release(content).as_deref(), Some("anolis"));
+        let info = parse_os_release(content);
+        assert_eq!(info.pkg_base.as_deref(), Some("anolis"));
+        assert!(info.version_id.is_none());
     }
 
     #[test]
     fn parse_os_release_uses_numeric_major_prefix() {
         let content = "ID=anolis\nVERSION_ID=\"23alpha\"\n";
-        assert_eq!(parse_os_release(content).as_deref(), Some("anolis23"));
+        let info = parse_os_release(content);
+        assert_eq!(info.pkg_base.as_deref(), Some("anolis23"));
+        assert_eq!(info.version_id.as_deref(), Some("23alpha"));
+    }
+
+    #[test]
+    fn parse_os_release_empty_input_returns_default() {
+        let info = parse_os_release("");
+        assert_eq!(info, OsReleaseInfo::default());
+    }
+
+    #[test]
+    fn pkg_base_from_id_recognizes_rpm_family() {
+        for id in ["alinux", "anolis", "openanolis", "rhel", "centos", "fedora"] {
+            assert_eq!(
+                pkg_base_from_id(id).as_deref(),
+                Some("rpm"),
+                "id `{id}` should map to rpm",
+            );
+        }
+    }
+
+    #[test]
+    fn pkg_base_from_id_recognizes_deb_family() {
+        for id in ["ubuntu", "debian", "linuxmint", "pop", "elementary"] {
+            assert_eq!(
+                pkg_base_from_id(id).as_deref(),
+                Some("deb"),
+                "id `{id}` should map to deb",
+            );
+        }
+    }
+
+    #[test]
+    fn pkg_base_from_id_unknown_returns_none() {
+        assert!(pkg_base_from_id("arch").is_none());
+        assert!(pkg_base_from_id("gentoo").is_none());
+        assert!(pkg_base_from_id("").is_none());
     }
 
     #[test]

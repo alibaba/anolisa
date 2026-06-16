@@ -614,6 +614,8 @@ mod tests {
             libc: None,
             kernel: None,
             pkg_base: None,
+            os_id: None,
+            os_version: None,
             btf: None,
             cap_bpf: None,
             container: container.map(|s| s.to_string()),
