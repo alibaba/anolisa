@@ -28,11 +28,6 @@ pub(crate) fn hook_analysis_user_input(
             " This finding is low confidence; first verify the evidence with read-only commands before giving a root-cause conclusion.",
         );
     }
-    if hook_id == "interactive-top-guidance" {
-        prompt.push_str(
-            " Do not analyze non-one-shot top output directly; ask for or suggest a read-only batch snapshot such as `top -b -n1 -o %MEM | head -30`.",
-        );
-    }
     prompt.push_str(&hook_analysis_evidence_excerpt(block, &output_id));
     prompt
 }

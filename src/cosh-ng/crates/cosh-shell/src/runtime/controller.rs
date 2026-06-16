@@ -342,13 +342,17 @@ fn render_raw_inline_events<W: Write>(
         return Ok(RawObserverAction::RestorePrompt);
     }
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
-    let host_shell_handoff_in_progress = inline_state.control.shell_handoff().has_pending();
     if let Some(action) =
         shell_handoff_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
     {
         return Ok(action);
     }
-    if host_shell_handoff_in_progress && shell_busy {
+    let shell_handoff_pending = inline_state
+        .control
+        .shell_handoff()
+        .pending_front()
+        .is_some();
+    if shell_busy || shell_handoff_pending {
         Ok(RawObserverAction::RawPassthrough)
     } else if inline_state
         .agent_run
@@ -357,8 +361,6 @@ fn render_raw_inline_events<W: Write>(
         .is_some_and(|run| !run.completed)
     {
         Ok(RawObserverAction::DelayShellOutput)
-    } else if shell_busy {
-        Ok(RawObserverAction::RawPassthrough)
     } else {
         Ok(RawObserverAction::Continue)
     }
@@ -369,19 +371,47 @@ fn shell_handoff_timeout_recovery_action<W: Write>(
     shell_busy: bool,
     output: &mut W,
 ) -> std::io::Result<Option<RawObserverAction>> {
-    if !shell_busy {
+    shell_handoff_timeout_recovery_action_with_timeout(
+        state,
+        shell_busy,
+        output,
+        configured_shell_handoff_timeout(),
+    )
+}
+
+fn shell_handoff_timeout_recovery_action_with_timeout<W: Write>(
+    state: &mut InlineState,
+    shell_busy: bool,
+    output: &mut W,
+    timeout: Option<Duration>,
+) -> std::io::Result<Option<RawObserverAction>> {
+    let shell_handoff_pending = state.control.shell_handoff().pending_front().is_some();
+    if !shell_busy && !shell_handoff_pending {
+        if let Some(timeout) = state.pending_shell_handoff_timeout_notice.take() {
+            render_shell_handoff_timeout_notice(state, output, timeout)?;
+        }
         return Ok(None);
     }
-    let Some(timeout) = configured_shell_handoff_timeout() else {
+
+    let Some(timeout) = timeout else {
         return Ok(None);
     };
-    if !state
+    let marked_timeout = state
         .control
         .shell_handoff_mut()
-        .mark_timeout_interrupt_if_elapsed(timeout)
-    {
+        .mark_timeout_interrupt_if_elapsed(timeout);
+    if !marked_timeout {
         return Ok(None);
     }
+    state.pending_shell_handoff_timeout_notice = Some(timeout);
+    Ok(Some(RawObserverAction::InterruptForeground))
+}
+
+fn render_shell_handoff_timeout_notice<W: Write>(
+    state: &InlineState,
+    output: &mut W,
+    timeout: Duration,
+) -> std::io::Result<()> {
     let i18n = state.i18n();
     let timeout_secs = timeout.as_secs().to_string();
     RatatuiInlineRenderer::for_terminal()
@@ -401,7 +431,7 @@ fn shell_handoff_timeout_recovery_action<W: Write>(
                 footer: None,
             },
         )?;
-    Ok(Some(RawObserverAction::InterruptForeground))
+    Ok(())
 }
 
 fn configured_shell_handoff_timeout() -> Option<Duration> {
@@ -519,6 +549,13 @@ mod hook_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::run::ActiveAgentRun;
+    use cosh_shell::adapter::FakeAgentAdapter;
+    use cosh_shell::types::{
+        AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs, ShellEvent,
+    };
+    use cosh_shell::AdapterInstance;
+    use std::time::Instant;
 
     #[test]
     fn approval_mode_config_keeps_legacy_suggest_as_recommend() {
@@ -551,5 +588,232 @@ mod tests {
         }
 
         assert!(!dir.exists(), "temp session dir should be removed on drop");
+    }
+
+    #[test]
+    fn active_foreground_command_keeps_raw_passthrough_even_when_agent_running() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let events = vec![ShellEvent::command_started(
+            "session-1",
+            "cmd-1",
+            "sudo df -h",
+            "/tmp",
+            10,
+        )];
+        let mut output = Vec::new();
+
+        let action = render_raw_inline_events(&events, &mut output, &adapter, "zsh", &mut state)
+            .expect("render raw inline events");
+
+        assert_eq!(action, RawObserverAction::RawPassthrough);
+    }
+
+    #[test]
+    fn pending_shell_handoff_keeps_raw_passthrough_before_preexec() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let request = cosh_shell::types::ShellHandoffRequest::new(
+            "echo approved",
+            "$ echo approved",
+            "approved_provider_shell_tool",
+            "user",
+            "req-approved",
+            "run-approved",
+            1,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request.clone());
+        let mut first_output = Vec::new();
+
+        let first_action =
+            render_raw_inline_events(&[], &mut first_output, &adapter, "zsh", &mut state)
+                .expect("emit handoff");
+
+        assert_eq!(first_action, RawObserverAction::EmitToPty(request));
+
+        let mut second_output = Vec::new();
+        let second_action =
+            render_raw_inline_events(&[], &mut second_output, &adapter, "zsh", &mut state)
+                .expect("keep handoff foreground protected");
+
+        assert_eq!(second_action, RawObserverAction::RawPassthrough);
+    }
+
+    #[test]
+    fn pending_shell_handoff_timeout_interrupts_before_preexec_without_notice() {
+        let mut state = InlineState::default();
+        let request = cosh_shell::types::ShellHandoffRequest::new(
+            "sleep 10",
+            "$ sleep 10",
+            "approved_provider_shell_tool",
+            "user",
+            "req-timeout-before-preexec",
+            "run-timeout-before-preexec",
+            1,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+        state
+            .control
+            .shell_handoff_mut()
+            .emit_next_approved()
+            .expect("emit handoff");
+        state
+            .control
+            .shell_handoff_mut()
+            .backdate_pending_emit_for_test(Duration::from_secs(2));
+        let mut output = Vec::new();
+
+        let action = shell_handoff_timeout_recovery_action_with_timeout(
+            &mut state,
+            false,
+            &mut output,
+            Some(Duration::from_secs(1)),
+        )
+        .expect("timeout action");
+
+        assert_eq!(action, Some(RawObserverAction::InterruptForeground));
+        assert!(output.is_empty(), "{}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
+        let mut state = InlineState::default();
+        let request = cosh_shell::types::ShellHandoffRequest::new(
+            "sleep 10",
+            "$ sleep 10",
+            "approved_provider_shell_tool",
+            "user",
+            "req-timeout",
+            "run-timeout",
+            1,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+        state
+            .control
+            .shell_handoff_mut()
+            .emit_next_approved()
+            .expect("emit handoff");
+        state
+            .control
+            .shell_handoff_mut()
+            .backdate_pending_emit_for_test(Duration::from_secs(2));
+        let mut busy_output = Vec::new();
+
+        let action = shell_handoff_timeout_recovery_action_with_timeout(
+            &mut state,
+            true,
+            &mut busy_output,
+            Some(Duration::from_secs(1)),
+        )
+        .expect("timeout action");
+
+        assert_eq!(action, Some(RawObserverAction::InterruptForeground));
+        assert!(
+            busy_output.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&busy_output)
+        );
+
+        state
+            .control
+            .shell_handoff_mut()
+            .pop_pending()
+            .expect("handoff finished");
+        let mut idle_output = Vec::new();
+        let action = shell_handoff_timeout_recovery_action_with_timeout(
+            &mut state,
+            false,
+            &mut idle_output,
+            Some(Duration::from_secs(1)),
+        )
+        .expect("timeout notice");
+        let idle_text = String::from_utf8_lossy(&idle_output);
+
+        assert_eq!(action, None);
+        assert!(
+            idle_text.contains("Command exceeded configured shell handoff timeout (1s)."),
+            "{idle_text}"
+        );
+        assert!(
+            idle_text.contains("Sent interrupt to foreground PTY; waiting for shell evidence."),
+            "{idle_text}"
+        );
+    }
+
+    fn test_active_run() -> ActiveAgentRun {
+        let request = test_agent_request("active");
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Recommend);
+        let renderer = RatatuiInlineRenderer::for_terminal();
+        ActiveAgentRun {
+            request,
+            handle,
+            provider_name: "fake",
+            language: cosh_shell::Language::EnUs,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: false,
+        }
+    }
+
+    fn test_agent_request(id: &str) -> AgentRequest {
+        AgentRequest {
+            id: id.to_string(),
+            session_id: "session-1".to_string(),
+            command_block: CommandBlock {
+                id: "agent-cmd-1".to_string(),
+                session_id: "session-1".to_string(),
+                command: "echo test".to_string(),
+                origin: Default::default(),
+                cwd: "/tmp".to_string(),
+                end_cwd: "/tmp".to_string(),
+                started_at_ms: 0,
+                ended_at_ms: 1,
+                duration_ms: 1,
+                exit_code: 0,
+                status: CommandStatus::Completed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+            },
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("test".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        }
     }
 }

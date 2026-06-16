@@ -26,6 +26,7 @@ struct CurrentCommand {
     id: String,
     command: String,
     cwd: String,
+    origin: CommandOrigin,
     started_at_ms: u64,
     output_start: usize,
 }
@@ -47,12 +48,28 @@ pub(super) struct OscParser {
     last_prompt_display_start: Option<usize>,
     captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
+    pending_handoff_echo: Option<PendingHandoffEcho>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingCommandOrigin {
     command: String,
     origin: CommandOrigin,
+}
+
+#[derive(Debug, Clone)]
+struct PendingHandoffEcho {
+    command: Vec<u8>,
+    replacement: Vec<u8>,
+    matched: usize,
+    ansi_after_command: bool,
+}
+
+enum PendingHandoffEchoAction {
+    Continue,
+    PassThrough(u8),
+    Complete(Vec<u8>),
+    Mismatch(Vec<u8>),
 }
 
 impl OscParser {
@@ -73,6 +90,7 @@ impl OscParser {
             last_prompt_display_start: None,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
+            pending_handoff_echo: None,
         }
     }
 
@@ -159,11 +177,6 @@ impl OscParser {
             }
             "preexec" => {
                 let command = marker.command.unwrap_or_default();
-                if is_internal_restore_command(&command) {
-                    self.current = None;
-                    return Ok(());
-                }
-
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
@@ -172,6 +185,7 @@ impl OscParser {
                     id: command_id.clone(),
                     command: command.clone(),
                     cwd: cwd.clone(),
+                    origin,
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
                 });
@@ -234,6 +248,7 @@ impl OscParser {
                 event.end_cwd = marker.cwd.or(Some(current.cwd));
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes = Some(output.len() as u64);
+                event.command_origin = Some(current.origin);
                 self.events.push(event);
             }
             _ => {}
@@ -278,8 +293,74 @@ impl OscParser {
     }
 
     fn append_passthrough(&mut self, data: &[u8]) {
-        self.display.extend_from_slice(data);
-        self.append_clean(data);
+        let data = self.filter_pending_handoff_echo(data);
+        if data.is_empty() {
+            return;
+        }
+        self.display.extend_from_slice(&data);
+        self.append_clean(&data);
+    }
+
+    fn filter_pending_handoff_echo(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(data.len());
+        for byte in data.iter().copied() {
+            let Some(action) = self.pending_handoff_echo_action(byte) else {
+                output.push(byte);
+                continue;
+            };
+            match action {
+                PendingHandoffEchoAction::Continue => {}
+                PendingHandoffEchoAction::PassThrough(byte) => output.push(byte),
+                PendingHandoffEchoAction::Complete(replacement) => {
+                    output.extend_from_slice(&replacement);
+                    self.pending_handoff_echo = None;
+                }
+                PendingHandoffEchoAction::Mismatch(bytes) => {
+                    output.extend_from_slice(&bytes);
+                    self.pending_handoff_echo = None;
+                }
+            }
+        }
+        output
+    }
+
+    fn pending_handoff_echo_action(&mut self, byte: u8) -> Option<PendingHandoffEchoAction> {
+        let echo = self.pending_handoff_echo.as_mut()?;
+        if echo.matched < echo.command.len() {
+            if byte == echo.command[echo.matched] {
+                echo.matched += 1;
+                return Some(PendingHandoffEchoAction::Continue);
+            }
+            if echo.matched == 0 {
+                return Some(PendingHandoffEchoAction::PassThrough(byte));
+            }
+            let mut bytes = echo.command[..echo.matched].to_vec();
+            bytes.push(byte);
+            return Some(PendingHandoffEchoAction::Mismatch(bytes));
+        }
+
+        if byte == b'\r' || byte == b'\n' {
+            let mut replacement = echo.replacement.clone();
+            replacement.push(byte);
+            return Some(PendingHandoffEchoAction::Complete(replacement));
+        }
+        if byte == b'\x1b' {
+            echo.ansi_after_command = true;
+            return Some(PendingHandoffEchoAction::Continue);
+        }
+        if echo.ansi_after_command {
+            if byte == b'[' || byte == b'?' || byte == b';' || byte.is_ascii_digit() {
+                return Some(PendingHandoffEchoAction::Continue);
+            }
+            if (0x40..=0x7e).contains(&byte) {
+                echo.ansi_after_command = false;
+            }
+            return Some(PendingHandoffEchoAction::Continue);
+        }
+
+        let mut bytes = echo.command.clone();
+        bytes.push(byte);
+        Some(PendingHandoffEchoAction::Mismatch(bytes))
     }
 
     fn append_clean(&mut self, data: &[u8]) {
@@ -352,6 +433,7 @@ impl OscParser {
         event.end_cwd = Some(current.cwd);
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
         event.terminal_output_bytes = Some(output.len() as u64);
+        event.command_origin = Some(current.origin);
         self.events.push(event);
         Ok(())
     }
@@ -467,12 +549,6 @@ impl OscParser {
 fn is_shell_exit_command(command: &str) -> bool {
     let trimmed = command.trim();
     trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
-}
-
-fn is_internal_restore_command(command: &str) -> bool {
-    command
-        .trim_start()
-        .starts_with("COSH_INTERNAL_RESTORE=1 stty echo icanon isig iexten opost 2>/dev/null")
 }
 
 #[derive(Debug, Deserialize)]
@@ -816,6 +892,18 @@ mod tests {
             event.command_origin,
             Some(CommandOrigin::UserAnalysisAction)
         );
+
+        feed_precmd(&mut parser, 0);
+
+        let event = parser
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandCompleted)
+            .expect("command completed");
+        assert_eq!(
+            event.command_origin,
+            Some(CommandOrigin::UserAnalysisAction)
+        );
     }
 
     #[test]
@@ -841,6 +929,62 @@ mod tests {
             .find(|event| event.kind == ShellEventKind::CommandStarted)
             .expect("command started");
         assert_eq!(event.command_origin, Some(CommandOrigin::Unknown));
+    }
+
+    #[test]
+    fn parser_preserves_pending_handoff_command_echo_for_crlf() {
+        let mut parser = parser_for_test("handoff-echo-crlf");
+        let request = ShellHandoffRequest::new(
+            "printf hi".to_string(),
+            "$ printf hi".to_string(),
+            "approved_provider_shell_tool",
+            "user",
+            "approval-1".to_string(),
+            "run-1".to_string(),
+            1,
+        )
+        .expect("handoff request");
+        let mut echo = b"prompt$ ".to_vec();
+        let mut command = request.pty_bytes().expect("handoff bytes");
+        command.pop();
+        echo.extend_from_slice(&command);
+        echo.extend_from_slice(b"\r\nhi");
+
+        parser.register_pending_handoff_origin(&request);
+        parser.feed(&echo).expect("feed handoff echo");
+
+        let display = String::from_utf8_lossy(&parser.display);
+        assert_eq!(display, "prompt$ printf hi\r\nhi");
+        let clean = String::from_utf8_lossy(&parser.clean);
+        assert_eq!(clean, "prompt$ printf hi\r\nhi");
+    }
+
+    #[test]
+    fn parser_preserves_pending_handoff_command_echo_for_cr() {
+        let mut parser = parser_for_test("handoff-echo-cr");
+        let request = ShellHandoffRequest::new(
+            "printf hi".to_string(),
+            "$ printf hi".to_string(),
+            "approved_provider_shell_tool",
+            "user",
+            "approval-1".to_string(),
+            "run-1".to_string(),
+            1,
+        )
+        .expect("handoff request");
+        let mut echo = b"prompt$ ".to_vec();
+        let mut command = request.pty_bytes().expect("handoff bytes");
+        command.pop();
+        echo.extend_from_slice(&command);
+        echo.extend_from_slice(b"\x1b[?2004l\rhi");
+
+        parser.register_pending_handoff_origin(&request);
+        parser.feed(&echo).expect("feed handoff echo");
+
+        let display = String::from_utf8_lossy(&parser.display);
+        assert_eq!(display, "prompt$ printf hi\x1b[?2004l\rhi");
+        let clean = String::from_utf8_lossy(&parser.clean);
+        assert_eq!(clean, "prompt$ printf hi\rhi");
     }
 
     #[test]
@@ -992,5 +1136,12 @@ mod tests {
             command_json = serde_json::to_string(command).expect("command json")
         );
         parser.feed(marker.as_bytes()).expect("feed preexec");
+    }
+
+    fn feed_precmd(parser: &mut OscParser, status: i32) {
+        let marker = format!(
+            "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":{status},\"cwd\":\"/tmp\"}}\x07"
+        );
+        parser.feed(marker.as_bytes()).expect("feed precmd");
     }
 }

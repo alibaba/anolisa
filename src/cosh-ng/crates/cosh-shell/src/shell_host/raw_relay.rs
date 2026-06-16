@@ -1,18 +1,19 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::path::Path;
 use std::process::Child;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nix::libc;
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    set_pty_winsize, signal_process_group, update_input_mode, RawInputEvent, RawInputMode,
-    RawObserverAction,
+    set_pty_winsize, signal_foreground_process_group, signal_process_group, update_input_mode,
+    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
 };
 use crate::types::ShellEvent;
 use crate::types::ShellEventKind;
@@ -35,6 +36,8 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     input_mode: &Arc<Mutex<RawInputMode>>,
     last_winsize: &mut Winsize,
     prompt: &str,
+    recovery_request_file: &Path,
+    handoff_request_file: &Path,
 ) -> io::Result<()>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
@@ -43,15 +46,12 @@ where
     let mut display_start = parser.display.len();
     let mut native_candidate_echoed_len = 0;
     let mut replayed_prompt_prefix: Option<Vec<u8>> = None;
-    let mut foreground_interrupts = ForegroundInterruptEscalator::default();
-    let mut pending_terminal_restore = false;
+    let mut pending_terminal_restore = PendingTerminalRecovery::default();
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
-            master,
             terminal.as_raw_fd(),
             parser,
-            output,
             &mut pending_terminal_restore,
         )? {
             thread::sleep(Duration::from_millis(10));
@@ -64,19 +64,20 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
-            &mut foreground_interrupts,
-            &mut pending_terminal_restore,
         )?;
         let mut observer_action = event_observer(&parser.events, output)?;
         observer_action = resolve_pty_emit(
             master,
             child.id(),
+            terminal.as_raw_fd(),
             parser,
             output,
             observer_action,
             &mut display_start,
             &mut replayed_prompt_prefix,
             &mut pending_terminal_restore,
+            recovery_request_file,
+            handoff_request_file,
         )?;
         update_input_mode(input_mode, &observer_action);
         let mut hold_shell_output = observer_action.hold_shell_output();
@@ -111,12 +112,15 @@ where
                         observer_action = resolve_pty_emit(
                             master,
                             child.id(),
+                            terminal.as_raw_fd(),
                             parser,
                             output,
                             observer_action,
                             &mut display_start,
                             &mut replayed_prompt_prefix,
                             &mut pending_terminal_restore,
+                            recovery_request_file,
+                            handoff_request_file,
                         )?;
                         update_input_mode(input_mode, &observer_action);
                         hold_shell_output = observer_action.hold_shell_output();
@@ -134,12 +138,15 @@ where
                     observer_action = resolve_pty_emit(
                         master,
                         child.id(),
+                        terminal.as_raw_fd(),
                         parser,
                         output,
                         observer_action,
                         &mut display_start,
                         &mut replayed_prompt_prefix,
                         &mut pending_terminal_restore,
+                        recovery_request_file,
+                        handoff_request_file,
                     )?;
                     update_input_mode(input_mode, &observer_action);
                     hold_shell_output = observer_action.hold_shell_output();
@@ -183,10 +190,8 @@ where
         }
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
-            master,
             terminal.as_raw_fd(),
             parser,
-            output,
             &mut pending_terminal_restore,
         )? {
             thread::sleep(Duration::from_millis(10));
@@ -199,19 +204,20 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
-            &mut foreground_interrupts,
-            &mut pending_terminal_restore,
         )?;
         observer_action = event_observer(&parser.events, output)?;
         observer_action = resolve_pty_emit(
             master,
             child.id(),
+            terminal.as_raw_fd(),
             parser,
             output,
             observer_action,
             &mut display_start,
             &mut replayed_prompt_prefix,
             &mut pending_terminal_restore,
+            recovery_request_file,
+            handoff_request_file,
         )?;
         update_input_mode(input_mode, &observer_action);
         hold_shell_output = observer_action.hold_shell_output();
@@ -298,31 +304,18 @@ where
 }
 
 fn drain_raw_input_events<W: Write>(
-    master: &mut File,
+    _master: &mut File,
     input_events: &Receiver<RawInputEvent>,
     parser: &mut OscParser,
     output: &mut W,
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
-    foreground_interrupts: &mut ForegroundInterruptEscalator,
-    pending_terminal_restore: &mut bool,
 ) -> io::Result<()> {
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::CtrlC => {
                 parser.push_control_event("ctrl_c");
-                restore_outer_terminal_presentation(output)?;
-                if shell_has_active_foreground_command(&parser.events) {
-                    *pending_terminal_restore = true;
-                }
-                if foreground_interrupts.observe_ctrl_c(&parser.events) {
-                    *pending_terminal_restore = true;
-                    master.write_all(&[0x1c])?;
-                    master.flush()?;
-                    parser.push_control_event("ctrl_backslash_escalation");
-                    restore_outer_terminal_presentation(output)?;
-                }
             }
             RawInputEvent::CandidateRedraw { input, hint } => {
                 if native_mode {
@@ -418,42 +411,6 @@ fn drain_raw_input_events<W: Write>(
     Ok(())
 }
 
-fn restore_outer_terminal_presentation<W: Write>(output: &mut W) -> io::Result<()> {
-    output.write_all(b"\x1b[0m\x1b[?25h\x1b[?1049l\x1b[?2004l\x1b[?7h")?;
-    output.flush()
-}
-
-#[derive(Debug)]
-struct ForegroundInterruptEscalator {
-    last_ctrl_c: Option<Instant>,
-    window: Duration,
-}
-
-impl Default for ForegroundInterruptEscalator {
-    fn default() -> Self {
-        Self {
-            last_ctrl_c: None,
-            window: Duration::from_secs(2),
-        }
-    }
-}
-
-impl ForegroundInterruptEscalator {
-    fn observe_ctrl_c(&mut self, events: &[ShellEvent]) -> bool {
-        if !shell_has_active_foreground_command(events) {
-            self.last_ctrl_c = None;
-            return false;
-        }
-
-        let now = Instant::now();
-        let escalate = self
-            .last_ctrl_c
-            .is_some_and(|last| now.duration_since(last) <= self.window);
-        self.last_ctrl_c = Some(now);
-        escalate
-    }
-}
-
 fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool {
     let mut active = std::collections::HashSet::new();
     for event in events {
@@ -471,6 +428,15 @@ fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool {
         }
     }
     !active.is_empty()
+}
+
+fn shell_has_completed_foreground_command(events: &[ShellEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.kind,
+            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+        )
+    })
 }
 
 fn sync_outer_terminal_winsize(
@@ -491,15 +457,22 @@ fn sync_outer_terminal_winsize(
     Ok(())
 }
 
+fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
+    std::fs::write(path, command.as_bytes())
+}
+
 fn resolve_pty_emit<W: Write>(
     master: &mut File,
     child_pid: u32,
+    terminal_fd: i32,
     parser: &mut OscParser,
     output: &mut W,
     action: RawObserverAction,
     display_start: &mut usize,
     replayed_prompt_prefix: &mut Option<Vec<u8>>,
-    pending_terminal_restore: &mut bool,
+    pending_terminal_restore: &mut PendingTerminalRecovery,
+    recovery_request_file: &Path,
+    handoff_request_file: &Path,
 ) -> io::Result<RawObserverAction> {
     match action {
         RawObserverAction::EmitToPty(request) => {
@@ -510,15 +483,27 @@ fn resolve_pty_emit<W: Write>(
                     format!("blocked shell handoff: {message}"),
                 )
             })?;
+            pending_terminal_restore.record_intervention_start(terminal_fd);
             parser.register_pending_handoff_origin(&request);
-            master.write_all(&bytes)?;
-            master.flush()?;
+            write_handoff_request(handoff_request_file, &request.command)?;
+            if let Err(err) = write_all_pty(master, &bytes) {
+                let _ = std::fs::remove_file(handoff_request_file);
+                return Err(err);
+            }
             Ok(RawObserverAction::Continue)
         }
         RawObserverAction::InterruptForeground => {
             output.flush()?;
-            signal_process_group(child_pid, libc::SIGINT)?;
-            *pending_terminal_restore = true;
+            pending_terminal_restore
+                .mark_owner(TerminalRecoveryOwner::CoshTimeoutInterrupt, terminal_fd);
+            signal_foreground_process_group(
+                master.as_raw_fd(),
+                terminal_fd,
+                child_pid,
+                libc::SIGINT,
+            )?;
+            pending_terminal_restore.restore_modes(terminal_fd)?;
+            pending_terminal_restore.request_shell_recovery(recovery_request_file)?;
             parser.push_control_event("timeout_interrupt");
             Ok(RawObserverAction::Continue)
         }
@@ -530,8 +515,7 @@ fn resolve_pty_emit<W: Write>(
             let raw_prompt = parser.last_prompt_display();
             let prompt = prompt_replay_bytes(raw_prompt);
             if prompt.is_empty() {
-                master.write_all(b"\n")?;
-                master.flush()?;
+                write_all_pty(master, b"\n")?;
             } else {
                 output.write_all(prompt)?;
                 output.flush()?;
@@ -544,42 +528,112 @@ fn resolve_pty_emit<W: Write>(
     }
 }
 
-fn restore_terminal_after_interrupted_command<W: Write>(
-    master: &mut File,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalRecoveryOwner {
+    CoshTimeoutInterrupt,
+}
+
+#[derive(Default)]
+struct PendingTerminalRecovery {
+    owner: Option<TerminalRecoveryOwner>,
+    snapshot: Option<libc::termios>,
+}
+
+impl PendingTerminalRecovery {
+    fn record_intervention_start(&mut self, terminal_fd: i32) {
+        self.snapshot = read_recoverable_terminal_snapshot(terminal_fd)
+            .ok()
+            .flatten();
+        self.owner = None;
+    }
+
+    fn mark_owner(&mut self, owner: TerminalRecoveryOwner, terminal_fd: i32) {
+        if self.snapshot.is_none() {
+            self.snapshot = read_recoverable_terminal_snapshot(terminal_fd)
+                .ok()
+                .flatten();
+        }
+        self.owner = Some(owner);
+    }
+
+    fn clear(&mut self) {
+        self.owner = None;
+        self.snapshot = None;
+    }
+
+    fn restore_modes(&self, terminal_fd: i32) -> io::Result<()> {
+        if self.owner.is_none() {
+            return Ok(());
+        }
+        if let Some(snapshot) = self.snapshot {
+            restore_pty_terminal_modes_from_snapshot(terminal_fd, snapshot)
+        } else {
+            restore_pty_terminal_modes_to_minimal_sane(terminal_fd)
+        }
+    }
+
+    fn request_shell_recovery(&self, path: &Path) -> io::Result<()> {
+        if self.owner.is_none() {
+            return Ok(());
+        }
+        std::fs::write(path, b"1")
+    }
+}
+
+fn restore_terminal_after_interrupted_command(
     terminal_fd: i32,
     parser: &OscParser,
-    output: &mut W,
-    pending_terminal_restore: &mut bool,
+    pending_terminal_restore: &mut PendingTerminalRecovery,
 ) -> io::Result<bool> {
-    let prompt = parser.last_prompt_display();
-    if !*pending_terminal_restore
+    if pending_terminal_restore.owner.is_none()
         || shell_has_active_foreground_command(&parser.events)
-        || prompt.is_empty()
-        || !parser.display.ends_with(prompt)
+        || !shell_has_completed_foreground_command(&parser.events)
     {
         return Ok(false);
     }
-    restore_pty_terminal_modes_for_hidden_command(terminal_fd)?;
-    restore_outer_terminal_presentation(output)?;
-    master
-        .write_all(b"COSH_INTERNAL_RESTORE=1 stty echo icanon isig iexten opost 2>/dev/null\n")?;
-    master.flush()?;
-    *pending_terminal_restore = false;
-    Ok(true)
+    pending_terminal_restore.restore_modes(terminal_fd)?;
+    pending_terminal_restore.clear();
+    Ok(false)
 }
 
-fn restore_pty_terminal_modes_for_hidden_command(master_fd: i32) -> io::Result<()> {
+fn read_pty_terminal_modes(terminal_fd: i32) -> io::Result<libc::termios> {
     let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(master_fd, &mut termios) } < 0 {
+    if unsafe { libc::tcgetattr(terminal_fd, &mut termios) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(termios)
+}
 
-    termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN;
-    termios.c_lflag &= !(libc::ECHO | libc::ECHONL);
+fn read_recoverable_terminal_snapshot(terminal_fd: i32) -> io::Result<Option<libc::termios>> {
+    let termios = read_pty_terminal_modes(terminal_fd)?;
+    if terminal_modes_look_like_external_command_state(&termios) {
+        Ok(Some(termios))
+    } else {
+        Ok(None)
+    }
+}
+
+fn terminal_modes_look_like_external_command_state(termios: &libc::termios) -> bool {
+    let required = libc::ECHO | libc::ICANON | libc::ISIG;
+    termios.c_lflag & required == required
+}
+
+fn restore_pty_terminal_modes_from_snapshot(
+    terminal_fd: i32,
+    snapshot: libc::termios,
+) -> io::Result<()> {
+    if unsafe { libc::tcsetattr(terminal_fd, libc::TCSANOW, &snapshot) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn restore_pty_terminal_modes_to_minimal_sane(terminal_fd: i32) -> io::Result<()> {
+    let mut termios = read_pty_terminal_modes(terminal_fd)?;
+    termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN | libc::ECHO;
     termios.c_iflag |= libc::ICRNL | libc::IXON;
     termios.c_oflag |= libc::OPOST;
-
-    if unsafe { libc::tcsetattr(master_fd, libc::TCSAFLUSH, &termios) } < 0 {
+    if unsafe { libc::tcsetattr(terminal_fd, libc::TCSANOW, &termios) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

@@ -504,12 +504,10 @@ pub(crate) fn record_approved_shell_handoff_blocks(
     let mut ids = Vec::new();
     while let Some(handoff) = state.control.shell_handoff().pending_front() {
         let request = handoff.request();
-        let Some(block) = blocks.iter().find(|block| {
-            block.command == request.command
-                && (block.ended_at_ms >= request.created_at_ms
-                    || request.source == "approved_provider_shell_tool"
-                    || request.approval_id.starts_with("handoff-"))
-        }) else {
+        let Some(block) = blocks
+            .iter()
+            .find(|block| shell_handoff_block_matches_request(block, request))
+        else {
             break;
         };
 
@@ -585,6 +583,26 @@ pub(crate) fn record_approved_shell_handoff_blocks(
         ids.push(id);
     }
     ids
+}
+
+fn shell_handoff_block_matches_request(
+    block: &CommandBlock,
+    request: &cosh_shell::types::ShellHandoffRequest,
+) -> bool {
+    block.command == request.command && block.origin == expected_handoff_origin(request)
+}
+
+fn expected_handoff_origin(
+    request: &cosh_shell::types::ShellHandoffRequest,
+) -> cosh_shell::types::CommandOrigin {
+    match request.source.as_str() {
+        "send_to_shell" => cosh_shell::types::CommandOrigin::UserSendToShell,
+        "user_analysis_action" => cosh_shell::types::CommandOrigin::UserAnalysisAction,
+        "approved_provider_shell_tool" => cosh_shell::types::CommandOrigin::ProviderTool,
+        "approved_fallback" => cosh_shell::types::CommandOrigin::AgentHandoff,
+        "validation" => cosh_shell::types::CommandOrigin::ShellInternal,
+        _ => cosh_shell::types::CommandOrigin::Unknown,
+    }
 }
 
 fn next_shell_handoff_activity_id(state: &InlineState, approval_id: &str) -> String {
@@ -1781,7 +1799,7 @@ mod tests {
             id: "cmd-1".to_string(),
             session_id: "session-1".to_string(),
             command: "sleep 100".to_string(),
-            origin: Default::default(),
+            origin: cosh_shell::types::CommandOrigin::ProviderTool,
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             started_at_ms: 1,
@@ -1813,6 +1831,53 @@ mod tests {
             "{}",
             row.detail
         );
+    }
+
+    #[test]
+    fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
+        let mut state = InlineState::default();
+        let request = cosh_shell::types::ShellHandoffRequest::new(
+            "df -h",
+            "$ df -h",
+            "approved_provider_shell_tool",
+            "user",
+            "req-stale",
+            "run-stale",
+            1_000,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+        state
+            .control
+            .shell_handoff_mut()
+            .emit_next_approved()
+            .expect("emit pending handoff");
+        let stale_block = CommandBlock {
+            id: "cmd-stale".to_string(),
+            session_id: "session-1".to_string(),
+            command: "df -h".to_string(),
+            origin: Default::default(),
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            started_at_ms: 100,
+            ended_at_ms: 200,
+            duration_ms: 100,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: Some("/tmp/stale-output-ref.txt".to_string()),
+                terminal_output_bytes: 0,
+            },
+        };
+
+        let ids = record_approved_shell_handoff_blocks(&mut state, &[stale_block]);
+
+        assert!(ids.is_empty(), "{ids:?}");
+        assert!(state.activity.rows.is_empty(), "{:?}", state.activity.rows);
+        assert!(state.control.shell_handoff().pending_front().is_some());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use super::capture_bridge::consume_captured_input;
 use super::card_capture::CardInputState;
 use super::event_parser::{CandidateLineBuffer, NativeLineState};
 use super::mode::{current_raw_input_mode, RawInputMode};
-use super::pty::{set_pty_winsize, signal_process_group};
+use super::pty::{set_pty_winsize, signal_process_group, write_all_pty};
 use super::relay::{
     relay_delayed_input, relay_passthrough_input, send_held_input_events, send_raw_input_events,
     ExplicitExitTracker, InputRelayContext,
@@ -40,8 +40,7 @@ where
             match input.read(&mut buffer) {
                 Ok(0) => {
                     if !exit_tracker.saw_explicit_exit() {
-                        master.write_all(b"exit\n")?;
-                        master.flush()?;
+                        write_all_pty(&mut master, b"exit\n")?;
                     }
                     return Ok(());
                 }
@@ -96,8 +95,7 @@ where
                         send_raw_input_events(&buffer[..n], &input_events);
                         native_line_state.observe_shell_bytes(&buffer[..n]);
                         exit_tracker.observe_shell_bytes(&buffer[..n]);
-                        master.write_all(&buffer[..n])?;
-                        master.flush()?;
+                        write_all_pty(&mut master, &buffer[..n])?;
                     }
                 },
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -174,8 +172,7 @@ pub(crate) fn spawn_raw_action_relay(
                             send_raw_input_events(&bytes, &input_events);
                             native_line_state.observe_shell_bytes(&bytes);
                             exit_tracker.observe_shell_bytes(&bytes);
-                            master.write_all(&bytes)?;
-                            master.flush()?;
+                            write_all_pty(&mut master, &bytes)?;
                         }
                     },
                     RawRelayAction::Resize(winsize) => {
@@ -187,8 +184,7 @@ pub(crate) fn spawn_raw_action_relay(
             }
 
             if !exit_tracker.saw_explicit_exit() {
-                master.write_all(b"exit\n")?;
-                master.flush()?;
+                write_all_pty(&mut master, b"exit\n")?;
             }
             Ok(())
         })()

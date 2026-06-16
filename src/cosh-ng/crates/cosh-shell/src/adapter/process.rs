@@ -141,6 +141,7 @@ pub(crate) fn run_provider_process_loop(
     cancellation_artifacts: ProviderCancellationArtifactStore,
     sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
     mut on_stdout_line: impl FnMut(String) -> Result<ProviderLineProgress, AdapterError>,
+    mut on_idle: impl FnMut() -> Result<Vec<AgentEvent>, AdapterError>,
 ) -> ProviderRunOutcome {
     let timeouts = AgentProcessTimeouts::from_env();
     let stdout = match child.stdout.take() {
@@ -277,7 +278,18 @@ pub(crate) fn run_provider_process_loop(
                 terminate_process_group(child.id());
                 return ProviderRunOutcome::Failed;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => match on_idle() {
+                Ok(events) => {
+                    for event in events {
+                        let _ = sender.send(Ok(event));
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(err));
+                    terminate_process_group(child.id());
+                    return ProviderRunOutcome::Failed;
+                }
+            },
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
     }

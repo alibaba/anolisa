@@ -808,7 +808,7 @@ MiB Swap:   8192.0 total,   2992.0 free,   5200.0 used.   1400.0 avail Mem
 }
 
 #[test]
-fn top_batch_without_one_shot_count_uses_guidance_not_diagnosis() {
+fn top_batch_without_one_shot_count_is_not_diagnosed() {
     let output = "\
 top - 04:04:49 up 20:38,  0 user,  load average: 0.31, 0.40, 0.42
 MiB Mem :  32768.0 total,   1400.0 free,  30200.0 used,   2188.0 buff/cache
@@ -835,65 +835,18 @@ MiB Swap:   8192.0 total,   2992.0 free,   5200.0 used.   1400.0 avail Mem
                 .is_none(),
             "{command}"
         );
-        assert!(
-            InteractiveTopGuidanceHook::new()
-                .evaluate(&make_input(command, output))
-                .is_some(),
-            "{command}"
-        );
     }
 }
 
 #[test]
-fn interactive_top_guidance_suggests_batch_snapshot_without_diagnosis() {
+fn interactive_top_without_batch_snapshot_is_not_diagnosed() {
     let output = include_str!("../../tests/fixtures/linux-memory/top_interactive_ansi_replay.txt");
-    let hook = InteractiveTopGuidanceHook::new();
-    let finding = hook.evaluate(&make_input("top", output)).unwrap();
-
-    assert_eq!(finding.hook_id, "interactive-top-guidance");
-    assert_eq!(finding.severity, FindingSeverity::Info);
-    assert_eq!(finding.skill.as_deref(), Some("memory-analysis"));
-    assert_eq!(
-        finding.cli_hint.as_deref(),
-        Some("top -b -n1 -o %MEM | head -30")
-    );
     assert!(MemoryPressureHook::new()
         .evaluate(&make_input("top", output))
         .is_none());
     assert!(HighMemoryProcessHook::new()
         .evaluate(&make_input("top", output))
         .is_none());
-}
-
-#[test]
-fn interactive_top_guidance_skips_batch_top() {
-    let output = "top - 04:04:49 up 20:38\n";
-    assert!(InteractiveTopGuidanceHook::new()
-        .evaluate(&make_input("top -b -n1", output))
-        .is_none());
-}
-
-#[test]
-fn interactive_top_guidance_skips_metadata_queries() {
-    let output = "procps-ng 4.0.4\n";
-    for command in [
-        "top --help",
-        "top -h",
-        "top -v",
-        "LANG=C top --version",
-        "top -O",
-        "LANG=C top -O",
-        "env -u LC_ALL LANG=C top --version",
-        "env -u LC_ALL LANG=C top -O",
-        "/usr/bin/env --ignore-environment LANG=C top -V",
-    ] {
-        assert!(
-            InteractiveTopGuidanceHook::new()
-                .evaluate(&make_input(command, output))
-                .is_none(),
-            "{command}"
-        );
-    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use crate::agent::failed_command::FailedCommandAgentStartOptions;
+use crate::runtime::command_interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
 #[cfg(test)]
 use crate::runtime::state::HookSuppressionRecord;
@@ -58,6 +59,9 @@ pub(crate) fn record_command_hook_findings(
 ) {
     for block in blocks {
         if !state.hooks.handled_command_hooks.insert(block.id.clone()) {
+            continue;
+        }
+        if command_should_skip_failure_analysis(events, block) {
             continue;
         }
         let origin = command_origin_for_block(events, block);
@@ -286,6 +290,7 @@ pub(crate) fn handle_consultation_events<W: Write>(
     Ok(())
 }
 
+#[cfg(test)]
 fn record_aggregated_hook_finding(
     block: &CommandBlock,
     aggregate: AggregatedHookFinding,
@@ -643,9 +648,7 @@ fn apply_memory_pressure_severity_upgrade(aggregate: &mut AggregatedHookFinding)
 }
 
 pub(crate) fn is_memory_hook(hook_id: &str) -> bool {
-    hook_id == "memory-pressure"
-        || hook_id == "high-memory-process"
-        || hook_id == "interactive-top-guidance"
+    hook_id == "memory-pressure" || hook_id == "high-memory-process"
 }
 
 pub(crate) fn finding_topic(aggregate: &AggregatedHookFinding) -> &str {
@@ -665,10 +668,6 @@ pub(crate) fn finding_topic_from_findings(
             .any(|finding| is_memory_hook(&finding.hook_id))
     {
         "memory"
-    } else if primary.hook_id == "test-failure" {
-        "test"
-    } else if primary.hook_id == "failed-command" {
-        "command-failure"
     } else {
         "external"
     }

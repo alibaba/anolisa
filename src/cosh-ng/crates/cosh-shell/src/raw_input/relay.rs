@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +10,7 @@ use super::event_parser::{
     starts_intercept_candidate, starts_native_intercept_candidate, CandidateLineBuffer,
     CandidateLineStatus, NativeLineState,
 };
-use super::{RawInputEvent, RawInputMode, CTRL_C};
+use super::{write_all_pty, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
     pub(super) master: &'a mut File,
@@ -44,8 +44,7 @@ pub(super) fn relay_passthrough_input(
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     relay.exit_tracker.observe_shell_bytes(bytes);
-    relay.master.write_all(bytes)?;
-    relay.master.flush()?;
+    write_all_pty(relay.master, bytes)?;
     Ok(false)
 }
 
@@ -94,8 +93,7 @@ fn relay_native_passthrough(bytes: &[u8], relay: &mut InputRelayContext<'_>) -> 
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     relay.exit_tracker.observe_shell_bytes(bytes);
-    relay.master.write_all(bytes)?;
-    relay.master.flush()?;
+    write_all_pty(relay.master, bytes)?;
     Ok(false)
 }
 
@@ -133,8 +131,7 @@ fn relay_candidate_line(relay: &mut InputRelayContext<'_>) -> io::Result<bool> {
                     send_raw_input_events(&bytes, relay.input_events);
                     relay.native_line_state.observe_shell_bytes(&bytes);
                     relay.exit_tracker.observe_shell_bytes(&bytes);
-                    relay.master.write_all(&bytes)?;
-                    relay.master.flush()?;
+                    write_all_pty(relay.master, &bytes)?;
                     if !remainder.is_empty() {
                         relay_passthrough_input(&remainder, relay)?;
                     }
@@ -164,8 +161,7 @@ fn flush_candidate_line_to_shell(
     send_raw_input_events(&bytes, input_events);
     native_line_state.observe_shell_bytes(&bytes);
     exit_tracker.observe_shell_bytes(&bytes);
-    master.write_all(&bytes)?;
-    master.flush()?;
+    write_all_pty(master, &bytes)?;
     Ok(false)
 }
 

@@ -11,7 +11,9 @@ mod spawn;
 
 pub(crate) use mode::{update_input_mode, RawInputMode};
 pub use mode::{RawInputCapture, RawObserverAction};
-pub(crate) use pty::{set_pty_winsize, signal_process_group};
+pub(crate) use pty::{
+    set_pty_winsize, signal_foreground_process_group, signal_process_group, write_all_pty,
+};
 pub use relay_action::RawRelayAction;
 pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
 

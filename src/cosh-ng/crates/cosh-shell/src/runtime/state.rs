@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cosh_shell::exit_classify::first_program_token;
 use cosh_shell::hook_engine::HookEngine;
@@ -86,6 +86,7 @@ pub(crate) struct InlineState {
     pub(crate) debug: bool,
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
+    pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cosh_shell::governance::govern_agent_events;
 use cosh_shell::interactive::run_line_interactive_bash;
@@ -12,10 +12,12 @@ use cosh_shell::raw_input::{RawObserverAction, RawRelayAction};
 use cosh_shell::shell_host::{
     run_raw_relay_bash, run_raw_relay_bash_with_actions,
     run_raw_relay_bash_with_actions_output_control, run_raw_relay_bash_with_observer,
-    run_raw_relay_zsh_with_actions, run_scripted_bash, run_scripted_zsh, ScriptedInput,
-    ShellHostConfig,
+    run_raw_relay_zsh_with_actions, run_raw_relay_zsh_with_output_control, run_scripted_bash,
+    run_scripted_zsh, ScriptedInput, ShellHostConfig,
 };
-use cosh_shell::types::{AgentEvent, GovernanceDecision, Policy, ShellEventKind};
+use cosh_shell::types::{
+    AgentEvent, GovernanceDecision, Policy, ShellEventKind, ShellHandoffRequest,
+};
 use cosh_shell::{adapter_for_kind, AdapterKind, AgentAdapter};
 
 #[path = "support/shell_host.rs"]
@@ -651,6 +653,7 @@ fn raw_relay_host_forwards_ctrl_c_and_keeps_shell_usable() {
 
     let rendered_text = String::from_utf8_lossy(&rendered);
     assert!(rendered_text.contains("after-ctrl-c"));
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
     assert!(!rendered
         .windows(b"\x1b]1337;COSH;".len())
         .any(|window| window == b"\x1b]1337;COSH;"));
@@ -667,7 +670,206 @@ fn raw_relay_host_forwards_ctrl_c_and_keeps_shell_usable() {
 }
 
 #[test]
-fn raw_relay_host_restores_echo_after_interrupted_tty_mutation() {
+fn transparent_bash_preserves_user_stty_modes() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-transparent-stty-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("transparent-stty-test", &work_dir);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("stty -echo"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(stty_flag_probe(
+                "-echo",
+                "__ECHO_OFF__",
+                "__ECHO_ON__",
+                "stty echo",
+            )),
+            RawRelayAction::line("stty -isig"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(stty_flag_probe(
+                "-isig",
+                "__ISIG_OFF__",
+                "__ISIG_ON__",
+                "stty isig",
+            )),
+            RawRelayAction::line("stty -icanon min 1 time 0"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(stty_flag_probe(
+                "-icanon",
+                "__ICANON_OFF__",
+                "__ICANON_ON__",
+                "stty icanon",
+            )),
+            RawRelayAction::line("stty sane"),
+        ],
+        &mut rendered,
+    )
+    .expect("raw relay stty parity");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(command_output.contains("__ECHO_OFF__"), "{command_output}");
+    assert!(!command_output.contains("__ECHO_ON__"), "{command_output}");
+    assert!(command_output.contains("__ISIG_OFF__"), "{command_output}");
+    assert!(!command_output.contains("__ISIG_ON__"), "{command_output}");
+    assert!(
+        command_output.contains("__ICANON_OFF__"),
+        "{command_output}"
+    );
+    assert!(
+        !command_output.contains("__ICANON_ON__"),
+        "{command_output}"
+    );
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("stty sane") && block.exit_code == 0));
+}
+
+#[test]
+fn transparent_ctrl_d_exits_bash_and_zsh() {
+    if Command::new("bash").arg("--version").output().is_ok() {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-bash-ctrl-d-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new("bash-ctrl-d-test", &work_dir);
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_bash_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(200)),
+                RawRelayAction::write(vec![0x04]),
+                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::line("echo __BASH_AFTER_CTRL_D__"),
+            ],
+            &mut rendered,
+        )
+        .expect("bash ctrl-d");
+
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(
+            !rendered_text.contains("__BASH_AFTER_CTRL_D__"),
+            "{rendered_text}"
+        );
+        assert!(output
+            .events
+            .iter()
+            .any(|event| event.kind == ShellEventKind::ShellExited));
+    }
+
+    if Command::new("zsh").arg("--version").output().is_ok() {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-zsh-ctrl-d-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let mut config = ShellHostConfig::new("zsh-ctrl-d-test", &work_dir);
+        config.native_mode = false;
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_zsh_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(200)),
+                RawRelayAction::write(vec![0x04]),
+                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::line("echo __ZSH_AFTER_CTRL_D__"),
+            ],
+            &mut rendered,
+        )
+        .expect("zsh ctrl-d");
+
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(
+            !rendered_text.contains("__ZSH_AFTER_CTRL_D__"),
+            "{rendered_text}"
+        );
+        assert!(output
+            .events
+            .iter()
+            .any(|event| event.kind == ShellEventKind::ShellExited));
+    }
+}
+
+#[test]
+fn transparent_ctrl_backslash_is_not_synthesized_from_ctrl_c() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-ctrl-backslash-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("ctrl-backslash-test", &work_dir);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(
+                "bash -c 'trap \"\" INT; trap \"exit 0\" QUIT; while IFS= read -r _; do :; done'",
+            ),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(vec![0x03]),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("printf '%s\\n' __AFTER_CTRL_C__"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(vec![0x1c]),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("printf '%s\\n' __AFTER_QUIT__"),
+        ],
+        &mut rendered,
+    )
+    .expect("ctrl-c ctrl-backslash parity");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(rendered_text.contains("__AFTER_QUIT__"), "{rendered_text}");
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
+
+    let ledger = ledger_from_output(&output);
+    assert!(!ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("__AFTER_CTRL_C__")));
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("__AFTER_QUIT__") && block.exit_code == 0));
+}
+
+fn stty_flag_probe(flag: &str, on_marker: &str, off_marker: &str, cleanup: &str) -> String {
+    format!(
+        "if stty -a | tr ' ;' '\\n\\n' | grep -qx -- {flag}; then printf '%s\\n' {on_marker}; else printf '%s\\n' {off_marker}; fi; {cleanup}",
+    )
+}
+
+fn ledger_output_refs_text(ledger: &cosh_shell::ledger::LedgerOutput) -> String {
+    let mut text = String::new();
+    for block in &ledger.blocks {
+        let Some(path) = block.output.terminal_output_ref.as_deref() else {
+            continue;
+        };
+        if let Ok(output) = std::fs::read_to_string(path) {
+            text.push_str(&output);
+            text.push('\n');
+        }
+    }
+    text
+}
+
+#[test]
+fn raw_relay_host_preserves_user_tty_mutation_after_interrupt() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -696,12 +898,8 @@ fn raw_relay_host_restores_echo_after_interrupted_tty_mutation() {
     .expect("raw relay host");
 
     let rendered_text = String::from_utf8_lossy(&rendered);
-    let rendered_lines: Vec<&str> = rendered_text.lines().map(str::trim).collect();
-    assert!(rendered_lines.contains(&"__STATE_ON__"), "{rendered_text}");
-    assert!(
-        !rendered_lines.contains(&"__STATE_OFF__"),
-        "{rendered_text}"
-    );
+    assert!(rendered_text.contains("__STATE_OFF__"), "{rendered_text}");
+    assert!(!rendered_text.contains("__STATE_ON__"), "{rendered_text}");
     assert!(
         rendered_text.contains("after-tty-restore"),
         "{rendered_text}"
@@ -711,6 +909,7 @@ fn raw_relay_host_restores_echo_after_interrupted_tty_mutation() {
         "{rendered_text}"
     );
     assert_no_osc_marker(&rendered);
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
 
     let ledger = ledger_from_output(&output);
     assert!(!ledger
@@ -721,6 +920,94 @@ fn raw_relay_host_restores_echo_after_interrupted_tty_mutation() {
         .blocks
         .iter()
         .any(|block| { block.command.contains("echo after-tty-restore") && block.exit_code == 0 }));
+}
+
+#[test]
+fn cosh_owned_timeout_recovery_restores_pty_without_visible_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-cosh-owned-recovery-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("cosh-owned-recovery-test", &work_dir);
+    let command = "stty -echo; sleep 5";
+    let mut emitted = false;
+    let mut interrupted = false;
+    let mut command_started_at: Option<Instant> = None;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(900)),
+            RawRelayAction::line(stty_flag_probe(
+                "-echo",
+                "__COSH_RECOVERY_ECHO_OFF__",
+                "__COSH_RECOVERY_ECHO_ON__",
+                "stty echo",
+            )),
+            RawRelayAction::line("echo after-cosh-recovery"),
+        ],
+        &mut rendered,
+        move |events, _| {
+            if !emitted {
+                emitted = true;
+                let request = ShellHandoffRequest::new(
+                    command,
+                    format!("$ {command}"),
+                    "validation",
+                    "policy",
+                    "approval-cosh-owned-recovery",
+                    "run-cosh-owned-recovery",
+                    1,
+                )
+                .expect("handoff request");
+                return Ok(RawObserverAction::EmitToPty(request));
+            }
+            if command_started_at.is_none()
+                && events.iter().any(|event| {
+                    event.kind == ShellEventKind::CommandStarted
+                        && event.command.as_deref() == Some(command)
+                })
+            {
+                command_started_at = Some(Instant::now());
+            }
+            if !interrupted
+                && command_started_at
+                    .is_some_and(|started| started.elapsed() > Duration::from_millis(250))
+            {
+                interrupted = true;
+                return Ok(RawObserverAction::InterruptForeground);
+            }
+            Ok(RawObserverAction::Continue)
+        },
+    )
+    .expect("cosh-owned recovery");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("after-cosh-recovery"),
+        "{rendered_text}"
+    );
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(
+        command_output.contains("__COSH_RECOVERY_ECHO_ON__"),
+        "{command_output}"
+    );
+    assert!(
+        !command_output.contains("__COSH_RECOVERY_ECHO_OFF__"),
+        "{command_output}"
+    );
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("echo after-cosh-recovery") && block.exit_code == 0));
 }
 
 #[test]
@@ -1092,6 +1379,70 @@ fn raw_relay_host_runs_batchmode_ssh_without_swallowing_shell() {
         .any(|block| block.command.contains("echo after-ssh") && block.exit_code == 0));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn raw_relay_child_process_does_not_inherit_parent_pty_master() {
+    if Command::new("bash").arg("--version").output().is_err()
+        || Command::new("python3").arg("--version").output().is_err()
+    {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-raw-fd-inherit-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("raw-fd-inherit-test", &work_dir);
+    config.native_mode = false;
+    let probe = r#"python3 - <<'PY'
+import os
+import stat
+
+bad = []
+for name in os.listdir("/dev/fd"):
+    try:
+        fd = int(name)
+    except ValueError:
+        continue
+    if fd <= 2:
+        continue
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        continue
+    if stat.S_ISCHR(st.st_mode) and os.major(st.st_rdev) == 15:
+        bad.append(str(fd))
+print("__PTY_MASTER_FDS__=" + ",".join(sorted(bad)))
+PY
+"#;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![RawRelayAction::write(probe.as_bytes().to_vec())],
+        &mut rendered,
+    )
+    .expect("raw relay fd inheritance");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("__PTY_MASTER_FDS__="),
+        "{rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("__PTY_MASTER_FDS__=\r\n")
+            || rendered_text.contains("__PTY_MASTER_FDS__=\n"),
+        "child inherited PTY master fd:\n{rendered_text}"
+    );
+
+    let ledger = ledger_from_output(&output);
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("python3 -") && block.exit_code == 0));
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
 #[test]
 fn raw_relay_host_shows_isolated_sudo_prompt_and_keeps_shell_usable() {
     if Command::new("bash").arg("--version").output().is_err() {
@@ -1151,7 +1502,7 @@ fn raw_relay_host_shows_isolated_sudo_prompt_and_keeps_shell_usable() {
     );
     assert!(rendered_text.contains("after-sudo"), "{rendered_text}");
     assert_no_osc_marker(&rendered);
-    assert_terminal_presentation_restored_after_interrupt(&rendered);
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
 
     let ledger = ledger_from_output(&output);
     let sudo_block = ledger
@@ -1171,6 +1522,144 @@ fn raw_relay_host_shows_isolated_sudo_prompt_and_keeps_shell_usable() {
         .blocks
         .iter()
         .any(|block| block.command.contains("echo after-sudo") && block.exit_code == 0));
+}
+
+#[test]
+fn raw_relay_zsh_tty_password_prompt_ctrl_c_keeps_shell_usable() {
+    if Command::new("zsh").arg("--version").output().is_err()
+        || Command::new("python3").arg("--version").output().is_err()
+    {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-tty-password-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let fake_bin_dir = work_dir.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin_dir).expect("fake bin dir");
+    let fake_sudo = fake_bin_dir.join("sudo");
+    std::fs::write(
+        &fake_sudo,
+        r#"#!/usr/bin/env python3
+import os
+import signal
+import sys
+import termios
+
+signal.alarm(5)
+tty = os.open("/dev/tty", os.O_RDWR)
+prompt = "[sudo] password for cosh: "
+args = sys.argv[1:]
+for idx, arg in enumerate(args):
+    if arg == "-p" and idx + 1 < len(args):
+        prompt = args[idx + 1]
+os.write(tty, prompt.encode())
+old = termios.tcgetattr(tty)
+new = old[:]
+new[3] &= ~termios.ECHO
+try:
+    termios.tcsetattr(tty, termios.TCSANOW, new)
+    os.read(tty, 1024)
+finally:
+    termios.tcsetattr(tty, termios.TCSANOW, old)
+    os.write(tty, b"\n")
+sys.exit(1)
+"#,
+    )
+    .expect("fake sudo script");
+    make_executable(&fake_sudo);
+
+    let mut config = ShellHostConfig::new("zsh-tty-password-test", &work_dir);
+    config.native_mode = false;
+    let command = format!(
+        "PATH={}:$PATH sudo -p '[sudo] password for cosh: ' true",
+        shell_arg(&fake_bin_dir)
+    );
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_zsh_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(command),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::write(vec![0x03]),
+            RawRelayAction::wait(Duration::from_millis(400)),
+            RawRelayAction::line("echo after-zsh-tty-password"),
+        ],
+        &mut rendered,
+    )
+    .expect("zsh tty password prompt");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("password for cosh:"),
+        "{rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("after-zsh-tty-password"),
+        "{rendered_text}"
+    );
+    assert_no_osc_marker(&rendered);
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
+
+    let ledger = ledger_from_output(&output);
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("sudo -p") && block.exit_code != 0));
+    assert!(ledger.blocks.iter().any(|block| {
+        block.command.contains("echo after-zsh-tty-password") && block.exit_code == 0
+    }));
+}
+
+#[test]
+fn raw_relay_zsh_job_control_suspend_fg_and_interrupt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-job-control-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-job-control-test", &work_dir);
+    config.native_mode = false;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_zsh_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("sleep 5"),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::write(vec![0x1a]),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("fg"),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::write(vec![0x03]),
+            RawRelayAction::wait(Duration::from_millis(400)),
+            RawRelayAction::line("echo after-zsh-job-control"),
+        ],
+        &mut rendered,
+    )
+    .expect("zsh job control");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("after-zsh-job-control"),
+        "{rendered_text}"
+    );
+    assert_no_osc_marker(&rendered);
+
+    let ledger = ledger_from_output(&output);
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command == "sleep 5" && block.exit_code != 0));
+    assert!(ledger
+        .blocks
+        .iter()
+        .any(|block| block.command.contains("echo after-zsh-job-control") && block.exit_code == 0));
 }
 
 #[test]
@@ -1208,7 +1697,7 @@ fn raw_relay_host_interrupts_python_repl_and_restores_terminal() {
         rendered_text.contains("after-python-repl"),
         "{rendered_text}"
     );
-    assert_terminal_presentation_restored_after_interrupt(&rendered);
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
 
     let ledger = ledger_from_output(&output);
     assert!(ledger
@@ -1253,7 +1742,7 @@ fn raw_relay_host_interrupts_node_repl_and_restores_terminal() {
 
     let rendered_text = String::from_utf8_lossy(&rendered);
     assert!(rendered_text.contains("after-node-repl"), "{rendered_text}");
-    assert_terminal_presentation_restored_after_interrupt(&rendered);
+    assert_no_synthetic_terminal_restore_after_interrupt(&rendered);
 
     let ledger = ledger_from_output(&output);
     assert!(ledger.blocks.iter().any(|block| block.command == "node"));
@@ -1263,18 +1752,19 @@ fn raw_relay_host_interrupts_node_repl_and_restores_terminal() {
         .any(|block| block.command.contains("echo after-node-repl") && block.exit_code == 0));
 }
 
-fn assert_terminal_presentation_restored_after_interrupt(rendered: &[u8]) {
+fn assert_no_synthetic_terminal_restore_after_interrupt(rendered: &[u8]) {
     for sequence in [
-        b"\x1b[?25h".as_slice(),
         b"\x1b[?1049l".as_slice(),
-        b"\x1b[?2004l".as_slice(),
-        b"\x1b[?7h".as_slice(),
+        b"\x1b[2J".as_slice(),
+        b"\x1bc".as_slice(),
+        b"COSH_INTERNAL_RESTORE".as_slice(),
+        b"stty echo icanon".as_slice(),
     ] {
         assert!(
-            rendered
+            !rendered
                 .windows(sequence.len())
                 .any(|window| window == sequence),
-            "missing terminal restore sequence {:?} in {}",
+            "unexpected synthetic terminal restore sequence {:?} in {}",
             sequence,
             String::from_utf8_lossy(rendered)
         );
@@ -1364,6 +1854,286 @@ fn raw_relay_host_intercepts_natural_language_via_bash_hook() {
         .blocks
         .iter()
         .any(|block| block.command.contains("missing-cosh-test-command") && block.exit_code != 0));
+}
+
+#[test]
+fn raw_relay_approved_handoff_wrapper_does_not_leak_to_output() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-wrapper-leak-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-wrapper-leak-test", &work_dir);
+    let mut emitted = false;
+    let command = "printf handoff-visible";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            let request = ShellHandoffRequest::new(
+                command,
+                format!("$ {command}"),
+                "approved_provider_shell_tool",
+                "user",
+                "approval-1",
+                "run-1",
+                1,
+            )
+            .expect("handoff request");
+            Ok(RawObserverAction::EmitToPty(request))
+        },
+    )
+    .expect("raw relay handoff");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("handoff-visible"), "{terminal}");
+    assert!(
+        !terminal.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{terminal}"
+    );
+
+    let ledger = ledger_from_output(&output);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == command)
+        .expect("original handoff command block");
+    assert_eq!(block.exit_code, 0, "{terminal}");
+    assert_clean_shell_output_ref(block, "handoff-visible");
+    let output_ref = block
+        .output
+        .terminal_output_ref
+        .as_deref()
+        .expect("terminal output ref");
+    let output_text = std::fs::read_to_string(output_ref).expect("output ref text");
+    assert!(
+        !output_text.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{output_text}"
+    );
+}
+
+#[test]
+fn raw_relay_handoff_provenance_does_not_set_child_environment() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-env-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-env-test", &work_dir);
+    let mut emitted = false;
+    let command = "sh -c 'printf \"handoff-bypass=%s\\n\" \"${COSH_SHELL_HANDOFF_BYPASS-unset}\"'";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            let request = ShellHandoffRequest::new(
+                command,
+                format!("$ {command}"),
+                "approved_provider_shell_tool",
+                "user",
+                "approval-env",
+                "run-env",
+                1,
+            )
+            .expect("handoff request");
+            Ok(RawObserverAction::EmitToPty(request))
+        },
+    )
+    .expect("raw relay handoff env");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(
+        command_output.contains("handoff-bypass=unset"),
+        "{command_output}"
+    );
+    assert!(
+        !command_output.contains("handoff-bypass=1"),
+        "{command_output}"
+    );
+}
+
+#[test]
+fn raw_relay_zsh_approved_handoff_wrapper_does_not_leak_to_output() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-handoff-wrapper-leak-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-handoff-wrapper-leak-test", &work_dir);
+    config.native_mode = false;
+    let input = DelayedInput::new(vec![(b"exit\n".to_vec(), Duration::from_millis(700))]);
+    let mut emitted = false;
+    let command = "printf zsh-handoff-visible";
+    let output = run_raw_relay_zsh_with_output_control(&config, input, Vec::new(), move |_, _| {
+        if emitted {
+            return Ok(RawObserverAction::Continue);
+        }
+        emitted = true;
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            "approval-1",
+            "run-1",
+            1,
+        )
+        .expect("handoff request");
+        Ok(RawObserverAction::EmitToPty(request))
+    })
+    .expect("raw zsh relay handoff");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("zsh-handoff-visible"), "{terminal}");
+    assert!(
+        !terminal.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{terminal}"
+    );
+
+    let ledger = ledger_from_output(&output);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == command)
+        .expect("original zsh handoff command block");
+    assert_eq!(block.exit_code, 0, "{terminal}");
+    assert_clean_shell_output_ref(block, "zsh-handoff-visible");
+    let output_ref = block
+        .output
+        .terminal_output_ref
+        .as_deref()
+        .expect("terminal output ref");
+    let output_text = std::fs::read_to_string(output_ref).expect("output ref text");
+    assert!(
+        !output_text.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{output_text}"
+    );
+}
+
+#[test]
+fn raw_relay_bash_history_records_original_handoff_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-handoff-history-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("bash-handoff-history-test", &work_dir);
+    config.native_mode = false;
+    let mut emitted = false;
+    let command = "printf bash-history-visible";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("history"),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            let request = ShellHandoffRequest::new(
+                command,
+                format!("$ {command}"),
+                "approved_provider_shell_tool",
+                "user",
+                "approval-1",
+                "run-1",
+                1,
+            )
+            .expect("handoff request");
+            Ok(RawObserverAction::EmitToPty(request))
+        },
+    )
+    .expect("raw bash handoff history");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains(command), "{terminal}");
+    assert!(
+        !terminal.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn raw_relay_zsh_history_records_original_handoff_command() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-handoff-history-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-handoff-history-test", &work_dir);
+    config.native_mode = false;
+    let input = DelayedInput::new(vec![
+        (b"history\n".to_vec(), Duration::from_millis(700)),
+        (b"exit\n".to_vec(), Duration::from_millis(100)),
+    ]);
+    let mut emitted = false;
+    let command = "printf zsh-history-visible";
+    let output = run_raw_relay_zsh_with_output_control(&config, input, Vec::new(), move |_, _| {
+        if emitted {
+            return Ok(RawObserverAction::Continue);
+        }
+        emitted = true;
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            "approval-1",
+            "run-1",
+            1,
+        )
+        .expect("handoff request");
+        Ok(RawObserverAction::EmitToPty(request))
+    })
+    .expect("raw zsh handoff history");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains(command), "{terminal}");
+    assert!(
+        !terminal.contains("COSH_SHELL_HANDOFF_BYPASS"),
+        "{terminal}"
+    );
 }
 
 #[test]

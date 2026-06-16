@@ -211,7 +211,7 @@ fn raw_cli_run_lock() -> std::sync::MutexGuard<'static, ()> {
     RAW_CLI_RUN_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock raw cli run")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct RawCliOutput {

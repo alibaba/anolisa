@@ -18,7 +18,7 @@ use crate::approval::broker::{provider_deny_response, ProviderResponseInput};
 use crate::runtime::evidence_delivery::stalled_provider_shell_handoff_continuation_request;
 use crate::runtime::prelude::*;
 
-const SHELL_EVIDENCE_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS: u64 = 15;
 
 pub(crate) fn poll_active_agent_run<W: Write>(
     state: &mut InlineState,
@@ -236,7 +236,16 @@ fn poll_active_agent_run_with_policy<W: Write>(
 }
 
 fn active_run_has_stalled_shell_evidence_delivery(active_run: &ActiveAgentRun) -> bool {
-    active_run.last_activity_at.elapsed() >= SHELL_EVIDENCE_IDLE_TIMEOUT
+    active_run.last_activity_at.elapsed() >= shell_evidence_idle_timeout()
+}
+
+fn shell_evidence_idle_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -52,6 +52,17 @@ _cosh_load_native_bash_history_if_empty
 
 _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
+_COSH_LAST_HISTORY_COMMAND=
+
+_cosh_apply_internal_recovery() {
+  if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
+    return 0
+  fi
+  trap - DEBUG
+  rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
+  stty echo icanon isig iexten opost 2>/dev/null || true
+  trap '_cosh_preexec_marker' DEBUG
+}
 
 _cosh_json_escape() {
   local value="$1"
@@ -194,12 +205,56 @@ _cosh_is_slash_control_candidate() {
   return 1
 }
 
+_COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
+
+_cosh_is_handoff_wrapper() {
+  case "$1" in
+    "$_COSH_HANDOFF_PREFIX"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_cosh_unwrap_handoff_command() {
+  local command="$1"
+  printf '%s' "${command#$_COSH_HANDOFF_PREFIX}"
+}
+
+_cosh_is_pending_handoff_command() {
+  local command="$1"
+  if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    return 1
+  fi
+  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+}
+
+_cosh_clear_handoff_request() {
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    rm -f -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null || true
+  fi
+}
+
+_cosh_replace_handoff_history() {
+  if [[ -z "${_COSH_HANDOFF_HISTORY_NO:-}" || -z "${_COSH_HANDOFF_HISTORY_COMMAND+x}" ]]; then
+    return 0
+  fi
+  builtin history -d "$_COSH_HANDOFF_HISTORY_NO" 2>/dev/null || true
+  builtin history -s "$_COSH_HANDOFF_HISTORY_COMMAND" 2>/dev/null || true
+  unset _COSH_HANDOFF_HISTORY_NO _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+}
+
 command_not_found_handle() {
   local command="$1"
   shift || true
   local original="$command"
   if (($# > 0)); then
     original="$original $*"
+  fi
+
+  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]] || _cosh_is_pending_handoff_command "$original"; then
+    printf 'bash: %s: command not found\n' "$command" >&2
+    return 127
   fi
 
   local reason
@@ -224,22 +279,37 @@ _cosh_preexec_marker() {
     history_entry="$(_cosh_history_entry)"
     history_no="$(_cosh_history_no "$history_entry")"
     command="$(_cosh_history_command_from_entry "$history_entry")"
-    if [[ -n "$history_no" && "$history_no" != "${_COSH_LAST_HISTORY_NO:-0}" && -n "$command" ]]; then
+    if [[ -n "$history_no" && -n "$command" && ( "$history_no" != "${_COSH_LAST_HISTORY_NO:-0}" || "$command" != "${_COSH_LAST_HISTORY_COMMAND:-}" ) ]]; then
       _COSH_LAST_HISTORY_NO="$history_no"
-      local first_word="$command"
-      local argc=1
-      if [[ "$command" == *[[:space:]]* ]]; then
-        first_word="${command%%[[:space:]]*}"
-        argc=2
+      _COSH_LAST_HISTORY_COMMAND="$command"
+      local display_command="$command"
+      if _cosh_is_handoff_wrapper "$command"; then
+        display_command="$(_cosh_unwrap_handoff_command "$command")"
+        _COSH_HANDOFF_ACTIVE=1
+        _COSH_HANDOFF_HISTORY_NO="$history_no"
+        _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
+        _cosh_replace_handoff_history
+      elif _cosh_is_pending_handoff_command "$command"; then
+        _COSH_HANDOFF_ACTIVE=1
+      else
+        _cosh_clear_handoff_request
+        unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+        unset _COSH_HANDOFF_HISTORY_NO _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+        local first_word="$command"
+        local argc=1
+        if [[ "$command" == *[[:space:]]* ]]; then
+          first_word="${command%%[[:space:]]*}"
+          argc=2
+        fi
+        local reason
+        if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+          _cosh_emit_intercept_marker "$command" "$reason"
+          _COSH_AT_PROMPT=0
+          trap '_cosh_preexec_marker' DEBUG
+          return 1
+        fi
       fi
-      local reason
-      if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
-        _cosh_emit_intercept_marker "$command" "$reason"
-        _COSH_AT_PROMPT=0
-        trap '_cosh_preexec_marker' DEBUG
-        return 1
-      fi
-      _cosh_emit_marker "preexec" "$command" 0
+      _cosh_emit_marker "preexec" "$display_command" 0
     fi
     _COSH_AT_PROMPT=0
   fi
@@ -249,6 +319,10 @@ _cosh_preexec_marker() {
 
 _cosh_precmd_marker() {
   local status=$?
+  _cosh_apply_internal_recovery
+  _cosh_replace_handoff_history
+  _cosh_clear_handoff_request
+  unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _cosh_emit_marker "precmd" "" "$status"
   _COSH_AT_PROMPT=1
 }
@@ -334,6 +408,14 @@ setopt NO_BEEP 2>/dev/null || true
 setopt NO_PROMPT_CR 2>/dev/null || true
 setopt NO_PROMPT_SP 2>/dev/null || true
 unsetopt NOMATCH 2>/dev/null || true
+
+_cosh_apply_internal_recovery() {
+  if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
+    return 0
+  fi
+  rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
+  stty echo icanon isig iexten opost 2>/dev/null || true
+}
 
 _cosh_json_escape() {
   local value="$1"
@@ -454,6 +536,53 @@ _cosh_is_slash_control_candidate() {
   return 1
 }
 
+_COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
+
+_cosh_is_handoff_wrapper() {
+  case "$1" in
+    "$_COSH_HANDOFF_PREFIX"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_cosh_unwrap_handoff_command() {
+  local command="$1"
+  printf '%s' "${command#$_COSH_HANDOFF_PREFIX}"
+}
+
+_cosh_is_pending_handoff_command() {
+  local command="$1"
+  if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    return 1
+  fi
+  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+}
+
+_cosh_clear_handoff_request() {
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    rm -f -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null || true
+  fi
+}
+
+_cosh_zshaddhistory_marker() {
+  local command="${1%$'\n'}"
+  if _cosh_is_handoff_wrapper "$command"; then
+    _COSH_HANDOFF_HISTORY_COMMAND="$(_cosh_unwrap_handoff_command "$command")"
+    return 1
+  fi
+  return 0
+}
+
+_cosh_add_handoff_history() {
+  if [[ -z "${_COSH_HANDOFF_HISTORY_COMMAND+x}" ]]; then
+    return 0
+  fi
+  print -sr -- "$_COSH_HANDOFF_HISTORY_COMMAND" 2>/dev/null || true
+  unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+}
+
 command_not_found_handler() {
   if [[ "${_COSH_PREEXEC_INTERCEPTED:-0}" == 1 ]]; then
     _COSH_PREEXEC_INTERCEPTED=0
@@ -465,6 +594,11 @@ command_not_found_handler() {
   local original="$command"
   if (($# > 0)); then
     original="$original $*"
+  fi
+
+  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]] || _cosh_is_pending_handoff_command "$original"; then
+    printf 'zsh: command not found: %s\n' "$command" >&2
+    return 127
   fi
 
   local reason
@@ -480,30 +614,47 @@ command_not_found_handler() {
 _cosh_preexec_marker() {
   _COSH_PREEXEC_INTERCEPTED=0
   local command="$1"
-  local first_word="$command"
-  local argc=1
-  if [[ "$command" == *[[:space:]]* ]]; then
-    first_word="${command%%[[:space:]]*}"
-    argc=2
+  local display_command="$command"
+  if _cosh_is_handoff_wrapper "$command"; then
+    display_command="$(_cosh_unwrap_handoff_command "$command")"
+    _COSH_HANDOFF_ACTIVE=1
+    _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
+  elif _cosh_is_pending_handoff_command "$command"; then
+    _COSH_HANDOFF_ACTIVE=1
+  else
+    _cosh_clear_handoff_request
+    unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+    unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+    local first_word="$command"
+    local argc=1
+    if [[ "$command" == *[[:space:]]* ]]; then
+      first_word="${command%%[[:space:]]*}"
+      argc=2
+    fi
+    local reason
+    if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+      _cosh_emit_intercept_marker "$command" "$reason"
+      _COSH_PREEXEC_INTERCEPTED=1
+      return 1
+    fi
   fi
-  local reason
-  if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
-    _cosh_emit_intercept_marker "$command" "$reason"
-    _COSH_PREEXEC_INTERCEPTED=1
-    return 1
-  fi
-  _cosh_emit_marker "preexec" "$command" 0
+  _cosh_emit_marker "preexec" "$display_command" 0
 }
 
 _cosh_precmd_marker() {
   local exit_status=$?
   setopt NO_PROMPT_CR 2>/dev/null || true
   setopt NO_PROMPT_SP 2>/dev/null || true
+  _cosh_apply_internal_recovery
+  _cosh_add_handoff_history
+  _cosh_clear_handoff_request
+  unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _cosh_emit_marker "precmd" "" "$exit_status"
 }
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 autoload -Uz add-zsh-hook
+add-zsh-hook zshaddhistory _cosh_zshaddhistory_marker
 add-zsh-hook preexec _cosh_preexec_marker
 add-zsh-hook precmd _cosh_precmd_marker
 "#

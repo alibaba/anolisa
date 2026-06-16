@@ -404,12 +404,12 @@ mod tests {
             mode: AgentMode::RecommendOnly,
             user_confirmed: true,
             hook_finding: Some(HookFinding {
-                hook_id: "test-failure".to_string(),
+                hook_id: "memory-pressure".to_string(),
                 severity: crate::hook_types::FindingSeverity::Warning,
-                title: "Test failed".to_string(),
-                description: "cargo test exited with code 101".to_string(),
-                suggestion: "Use /rust-project".to_string(),
-                skill: Some("rust-project".to_string()),
+                title: "Memory pressure detected".to_string(),
+                description: "Available memory is low".to_string(),
+                suggestion: "Use memory-analysis".to_string(),
+                skill: Some("memory-analysis".to_string()),
                 cli_hint: None,
                 context_refs: Vec::new(),
             }),
@@ -417,13 +417,16 @@ mod tests {
         };
 
         let prompt = prompt_from_request(&request);
-        assert!(prompt.contains("Hook finding: Test failed"), "{prompt}");
         assert!(
-            prompt.contains("Description: cargo test exited with code 101"),
+            prompt.contains("Hook finding: Memory pressure detected"),
             "{prompt}"
         );
         assert!(
-            prompt.contains("Recommended skill: rust-project"),
+            prompt.contains("Description: Available memory is low"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Recommended skill: memory-analysis"),
             "{prompt}"
         );
     }

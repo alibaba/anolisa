@@ -606,7 +606,7 @@ impl AgentAdapter for FakeAgentAdapter {
             AgentEvent::StatusChanged {
                 run_id: run_id.clone(),
                 phase: "analyzing".to_string(),
-                message: "building failed-command context for fake adapter".to_string(),
+                message: "building failed command context for fake adapter".to_string(),
             },
             AgentEvent::TextDelta {
                 run_id: run_id.clone(),

@@ -12,6 +12,21 @@ pub(super) fn generate_marker_token() -> String {
     format!("{:x}{:x}{:x}", std::process::id(), nanos, counter)
 }
 
-pub(super) fn marker_script_with_token(script: &str, token: &str) -> String {
-    format!("COSH_MARKER_TOKEN='{token}'\n{script}")
+pub(super) fn marker_script_with_token(
+    script: &str,
+    token: &str,
+    recovery_request_file: &str,
+    handoff_request_file: &str,
+) -> String {
+    format!(
+        "COSH_MARKER_TOKEN='{}'\nCOSH_RECOVERY_REQUEST_FILE='{}'\nCOSH_HANDOFF_REQUEST_FILE='{}'\n{}",
+        shell_single_quote_value(token),
+        shell_single_quote_value(recovery_request_file),
+        shell_single_quote_value(handoff_request_file),
+        script
+    )
+}
+
+fn shell_single_quote_value(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }

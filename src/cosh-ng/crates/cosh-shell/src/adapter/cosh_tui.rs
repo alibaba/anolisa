@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,8 +14,8 @@ use super::claude::{
 };
 use super::{
     agent_event_is_provider_progress, control_protocol, prompt_from_request,
-    provider_prompt_contract, record_cancellation_pending_session, run_provider_process_loop,
-    spawn_provider_child, start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
+    record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
+    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, ApprovalDecision, ApprovalResponse,
     ClaudeStreamParser, PreparedInvocation, ProviderCancellationArtifactStore,
     ProviderLineProgress, ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
@@ -248,16 +249,8 @@ impl AgentAdapter for CoshTuiAdapter {
     }
 }
 
-fn cosh_tui_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> String {
-    format!(
-        "{}{}\n\n\
-         cosh-tui adapter compatibility:\n\
-         - Use the shell tool to gather evidence when the cosh-shell Agent contract asks for shell evidence.\n\
-         - Do not answer only with a suggested shell command when the shell tool can gather the evidence.\n\
-         - If host-executed shell results are required, cosh-tui must support that control response before running the shell itself.",
-        prompt_from_request(request),
-        provider_prompt_contract(mode, "shell")
-    )
+fn cosh_tui_prompt_from_request(request: &AgentRequest, _mode: CoshApprovalMode) -> String {
+    prompt_from_request(request)
 }
 
 fn cosh_tui_dry_run_events(
@@ -405,6 +398,7 @@ fn start_cancellable_cosh_tui_process(
                 }
                 Ok(line_progress(progressed))
             },
+            || Ok(Vec::new()),
         );
 
         match &outcome {
@@ -598,8 +592,8 @@ fn start_control_protocol_cosh_tui_process(
             run_id.clone(),
             Some(Arc::clone(&pending_session_for_thread)),
         );
-        let mut pending_control_tool_call =
-            control_protocol::PendingControlProtocolToolCall::default();
+        let pending_control_tool_call =
+            RefCell::new(control_protocol::PendingControlProtocolToolCall::default());
         let control_capabilities_for_loop = Arc::clone(&control_capabilities_for_thread);
         let approval_tx_for_loop = approval_tx_for_thread.clone();
         let mut completed = false;
@@ -629,8 +623,9 @@ fn start_control_protocol_cosh_tui_process(
                             tool_input,
                             tool_use_id,
                         } => {
-                            let _ =
-                                pending_control_tool_call.take_matching_control_shell(&tool_use_id);
+                            let _ = pending_control_tool_call
+                                .borrow_mut()
+                                .take_matching_control_shell(&tool_use_id);
                             if let Some(response) =
                                 control_protocol::analysis_continuation_shell_deny_response(
                                     &prompt_for_loop,
@@ -703,7 +698,7 @@ fn start_control_protocol_cosh_tui_process(
                 let events = parser.parse_line(&line);
                 let progressed = events.iter().any(agent_event_is_provider_progress);
                 for event in events {
-                    for event in pending_control_tool_call.stage_or_emit(event) {
+                    for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                         update_completion_flags(&event, &mut completed, &mut failed);
                         if is_terminal_agent_event(&event) {
                             writer_done.store(true, Ordering::SeqCst);
@@ -714,6 +709,11 @@ fn start_control_protocol_cosh_tui_process(
                     }
                 }
                 Ok(line_progress(progressed))
+            },
+            || {
+                Ok(pending_control_tool_call
+                    .borrow_mut()
+                    .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE))
             },
         );
 
@@ -745,7 +745,7 @@ fn start_control_protocol_cosh_tui_process(
         }
 
         let _ = parser.finish(&mut |event| {
-            for event in pending_control_tool_call.stage_or_emit(event) {
+            for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                 update_completion_flags(&event, &mut completed, &mut failed);
                 if is_terminal_agent_event(&event) {
                     writer_done.store(true, Ordering::SeqCst);
@@ -874,6 +874,20 @@ mod tests {
 
         let trust = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Trust);
         assert!(trust.args.contains(&"trust".to_string()));
+    }
+
+    #[test]
+    fn prepare_invocation_prompt_leaves_shell_tool_trigger_to_cosh_tui() {
+        let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
+
+        assert!(inv
+            .prompt
+            .contains("Handle this natural-language shell prompt request"));
+        assert!(!inv.prompt.contains("cosh-shell Agent contract"));
+        assert!(!inv
+            .prompt
+            .contains("Always emit a provider permission request"));
+        assert!(!inv.prompt.contains("cosh-tui adapter compatibility"));
     }
 
     #[test]

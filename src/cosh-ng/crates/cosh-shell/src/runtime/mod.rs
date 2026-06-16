@@ -1,4 +1,5 @@
 pub(crate) mod cancel;
+pub(crate) mod command_interrupt;
 pub(crate) mod continuity;
 pub(crate) mod controller;
 pub(crate) mod details;

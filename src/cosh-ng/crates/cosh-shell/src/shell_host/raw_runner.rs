@@ -259,6 +259,8 @@ where
         &input_mode,
         &mut last_winsize,
         relay_prompt,
+        &session.recovery_request_file,
+        &session.handoff_request_file,
     )?;
     let display_start = session.parser.display.len();
     session.parser.flush_pending();

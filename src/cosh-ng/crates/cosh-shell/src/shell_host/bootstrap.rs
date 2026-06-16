@@ -3,7 +3,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
@@ -23,6 +23,8 @@ pub(super) struct PtySession {
     pub(super) terminal: File,
     pub(super) child: Child,
     pub(super) parser: OscParser,
+    pub(super) recovery_request_file: PathBuf,
+    pub(super) handoff_request_file: PathBuf,
 }
 
 pub(super) fn start_bash_session(config: &ShellHostConfig) -> io::Result<PtySession> {
@@ -44,21 +46,36 @@ fn start_shell_session(
     fs::set_permissions(&output_ref_dir, fs::Permissions::from_mode(0o700))?;
     cleanup_expired_output_refs(&output_ref_dir, OUTPUT_REF_RETENTION)?;
     let rcfile = config.work_dir.join(adapter.marker_filename());
+    let recovery_request_file = config.work_dir.join("terminal-recovery-request");
+    let handoff_request_file = config.work_dir.join("shell-handoff-request");
     let marker_token = generate_marker_token();
+    let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
+    let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
     fs::write(
         &rcfile,
-        marker_script_with_token(adapter.marker_script(), &marker_token),
+        marker_script_with_token(
+            adapter.marker_script(),
+            &marker_token,
+            &recovery_request_file_str,
+            &handoff_request_file_str,
+        ),
     )?;
     fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
 
     let pty = openpty(Some(&config.winsize), None).map_err(nix_to_io)?;
     let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    set_close_on_exec(master.as_raw_fd())?;
     set_nonblocking(master.as_raw_fd())?;
 
     let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
+    set_interactive_terminal_baseline(slave.as_raw_fd())?;
     let terminal = slave.try_clone()?;
     let stdin = slave.try_clone()?;
     let stdout = slave.try_clone()?;
+    set_close_on_exec(slave.as_raw_fd())?;
+    set_close_on_exec(terminal.as_raw_fd())?;
+    set_close_on_exec(stdin.as_raw_fd())?;
+    set_close_on_exec(stdout.as_raw_fd())?;
 
     let mut command = Command::new(adapter.executable(config));
     adapter.configure_command(&mut command, &rcfile, config);
@@ -83,6 +100,10 @@ fn start_shell_session(
             if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
+            set_interactive_terminal_baseline(0)?;
+            if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -96,6 +117,8 @@ fn start_shell_session(
         terminal,
         child,
         parser,
+        recovery_request_file,
+        handoff_request_file,
     })
 }
 
@@ -109,6 +132,60 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn set_close_on_exec(fd: i32) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn set_interactive_terminal_baseline(fd: i32) -> io::Result<()> {
+    let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    termios.c_lflag |= libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ICANON | libc::ISIG;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        termios.c_lflag |= libc::IEXTEN;
+    }
+    termios.c_iflag |= libc::ICRNL | libc::IXON | libc::BRKINT;
+    termios.c_iflag &= !(libc::IGNBRK | libc::INLCR | libc::IGNCR | libc::ISTRIP);
+    termios.c_oflag |= libc::OPOST;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        termios.c_oflag |= libc::ONLCR;
+    }
+    set_control_char(&mut termios, libc::VINTR as usize, 0x03);
+    set_control_char(&mut termios, libc::VQUIT as usize, 0x1c);
+    set_control_char(&mut termios, libc::VERASE as usize, 0x7f);
+    set_control_char(&mut termios, libc::VKILL as usize, 0x15);
+    set_control_char(&mut termios, libc::VEOF as usize, 0x04);
+    set_control_char(&mut termios, libc::VEOL as usize, 0x00);
+    set_control_char(&mut termios, libc::VMIN as usize, 0x01);
+    set_control_char(&mut termios, libc::VTIME as usize, 0x00);
+    set_control_char(&mut termios, libc::VSUSP as usize, 0x1a);
+    set_control_char(&mut termios, libc::VSTART as usize, 0x11);
+    set_control_char(&mut termios, libc::VSTOP as usize, 0x13);
+
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn set_control_char(termios: &mut libc::termios, index: usize, value: u8) {
+    if index < termios.c_cc.len() {
+        termios.c_cc[index] = value as libc::cc_t;
+    }
 }
 
 fn nix_to_io(err: nix::Error) -> io::Error {
@@ -196,5 +273,17 @@ mod tests {
 
         assert!(recent.exists(), "recent output ref should be retained");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_on_exec_sets_fd_flag() {
+        let pty = openpty(None, None).expect("open pty");
+        let fd = pty.master.as_raw_fd();
+
+        set_close_on_exec(fd).expect("set close on exec");
+
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
     }
 }

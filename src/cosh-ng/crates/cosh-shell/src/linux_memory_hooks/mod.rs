@@ -5,9 +5,7 @@ mod parser;
 mod presentation;
 
 use parser::*;
-use presentation::{
-    high_memory_finding, interactive_top_guidance_finding, memory_pressure_finding,
-};
+use presentation::{high_memory_finding, memory_pressure_finding};
 
 #[derive(Debug, Clone, PartialEq)]
 struct ProcessMemoryRow {
@@ -171,52 +169,6 @@ impl BuiltinHook for MemoryPressureHook {
             return None;
         };
         memory_pressure_finding(metrics.as_ref())
-    }
-}
-
-pub struct InteractiveTopGuidanceHook {
-    matcher: HookMatcher,
-}
-
-impl Default for InteractiveTopGuidanceHook {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InteractiveTopGuidanceHook {
-    pub fn new() -> Self {
-        Self {
-            matcher: HookMatcher {
-                id: "interactive-top-guidance".into(),
-                commands: vec!["top".into(), "env".into()],
-                command_patterns: Vec::new(),
-                command_regex: None,
-                exit_codes: Some(vec![0]),
-                min_output_bytes: Some(1),
-                trigger: HookTrigger::OnSuccess,
-            },
-        }
-    }
-}
-
-impl BuiltinHook for InteractiveTopGuidanceHook {
-    fn id(&self) -> &str {
-        "interactive-top-guidance"
-    }
-
-    fn matcher(&self) -> &HookMatcher {
-        &self.matcher
-    }
-
-    fn evaluate(&self, input: &HookInput) -> Option<HookFinding> {
-        if memory_target_program(&input.command) != "top"
-            || is_batch_top_command(&input.command)
-            || is_top_metadata_command(&input.command)
-        {
-            return None;
-        }
-        Some(interactive_top_guidance_finding())
     }
 }
 

@@ -117,6 +117,10 @@ fn agent_loading_count(output: &str) -> usize {
     count_occurrences(output, "Thinking...") + count_occurrences(output, "正在思考...")
 }
 
+fn json_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn process_is_alive(pid: u32) -> bool {
     Command::new("ps")
         .args(["-p", &pid.to_string()])
@@ -2314,7 +2318,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
                 b"?? cosh-tui-auto-safe-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -2327,6 +2331,325 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(!output.contains("Approval required"), "{output}");
     assert!(
         !output.contains("missing auto host_executed_shell result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_cosh_tui_sysctl_non_ascii_shell_handoff_is_not_intercepted() {
+    let home = temp_shell_home("cosh-tui-sysctl-non-ascii-shell");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_tui_path = bin_dir.join("cosh-tui");
+    write_executable(
+        &cosh_tui_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-sysctl-non-ascii","model":"cosh-tui-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-tui-sysctl-non-ascii-shell*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-sysctl-non-ascii","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sysctl -n kernel.ostype 2>/dev/null || printf sysctl-fallback; printf '\'' 内存总计\\n'\''"},"tool_use_id":"toolu-sysctl-non-ascii"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'sysctl-fallback'*'内存总计'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-sysctl-non-ascii","message":{"content":[{"type":"text","text":"SYSCTL NON ASCII HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":true,"result":"missing sysctl non-ascii host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-tui",
+        &[],
+        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-tui-sysctl-non-ascii-shell\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(output.contains("内存总计"), "{output}");
+    assert!(
+        output.contains("SYSCTL NON ASCII HOSTEXEC RECEIVED"),
+        "{output}"
+    );
+    assert!(!output.contains("natural_language"), "{output}");
+    assert!(
+        !output.contains("missing sysctl non-ascii host_executed_shell result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_approved_shell_handoff_command_not_found_does_not_intercept() {
+    let home = temp_shell_home("cosh-tui-handoff-command-not-found");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_tui_path = bin_dir.join("cosh-tui");
+    write_executable(
+        &cosh_tui_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-command-not-found","model":"cosh-tui-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-tui-handoff-command-not-found*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-command-not-found","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"/help"},"tool_use_id":"toolu-handoff-command-not-found"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'/help'*'"exit_code":127'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-command-not-found","message":{"content":[{"type":"text","text":"HANDOFF COMMAND NOT FOUND HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":true,"result":"missing command-not-found host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-tui",
+        &[],
+        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-tui-handoff-command-not-found\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(
+        output.contains("HANDOFF COMMAND NOT FOUND HOSTEXEC RECEIVED"),
+        "{output}"
+    );
+    assert!(!output.contains("intercepted  slash"), "{output}");
+    assert!(
+        !output.contains("missing command-not-found host_executed_shell result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_approved_shell_handoff_bypasses_marker_intercepts() {
+    let home = temp_shell_home("cosh-tui-handoff-bypass-marker");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_tui_path = bin_dir.join("cosh-tui");
+    write_executable(
+        &cosh_tui_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-bypass-marker","model":"cosh-tui-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-tui-handoff-bypass-marker*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-shell"},"tool_use_id":"toolu-handoff-bypass-marker"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'?? should-run-as-shell'*'"exit_code":127'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-bypass-marker","message":{"content":[{"type":"text","text":"HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":true,"result":"missing marker-bypass host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-tui",
+        &[],
+        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-tui-handoff-bypass-marker\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(
+        output.contains("HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"),
+        "{output}"
+    );
+    assert!(!output.contains("agent_marker"), "{output}");
+    assert!(!output.contains("intercepted"), "{output}");
+    assert!(
+        !output.contains("missing marker-bypass host_executed_shell result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_zsh_approved_shell_handoff_bypasses_marker_intercepts() {
+    let home = temp_shell_home("cosh-tui-zsh-handoff-bypass-marker");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_tui_path = bin_dir.join("cosh-tui");
+    write_executable(
+        &cosh_tui_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","model":"cosh-tui-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-tui-zsh-handoff-bypass-marker*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-zsh-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-zsh-shell"},"tool_use_id":"toolu-zsh-handoff-bypass-marker"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'?? should-run-as-zsh-shell'*'"exit_code":127'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","message":{"content":[{"type":"text","text":"ZSH HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":true,"result":"missing zsh marker-bypass host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-tui",
+        &["--shell", "zsh"],
+        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-tui-zsh-handoff-bypass-marker\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(
+        output.contains("ZSH HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"),
+        "{output}"
+    );
+    assert!(!output.contains("agent_marker"), "{output}");
+    assert!(!output.contains("intercepted"), "{output}");
+    assert!(
+        !output.contains("missing zsh marker-bypass host_executed_shell result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_approved_shell_handoff_wrapper_does_not_leak() {
+    let home = temp_shell_home("cosh-tui-handoff-wrapper-leak");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_tui_path = bin_dir.join("cosh-tui");
+    write_executable(
+        &cosh_tui_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-wrapper-leak","model":"cosh-tui-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-tui-handoff-wrapper-leak*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-wrapper-leak","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf wrapper-visible"},"tool_use_id":"toolu-handoff-wrapper-leak"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'printf wrapper-visible'*'wrapper-visible'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-wrapper-leak","message":{"content":[{"type":"text","text":"HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":true,"result":"missing wrapper-leak host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-tui",
+        &[],
+        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-tui-handoff-wrapper-leak\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(output.contains("wrapper-visible"), "{output}");
+    assert!(
+        output.contains("HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"),
+        "{output}"
+    );
+    assert!(!output.contains("COSH_SHELL_HANDOFF_BYPASS"), "{output}");
+    assert!(
+        !output.contains("missing wrapper-leak host_executed_shell result"),
         "{output}"
     );
 }
@@ -3785,19 +4108,14 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     assert!(!output.contains("Shell recovery"), "{output}");
     assert!(!output.contains("/output-refs/"), "{output}");
     assert_eq!(
-        count_occurrences_between(
-            &normalized,
-            "cosh-osc$ du -sh .\n",
-            "FINAL MULTI TOOL REPORT",
-            "cosh-osc$"
-        ),
+        count_occurrences_between(&normalized, "\t.\n", "FINAL MULTI TOOL REPORT", "cosh-osc$"),
         0,
         "{output}"
     );
     assert_eq!(
         count_occurrences_between(
             &normalized,
-            "cosh-osc$ du -sh .\n",
+            "\t.\n",
             "FINAL MULTI TOOL REPORT",
             "Thinking..."
         ),
@@ -3900,7 +4218,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert_eq!(
         count_occurrences_between(
             &normalized,
-            "cosh-osc$ du -sh .\n",
+            "\t.\n",
             "FINAL COSH-TUI MULTI TOOL REPORT",
             "cosh-osc$"
         ),
@@ -4027,7 +4345,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-streamed-
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "qwen",
         &[],
-        &[("HOME", &home_str), ("PATH", &path)],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS", "1"),
+        ],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
@@ -4556,6 +4878,196 @@ fn raw_cli_host_executed_shell_timeout_interrupts_and_returns_result() {
     assert!(!output.contains("req-2"), "{output}");
     assert!(
         !output.contains("missing timeout interrupt result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_host_executed_password_prompt_timeout_defers_notice_until_prompt() {
+    let home = temp_shell_home("qwen-host-executed-password-timeout");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(
+        &bin_dir.join("sudo"),
+        r#"#!/bin/sh
+prompt='[sudo] password for cosh timeout: '
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) shift; prompt="$1" ;;
+  esac
+  shift || true
+done
+printf '%s' "$prompt" >/dev/tty
+IFS= read -r _password </dev/tty
+exit 1
+"#,
+    );
+    let command = format!(
+        "PATH=\"{}\":$PATH sudo -p \"[sudo] password for cosh timeout: \" true",
+        bin_dir.display()
+    );
+    let co_path = bin_dir.join("co");
+    let command_json = json_string(&command);
+    write_executable(
+        &co_path,
+        &format!(
+            r#"#!/bin/sh
+read -r init
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}}}}}'
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-host-executed-password-timeout","model":"qwen-test"}}'
+read -r user_message
+case "$user_message" in
+  *provider-host-executed-password-timeout*)
+    printf '%s\n' '{{"type":"control_request","request_id":"ctrl-password-timeout","request":{{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{{"command":"{command_json}"}},"tool_use_id":"toolu-password-timeout"}}}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'"status":"timed_out"'*'password for cosh timeout'*)
+          printf '%s\n' '{{"type":"assistant","session_id":"sess-host-executed-password-timeout","message":{{"content":[{{"type":"text","text":"Host-executed password timeout result received."}}]}}}}'
+          printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-executed-password-timeout","is_error":false,"result":"done"}}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{{"type":"result","subtype":"error","session_id":"sess-host-executed-password-timeout","is_error":true,"result":"missing password timeout result"}}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-executed-password-timeout","is_error":false,"result":"ignored"}}'
+"#
+        ),
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "qwen",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("PATH", path.as_str()),
+            ("COSH_SHELL_HANDOFF_TIMEOUT_SECS", "1"),
+        ],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? provider-host-executed-password-timeout\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            (b"dummy-password\n".to_vec(), Duration::from_millis(5_000)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    let prompt_pos = output.find("password for cosh timeout:").expect(&output);
+    let notice_pos = output
+        .find("Command exceeded configured shell handoff timeout (1s).")
+        .expect(&output);
+    assert!(prompt_pos < notice_pos, "{output}");
+    assert!(
+        output.contains("Sent interrupt to foreground PTY; waiting for shell evidence."),
+        "{output}"
+    );
+    assert!(
+        output.contains("Host-executed password timeout result received."),
+        "{output}"
+    );
+    assert!(output.contains("Shell: timed_out · req-1"), "{output}");
+    assert!(
+        !output.contains("missing password timeout result"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_host_executed_fullscreen_timeout_defers_notice_until_exit_alt_screen() {
+    let home = temp_shell_home("qwen-host-executed-fullscreen-timeout");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fullscreen_script = bin_dir.join("fullscreen-timeout-helper");
+    write_executable(
+        &fullscreen_script,
+        r#"#!/bin/sh
+trap 'printf "\033[?1049lFULLSCREEN_DONE\n"; exit 130' INT TERM
+printf '\033[?1049hFULLSCREEN_START\n'
+while :; do
+  sleep 1
+done
+"#,
+    );
+    let command = "fullscreen-timeout-helper";
+    let co_path = bin_dir.join("co");
+    let command_json = json_string(command);
+    write_executable(
+        &co_path,
+        &format!(
+            r#"#!/bin/sh
+read -r init
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}}}}}'
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-host-executed-fullscreen-timeout","model":"qwen-test"}}'
+read -r user_message
+case "$user_message" in
+  *provider-host-executed-fullscreen-timeout*)
+    printf '%s\n' '{{"type":"control_request","request_id":"ctrl-fullscreen-timeout","request":{{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{{"command":"{command_json}"}},"tool_use_id":"toolu-fullscreen-timeout"}}}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'"status":"timed_out"'*)
+          printf '%s\n' '{{"type":"assistant","session_id":"sess-host-executed-fullscreen-timeout","message":{{"content":[{{"type":"text","text":"Host-executed fullscreen timeout result received."}}]}}}}'
+          printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-executed-fullscreen-timeout","is_error":false,"result":"done"}}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{{"type":"result","subtype":"error","session_id":"sess-host-executed-fullscreen-timeout","is_error":true,"result":"missing fullscreen timeout result"}}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-executed-fullscreen-timeout","is_error":false,"result":"ignored"}}'
+"#
+        ),
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "qwen",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("PATH", path.as_str()),
+            ("COSH_SHELL_HANDOFF_TIMEOUT_SECS", "1"),
+        ],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? provider-host-executed-fullscreen-timeout\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(5_000)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    let enter_alt_pos = output.find("\x1b[?1049h").expect(&output);
+    let leave_alt_pos = output.find("\x1b[?1049l").expect(&output);
+    let notice_pos = output
+        .find("Command exceeded configured shell handoff timeout (1s).")
+        .expect(&output);
+    assert!(enter_alt_pos < leave_alt_pos, "{output}");
+    assert!(leave_alt_pos < notice_pos, "{output}");
+    assert!(
+        output.contains("Host-executed fullscreen timeout result received."),
+        "{output}"
+    );
+    assert!(output.contains("Shell: timed_out · req-1"), "{output}");
+    assert!(
+        !output.contains("missing fullscreen timeout result"),
         "{output}"
     );
 }
@@ -5222,7 +5734,11 @@ exit 0
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let mut env = vec![("HOME", home_str.as_str()), ("PATH", path.as_str())];
+    let mut env = vec![
+        ("HOME", home_str.as_str()),
+        ("PATH", path.as_str()),
+        ("COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS", "1"),
+    ];
     env.extend_from_slice(extra_env);
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "qwen",
@@ -6622,7 +7138,7 @@ fn raw_cli_ctrl_c_interrupts_foreground_command_without_agent_cancel() {
 }
 
 #[test]
-fn raw_cli_second_ctrl_c_recovers_ignored_foreground_command() {
+fn raw_cli_ctrl_backslash_recovers_ignored_foreground_command() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -6632,7 +7148,7 @@ fn raw_cli_second_ctrl_c_recovers_ignored_foreground_command() {
                 Duration::ZERO,
             ),
             (vec![0x03], Duration::from_millis(500)),
-            (vec![0x03], Duration::from_millis(500)),
+            (vec![0x1c], Duration::from_millis(500)),
             (
                 b"echo after-foreground-escalation\nexit\n".to_vec(),
                 Duration::from_millis(1_000),
@@ -7192,7 +7708,6 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
         compact.contains("Hook routing hints visible to Agent: <none>"),
         "{output}"
     );
-    assert!(output.contains("Hook auto-analyzed"), "{output}");
     assert!(
         compact.contains("The command ls /path/that/does/not/exist failed"),
         "{output}"
@@ -7308,11 +7823,6 @@ fn raw_cli_repeated_failed_command_skips_without_auto_analyzed_notice() {
     );
 
     assert_eq!(
-        count_occurrences(&output, "Hook auto-analyzed"),
-        1,
-        "{output}"
-    );
-    assert_eq!(
         count_occurrences(&output, "Analysis skipped"),
         1,
         "{output}"
@@ -7346,13 +7856,13 @@ fn raw_cli_zh_repeated_failed_command_uses_localized_notices() {
         ],
     );
 
-    assert_eq!(count_occurrences(&output, "Hook 自动分析"), 1, "{output}");
     assert_eq!(count_occurrences(&output, "已跳过分析"), 1, "{output}");
     assert!(
         output.contains("已跳过 `ls ccc` 的重复失败分析"),
         "{output}"
     );
-    assert!(output.contains("Agent 分析正在启动。"), "{output}");
+    assert!(output.contains("Agent 回复"), "{output}");
+    assert!(output.contains("The command ls ccc failed with exit code 1."));
     assert!(output.contains("after-zh-repeat"), "{output}");
     assert!(!output.contains("bash: ls ccc"), "{output}");
 }
@@ -7431,11 +7941,6 @@ fn raw_cli_repeated_ps_dash_aux_failure_is_stable_and_keeps_prompt() {
     let _ = fs::remove_dir_all(&fixture);
 
     assert_eq!(
-        count_occurrences(&output, "Hook auto-analyzed"),
-        1,
-        "{output}"
-    );
-    assert_eq!(
         count_occurrences(&output, "Analysis skipped"),
         1,
         "{output}"
@@ -7478,9 +7983,10 @@ fn raw_cli_delays_agent_output_while_foreground_command_is_active() {
         vec![
             (b"?? hold test slow agent\n".to_vec(), Duration::ZERO),
             (
-                b"sleep 0.3; echo after-foreground\nexit\n".to_vec(),
+                b"sleep 0.3; echo after-foreground\n".to_vec(),
                 Duration::from_millis(200),
             ),
+            (b"exit\n".to_vec(), Duration::from_millis(3_500)),
         ],
     );
 
@@ -7880,13 +8386,17 @@ fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
 
 #[test]
 fn raw_cli_animation_mode_uses_transient_agent_status() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "?? slow agent\nexit\n",
+        &[],
         &[
             ("COSH_SHELL_LANG", "en-US"),
             ("COSH_SHELL_ANIMATION", "always"),
             ("TERM", "xterm-256color"),
+        ],
+        vec![
+            (b"?? slow agent\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
         ],
     );
 
@@ -8016,10 +8526,14 @@ fn raw_cli_agent_response_streams_markdown_fragments_inside_card() {
 
 #[test]
 fn raw_cli_agent_response_streams_markdown_table_as_stable_block() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "?? stream markdown table\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
+        vec![
+            (b"?? stream markdown table\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(800)),
+        ],
     );
 
     assert!(output.contains("╭ Agent"), "{output}");
@@ -8036,10 +8550,14 @@ fn raw_cli_agent_response_streams_markdown_table_as_stable_block() {
 
 #[test]
 fn raw_cli_agent_response_streams_soft_wrapped_markdown_paragraph() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "?? stream markdown paragraph\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
+        vec![
+            (b"?? stream markdown paragraph\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(800)),
+        ],
     );
 
     assert!(output.contains("╭ Agent"), "{output}");

@@ -195,21 +195,6 @@ fn stale_memory_pressure_does_not_promote_process_warning() {
 }
 
 #[test]
-fn interactive_top_guidance_info_is_hint_not_card() {
-    let findings = vec![finding("interactive-top-guidance", FindingSeverity::Info)];
-    let aggregated = aggregate_hook_findings(findings);
-
-    assert_eq!(
-        display_for_aggregate(
-            &block_with_command("top"),
-            &aggregated[0],
-            AnalysisMode::Smart
-        ),
-        RuntimeHookDisplay::Hint
-    );
-}
-
-#[test]
 fn swap_only_memory_pressure_info_is_silent() {
     let findings = vec![finding("memory-pressure", FindingSeverity::Info)];
     let aggregated = aggregate_hook_findings(findings);

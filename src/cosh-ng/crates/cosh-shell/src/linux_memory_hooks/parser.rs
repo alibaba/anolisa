@@ -456,51 +456,6 @@ pub(super) fn is_free_sampling_command(command: &str) -> bool {
     false
 }
 
-pub(super) fn is_top_metadata_command(command: &str) -> bool {
-    if memory_target_program(command) != "top" {
-        return false;
-    }
-
-    let mut seen_program = false;
-    let mut after_sudo = false;
-    let mut skip_next_sudo_arg = false;
-    for token in command.split_whitespace() {
-        if !seen_program {
-            if skip_next_sudo_arg {
-                skip_next_sudo_arg = false;
-                continue;
-            }
-            if is_env_assignment_token(token) {
-                continue;
-            }
-            let basename = token
-                .rsplit_once('/')
-                .map(|(_, name)| name)
-                .unwrap_or(token);
-            if basename == "sudo" {
-                after_sudo = true;
-                continue;
-            }
-            if after_sudo && is_sudo_option_token(token, &mut skip_next_sudo_arg) {
-                continue;
-            }
-            if basename == "top" {
-                seen_program = true;
-            }
-            continue;
-        }
-
-        if matches!(token, "|" | ";" | "&&" | "||") {
-            break;
-        }
-        if matches!(token, "-h" | "--help" | "-v" | "-V" | "-O" | "--version") {
-            return true;
-        }
-    }
-
-    false
-}
-
 pub(super) fn is_env_assignment_token(token: &str) -> bool {
     let Some(eq_pos) = token.find('=') else {
         return false;

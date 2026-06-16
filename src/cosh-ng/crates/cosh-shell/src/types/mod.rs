@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const SHELL_HANDOFF_BYPASS_PREFIX: &str = "COSH_SHELL_HANDOFF_BYPASS=1 ";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellHandoffRequest {
@@ -80,6 +81,14 @@ impl ShellHandoffRequest {
     pub fn pty_bytes(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         let mut bytes = self.command.as_bytes().to_vec();
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    pub fn handoff_pty_bytes(&self) -> Result<Vec<u8>, String> {
+        self.validate()?;
+        let mut bytes = SHELL_HANDOFF_BYPASS_PREFIX.as_bytes().to_vec();
+        bytes.extend_from_slice(self.command.as_bytes());
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -511,7 +520,7 @@ impl Default for Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::ShellHandoffRequest;
+    use super::{ShellHandoffRequest, SHELL_HANDOFF_BYPASS_PREFIX};
 
     fn handoff(command: &str) -> Result<ShellHandoffRequest, String> {
         ShellHandoffRequest::new(
@@ -542,6 +551,10 @@ mod tests {
         let request = handoff("printf\tok").expect("tab-separated command is visible input");
 
         assert_eq!(request.pty_bytes().unwrap(), b"printf\tok\n");
+        assert_eq!(
+            request.handoff_pty_bytes().unwrap(),
+            format!("{SHELL_HANDOFF_BYPASS_PREFIX}printf\tok\n").as_bytes()
+        );
         assert_eq!(request.preview_hash, "fnv1a64:7d74cbb1a6f6fb27");
     }
 }

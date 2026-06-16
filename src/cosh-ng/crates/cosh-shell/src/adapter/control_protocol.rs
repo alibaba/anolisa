@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::tools::is_shell_tool_name;
 use crate::types::{AgentEvent, QuestionSelectionMode};
@@ -8,6 +9,7 @@ use crate::types::{AgentEvent, QuestionSelectionMode};
 const SHELL_HANDOFF_EVIDENCE_PROMPT_MARKER: &str = "ShellCommandCompleted";
 const SHELL_HANDOFF_CONTINUATION_HINT: &str =
     "analysis-only continuation after foreground shell handoff";
+pub const PENDING_CONTROL_TOOL_CALL_GRACE: Duration = Duration::from_millis(200);
 pub const ANALYSIS_ONLY_SHELL_DENY_MESSAGE: &str = "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.";
 
 pub enum ControlRequest {
@@ -68,8 +70,14 @@ pub struct ControlProtocolCapabilities {
 
 #[derive(Debug, Default)]
 pub struct PendingControlProtocolToolCall {
-    pending_shell_tool_calls: Vec<AgentEvent>,
+    pending_shell_tool_calls: Vec<PendingShellToolCall>,
     held_events: Vec<AgentEvent>,
+}
+
+#[derive(Debug)]
+struct PendingShellToolCall {
+    event: AgentEvent,
+    staged_at: Instant,
 }
 
 impl PendingControlProtocolToolCall {
@@ -88,7 +96,10 @@ impl PendingControlProtocolToolCall {
     pub fn stage_or_emit(&mut self, event: AgentEvent) -> Vec<AgentEvent> {
         if matches!(&event, AgentEvent::ToolCall { tool_id: Some(_), name, .. } if is_shell_tool_name(name))
         {
-            self.pending_shell_tool_calls.push(event);
+            self.pending_shell_tool_calls.push(PendingShellToolCall {
+                event,
+                staged_at: Instant::now(),
+            });
             return Vec::new();
         }
 
@@ -118,22 +129,47 @@ impl PendingControlProtocolToolCall {
     }
 
     pub fn flush(&mut self) -> Vec<AgentEvent> {
-        let mut events = std::mem::take(&mut self.pending_shell_tool_calls);
+        let mut events = self
+            .pending_shell_tool_calls
+            .drain(..)
+            .map(|pending| pending.event)
+            .collect::<Vec<_>>();
         events.append(&mut self.held_events);
+        events
+    }
+
+    pub fn flush_stalled(&mut self, grace: Duration) -> Vec<AgentEvent> {
+        let now = Instant::now();
+        let count = self
+            .pending_shell_tool_calls
+            .iter()
+            .take_while(|pending| now.saturating_duration_since(pending.staged_at) >= grace)
+            .count();
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut events = self
+            .pending_shell_tool_calls
+            .drain(..count)
+            .map(|pending| pending.event)
+            .collect::<Vec<_>>();
+        if self.pending_shell_tool_calls.is_empty() {
+            events.append(&mut self.held_events);
+        }
         events
     }
 
     fn pending_shell_tool_call_index(&self, tool_use_id: &str) -> Option<usize> {
         self.pending_shell_tool_calls
             .iter()
-            .position(|event| matches!(event, AgentEvent::ToolCall { tool_id: Some(tool_id), .. } if tool_id == tool_use_id))
+            .position(|pending| matches!(&pending.event, AgentEvent::ToolCall { tool_id: Some(tool_id), .. } if tool_id == tool_use_id))
     }
 
     fn take_pending_shell_tool_call(&mut self, tool_use_id: &str) -> Vec<AgentEvent> {
         let Some(index) = self.pending_shell_tool_call_index(tool_use_id) else {
             return Vec::new();
         };
-        vec![self.pending_shell_tool_calls.remove(index)]
+        vec![self.pending_shell_tool_calls.remove(index).event]
     }
 }
 

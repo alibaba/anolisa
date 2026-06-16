@@ -105,3 +105,66 @@ fn block_with_command_at(command: &str, ended_at_ms: u64) -> CommandBlock {
     block.ended_at_ms = ended_at_ms;
     block
 }
+
+fn write_test_output_ref(name: &str, content: &str) -> String {
+    let path = std::env::temp_dir().join(format!(
+        "cosh-shell-hook-runtime-{name}-{}-{}.txt",
+        std::process::id(),
+        content.len()
+    ));
+    std::fs::write(&path, content).expect("write hook output");
+    path.to_string_lossy().to_string()
+}
+
+#[test]
+fn command_hook_findings_skip_user_interrupted_exit_one() {
+    let mut state = InlineState::default();
+    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
+    for hook in cosh_shell::builtin_hooks::default_builtin_hooks() {
+        hook_engine.register(hook);
+    }
+    state.hooks.engine = hook_engine;
+
+    let mut block = block(1);
+    block.command = "aliyun configure".to_string();
+    block.started_at_ms = 100;
+    block.ended_at_ms = 200;
+
+    let started = ShellEvent::command_started("session", "cmd-1", "aliyun configure", "/tmp", 100);
+    let mut ctrl_c = ShellEvent::user_input_intercepted("session", "ctrl_c");
+    ctrl_c.component = Some("control".to_string());
+    ctrl_c.started_at_ms = Some(150);
+    let finished = ShellEvent::command_finished(
+        ShellEventKind::CommandFailed,
+        "session",
+        "cmd-1",
+        1,
+        200,
+        "terminal://test/cmd-1",
+    );
+    let events = vec![started, ctrl_c, finished];
+
+    record_command_hook_findings(&events, &[block], &mut state);
+
+    assert!(state.hooks.findings.is_empty());
+}
+
+#[test]
+fn command_hook_findings_skip_interactive_cancel_output_without_ctrl_c_event() {
+    let mut state = InlineState::default();
+    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
+    for hook in cosh_shell::builtin_hooks::default_builtin_hooks() {
+        hook_engine.register(hook);
+    }
+    state.hooks.engine = hook_engine;
+
+    let output_ref =
+        write_test_output_ref("sudo-password-required", "sudo: a password is required\n");
+    let mut block = block(1);
+    block.command = "sudo df -h".to_string();
+    block.output.terminal_output_ref = Some(output_ref);
+
+    record_command_hook_findings(&[], &[block], &mut state);
+
+    assert!(state.hooks.findings.is_empty());
+}

@@ -23,12 +23,6 @@ USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
 root      1234  3.1 45.2 5120000 2376420 ?     Sl   10:00   1:23 java -jar app.jar
 ";
 
-const TOP_INTERACTIVE_OUTPUT: &str = "\
-\x1b[H\x1b[Jtop - 04:04:49 up 20:38,  0 user,  load average: 0.31, 0.40, 0.42
-  PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
- 1234 root      20   0 5120000   2.3g  100m S  12.0  45.2   1:23.45 java
-";
-
 fn state_with_builtin_hooks() -> InlineState {
     let mut state = InlineState::default();
     let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
@@ -477,28 +471,6 @@ fn smart_mode_trusted_project_warning_finding_uses_interruption_policy() {
     assert!(marker.exists());
 
     let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn smart_mode_interactive_top_renders_sampling_hint_without_card() {
-    let output_ref = write_hook_output("top-interactive-hint", TOP_INTERACTIVE_OUTPUT);
-    let events = command_events("top", &output_ref, TOP_INTERACTIVE_OUTPUT.len() as u64);
-    let mut state = state_with_builtin_hooks();
-    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-    let mut output = Vec::new();
-
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("render interactive top hint");
-
-    let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(rendered.contains("interactive-top-guidance"), "{rendered}");
-    assert!(rendered.contains("top"), "{rendered}");
-    assert!(rendered.contains("-b"), "{rendered}");
-    assert!(rendered.contains("-n1"), "{rendered}");
-    assert!(rendered.contains("%MEM"), "{rendered}");
-    assert!(rendered.contains("head -30"), "{rendered}");
-    assert!(!rendered.contains("[Analyze] [Ignore]"), "{rendered}");
-    assert!(state.hooks.pending_consultation.is_none());
 }
 
 #[test]

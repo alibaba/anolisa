@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -98,6 +99,7 @@ pub(super) fn start_cancellable_qwen_process(
                 }
                 Ok(line_progress(progressed))
             },
+            || Ok(Vec::new()),
         );
 
         match &outcome {
@@ -286,8 +288,8 @@ pub(super) fn start_control_protocol_qwen_process(
             run_id.clone(),
             Some(Arc::clone(&pending_session_for_thread)),
         );
-        let mut pending_control_tool_call =
-            control_protocol::PendingControlProtocolToolCall::default();
+        let pending_control_tool_call =
+            RefCell::new(control_protocol::PendingControlProtocolToolCall::default());
         let control_capabilities_for_loop = Arc::clone(&control_capabilities_for_thread);
         let approval_tx_for_loop = approval_tx_for_thread.clone();
         let mut completed = false;
@@ -317,8 +319,9 @@ pub(super) fn start_control_protocol_qwen_process(
                             tool_input,
                             tool_use_id,
                         } => {
-                            let _ =
-                                pending_control_tool_call.take_matching_control_shell(&tool_use_id);
+                            let _ = pending_control_tool_call
+                                .borrow_mut()
+                                .take_matching_control_shell(&tool_use_id);
                             if let Some(response) =
                                 control_protocol::analysis_continuation_shell_deny_response(
                                     &prompt_for_loop,
@@ -391,7 +394,7 @@ pub(super) fn start_control_protocol_qwen_process(
                 let events = parser.parse_line(&line);
                 let progressed = events.iter().any(agent_event_is_provider_progress);
                 for event in events {
-                    for event in pending_control_tool_call.stage_or_emit(event) {
+                    for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                         update_completion_flags(&event, &mut completed, &mut failed);
                         if is_terminal_agent_event(&event) {
                             writer_done.store(true, Ordering::SeqCst);
@@ -402,6 +405,11 @@ pub(super) fn start_control_protocol_qwen_process(
                     }
                 }
                 Ok(line_progress(progressed))
+            },
+            || {
+                Ok(pending_control_tool_call
+                    .borrow_mut()
+                    .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE))
             },
         );
 
@@ -433,7 +441,7 @@ pub(super) fn start_control_protocol_qwen_process(
         }
 
         let _ = parser.finish(&mut |event| {
-            for event in pending_control_tool_call.stage_or_emit(event) {
+            for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                 update_completion_flags(&event, &mut completed, &mut failed);
                 if is_terminal_agent_event(&event) {
                     writer_done.store(true, Ordering::SeqCst);

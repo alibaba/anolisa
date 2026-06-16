@@ -5,22 +5,6 @@ const HIGH_MEMORY_CLI_HINT: &str =
     "ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head -20";
 const MEMORY_PRESSURE_CLI_HINT: &str =
     "free -m && ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head -20";
-const INTERACTIVE_TOP_CLI_HINT: &str = "top -b -n1 -o %MEM | head -30";
-
-pub(super) fn interactive_top_guidance_finding() -> HookFinding {
-    HookFinding {
-        hook_id: "interactive-top-guidance".into(),
-        severity: FindingSeverity::Info,
-        title: "Top output is not a one-shot diagnostic snapshot".into(),
-        description: "The command did not use a one-shot batch top form. Interactive or multi-frame top output can contain ANSI control sequences and partial refresh frames, so cosh-shell does not treat it as stable diagnostic evidence.".into(),
-        suggestion: format!(
-            "Capture a one-shot batch snapshot before asking Agent to analyze top output: {INTERACTIVE_TOP_CLI_HINT}"
-        ),
-        skill: Some(MEMORY_SKILL.into()),
-        cli_hint: Some(INTERACTIVE_TOP_CLI_HINT.into()),
-        context_refs: Vec::new(),
-    }
-}
 
 pub(super) fn high_memory_finding(rows: &[ProcessMemoryRow]) -> Option<HookFinding> {
     let mut candidates: Vec<&ProcessMemoryRow> =

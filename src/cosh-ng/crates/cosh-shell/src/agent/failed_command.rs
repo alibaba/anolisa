@@ -1,3 +1,4 @@
+use crate::runtime::command_interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
 use cosh_shell::exit_classify::{classify_exit, first_program_token, ExitCodeCategory};
 
@@ -14,6 +15,7 @@ pub(crate) struct FailedCommandAgentStartOptions {
 }
 
 pub(crate) fn render_failed_command_cards<W: Write>(
+    events: &[ShellEvent],
     blocks: &[CommandBlock],
     state: &mut InlineState,
     output: &mut W,
@@ -24,6 +26,7 @@ pub(crate) fn render_failed_command_cards<W: Write>(
 
     for block in blocks.iter().filter(|block| {
         should_offer_failed_command_card(block)
+            && !command_should_skip_failure_analysis(events, block)
             && !state.analyzed_blocks.contains(&block.id)
             && !state.canceled_blocks.contains(&block.id)
     }) {
@@ -490,7 +493,7 @@ mod tests {
         };
         let mut output = Vec::new();
 
-        render_failed_command_cards(&[block], &mut state, &mut output)
+        render_failed_command_cards(&[], &[block], &mut state, &mut output)
             .expect("render failed command card");
 
         let rendered = String::from_utf8(output).expect("utf8");
@@ -501,6 +504,26 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("/explain"), "{rendered}");
+    }
+
+    #[test]
+    fn manual_mode_skips_user_interrupted_failed_command_card() {
+        let mut block = failed_block(1, "aliyun configure");
+        block.started_at_ms = 100;
+        block.ended_at_ms = 200;
+        let mut ctrl_c = ShellEvent::user_input_intercepted("session-1", "ctrl_c");
+        ctrl_c.component = Some("control".to_string());
+        ctrl_c.started_at_ms = Some(150);
+        let mut state = InlineState {
+            analysis_mode: AnalysisMode::Manual,
+            ..InlineState::default()
+        };
+        let mut output = Vec::new();
+
+        render_failed_command_cards(&[ctrl_c], &[block], &mut state, &mut output)
+            .expect("render failed command card");
+
+        assert!(output.is_empty());
     }
 
     #[test]

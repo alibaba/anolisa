@@ -60,9 +60,6 @@ pub(crate) fn display_for_aggregate(
             RuntimeHookDisplay::Consultation
         }
         FindingSeverity::Warning => RuntimeHookDisplay::Hint,
-        FindingSeverity::Info if aggregate.primary.hook_id == "interactive-top-guidance" => {
-            RuntimeHookDisplay::Hint
-        }
         FindingSeverity::Info => RuntimeHookDisplay::Silent,
     }
 }
@@ -115,6 +112,7 @@ pub(crate) fn decide_session_interruption_policy_with_origin(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn decide_session_interruption_policy_with_context(
     block: &CommandBlock,
     aggregate: &AggregatedHookFinding,

@@ -21,6 +21,7 @@ use crate::question::runtime::{
 };
 use crate::recommendation::runtime::render_selection_actions;
 use crate::runtime::cancel::render_agent_cancel_actions;
+use crate::runtime::command_interrupt::command_should_skip_failure_analysis;
 use crate::runtime::details::render_runtime_details_card_actions;
 use crate::runtime::evidence_delivery::shell_handoff_continuation_requests;
 use crate::runtime::evidence_requests::render_evidence_request_actions;
@@ -181,11 +182,10 @@ fn render_inline_guidance_from_batch<W: Write>(
     )?;
 
     let analysis_mode = state.analysis_mode;
-    for block in ledger
-        .blocks
-        .iter()
-        .filter(|block| should_analyze_failed_block(block, analysis_mode))
-    {
+    for block in ledger.blocks.iter().filter(|block| {
+        should_analyze_failed_block(block, analysis_mode)
+            && !command_should_skip_failure_analysis(events, block)
+    }) {
         start_agent_for_block(
             block,
             &ledger.blocks,
@@ -201,7 +201,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         output.flush()?;
     }
 
-    render_failed_command_cards(&ledger.blocks, state, output)?;
+    render_failed_command_cards(events, &ledger.blocks, state, output)?;
 
     render_post_failure_actions(
         action_events,

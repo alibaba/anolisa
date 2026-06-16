@@ -339,36 +339,3 @@ fn low_confidence_hook_analyze_prompts_readonly_verification() {
         "{prompt}"
     );
 }
-
-#[test]
-fn interactive_top_guidance_analyze_prompts_batch_sampling() {
-    let aggregate = aggregate_hook_findings(vec![finding(
-        "interactive-top-guidance",
-        FindingSeverity::Info,
-    )])
-    .remove(0);
-    let block = block_with_command("top");
-    let blocks = vec![block.clone()];
-    let mut state = InlineState::default();
-    record_aggregated_hook_finding(&block, aggregate, &mut state);
-    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-    let mut output = Vec::new();
-
-    handle_command_hook_hint_action(
-        "analyze",
-        "hook-cmd-1-interactive-top-guidance",
-        &blocks,
-        &adapter,
-        &mut state,
-        &mut output,
-    )
-    .expect("analyze interactive top guidance");
-
-    let request = &state.agent_run.active.as_ref().expect("active run").request;
-    let prompt = request.user_input.as_deref().unwrap_or("");
-    assert!(
-        prompt.contains("Do not analyze non-one-shot top output directly"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("top -b -n1 -o %MEM | head -30"), "{prompt}");
-}

@@ -35,10 +35,6 @@ impl ShellHandoffState {
         self.pending.pop_front()
     }
 
-    pub(crate) fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
     pub(crate) fn has_active_handoff(&self) -> bool {
         !self.approved.is_empty() || !self.pending.is_empty()
     }
@@ -61,6 +57,13 @@ impl ShellHandoffState {
     #[cfg(test)]
     pub(crate) fn approved_is_empty(&self) -> bool {
         self.approved.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backdate_pending_emit_for_test(&mut self, age: Duration) {
+        if let Some(handoff) = self.pending.front_mut() {
+            handoff.emitted_at = Some(Instant::now() - age);
+        }
     }
 }
 
