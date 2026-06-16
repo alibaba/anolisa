@@ -136,10 +136,12 @@ const createMockUIActions = (): UIActions => ({
   cancelCommandSearch: () => {},
   resetCompletion: () => {},
   resetShellCompletion: () => {},
+  clearInput: () => {},
   registerResetCompletion: () => {},
   registerResetShellCompletion: () => {},
   registerCancelReverseSearch: () => {},
   registerCancelCommandSearch: () => {},
+  registerClearInput: () => {},
   setCompletionShowSuggestions: () => {},
   setShellCompletionShowSuggestions: () => {},
   openThemeDialog: () => {},
@@ -191,12 +193,14 @@ export const renderWithProviders = (
     config = undefined,
     uiState = createMockUIState(),
     uiActions = createMockUIActions(),
+    pasteWorkaround = false,
   }: {
     shellFocus?: boolean;
     settings?: LoadedSettings;
     config?: Config;
     uiState?: UIState;
     uiActions?: UIActions;
+    pasteWorkaround?: boolean;
   } = {},
 ): ReturnType<typeof render> =>
   render(
@@ -205,7 +209,10 @@ export const renderWithProviders = (
         <ShellFocusContext.Provider value={shellFocus}>
           <UIStateContext.Provider value={uiState}>
             <UIActionsContext.Provider value={uiActions}>
-              <KeypressProvider kittyProtocolEnabled={true}>
+              <KeypressProvider
+                kittyProtocolEnabled={true}
+                pasteWorkaround={pasteWorkaround}
+              >
                 {component}
               </KeypressProvider>
             </UIActionsContext.Provider>

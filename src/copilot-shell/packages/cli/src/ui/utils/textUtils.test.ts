@@ -9,7 +9,12 @@ import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
 } from '@copilot-shell/core';
-import { escapeAnsiCtrlCodes } from './textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  cpLen,
+  cpSlice,
+  toCodePoints,
+} from './textUtils.js';
 
 describe('textUtils', () => {
   describe('escapeAnsiCtrlCodes', () => {
@@ -164,6 +169,103 @@ describe('textUtils', () => {
         expect(sanitized.f).toBe(123);
         expect(sanitized.g).toBe(null);
         expect(sanitized.h()).toBe('\u001b[35mpurple\u001b[0m');
+      });
+    });
+  });
+
+  describe('code-point utilities (cpLen, cpSlice, toCodePoints)', () => {
+    describe('cpLen', () => {
+      it('should return correct length for ASCII strings', () => {
+        expect(cpLen('hello')).toBe(5);
+        expect(cpLen('')).toBe(0);
+      });
+
+      it('should return correct length for emoji/non-BMP characters', () => {
+        // Single emoji (surrogate pair in UTF-16)
+        expect(cpLen('🚀')).toBe(1);
+        expect(cpLen('😀')).toBe(1);
+        expect(cpLen('🎉')).toBe(1);
+
+        // Multiple emojis
+        expect(cpLen('🚀😀')).toBe(2);
+        expect(cpLen('🎉🎉🎉')).toBe(3);
+
+        // Mixed ASCII and emoji
+        expect(cpLen('hi🚀')).toBe(3);
+        expect(cpLen('🚀hello')).toBe(6);
+
+        // Chinese characters (BMP but still single code point each)
+        expect(cpLen('你好')).toBe(2);
+        expect(cpLen('你好世界')).toBe(4);
+
+        // Mixed emoji, ASCII, and CJK
+        expect(cpLen('🚀hello世界')).toBe(8);
+      });
+
+      it('should handle complex emoji (surrogate pairs)', () => {
+        // Some emojis are single code points (most common)
+        expect(cpLen('❤️')).toBe(2); // Heart + variant selector
+        expect(cpLen('👨‍👩‍👧‍👦')).toBe(7); // Family emoji (ZWJ sequence)
+      });
+    });
+
+    describe('cpSlice', () => {
+      it('should slice ASCII strings correctly', () => {
+        expect(cpSlice('hello', 0, 3)).toBe('hel');
+        expect(cpSlice('hello', 2)).toBe('llo');
+        expect(cpSlice('hello', 1, 4)).toBe('ell');
+      });
+
+      it('should slice emoji/non-BMP strings correctly', () => {
+        // Single emoji
+        expect(cpSlice('🚀', 0, 1)).toBe('🚀');
+        expect(cpSlice('🚀', 0)).toBe('🚀');
+
+        // Multiple emojis
+        expect(cpSlice('🚀😀🎉', 0, 2)).toBe('🚀😀');
+        expect(cpSlice('🚀😀🎉', 1)).toBe('😀🎉');
+        expect(cpSlice('🚀😀🎉', 1, 3)).toBe('😀🎉');
+
+        // Mixed ASCII and emoji
+        expect(cpSlice('hi🚀world', 0, 3)).toBe('hi🚀');
+        expect(cpSlice('hi🚀world', 2, 5)).toBe('🚀wo');
+        expect(cpSlice('🚀hello', 1, 4)).toBe('hel');
+      });
+
+      it('should handle edge cases with emoji', () => {
+        // Empty slice
+        expect(cpSlice('🚀😀', 0, 0)).toBe('');
+
+        // Slice at emoji boundary (critical for placeholder backspace fix)
+        const placeholder = '[📎 paste 100 chars]'; // Contains 📎 emoji
+        const textWithEmoji = '🚀' + placeholder;
+        const placeholderStart = cpLen('🚀'); // = 1 (code-point offset)
+        const placeholderEnd = cpLen(textWithEmoji); // = 1 + 19 = 20
+
+        expect(cpSlice(textWithEmoji, placeholderStart, placeholderEnd)).toBe(
+          placeholder,
+        );
+
+        // Document: UTF-16 indices differ from code-point indices for emoji
+        // 🚀 UTF-16 = 2, code-point = 1
+        // If we used .length for offset calculation, the slice would fail
+        // The fix uses cpLen/cpSlice for consistent code-point semantics
+      });
+    });
+
+    describe('toCodePoints', () => {
+      it('should split ASCII into individual characters', () => {
+        expect(toCodePoints('abc')).toEqual(['a', 'b', 'c']);
+      });
+
+      it('should split emoji into individual code points', () => {
+        expect(toCodePoints('🚀')).toEqual(['🚀']);
+        expect(toCodePoints('🚀😀')).toEqual(['🚀', '😀']);
+      });
+
+      it('should handle mixed content', () => {
+        expect(toCodePoints('a🚀b')).toEqual(['a', '🚀', 'b']);
+        expect(toCodePoints('hi🎉世界')).toEqual(['h', 'i', '🎉', '世', '界']);
       });
     });
   });

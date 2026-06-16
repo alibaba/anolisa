@@ -56,10 +56,12 @@ export interface UIActions {
   cancelCommandSearch: () => void;
   resetCompletion: () => void;
   resetShellCompletion: () => void;
+  clearInput: () => void;
   registerResetCompletion: (resetFn: () => void) => void;
   registerResetShellCompletion: (resetFn: () => void) => void;
   registerCancelReverseSearch: (cancelFn: () => void) => void;
   registerCancelCommandSearch: (cancelFn: () => void) => void;
+  registerClearInput: (clearFn: () => void) => void;
   setCompletionShowSuggestions: (value: boolean) => void;
   setShellCompletionShowSuggestions: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;

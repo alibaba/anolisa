@@ -49,6 +49,12 @@ export default {
   'to quit': 'to quit',
   'for newline': 'for newline',
   'to clear screen': 'to clear screen',
+  // ============================================================================
+  // Paste Placeholder
+  // ============================================================================
+  'input.paste.placeholder': '[Pasted Content {{charCount}} chars]',
+  'input.paste.placeholder.numbered':
+    '[Pasted Content {{charCount}} chars] #{{id}}',
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',

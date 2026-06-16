@@ -177,6 +177,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const resetShellCompletionRef = useRef<(() => void) | null>(null);
   const cancelReverseSearchRef = useRef<(() => void) | null>(null);
   const cancelCommandSearchRef = useRef<(() => void) | null>(null);
+  const clearInputRef = useRef<(() => void) | null>(null);
 
   // Stable callback wrappers for reset actions
   const cancelReverseSearch = useCallback(() => {
@@ -191,6 +192,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const resetShellCompletion = useCallback(() => {
     resetShellCompletionRef.current?.();
   }, []);
+  const clearInput = useCallback(() => {
+    clearInputRef.current?.();
+  }, []);
   const registerResetCompletion = useCallback((fn: () => void) => {
     resetCompletionRef.current = fn;
   }, []);
@@ -202,6 +206,9 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const registerCancelCommandSearch = useCallback((fn: () => void) => {
     cancelCommandSearchRef.current = fn;
+  }, []);
+  const registerClearInput = useCallback((fn: () => void) => {
+    clearInputRef.current = fn;
   }, []);
 
   const [compactMode, setCompactMode] = useState<boolean>(
@@ -1359,6 +1366,7 @@ export const AppContainer = (props: AppContainerProps) => {
           if (escapePressedOnce) {
             // Second press: clear input and reset prompt state
             buffer.setText('');
+            clearInput(); // Clear pendingPastes and placeholder state
             setEscapePressedOnce(false);
             setShowEscapePrompt(false);
             if (escapeTimerRef.current) {
@@ -1485,6 +1493,7 @@ export const AppContainer = (props: AppContainerProps) => {
       resetShellCompletion,
       shellModeActive,
       setShellModeActive,
+      clearInput,
     ],
   );
 
@@ -1820,10 +1829,12 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelCommandSearch,
       resetCompletion,
       resetShellCompletion,
+      clearInput,
       registerResetCompletion,
       registerResetShellCompletion,
       registerCancelReverseSearch,
       registerCancelCommandSearch,
+      registerClearInput,
       setCompletionShowSuggestions,
       setShellCompletionShowSuggestions,
       vimHandleInput,
@@ -1879,10 +1890,12 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelCommandSearch,
       resetCompletion,
       resetShellCompletion,
+      clearInput,
       registerResetCompletion,
       registerResetShellCompletion,
       registerCancelReverseSearch,
       registerCancelCommandSearch,
+      registerClearInput,
       setCompletionShowSuggestions,
       setShellCompletionShowSuggestions,
       vimHandleInput,
