@@ -76,7 +76,7 @@ async fn dispatch(
         ("GET", ["v1", "instances", id]) => get_instance(state, id),
         ("POST", ["v1", "instances", id, "checkpoint"]) => checkpoint(state, id),
         ("POST", ["v1", "instances", id, "reset"]) => reset_instance(state, id),
-        ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id),
+        ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id).await,
         ("GET", ["v1", "pools"]) => list_pools(state),
         ("GET", ["v1", "pools", backend, class]) => pool_status(state, backend, class),
         ("POST", ["v1", "pools", backend, class, "drain"]) => drain_pool(state, backend, class),
@@ -274,14 +274,39 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         inst
     };
 
-    // 5. Spawn — for LinuxSandbox we'd exec
-    // `anolisa-linux-sandbox run --bundle <path>` here. v0.1 only logs
-    // the intent and continues with a simulated transition.
-    if backend == BackendKind::LinuxSandbox {
-        tracing::info!(
-            instance = %instance.id,
-            "would spawn anolisa-linux-sandbox run --bundle <path> (v0.1 simulated)"
-        );
+    // 5. Spawn the data-plane process via the BackendSpawner trait.
+    //    The daemon picks LinuxSandboxSpawner when the configured
+    //    backend binary exists; otherwise MockSpawner keeps the daemon
+    //    usable on macOS dev hosts and in CI.
+    let binary_path = {
+        let cfg = state
+            .config
+            .lock()
+            .map_err(|_| AnvilDaemonError::Internal("config lock poisoned".into()))?;
+        cfg.backends
+            .get(backend.as_str())
+            .cloned()
+            .unwrap_or_else(std::path::PathBuf::new)
+    };
+    let work_dir = state.state_dir.join(instance.id.to_string());
+    let spawner = state.spawner.clone();
+    match spawner.spawn(&instance, &binary_path, &work_dir).await {
+        Ok(handle) => {
+            let mut handles = state
+                .spawn_handles
+                .lock()
+                .map_err(|_| AnvilDaemonError::Internal("spawn_handles lock poisoned".into()))?;
+            handles.insert(instance.id, handle);
+        }
+        Err(err) => {
+            // Fail forward into Destroyed so the lifecycle stays
+            // consistent and surface the error to the caller.
+            tracing::error!(instance = %instance.id, ?err, "spawn failed, marking destroyed");
+            let _ = instance.transition(SandboxState::Destroyed);
+            instance.persist(&state.state_dir)?;
+            state.metrics.inc(&state.metrics.instances_destroyed);
+            return Err(err.into());
+        }
     }
     instance.transition(SandboxState::Running)?;
     instance.persist(&state.state_dir)?;
@@ -358,8 +383,10 @@ fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<By
     json_ok(&snapshot)
 }
 
-fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    let uuid = parse_uuid(id)?;
+fn destroy_instance_state(
+    state: &Arc<ServerState>,
+    uuid: Uuid,
+) -> Result<(SandboxInstance, Option<crate::spawner::SpawnHandle>)> {
     let mut map = state
         .instances
         .lock()
@@ -369,6 +396,26 @@ fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<
         .ok_or_else(|| AnvilDaemonError::NotFound(format!("instance {uuid}")))?;
     inst.transition(SandboxState::Destroyed)?;
     inst.persist(&state.state_dir)?;
+    let snapshot = inst.clone();
+    drop(map);
+    let handle = {
+        let mut handles = state
+            .spawn_handles
+            .lock()
+            .map_err(|_| AnvilDaemonError::Internal("spawn_handles lock poisoned".into()))?;
+        handles.remove(&uuid)
+    };
+    Ok((snapshot, handle))
+}
+
+async fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+    let uuid = parse_uuid(id)?;
+    let (inst, handle) = destroy_instance_state(state, uuid)?;
+    if let Some(handle) = handle
+        && let Err(err) = state.spawner.kill(&handle).await
+    {
+        tracing::warn!(instance = %uuid, ?err, "spawner.kill failed (non-fatal)");
+    }
     state.metrics.inc(&state.metrics.instances_destroyed);
     json_ok(&json!({
         "destroyed": true,

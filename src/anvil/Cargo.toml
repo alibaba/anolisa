@@ -32,6 +32,7 @@ tokio-util = { version = "0.7", features = ["net"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
+async-trait = "0.1"
 
 # Logging
 tracing = "0.1"

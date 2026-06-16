@@ -9,6 +9,7 @@ mod cli;
 mod daemon;
 mod error;
 mod metrics;
+mod spawner;
 mod state;
 
 use std::process::ExitCode;

@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anvil_core::backend::BackendKind;
 use anvil_core::config::{DaemonConfig, PolicyLoadErrorMode};
 use anvil_core::kernel::HookRegistry;
 use anvil_core::policy::PolicyEngine;
@@ -19,6 +20,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
 use crate::error::{AnvilDaemonError, Result};
+use crate::spawner::{BackendSpawner, DynSpawner, LinuxSandboxSpawner, MockSpawner};
 use crate::state::ServerState;
 
 /// Boot the daemon: load config + policies, prepare state directories,
@@ -32,9 +34,12 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let pool = PoolManager::new();
     let template = TemplateRegistry::new();
     let hook = HookRegistry::new();
+    let spawner = build_spawner(&config).await;
 
     let socket_path = config.daemon.socket.clone();
-    let state = Arc::new(ServerState::build(config, policy, pool, template, hook));
+    let state = Arc::new(ServerState::build(
+        config, policy, pool, template, hook, spawner,
+    ));
 
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
@@ -55,6 +60,53 @@ fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+/// Build the [`BackendSpawner`] used by API handlers. Probes the
+/// `linux-sandbox` backend path declared in `[backends]`; uses
+/// the real spawner when the binary exists, otherwise warns and falls
+/// back to the mock implementation so the daemon stays functional on
+/// macOS dev hosts and in CI without a real backend.
+async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
+    let shim = cfg
+        .backends
+        .get(BackendKind::LinuxSandbox.as_str())
+        .cloned();
+    match shim {
+        Some(path) => {
+            let probe = LinuxSandboxSpawner;
+            match probe.probe(&path).await {
+                Ok(true) => {
+                    tracing::info!(
+                        binary = %path.display(),
+                        "data plane: using LinuxSandboxSpawner",
+                    );
+                    Arc::new(LinuxSandboxSpawner)
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        binary = %path.display(),
+                        "linux-sandbox binary missing, falling back to MockSpawner",
+                    );
+                    Arc::new(MockSpawner)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        binary = %path.display(),
+                        "linux-sandbox probe failed, falling back to MockSpawner",
+                    );
+                    Arc::new(MockSpawner)
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "no [backends].linux-sandbox configured, using MockSpawner (data plane is simulated)",
+            );
+            Arc::new(MockSpawner)
+        }
+    }
 }
 
 fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
