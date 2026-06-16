@@ -30,6 +30,22 @@ git diff origin/main..HEAD
 gh pr list --head $(git branch --show-current) --repo alibaba/anolisa --state open --json number,title,body
 ```
 
+### 步骤 1.5：Preflight 检查
+
+在分析变更前，运行以下检查并记录结果（后续自动填入 Checklist）：
+
+```bash
+# 在 agentsight 目录下执行
+cargo fmt --check          # 格式检查
+cargo clippy --all-targets -- -D warnings  # lint 检查
+cargo test                 # 单元测试 + 集成测试
+```
+
+- 三项全部通过才继续后续步骤
+- 如果 `cargo fmt --check` 失败，自动运行 `cargo fmt` 修复后重新检查
+- 如果 `cargo clippy` 失败，列出告警并尝试修复，修复后重新检查
+- 如果 `cargo test` 失败，停止流程，报告失败的测试用例
+
 ### 步骤 2：分析变更
 
 从 diff 中提取以下信息：
@@ -95,10 +111,11 @@ closes #<issue-number>
 ## Checklist
 
 - [x] I have read the [Contributing Guide](../CONTRIBUTING.md)
-- [x] My code follows the project's code style
+- [x/空] `cargo fmt --check` pass（基于 preflight 结果勾选）
+- [x/空] `cargo clippy --all-targets -- -D warnings` pass（基于 preflight 结果勾选）
+- [x/空] `cargo test` pass（基于 preflight 结果勾选）
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] I have updated the documentation accordingly
-- [x] For `sight`: `cargo test` pass
 - [x] Lock files are up to date (`Cargo.lock`)
 
 ## Testing
