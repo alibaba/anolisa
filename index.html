@@ -540,7 +540,31 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-8">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-9">
+          <div class="release-meta">
+            <div class="release-version">0.1.9</div>
+            <div class="release-date">2026-06-16</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa install --all</code> can install every available component from the catalog.</li>
+              <li><code>anolisa install --all --fail-fast</code> can stop after the first failed component.</li>
+              <li><code>anolisa install --all --json</code> returns one batch summary with per-component results.</li>
+              <li><code>anolisa status</code> now shows adapter summaries for installed components.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>installed.toml</code> now distinguishes ANOLISA-managed packages from observed system RPMs.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-8">
           <div class="release-meta">
             <div class="release-version">0.1.8</div>
             <div class="release-date">2026-06-15</div>
@@ -565,7 +589,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-7">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-7">
           <div class="release-meta">
             <div class="release-version">0.1.7</div>
             <div class="release-date">2026-06-13</div>
@@ -587,7 +611,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-6">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-6">
           <div class="release-meta">
             <div class="release-version">0.1.6</div>
             <div class="release-date">2026-06-12</div>
@@ -616,7 +640,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-5">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-5">
           <div class="release-meta">
             <div class="release-version">0.1.5</div>
             <div class="release-date">2026-06-11</div>
@@ -645,38 +669,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-4">
-          <div class="release-meta">
-            <div class="release-version">0.1.4</div>
-            <div class="release-date">2026-06-10</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa adapter scan</code> detects available framework integrations. (#808)</li>
-              <li><code>anolisa adapter install</code> downloads verified packages and registers adapters with the target framework.</li>
-              <li><code>anolisa adapter remove</code> safely removes only ANOLISA-managed files, with dry-run and JSON preview support.</li>
-              <li><code>anolisa adapter install tokenless openclaw</code> wires up the tokenless adapter via the OpenClaw CLI.</li>
-              <li><code>anolisa enable</code> fetches component metadata from the remote repository, with offline fallback.</li>
-              <li><code>anolisa status</code> now includes component health check results.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li>Renamed subscription commands to top-level <code>anolisa register</code> / <code>unregister</code>.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li>Adapter install/remove failures now roll back or preserve state for retry.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -687,7 +679,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.8",
+  "latestVersion": "0.1.9",
   "components": [
     {
       "id": "anolisa",
@@ -698,6 +690,27 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.9",
+              "date": "2026-06-16",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa install --all` can install every available component from the catalog.",
+                    "`anolisa install --all --fail-fast` can stop after the first failed component.",
+                    "`anolisa install --all --json` returns one batch summary with per-component results.",
+                    "`anolisa status` now shows adapter summaries for installed components."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`installed.toml` now distinguishes ANOLISA-managed packages from observed system RPMs."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.8",
               "date": "2026-06-15",
@@ -791,41 +804,33 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.4",
-              "date": "2026-06-10",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa adapter scan` detects available framework integrations. (#808)",
-                    "`anolisa adapter install` downloads verified packages and registers adapters with the target framework.",
-                    "`anolisa adapter remove` safely removes only ANOLISA-managed files, with dry-run and JSON preview support.",
-                    "`anolisa adapter install tokenless openclaw` wires up the tokenless adapter via the OpenClaw CLI.",
-                    "`anolisa enable` fetches component metadata from the remote repository, with offline fallback.",
-                    "`anolisa status` now includes component health check results."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "Renamed subscription commands to top-level `anolisa register` / `unregister`."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "Adapter install/remove failures now roll back or preserve state for retry."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.9",
+              "date": "2026-06-16",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa install --all` 可安装目录中的所有可用组件。",
+                    "`anolisa install --all --fail-fast` 可在首个失败组件后停止。",
+                    "`anolisa install --all --json` 现返回按组件汇总的批量结果。",
+                    "`anolisa status` 现显示已安装组件的适配器摘要。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`installed.toml` 现区分 ANOLISA 管理包和只观察的系统 RPM。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.8",
               "date": "2026-06-15",
@@ -916,35 +921,6 @@ h1 span{color:var(--accent-light)}
                   "items": [
                     "未配置组件目录时，`anolisa list` 返回空列表并提示配置方法。(#850)",
                     "安装中途失败时自动回滚已写入的文件。(#852)"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.4",
-              "date": "2026-06-10",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa adapter scan` 探测已安装的 Agent 框架集成。(#808)",
-                    "`anolisa adapter install` 下载校验后的安装包并注册到目标框架。",
-                    "`anolisa adapter remove` 安全移除 ANOLISA 管理的文件，支持预览和 dry-run。",
-                    "`anolisa adapter install tokenless openclaw` 通过 OpenClaw CLI 注册 tokenless 适配器。",
-                    "`anolisa enable` 从远程仓库获取组件元数据，离线时降级到本地缓存。",
-                    "`anolisa status` 输出中新增组件健康检查结果。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "订阅管理命令提升为顶层 `anolisa register` / `unregister`。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "adapter 安装或移除失败时自动回滚或保留状态以便重试。"
                   ]
                 }
               ]
