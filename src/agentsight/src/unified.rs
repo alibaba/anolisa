@@ -100,6 +100,8 @@ pub struct AgentSight {
     deadloop_kill_enabled: bool,
     /// DeadLoop auto-kill: trigger threshold (kill after N detections)
     deadloop_kill_after_count: usize,
+    /// Process killer for DeadLoop auto-kill (injectable for tests)
+    process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -496,6 +498,7 @@ impl AgentSight {
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
+            process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
         })
     }
 
@@ -1037,43 +1040,20 @@ impl AgentSight {
                                     );
 
                                     // ── Auto-kill 止血 ──
-                                    if self.deadloop_kill_enabled {
-                                        let new_count = existing_count + 1;
-                                        if new_count > self.deadloop_kill_after_count {
-                                            if let Some(pid) = loop_event.pid {
-                                                log::error!(
-                                                    "DeadLoop auto-kill: escalating to SIGKILL for pid {pid} (conversation={cid}, detections={new_count})"
-                                                );
-                                                let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
-                                                if ret != 0 {
-                                                    let err = std::io::Error::last_os_error();
-                                                    log::error!(
-                                                        "DeadLoop auto-kill: SIGKILL failed for pid {pid}: {err}"
-                                                    );
-                                                }
-                                            }
-                                        } else if new_count == self.deadloop_kill_after_count {
-                                            if let Some(pid) = loop_event.pid {
-                                                log::error!(
-                                                    "DeadLoop auto-kill: sending SIGTERM to pid {pid} (conversation={cid}, detections={new_count})"
-                                                );
-                                                let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-                                                if ret != 0 {
-                                                    let err = std::io::Error::last_os_error();
-                                                    log::error!(
-                                                        "DeadLoop auto-kill: SIGTERM failed for pid {pid}: {err}"
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            log::warn!(
-                                                "DeadLoop auto-kill: detection {}/{} for conversation {}, waiting...",
-                                                new_count,
-                                                self.deadloop_kill_after_count,
-                                                cid
-                                            );
-                                        }
-                                    }
+                                    let new_count = existing_count + 1;
+                                    let action = crate::interruption::escalation::decide_kill(
+                                        self.deadloop_kill_enabled,
+                                        existing_count,
+                                        self.deadloop_kill_after_count,
+                                    );
+                                    crate::interruption::escalation::execute_kill_action(
+                                        self.process_killer.as_ref(),
+                                        action,
+                                        loop_event.pid,
+                                        cid,
+                                        new_count,
+                                        self.deadloop_kill_after_count,
+                                    );
                                 }
                             }
                         }

@@ -1,6 +1,7 @@
 //! Interruption module — public API.
 
 pub mod detector;
+pub(crate) mod escalation;
 pub mod loop_detector;
 pub mod oom_recovery;
 pub mod types;
