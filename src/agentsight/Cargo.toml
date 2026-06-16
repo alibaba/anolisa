@@ -72,6 +72,8 @@ uuid = { version = "1", features = ["v4"] }
 # Static link OpenSSL to avoid runtime dependency on libssl.so.1.1
 openssl = { version = "0.10", features = ["vendored"] }
 flate2 = "1"
+zstd = "0.13"
+brotli = "8"
 # HTTP API server (optional, enabled by "server" feature)
 actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }

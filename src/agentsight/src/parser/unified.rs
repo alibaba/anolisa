@@ -109,6 +109,17 @@ impl Parser {
 
         // 4. Fallback: SSE data (read-direction only)
         let sse_events = self.sse_parser.parse(ssl_event.clone());
+        if sse_events.is_empty() {
+            // No SSE events could be parsed from this read-direction chunk.
+            // This happens when the SSE stream is compressed (gzip/zstd/br):
+            // the bytes are not text and yield no `data:`/`event:` lines.
+            // Forward the raw event so the aggregator — which knows the
+            // connection's Content-Encoding — can buffer and later decompress
+            // it. For non-SSE connections the aggregator simply ignores it.
+            return ParseResult {
+                messages: vec![ParsedMessage::RawData(ssl_event)],
+            };
+        }
         let messages = sse_events
             .into_iter()
             .map(ParsedMessage::SseEvent)

@@ -48,6 +48,13 @@ pub enum ConnectionState {
         request: Option<ParsedRequest>,
         response_headers: ParsedResponse,
         sse_events: Vec<ParsedSseEvent>,
+        /// Raw (chunk-framed, still content-encoded) body bytes, buffered for a
+        /// *compressed* SSE stream and decoded once the stream completes.
+        /// `None` means an uncompressed stream parsed live via `process_sse_event`
+        /// (unchanged legacy behaviour).
+        compressed_buffer: Option<Vec<u8>>,
+        /// Response `Content-Encoding`, used to decode `compressed_buffer`.
+        content_encoding: Option<String>,
     },
 }
 
@@ -125,6 +132,96 @@ impl HttpConnectionAggregator {
         });
 
         SseParser::new().parse(synthetic_event)
+    }
+
+    /// Decide the initial SSE state from response headers.
+    ///
+    /// Returns `(initial_sse_events, compressed_buffer, content_encoding)`.
+    /// `compressed_buffer == Some(..)` marks a *compressed* stream whose body must
+    /// be buffered and decoded at completion; `None` keeps the legacy live-parse
+    /// path for uncompressed streams. Compression is detected from the
+    /// `Content-Encoding` header, with a magic-byte fallback (gzip `1f 8b`,
+    /// zstd `28 b5 2f fd`) for cases where the header is absent.
+    fn sse_entry_state(
+        response: &ParsedResponse,
+    ) -> (Vec<ParsedSseEvent>, Option<Vec<u8>>, Option<String>) {
+        let enc = response.content_encoding().map(|e| e.trim().to_lowercase());
+        let initial = response.body();
+        let compressed = matches!(
+            enc.as_deref(),
+            Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br")
+        ) || (initial.len() >= 2 && initial[0] == 0x1f && initial[1] == 0x8b)
+            || (initial.len() >= 4
+                && initial[0] == 0x28
+                && initial[1] == 0xb5
+                && initial[2] == 0x2f
+                && initial[3] == 0xfd);
+
+        if compressed {
+            (Vec::new(), Some(initial.to_vec()), enc)
+        } else {
+            (Self::initial_sse_events(response), None, enc)
+        }
+    }
+
+    /// Finish a compressed SSE stream: de-frame chunked transfer-encoding,
+    /// decompress the buffered body, parse it into SSE events, and build the
+    /// aggregated result (mirrors the live `SseComplete` construction).
+    fn finish_compressed_sse(
+        connection_id: ConnectionId,
+        request: Option<ParsedRequest>,
+        response_headers: ParsedResponse,
+        content_encoding: Option<String>,
+        raw_buffer: Vec<u8>,
+    ) -> AggregatedResult {
+        let is_chunked = response_headers
+            .headers
+            .get("transfer-encoding")
+            .map(|v| v.to_lowercase().contains("chunked"))
+            .unwrap_or(false);
+        let body = if is_chunked {
+            crate::utils::decompress::dechunk_body(&raw_buffer)
+        } else {
+            raw_buffer
+        };
+        let decompressed =
+            crate::utils::decompress::decompress_body(&body, content_encoding.as_deref());
+
+        let src = &response_headers.source_event;
+        let synthetic = std::rc::Rc::new(SslEvent {
+            source: src.source,
+            timestamp_ns: src.timestamp_ns,
+            delta_ns: src.delta_ns,
+            pid: src.pid,
+            tid: src.tid,
+            uid: src.uid,
+            len: decompressed.len() as u32,
+            rw: src.rw,
+            comm: src.comm.clone(),
+            buf: decompressed,
+            is_handshake: src.is_handshake,
+            ssl_ptr: src.ssl_ptr,
+        });
+        let sse_events = SseParser::new().parse(synthetic);
+        log::debug!(
+            "[HttpAggregator] Decoded compressed SSE | conn={connection_id:?} | encoding={content_encoding:?} | events={}",
+            sse_events.len(),
+        );
+
+        let mut response = AggregatedResponse::from_parsed(response_headers);
+        response.set_sse_events(sse_events);
+
+        if let Some(req) = request {
+            let parsed = response.parsed.clone();
+            let mut pair = HttpPair::from_parsed(connection_id, req, parsed);
+            pair.response = response;
+            AggregatedResult::SseComplete(pair)
+        } else {
+            AggregatedResult::ResponseOnly {
+                connection_id,
+                response,
+            }
+        }
     }
 
     /// Process HTTP Request (from HTTP Parser)
@@ -212,14 +309,28 @@ impl HttpConnectionAggregator {
 
                 if response.is_sse() {
                     let mut response_headers = response;
-                    let sse_events = Self::initial_sse_events(&response_headers);
+                    let (sse_events, compressed_buffer, content_encoding) =
+                        Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
+                    if let Some(buf) = &compressed_buffer {
+                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                            return Some(Self::finish_compressed_sse(
+                                connection_id,
+                                Some(completed_request),
+                                response_headers,
+                                content_encoding,
+                                buf.clone(),
+                            ));
+                        }
+                    }
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: Some(completed_request),
                             response_headers,
                             sse_events,
+                            compressed_buffer,
+                            content_encoding,
                         },
                     );
                     None
@@ -236,15 +347,29 @@ impl HttpConnectionAggregator {
                         response.status_code,
                     );
                     let mut response_headers = response;
-                    let sse_events = Self::initial_sse_events(&response_headers);
+                    let (sse_events, compressed_buffer, content_encoding) =
+                        Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     // Transition to SSE active state, wait for SSE events
+                    if let Some(buf) = &compressed_buffer {
+                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                            return Some(Self::finish_compressed_sse(
+                                connection_id,
+                                Some(request),
+                                response_headers,
+                                content_encoding,
+                                buf.clone(),
+                            ));
+                        }
+                    }
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: Some(request),
                             response_headers,
                             sse_events,
+                            compressed_buffer,
+                            content_encoding,
                         },
                     );
 
@@ -269,14 +394,28 @@ impl HttpConnectionAggregator {
                         response.status_code
                     );
                     let mut response_headers = response;
-                    let sse_events = Self::initial_sse_events(&response_headers);
+                    let (sse_events, compressed_buffer, content_encoding) =
+                        Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
+                    if let Some(buf) = &compressed_buffer {
+                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                            return Some(Self::finish_compressed_sse(
+                                connection_id,
+                                None,
+                                response_headers,
+                                content_encoding,
+                                buf.clone(),
+                            ));
+                        }
+                    }
                     self.insert(
                         connection_id,
                         ConnectionState::SseActive {
                             request: None,
                             response_headers,
                             sse_events,
+                            compressed_buffer,
+                            content_encoding,
                         },
                     );
                     None
@@ -363,8 +502,42 @@ impl HttpConnectionAggregator {
                 }
                 None
             }
+            ConnectionState::SseActive {
+                request,
+                response_headers,
+                sse_events,
+                compressed_buffer: Some(mut buf),
+                content_encoding,
+            } => {
+                // Compressed SSE body bytes: the parser forwards them as RawData
+                // because they don't parse as SSE text. Buffer until the chunked
+                // terminator, then de-frame + decompress + parse.
+                let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
+                buf.extend_from_slice(data);
+                if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                    Some(Self::finish_compressed_sse(
+                        connection_id,
+                        request,
+                        response_headers,
+                        content_encoding,
+                        buf,
+                    ))
+                } else {
+                    self.insert(
+                        connection_id,
+                        ConnectionState::SseActive {
+                            request,
+                            response_headers,
+                            sse_events,
+                            compressed_buffer: Some(buf),
+                            content_encoding,
+                        },
+                    );
+                    None
+                }
+            }
             other => {
-                // Not in RequestBodyPending state, restore and ignore
+                // Not in RequestBodyPending / compressed-SSE state, restore and ignore
                 self.insert(connection_id, other);
                 None
             }
@@ -385,7 +558,34 @@ impl HttpConnectionAggregator {
                 request,
                 response_headers,
                 mut sse_events,
+                compressed_buffer,
+                content_encoding,
             } => {
+                // Compressed streams are decoded at completion, not live. A done
+                // marker (e.g. a standalone "0\r\n\r\n" chunk terminator surfaced
+                // as a DONE event) finalizes the buffered stream.
+                if let Some(buf) = compressed_buffer {
+                    if sse_event.is_done() {
+                        return Some(Self::finish_compressed_sse(
+                            *connection_id,
+                            request,
+                            response_headers,
+                            content_encoding,
+                            buf,
+                        ));
+                    }
+                    self.insert(
+                        *connection_id,
+                        ConnectionState::SseActive {
+                            request,
+                            response_headers,
+                            sse_events,
+                            compressed_buffer: Some(buf),
+                            content_encoding,
+                        },
+                    );
+                    return None;
+                }
                 // Check if stream is done before processing
                 let is_done = sse_event.is_done();
 
@@ -418,13 +618,15 @@ impl HttpConnectionAggregator {
                         })
                     }
                 } else {
-                    // Continue SSE active state
+                    // Continue SSE active state (uncompressed: parsed live)
                     self.insert(
                         *connection_id,
                         ConnectionState::SseActive {
                             request,
                             response_headers,
                             sse_events,
+                            compressed_buffer: None,
+                            content_encoding,
                         },
                     );
 

@@ -217,6 +217,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bindgen",
+ "brotli",
  "byteorder",
  "cached",
  "capstone",
@@ -270,6 +271,7 @@ dependencies = [
  "uname",
  "ureq 2.12.1",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
