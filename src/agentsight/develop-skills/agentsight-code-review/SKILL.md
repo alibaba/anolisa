@@ -70,11 +70,16 @@ git log --oneline origin/main..HEAD
 
 检查代码变更是否需要同步更新以下文档（根据变更内容自行判断）：
 
-- `AGENTS.md`
-- `CLAUDE.md`
-- `src/FFI_AGENTS.md`
-- `src/UNIFIED_AGENTS.md`
-- `src/storage/AGENTS.md`
+- `AGENTS.md` — 导航总览（Module Map、CLI、API、eBPF Probes、Configuration 等）
+- `CLAUDE.md` — 构建命令、CLI 用法、配置说明
+- `src/FFI_AGENTS.md` — FFI 层边界规则
+- `src/UNIFIED_AGENTS.md` — 主编排器边界规则
+- `src/storage/AGENTS.md` — 存储层边界规则
+- `docs/PITFALLS.md` — 常见踩坑记录
+- `docs/adr/` — 架构决策记录（涉及架构选型变更时需新增 ADR）
+- `docs/ARCHITECTURE.md` — 架构设计文档
+- `docs/DEVELOPMENT.md` — 开发指南
+- `docs/design-docs/` — 模块设计文档
 
 ### 步骤 3：输出 Findings
 
