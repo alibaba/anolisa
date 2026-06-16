@@ -86,8 +86,8 @@ pub use service::{
 };
 pub use state::{
     BackupRecord, ExternalModifiedFile, FileOwner, HealthEntry, InstallMode, InstalledObject,
-    InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, STATE_SCHEMA_VERSION,
-    ServiceRef, StateError, SubscriptionScope,
+    InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata,
+    STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
 };
 pub use transaction::{
     JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,

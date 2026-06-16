@@ -738,6 +738,8 @@ mod tests {
             manifest_digest: Some("sha256:abc".to_string()),
             distribution_source: Some("builtin".to_string()),
             install_backend: None,
+            ownership: None,
+            rpm_metadata: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-20260601-001".to_string()),
             managed: true,

@@ -324,6 +324,8 @@ mod tests {
             manifest_digest: None,
             distribution_source: None,
             install_backend: None,
+            ownership: None,
+            rpm_metadata: None,
             installed_at: "2026-06-12T00:00:00Z".to_string(),
             last_operation_id: None,
             managed: true,

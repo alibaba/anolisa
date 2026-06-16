@@ -17,6 +17,7 @@ status = "installed" # installed | partial | disabled | failed | adopted
 manifest_digest = "sha256:replace-with-manifest-digest"
 distribution_source = "builtin"
 install_backend = "raw"
+ownership = "raw_managed" # raw_managed | rpm_managed | rpm_observed
 installed_at = "2026-06-01T10:00:00Z"
 last_operation_id = "op-20260601-001"
 managed = true
@@ -45,6 +46,26 @@ enabled = true
 name = "binary"
 status = "ok"
 checked_at = "2026-06-01T10:00:03Z"
+
+# Example: system RPM adopted by ANOLISA (rpm-observed ownership)
+[[objects]]
+kind = "component"
+name = "copilot-shell"
+version = "1.2.3"
+status = "adopted"
+install_backend = "rpm"
+ownership = "rpm_observed"
+installed_at = "2026-06-10T08:00:00Z"
+last_operation_id = "op-20260610-001"
+managed = false
+adopted = true
+subscription_scope = "none"
+
+[objects.rpm_metadata]
+package_name = "anolisa-copilot-shell"
+evr = "0:1.2.3-1.al8"
+arch = "x86_64"
+source_repo = "@System"
 
 [[backups]]
 id = "backup-op-20260601-001-openclaw-config"

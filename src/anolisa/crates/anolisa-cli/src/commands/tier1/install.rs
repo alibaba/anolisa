@@ -31,7 +31,7 @@ use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
     FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
-    ObjectStatus, OperationRecord, OwnedFile, ServiceRef,
+    ObjectStatus, OperationRecord, OwnedFile, Ownership, ServiceRef,
 };
 use anolisa_core::{
     ArtifactType, ComponentManifest, DistributionEntry, DistributionIndex, FileKind, ResolveQuery,
@@ -966,6 +966,8 @@ fn execute_raw(
         manifest_digest: None,
         distribution_source: Some(resolution.artifact_url.clone()),
         install_backend: Some(resolution.backend.clone()),
+        ownership: Some(Ownership::RawManaged),
+        rpm_metadata: None,
         installed_at: started_at.clone(),
         last_operation_id: Some(operation_id.clone()),
         managed: true,
@@ -2155,6 +2157,8 @@ base_url = "https://example.com/yum-repo"
             manifest_digest: None,
             distribution_source: Some("file:///repo/v1/agentsight-bin".to_string()),
             install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: true,

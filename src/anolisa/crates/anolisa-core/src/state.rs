@@ -27,7 +27,11 @@ use crate::adapter::claim::AdapterClaim;
 /// v2 added the `adapter_claims` array (adapter receipts). The field
 /// default-deserializes, so v1 files load unchanged and are silently
 /// upgraded to v2 on the next save.
-pub const STATE_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 added `ownership` (provenance model) and `rpm_metadata` to
+/// [`InstalledObject`]. Both fields default-deserialize (`None`), so
+/// older files load unchanged and gain the new fields on next save.
+pub const STATE_SCHEMA_VERSION: u32 = 3;
 
 /// Default for `bool` fields that should serialise to `true` when absent.
 fn default_true() -> bool {
@@ -92,6 +96,67 @@ pub enum SubscriptionScope {
     Entitled,
     /// Object reports usage or health to a subscription backend.
     Reporting,
+}
+
+/// Provenance and lifecycle ownership of an installed object.
+///
+/// Determines who holds removal authority and how upgrades are executed.
+/// See `raw_rpm_lifecycle_proposal.md` §5 for the full ownership table.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Ownership {
+    /// Installed via ANOLISA raw backend; ANOLISA manages owned files and
+    /// may remove them on uninstall.
+    RawManaged,
+    /// Installed via ANOLISA-delegated RPM backend (`dnf install`);
+    /// file transactions are owned by rpm/dnf, uninstall delegates to
+    /// `dnf remove`.
+    RpmManaged,
+    /// Pre-existing system RPM adopted/observed by ANOLISA. ANOLISA does
+    /// **not** own package removal: [`owns_removal`](Ownership::owns_removal)
+    /// is `false`. Per the intended lifecycle contract
+    /// (`raw_rpm_lifecycle_proposal.md` §11), `uninstall` should drop only the
+    /// ANOLISA state record unless an explicit `--remove-system-package`
+    /// override is given. That uninstall wiring is a follow-up; this change
+    /// only models the ownership, it does not implement the removal path.
+    RpmObserved,
+}
+
+impl Ownership {
+    /// Whether ANOLISA holds removal authority for this ownership class.
+    ///
+    /// `rpm-observed` objects are tracked but not owned, so default
+    /// uninstall must not invoke `dnf remove`.
+    pub fn owns_removal(self) -> bool {
+        match self {
+            Self::RawManaged | Self::RpmManaged => true,
+            Self::RpmObserved => false,
+        }
+    }
+
+    /// Whether the object was installed via an RPM-based backend.
+    pub fn is_rpm(self) -> bool {
+        matches!(self, Self::RpmManaged | Self::RpmObserved)
+    }
+}
+
+/// RPM package metadata recorded when a component is managed or observed
+/// through an RPM backend. Populated from `rpmdb` queries at adopt/install
+/// time; refreshed on `repair` and `update`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpmMetadata {
+    /// RPM package name (e.g. `anolisa-copilot-shell`).
+    pub package_name: String,
+    /// Full EVR (epoch:version-release) string from rpmdb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evr: Option<String>,
+    /// Package architecture (`x86_64`, `aarch64`, `noarch`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    /// Source repository or label that supplied the package (e.g.
+    /// `@System`, `anolisa-release`, `alinux-updates`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
 }
 
 /// File ownership: ANOLISA-owned vs. external (third-party).
@@ -198,6 +263,18 @@ pub struct InstalledObject {
     /// component's provenance stays deterministic across updates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_backend: Option<String>,
+    /// Provenance/ownership class for lifecycle decisions (removal,
+    /// upgrade delegation). `None` on state files written before v3;
+    /// callers fall back to inspecting `managed` / `adopted` /
+    /// `install_backend` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<Ownership>,
+    /// RPM metadata populated when [`ownership`](Self::ownership) is
+    /// [`RpmManaged`](Ownership::RpmManaged) or
+    /// [`RpmObserved`](Ownership::RpmObserved). `None` for raw installs
+    /// and pre-v3 state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_metadata: Option<RpmMetadata>,
     /// RFC3339 UTC timestamp when this object entered state.
     pub installed_at: String,
     /// Last operation that changed this object, shared with central log rows.
@@ -234,6 +311,43 @@ pub struct InstalledObject {
     /// Cached health results from the last status/probe pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub health: Vec<HealthEntry>,
+}
+
+impl InstalledObject {
+    /// Effective ownership, resolving `None` (pre-v3 state) by inspecting
+    /// legacy fields `managed`, `adopted`, and `install_backend`.
+    pub fn effective_ownership(&self) -> Ownership {
+        if let Some(o) = self.ownership {
+            return o;
+        }
+        // Legacy heuristic, reached only when `ownership` is absent — i.e.
+        // pre-v3 files, since every v3 write sets `ownership` explicitly.
+        // A pre-v3 adopted RPM was recorded either via `adopted = true` or
+        // via `managed = false` (the "external, do not mutate" marker), so
+        // both imply rpm-observed when the backend is RPM. This cannot
+        // misclassify future writes: they never reach the heuristic.
+        // (adopted || !managed) + RPM → rpm-observed; managed + RPM →
+        // rpm-managed; otherwise raw-managed.
+        if (self.adopted || !self.managed) && self.install_backend.as_deref() == Some("rpm") {
+            return Ownership::RpmObserved;
+        }
+        if self.install_backend.as_deref() == Some("rpm") {
+            return Ownership::RpmManaged;
+        }
+        Ownership::RawManaged
+    }
+
+    /// Whether this object represents a pre-existing system RPM that
+    /// ANOLISA only observes without claiming removal authority.
+    pub fn is_rpm_observed(&self) -> bool {
+        self.effective_ownership() == Ownership::RpmObserved
+    }
+
+    /// Whether default uninstall may remove this object's backing files
+    /// or packages.
+    pub fn owns_removal(&self) -> bool {
+        self.effective_ownership().owns_removal()
+    }
 }
 
 /// Backup metadata recorded when an operation touched an external file.
@@ -367,8 +481,18 @@ impl InstalledState {
     /// the same path. Mirrors `transaction::write_atomic`.
     pub fn save(&self, path: &Path) -> Result<(), StateError> {
         // Keep save() non-mutating for callers while refreshing persisted
-        // updated_at. Installed state is small, so this clone is acceptable.
+        // updated_at and schema_version. Installed state is small, so this
+        // clone is acceptable.
+        //
+        // Legacy objects deliberately keep `ownership = None` rather than
+        // being back-filled from `effective_ownership()`: that result is a
+        // guess derived from filesystem-side fields, and persisting it would
+        // make a wrong guess permanent and indistinguishable from a verified
+        // value. Authoritative ownership is written only when known — by
+        // install (raw-managed) or by adopt/repair after an rpmdb query.
+        // Re-running the heuristic on load is a few field comparisons, not I/O.
         let mut snapshot = self.clone();
+        snapshot.schema_version = STATE_SCHEMA_VERSION;
         snapshot.updated_at = now_iso8601();
 
         if let Some(parent) = path.parent()
@@ -581,6 +705,8 @@ mod tests {
             manifest_digest: Some("sha256:abc".to_string()),
             distribution_source: Some("builtin".to_string()),
             install_backend: Some("raw".to_string()),
+            ownership: Some(Ownership::RawManaged),
+            rpm_metadata: None,
             installed_at: now_iso8601(),
             last_operation_id: Some("op-1".to_string()),
             managed: true,
@@ -944,6 +1070,8 @@ mod tests {
         obj.distribution_source = None;
         obj.install_backend = None;
         obj.last_operation_id = None;
+        obj.ownership = None;
+        obj.rpm_metadata = None;
         state.upsert_object(obj);
 
         let rendered = toml::to_string_pretty(&state).expect("serialize");
@@ -962,6 +1090,234 @@ mod tests {
         assert!(
             !rendered.contains("last_operation_id"),
             "None last_operation_id must be skipped"
+        );
+        assert!(
+            !rendered.contains("ownership"),
+            "None ownership must be skipped"
+        );
+        assert!(
+            !rendered.contains("rpm_metadata"),
+            "None rpm_metadata must be skipped"
+        );
+    }
+
+    // ── Ownership model tests ───────────────────────────────────────────
+
+    #[test]
+    fn ownership_owns_removal() {
+        assert!(Ownership::RawManaged.owns_removal());
+        assert!(Ownership::RpmManaged.owns_removal());
+        assert!(!Ownership::RpmObserved.owns_removal());
+    }
+
+    #[test]
+    fn ownership_is_rpm() {
+        assert!(!Ownership::RawManaged.is_rpm());
+        assert!(Ownership::RpmManaged.is_rpm());
+        assert!(Ownership::RpmObserved.is_rpm());
+    }
+
+    #[test]
+    fn effective_ownership_uses_explicit_field() {
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = Some(Ownership::RpmObserved);
+        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+        assert!(obj.is_rpm_observed());
+        assert!(!obj.owns_removal());
+    }
+
+    #[test]
+    fn effective_ownership_legacy_raw_managed() {
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = None;
+        obj.managed = true;
+        obj.adopted = false;
+        obj.install_backend = Some("raw".to_string());
+        assert_eq!(obj.effective_ownership(), Ownership::RawManaged);
+        assert!(obj.owns_removal());
+    }
+
+    #[test]
+    fn effective_ownership_legacy_rpm_managed() {
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = None;
+        obj.managed = true;
+        obj.adopted = false;
+        obj.install_backend = Some("rpm".to_string());
+        assert_eq!(obj.effective_ownership(), Ownership::RpmManaged);
+        assert!(obj.owns_removal());
+    }
+
+    #[test]
+    fn effective_ownership_legacy_rpm_observed() {
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = None;
+        obj.managed = false;
+        obj.adopted = true;
+        obj.install_backend = Some("rpm".to_string());
+        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+        assert!(obj.is_rpm_observed());
+        assert!(!obj.owns_removal());
+    }
+
+    #[test]
+    fn rpm_observed_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+
+        let mut state = InstalledState::default();
+        let mut obj = sample_object(ObjectKind::Component, "copilot-shell", "1.2.3");
+        obj.ownership = Some(Ownership::RpmObserved);
+        obj.status = ObjectStatus::Adopted;
+        obj.managed = false;
+        obj.adopted = true;
+        obj.install_backend = Some("rpm".to_string());
+        obj.rpm_metadata = Some(RpmMetadata {
+            package_name: "anolisa-copilot-shell".to_string(),
+            evr: Some("0:1.2.3-1.al8".to_string()),
+            arch: Some("x86_64".to_string()),
+            source_repo: Some("@System".to_string()),
+        });
+        obj.files = Vec::new();
+        state.upsert_object(obj);
+
+        state.save(&path).expect("save");
+        let loaded = InstalledState::load(&path).expect("load");
+
+        let comp = loaded
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("present");
+        assert_eq!(comp.ownership, Some(Ownership::RpmObserved));
+        assert!(comp.is_rpm_observed());
+        assert!(!comp.owns_removal());
+
+        let rpm = comp.rpm_metadata.as_ref().expect("rpm_metadata present");
+        assert_eq!(rpm.package_name, "anolisa-copilot-shell");
+        assert_eq!(rpm.evr.as_deref(), Some("0:1.2.3-1.al8"));
+        assert_eq!(rpm.arch.as_deref(), Some("x86_64"));
+        assert_eq!(rpm.source_repo.as_deref(), Some("@System"));
+    }
+
+    #[test]
+    fn rpm_managed_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+
+        let mut state = InstalledState::default();
+        let mut obj = sample_object(ObjectKind::Component, "copilot-shell", "1.2.3");
+        obj.ownership = Some(Ownership::RpmManaged);
+        obj.install_backend = Some("rpm".to_string());
+        obj.rpm_metadata = Some(RpmMetadata {
+            package_name: "anolisa-copilot-shell".to_string(),
+            evr: Some("0:1.2.3-1.al8".to_string()),
+            arch: Some("x86_64".to_string()),
+            source_repo: Some("anolisa-release".to_string()),
+        });
+        state.upsert_object(obj);
+
+        state.save(&path).expect("save");
+        let loaded = InstalledState::load(&path).expect("load");
+
+        let comp = loaded
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("present");
+        assert_eq!(comp.ownership, Some(Ownership::RpmManaged));
+        assert!(!comp.is_rpm_observed());
+        assert!(comp.owns_removal());
+    }
+
+    /// Pre-v3 state files omit `ownership` and `rpm_metadata`; loading
+    /// must not reject them (backward compatibility).
+    #[test]
+    fn pre_v3_state_without_ownership_deserializes() {
+        let toml_text = r#"
+            schema_version = 2
+            updated_at = "2026-06-01T10:00:00Z"
+            install_mode = "system"
+            prefix = "/"
+            anolisa_version = "0.2.0"
+
+            [[objects]]
+            kind = "component"
+            name = "copilot-shell"
+            version = "1.0.0"
+            status = "adopted"
+            install_backend = "rpm"
+            installed_at = "2026-06-01T10:00:00Z"
+            managed = false
+            adopted = true
+        "#;
+        let state: InstalledState = toml::from_str(toml_text).expect("pre-v3 state parses");
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("present");
+        assert_eq!(obj.ownership, None);
+        assert_eq!(obj.rpm_metadata, None);
+        // Legacy fallback resolves to rpm-observed.
+        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+        assert!(obj.is_rpm_observed());
+    }
+
+    /// Loading an older state file and saving it must stamp the current
+    /// `schema_version`, silently upgrading the on-disk version while
+    /// preserving the object payload.
+    #[test]
+    fn save_upgrades_schema_version_from_older_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+
+        let v2_text = r#"
+            schema_version = 2
+            updated_at = "2026-06-01T10:00:00Z"
+            install_mode = "system"
+            prefix = "/"
+            anolisa_version = "0.2.0"
+
+            [[objects]]
+            kind = "component"
+            name = "copilot-shell"
+            version = "1.0.0"
+            status = "installed"
+            install_backend = "raw"
+            installed_at = "2026-06-01T10:00:00Z"
+            managed = true
+            adopted = false
+        "#;
+        fs::write(&path, v2_text).expect("seed v2 file");
+
+        let state = InstalledState::load(&path).expect("load v2");
+        assert_eq!(state.schema_version, 2, "loaded value reflects the file");
+
+        state.save(&path).expect("save");
+
+        let upgraded = InstalledState::load(&path).expect("reload");
+        assert_eq!(
+            upgraded.schema_version, STATE_SCHEMA_VERSION,
+            "save must stamp the current schema version"
+        );
+        assert!(
+            upgraded
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "object payload survives the upgrade"
+        );
+    }
+
+    #[test]
+    fn ownership_serde_snake_case() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+
+        let mut state = InstalledState::default();
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = Some(Ownership::RpmObserved);
+        state.upsert_object(obj);
+        state.save(&path).expect("save");
+
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.contains("rpm_observed"),
+            "ownership must serialize as snake_case, got:\n{content}"
         );
     }
 }
