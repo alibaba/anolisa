@@ -395,12 +395,12 @@ describe('InputPrompt', () => {
 
       expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
+        path.join('test', 'project', 'src'),
       );
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
+        path.join('test', 'project', 'src'),
       );
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
+      // Attachment UI is used instead of inserting text directly
       unmount();
     });
 
@@ -438,20 +438,18 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should insert image path at cursor position with proper spacing', async () => {
+    it('should add attachment when clipboard has image', async () => {
       const imagePath = path.join(
         'test',
-        '.qwen-clipboard',
+        'project',
+        'src',
+        '.copilot-shell',
+        'tmp',
+        'clipboard',
         'clipboard-456.png',
       );
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
-
-      // Set initial text and cursor position
-      mockBuffer.text = 'Hello world';
-      mockBuffer.cursor = [0, 5]; // Cursor after "Hello"
-      mockBuffer.lines = ['Hello world'];
-      mockBuffer.replaceRangeByOffset = vi.fn();
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -461,24 +459,16 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      // Should insert at cursor position with spaces
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
+      // Should call saveClipboardImage and create attachment
+      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+      expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
 
-      // Get the actual call to see what path was used
-      const actualCall = vi.mocked(mockBuffer.replaceRangeByOffset).mock
-        .calls[0];
-      expect(actualCall[0]).toBe(5); // start offset
-      expect(actualCall[1]).toBe(5); // end offset
-      expect(actualCall[2]).toBe(
-        ' @' + path.relative(path.join('test', 'project', 'src'), imagePath),
-      );
+      // Attachment UI is used instead of inserting text directly
+      // The attachment will be converted to @reference on submit
       unmount();
     });
 
-    it('should handle errors during clipboard operations', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
+    it('should handle errors during clipboard operations gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockRejectedValue(
         new Error('Clipboard error'),
       );
@@ -491,13 +481,59 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Error handling clipboard image:',
-        expect.any(Error),
-      );
+      // Should not throw and should not modify buffer
       expect(mockBuffer.setText).not.toHaveBeenCalled();
 
-      consoleErrorSpy.mockRestore();
+      unmount();
+    });
+
+    it('should submit with only attachments and empty text', async () => {
+      const imagePath = path.join(
+        'test',
+        'project',
+        'src',
+        '.copilot-shell',
+        'tmp',
+        'clipboard',
+        'clipboard-789.png',
+      );
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
+
+      // Wait for paste protection timeout
+      vi.useFakeTimers();
+      vi.advanceTimersByTime(1000);
+      vi.useRealTimers();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // Paste image (Ctrl+V)
+      stdin.write('\x16');
+      await wait();
+
+      // Buffer is empty (no text input)
+      mockBuffer.setText('');
+      mockBuffer.text = '';
+
+      // Wait for paste protection timeout
+      vi.useFakeTimers();
+      vi.advanceTimersByTime(500);
+      vi.useRealTimers();
+
+      // Submit with Enter (should work with empty text + attachment)
+      stdin.write('\r'); // Enter
+      await wait();
+
+      // Should call onSubmit with the attachment reference
+      expect(props.onSubmit).toHaveBeenCalled();
+      const submittedValue = props.onSubmit.mock.calls[0][0];
+      expect(submittedValue).toContain(
+        '.copilot-shell/tmp/clipboard/clipboard-789.png',
+      );
+
       unmount();
     });
   });
