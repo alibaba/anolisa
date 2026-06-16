@@ -16,7 +16,7 @@
 //! services are recorded in state with `enabled: false`.
 
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ use crate::repo_config::{
     HostVars, RepoConfig, RepoConfigError, normalize_override_url, raw_artifact_url, raw_index_url,
     raw_relative_root,
 };
-use crate::response::{CliError, render_json};
+use crate::response::{CliError, render_json, render_json_with_status};
 
 const COMMAND: &str = "install";
 
@@ -56,10 +56,21 @@ const COMMAND: &str = "install";
 // convention), so the auto-generated CLI-version flag must be disabled
 // to free the name. `anolisa --version` still works at the top level.
 #[command(disable_version_flag = true)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .args(["component", "all"]),
+))]
 pub struct InstallArgs {
     /// Component name to install
     #[arg(value_name = "COMPONENT")]
-    pub component: String,
+    pub component: Option<String>,
+    /// Install every component listed in the catalog (mutually exclusive with COMPONENT)
+    #[arg(long, conflicts_with_all = ["component", "version", "package"])]
+    pub all: bool,
+    /// With --all, stop on the first failure instead of continuing
+    #[arg(long, requires = "all")]
+    pub fail_fast: bool,
     /// Install a specific version instead of the latest in the channel
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
@@ -157,8 +168,26 @@ struct InstallResultPayload {
 }
 
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let command = format!("install {}", args.component);
-    let component = args.component.clone();
+    if args.fail_fast && !args.all {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: "--fail-fast is only meaningful with --all".to_string(),
+        });
+    }
+    if args.all {
+        return handle_all(args, ctx);
+    }
+    // clap ArgGroup guarantees at least one of `component` / `--all`; with
+    // `--all` ruled out above, `component` is necessarily Some.
+    let component = args
+        .component
+        .clone()
+        .expect("clap ArgGroup ensures component is set when --all is absent");
+    handle_one(component, args, ctx)
+}
+
+fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+    let command = format!("install {component}");
 
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
@@ -231,6 +260,252 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let prepared = prepare_raw_execution(ctx, &layout, resolved)?;
     execute_raw(ctx, &layout, &command, prepared)
+}
+
+// ── --all support ───────────────────────────────────────────────────
+
+/// Minimal catalog shape used by `--all`. We only need the component name
+/// and (optionally) the `available` status, so this is a thin parse rather
+/// than a re-use of `list.rs`'s richer types. Keeping it local avoids a
+/// cross-module type dependency for one entry point.
+#[derive(Debug, Deserialize)]
+struct AllCatalogV1 {
+    schema_version: u32,
+    #[serde(default)]
+    components: Vec<AllCatalogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AllCatalogEntry {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Wire shape for a batch entry.  `status` is one of:
+/// `installed` | `planned` (dry-run) | `failed` | `skipped`.
+#[derive(Serialize)]
+struct AllSummaryItem {
+    component: String,
+    status: &'static str,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AllSummaryPayload {
+    total: usize,
+    installed: usize,
+    planned: usize,
+    failed: usize,
+    skipped: usize,
+    dry_run: bool,
+    items: Vec<AllSummaryItem>,
+}
+
+fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+    let names = resolve_all_components(ctx)?;
+    if names.is_empty() {
+        if !ctx.quiet && !ctx.json {
+            let color = Palette::new(ctx.no_color);
+            println!(
+                "{}",
+                color.muted("no available components in catalog; nothing to install")
+            );
+        }
+        if ctx.json {
+            return render_json(
+                "install --all",
+                AllSummaryPayload {
+                    total: 0,
+                    installed: 0,
+                    planned: 0,
+                    failed: 0,
+                    skipped: 0,
+                    dry_run: ctx.dry_run,
+                    items: Vec::new(),
+                },
+            );
+        }
+        return Ok(());
+    }
+
+    // Suppress per-component rendering: handle_all owns the final output.
+    // Each handle_one call runs in quiet mode so it doesn't print individual
+    // JSON envelopes or human-mode messages — only the batch summary at the
+    // end goes to stdout.
+    let suppressed_ctx = CliContext {
+        json: false,
+        quiet: true,
+        ..ctx.clone()
+    };
+
+    // Dry-run successes are "planned" rather than "installed": no files or
+    // state were written.
+    let ok_status: &'static str = if ctx.dry_run { "planned" } else { "installed" };
+
+    let mut items: Vec<AllSummaryItem> = Vec::with_capacity(names.len());
+    let mut first_error: Option<CliError> = None;
+    let mut last_processed = 0usize;
+
+    for (idx, name) in names.iter().enumerate() {
+        last_processed = idx;
+        if !ctx.quiet && !ctx.json {
+            let color = Palette::new(ctx.no_color);
+            println!("{} {name}", color.label("==>"));
+        }
+        let per_args = InstallArgs {
+            component: Some(name.clone()),
+            all: false,
+            fail_fast: false,
+            version: None,
+            backend: args.backend.clone(),
+            repo: args.repo.clone(),
+            package: None,
+        };
+        match handle_one(name.clone(), per_args, &suppressed_ctx) {
+            Ok(()) => items.push(AllSummaryItem {
+                component: name.clone(),
+                status: ok_status,
+                reason: None,
+            }),
+            Err(err) => {
+                let reason = err.reason().to_string();
+                items.push(AllSummaryItem {
+                    component: name.clone(),
+                    status: "failed",
+                    reason: Some(reason),
+                });
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                if args.fail_fast {
+                    break;
+                }
+            }
+        }
+    }
+
+    // --fail-fast may have left components unprocessed.  Mark them as
+    // skipped so `total` always equals the full target set.
+    for name in &names[last_processed + 1..] {
+        items.push(AllSummaryItem {
+            component: name.clone(),
+            status: "skipped",
+            reason: Some("--fail-fast: not attempted".to_string()),
+        });
+    }
+
+    let installed = items.iter().filter(|i| i.status == "installed").count();
+    let planned = items.iter().filter(|i| i.status == "planned").count();
+    let failed = items.iter().filter(|i| i.status == "failed").count();
+    let skipped = items.iter().filter(|i| i.status == "skipped").count();
+
+    if ctx.json {
+        // The batch summary is the single, complete JSON response.  We
+        // return BatchPartial (not Ok) so that main's render_error still
+        // sets a non-zero exit code — but render_error recognises
+        // BatchPartial and skips the second JSON render.
+        render_json_with_status(
+            "install --all",
+            failed == 0,
+            AllSummaryPayload {
+                total: names.len(),
+                installed,
+                planned,
+                failed,
+                skipped,
+                dry_run: ctx.dry_run,
+                items,
+            },
+        )?;
+        return match first_error {
+            Some(_) => Err(CliError::BatchPartial {
+                command: "install --all".to_string(),
+            }),
+            None => Ok(()),
+        };
+    }
+
+    if !ctx.quiet {
+        let color = Palette::new(ctx.no_color);
+        println!();
+        let failed_names: Vec<&str> = items
+            .iter()
+            .filter(|i| i.status == "failed")
+            .map(|i| i.component.as_str())
+            .collect();
+        let ok_word = if ctx.dry_run { "planned" } else { "installed" };
+        let ok_count = if ctx.dry_run { planned } else { installed };
+        if failed_names.is_empty() {
+            println!(
+                "{} total={}  {ok_word}={}  skipped={}",
+                color.label("summary:"),
+                names.len(),
+                ok_count,
+                skipped,
+            );
+        } else {
+            println!(
+                "{} total={}  {ok_word}={}  failed={} ({})  skipped={}",
+                color.label("summary:"),
+                names.len(),
+                ok_count,
+                failed,
+                failed_names.join(", "),
+                skipped,
+            );
+        }
+    }
+
+    // Human mode: preserve non-zero exit code on failure.
+    match first_error {
+        Some(_) => Err(CliError::BatchPartial {
+            command: "install --all".to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Fetch and parse the component catalog, returning the names of components
+/// whose `status` is `available`. Returns an error if the catalog URL is not
+/// configured or the catalog cannot be fetched/parsed.
+fn resolve_all_components(ctx: &CliContext) -> Result<Vec<String>, CliError> {
+    let url = common::resolve_catalog_url(ctx, "install --all")?.ok_or_else(|| {
+        CliError::InvalidArgument {
+            command: "install --all".to_string(),
+            reason: "component catalog is not configured; set ANOLISA_CATALOG_URL or \
+                 configure [backends.raw].base_url in repo.toml"
+                .to_string(),
+        }
+    })?;
+    let bytes = common::fetch_catalog_bytes(&url, "install --all")?;
+    let catalog: AllCatalogV1 =
+        serde_json::from_slice(&bytes).map_err(|err| CliError::InvalidArgument {
+            command: "install --all".to_string(),
+            reason: format!("failed to parse component catalog JSON: {err}"),
+        })?;
+    if catalog.schema_version != 1 {
+        return Err(CliError::InvalidArgument {
+            command: "install --all".to_string(),
+            reason: format!(
+                "unsupported component catalog schema_version {}; expected 1",
+                catalog.schema_version
+            ),
+        });
+    }
+    let mut names: Vec<String> = Vec::new();
+    for entry in catalog.components {
+        if entry.name.trim().is_empty() {
+            if !ctx.quiet {
+                eprintln!("warning: catalog contains an entry with an empty name; skipping");
+            }
+            continue;
+        }
+        if entry.status.as_deref() == Some("available") {
+            names.push(entry.name);
+        }
+    }
+    Ok(names)
 }
 
 /// Caller-side inputs to [`resolve_raw`], grouped to keep the signature flat.
@@ -1379,7 +1654,9 @@ mod tests {
 
     fn args(component: &str) -> InstallArgs {
         InstallArgs {
-            component: component.to_string(),
+            component: Some(component.to_string()),
+            all: false,
+            fail_fast: false,
             version: None,
             backend: None,
             repo: None,
@@ -2276,5 +2553,119 @@ base_url = "https://example.com/yum-repo"
             handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must fail to resolve");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
+    }
+
+    // ── --all / --fail-fast clap validation tests ─────────────────────
+
+    #[test]
+    fn install_all_and_component_are_mutually_exclusive() {
+        let err = InstallArgs::try_parse_from(["install", "--all", "tokenless"])
+            .expect_err("must reject --all with positional");
+        assert!(
+            err.kind() == clap::error::ErrorKind::ArgumentConflict
+                || err.to_string().contains("cannot be used with")
+        );
+    }
+
+    #[test]
+    fn install_all_conflicts_with_package() {
+        let err = InstallArgs::try_parse_from(["install", "--all", "--package", "foo"])
+            .expect_err("must reject --all with --package");
+        assert!(
+            err.kind() == clap::error::ErrorKind::ArgumentConflict
+                || err.to_string().contains("cannot be used with")
+        );
+    }
+
+    #[test]
+    fn install_all_conflicts_with_version() {
+        let err = InstallArgs::try_parse_from(["install", "--all", "--version", "1.0.0"])
+            .expect_err("must reject --all with --version");
+        assert!(
+            err.kind() == clap::error::ErrorKind::ArgumentConflict
+                || err.to_string().contains("cannot be used with")
+        );
+    }
+
+    #[test]
+    fn install_fail_fast_without_all_is_rejected() {
+        // clap still parses it (ArgGroup + requires limitation), but
+        // handle() now rejects at runtime.
+        let a = InstallArgs::try_parse_from(["install", "tokenless", "--fail-fast"])
+            .expect("clap allows this parse");
+        assert!(!a.all);
+        assert!(a.fail_fast);
+
+        let ctx = ctx_with_prefix(false, None);
+        let err = handle(a, &ctx).expect_err("handle should reject --fail-fast without --all");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn install_all_parses_successfully() {
+        let a = InstallArgs::try_parse_from(["install", "--all"]).expect("should parse");
+        assert!(a.all);
+        assert!(a.component.is_none());
+    }
+
+    #[test]
+    fn install_all_with_fail_fast_parses_successfully() {
+        let a =
+            InstallArgs::try_parse_from(["install", "--all", "--fail-fast"]).expect("should parse");
+        assert!(a.all);
+        assert!(a.fail_fast);
+    }
+
+    // ── catalog parsing tests ────────────────────────────────────────
+
+    #[test]
+    fn all_catalog_filters_available_components() {
+        let json = r#"{
+            "schema_version": 1,
+            "components": [
+                {"name": "a", "status": "available"},
+                {"name": "b", "status": "planned"},
+                {"name": "c", "status": "available"},
+                {"name": "d"}
+            ]
+        }"#;
+        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
+        assert_eq!(catalog.schema_version, 1);
+        let names: Vec<String> = catalog
+            .components
+            .into_iter()
+            .filter(|c| c.status.as_deref() == Some("available"))
+            .map(|c| c.name)
+            .filter(|n| !n.trim().is_empty())
+            .collect();
+        assert_eq!(names, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn all_catalog_rejects_unsupported_schema_version() {
+        let json = r#"{"schema_version": 2, "components": []}"#;
+        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
+        assert_ne!(catalog.schema_version, 1);
+    }
+
+    #[test]
+    fn all_catalog_skips_empty_names() {
+        let json = r#"{
+            "schema_version": 1,
+            "components": [
+                {"name": "", "status": "available"},
+                {"name": "  ", "status": "available"},
+                {"name": "valid", "status": "available"}
+            ]
+        }"#;
+        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
+        let names: Vec<String> = catalog
+            .components
+            .into_iter()
+            .filter(|c| c.status.as_deref() == Some("available"))
+            .map(|c| c.name)
+            .filter(|n| !n.trim().is_empty())
+            .collect();
+        assert_eq!(names, vec!["valid"]);
     }
 }
