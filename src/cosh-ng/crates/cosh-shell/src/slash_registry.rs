@@ -49,6 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/auth",
+            usage: "/auth",
+            summary_id: MessageId::HelpSummaryAuth,
+            group: None,
+            scope: "config",
+            state: SlashCommandState::Contextual,
+        },
+        SlashCommandSpec {
             name: "/config",
             usage: "/config language [auto|en-US|zh-CN]",
             summary_id: MessageId::HelpSummaryConfig,

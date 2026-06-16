@@ -70,6 +70,7 @@ pub(crate) struct InlineState {
     pub(crate) handled_details_actions: HashSet<String>,
     pub(crate) handled_selections: HashSet<String>,
     pub(crate) approvals: ApprovalState,
+    pub(crate) auth: crate::auth::runtime::AuthState,
     pub(crate) questions: QuestionState,
     pub(crate) control: ControlState,
     pub(crate) activity: ActivityState,

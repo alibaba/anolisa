@@ -185,6 +185,11 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                     &[("skill", skill), ("error", error)],
                 );
             }
+            AgentEvent::AuthRequired { .. } => {
+                active_run.current_phase = "auth".to_string();
+                active_run.current_message =
+                    "Authentication credentials required".to_string();
+            }
         }
     }
 }

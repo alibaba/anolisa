@@ -516,6 +516,9 @@ impl CardInputState {
                 if !answer.is_empty() {
                     return Some(RawInputEvent::CardAnswer(answer.to_string()));
                 }
+                if *allow_free_text && *option_count == 0 {
+                    return Some(RawInputEvent::CardAnswer(String::new()));
+                }
                 None
             }
             RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {

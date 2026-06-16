@@ -17,6 +17,10 @@ pub(super) fn render_slash_command<W: Write>(
 ) -> std::io::Result<bool> {
     match command {
         SlashCommand::Noop => Ok(true),
+        SlashCommand::Auth => {
+            crate::auth::runtime::trigger_auth_from_slash(state, output)?;
+            Ok(false)
+        }
         SlashCommand::Help => {
             render_help(state, output)?;
             Ok(true)

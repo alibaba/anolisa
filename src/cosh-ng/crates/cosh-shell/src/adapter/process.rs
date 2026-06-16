@@ -372,7 +372,8 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
         | AgentEvent::ToolCompleted { .. }
         | AgentEvent::AgentCompleted { .. }
         | AgentEvent::AgentFailed { .. }
-        | AgentEvent::AgentCancelled { .. } => true,
+        | AgentEvent::AgentCancelled { .. }
+        | AgentEvent::AuthRequired { .. } => true,
     }
 }
 

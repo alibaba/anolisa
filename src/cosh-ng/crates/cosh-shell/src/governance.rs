@@ -217,6 +217,13 @@ pub fn govern_agent_events_with_language(
                 ),
                 false,
             ),
+            AgentEvent::AuthRequired { .. } => (
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
+                "auth required is display-only".to_string(),
+                "Authentication credentials required".to_string(),
+                false,
+            ),
         };
 
         let governed_event = GovernedEvent {

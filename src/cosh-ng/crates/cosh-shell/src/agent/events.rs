@@ -48,6 +48,8 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     render_activity_rows(state, &activity_ids, output)?;
     let question_ids = record_user_questions(state, governed_events);
     render_user_questions(state, &question_ids, output)?;
+    let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
+    crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
     if render_trusted_tool(state, governed_events, run_request, output, adapter)? {
         return Ok(());
     }
@@ -111,6 +113,7 @@ pub(crate) enum TextHoldReason {
 
 pub(crate) fn state_has_pending_interaction(state: &InlineState) -> bool {
     has_pending_question(state)
+        || crate::auth::runtime::has_pending_auth(state)
         || state
             .approvals
             .requests
@@ -129,6 +132,7 @@ fn is_interaction_governed_event(event: &GovernedEvent) -> bool {
         event.event,
         AgentEvent::ToolCall { .. }
             | AgentEvent::UserQuestion { .. }
+            | AgentEvent::AuthRequired { .. }
             | AgentEvent::Action { .. }
             | AgentEvent::ToolPermissionRequest { .. }
     )
@@ -260,6 +264,7 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::ToolOutputDelta { .. }
         | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
+        AgentEvent::AuthRequired { .. } => false,
     }
 }
 

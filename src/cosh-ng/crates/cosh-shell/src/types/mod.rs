@@ -423,6 +423,13 @@ pub enum AgentEvent {
         run_id: String,
         reason: String,
     },
+    AuthRequired {
+        run_id: String,
+        request_id: String,
+        reason: String,
+        error_message: Option<String>,
+        providers: Vec<crate::adapter::AuthProviderInfo>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

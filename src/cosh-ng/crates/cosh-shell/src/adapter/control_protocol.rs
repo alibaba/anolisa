@@ -1,4 +1,6 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::tools::is_shell_tool_name;
 use crate::types::{AgentEvent, QuestionSelectionMode};
@@ -25,6 +27,36 @@ pub enum ControlRequest {
         allow_free_text: bool,
         selection_mode: QuestionSelectionMode,
     },
+    AuthRequired {
+        request_id: String,
+        reason: String,
+        error_message: Option<String>,
+        providers: Vec<AuthProviderInfo>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthProviderInfo {
+    pub id: String,
+    pub label: String,
+    pub fields: Vec<AuthFieldInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthFieldInfo {
+    pub name: String,
+    pub label: String,
+    pub hint: Option<String>,
+    pub secret: bool,
+    pub required: bool,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthResponse {
+    pub provider_id: String,
+    pub values: HashMap<String, String>,
+    pub persist: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -181,6 +213,72 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                 options,
                 allow_free_text,
                 selection_mode,
+            })
+        }
+        "auth_required" => {
+            let reason = request
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("not_configured")
+                .to_string();
+            let error_message = request
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let providers = request
+                .get("providers")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let id = item.get("id")?.as_str()?.to_string();
+                            let label = item.get("label")?.as_str()?.to_string();
+                            let fields = item
+                                .get("fields")
+                                .and_then(|v| v.as_array())
+                                .map(|farr| {
+                                    farr.iter()
+                                        .filter_map(|f| {
+                                            let name = f.get("name")?.as_str()?.to_string();
+                                            let label = f.get("label")?.as_str()?.to_string();
+                                            let hint = f
+                                                .get("hint")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string());
+                                            let secret = f
+                                                .get("secret")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(false);
+                                            let required = f
+                                                .get("required")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(true);
+                                            let placeholder = f
+                                                .get("placeholder")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string());
+                                            Some(AuthFieldInfo {
+                                                name,
+                                                label,
+                                                hint,
+                                                secret,
+                                                required,
+                                                placeholder,
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            Some(AuthProviderInfo { id, label, fields })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ControlRequest::AuthRequired {
+                request_id,
+                reason,
+                error_message,
+                providers,
             })
         }
         _ => None,
@@ -393,6 +491,32 @@ pub fn serialize_answer(request_id: &str, answer: &str) -> String {
             "request_id": request_id,
             "response": {
                 "answer": answer
+            }
+        }
+    })
+    .to_string()
+}
+
+pub fn serialize_auth_response(
+    request_id: &str,
+    provider_id: &str,
+    values: &HashMap<String, String>,
+    persist: bool,
+) -> String {
+    let values_json: Value = values
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "provider_id": provider_id,
+                "values": values_json,
+                "persist": persist
             }
         }
     })
@@ -725,5 +849,55 @@ mod tests {
         let s2 = serialize_user_message("hi", None);
         let v2: Value = serde_json::from_str(&s2).unwrap();
         assert_eq!(v2["session_id"], "default");
+    }
+
+    #[test]
+    fn parse_auth_required() {
+        let line = r#"{"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[{"id":"dashscope","label":"DashScope","fields":[{"name":"api_key","label":"API Key","hint":"get from console","secret":true,"required":true}]},{"id":"openai_compat","label":"OpenAI","fields":[{"name":"base_url","label":"Base URL","secret":false,"required":true,"placeholder":"https://api.openai.com/v1"},{"name":"api_key","label":"Key","secret":true,"required":true}]}]}}"#;
+        let req = parse_control_request(line).expect("should parse auth_required");
+        match req {
+            ControlRequest::AuthRequired {
+                request_id,
+                reason,
+                error_message,
+                providers,
+            } => {
+                assert_eq!(request_id, "auth-init");
+                assert_eq!(reason, "not_configured");
+                assert!(error_message.is_none());
+                assert_eq!(providers.len(), 2);
+                assert_eq!(providers[0].id, "dashscope");
+                assert_eq!(providers[0].label, "DashScope");
+                assert_eq!(providers[0].fields.len(), 1);
+                assert_eq!(providers[0].fields[0].name, "api_key");
+                assert!(providers[0].fields[0].secret);
+                assert!(providers[0].fields[0].required);
+                assert_eq!(
+                    providers[0].fields[0].hint.as_deref(),
+                    Some("get from console")
+                );
+                assert_eq!(providers[1].id, "openai_compat");
+                assert_eq!(providers[1].fields.len(), 2);
+                assert_eq!(
+                    providers[1].fields[0].placeholder.as_deref(),
+                    Some("https://api.openai.com/v1")
+                );
+            }
+            _ => panic!("expected AuthRequired"),
+        }
+    }
+
+    #[test]
+    fn serialize_auth_response_format() {
+        let mut values = HashMap::new();
+        values.insert("api_key".to_string(), "sk-test".to_string());
+        let s = serialize_auth_response("auth-init", "dashscope", &values, true);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["type"], "control_response");
+        assert_eq!(v["response"]["subtype"], "success");
+        assert_eq!(v["response"]["request_id"], "auth-init");
+        assert_eq!(v["response"]["response"]["provider_id"], "dashscope");
+        assert_eq!(v["response"]["response"]["values"]["api_key"], "sk-test");
+        assert_eq!(v["response"]["response"]["persist"], true);
     }
 }

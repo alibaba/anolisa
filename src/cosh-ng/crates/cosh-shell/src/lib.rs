@@ -24,6 +24,7 @@ pub mod tools;
 pub mod types;
 
 pub use adapter::{adapter_for_kind, AdapterInstance, AdapterKind, AgentAdapter};
+pub use adapter::{AuthFieldInfo, AuthProviderInfo, AuthResponse};
 pub use config::{
     language_config_status, load_config, parse_language_setting, resolve_language_setting,
     write_user_language_config, CoshConfig, Language, LanguageConfigStatus,

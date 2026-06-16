@@ -387,6 +387,14 @@ fn start_cancellable_cosh_tui_process(
             |line| {
                 let events = parser.parse_line(&line);
                 let progressed = events.iter().any(agent_event_is_provider_progress);
+                if events.is_empty() {
+                    if let Some(auth_event) =
+                        try_parse_auth_required_from_line(&line, &run_id)
+                    {
+                        send_agent_event(&sender, auth_event);
+                        return Ok(ProviderLineProgress::AwaitingApproval);
+                    }
+                }
                 for event in events {
                     update_completion_flags(&event, &mut completed, &mut failed);
                     if is_terminal_agent_event(&event) {
@@ -452,6 +460,7 @@ fn start_cancellable_cosh_tui_process(
         receiver,
         cancel,
         approval_sender: None,
+        auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(
             control_protocol::ControlProtocolCapabilities::default(),
         )),
@@ -669,6 +678,24 @@ fn start_control_protocol_cosh_tui_process(
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);
                         }
+                        control_protocol::ControlRequest::AuthRequired {
+                            request_id,
+                            reason,
+                            error_message,
+                            providers,
+                        } => {
+                            send_agent_event(
+                                &event_tx,
+                                AgentEvent::AuthRequired {
+                                    run_id: run_id.clone(),
+                                    request_id,
+                                    reason,
+                                    error_message,
+                                    providers,
+                                },
+                            );
+                            return Ok(ProviderLineProgress::AwaitingApproval);
+                        }
                     }
                     return Ok(ProviderLineProgress::NoProgress);
                 }
@@ -748,9 +775,33 @@ fn start_control_protocol_cosh_tui_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        auth_sender: None,
         control_capabilities,
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,
+    }
+}
+
+fn try_parse_auth_required_from_line(line: &str, run_id: &str) -> Option<AgentEvent> {
+    let trimmed = line.trim();
+    if !trimmed.contains("auth_required") {
+        return None;
+    }
+    let parsed = control_protocol::parse_control_request(trimmed)?;
+    match parsed {
+        control_protocol::ControlRequest::AuthRequired {
+            request_id,
+            reason,
+            error_message,
+            providers,
+        } => Some(AgentEvent::AuthRequired {
+            run_id: run_id.to_string(),
+            request_id,
+            reason,
+            error_message,
+            providers,
+        }),
+        _ => None,
     }
 }
 

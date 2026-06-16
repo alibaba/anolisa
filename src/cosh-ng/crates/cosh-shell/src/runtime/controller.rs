@@ -474,6 +474,10 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         return Some(capture);
     }
 
+    if let Some(capture) = crate::auth::runtime::pending_auth_capture(state) {
+        return Some(capture);
+    }
+
     if let Some(capture) = crate::runtime::evidence_requests::pending_evidence_capture(state) {
         return Some(capture);
     }

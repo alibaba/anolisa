@@ -1,6 +1,7 @@
 mod activity;
 mod agent;
 mod approval;
+mod auth;
 mod evidence;
 mod hooks;
 mod main_cli;

@@ -70,6 +70,8 @@ pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
     pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
+    pub(crate) auth_sender:
+        Option<std::sync::mpsc::Sender<crate::adapter::control_protocol::AuthResponse>>,
     control_capabilities: Arc<Mutex<ControlProtocolCapabilities>>,
     pending_provider_session: Option<Arc<Mutex<Option<String>>>>,
     cancellation_artifacts: ProviderCancellationArtifactStore,
@@ -149,6 +151,17 @@ impl AgentRunHandle {
             .map_err(|_| AdapterError {
                 message: "approval channel closed".to_string(),
             })
+    }
+
+    pub fn respond_auth(
+        &self,
+        response: crate::adapter::control_protocol::AuthResponse,
+    ) -> Result<(), String> {
+        self.auth_sender
+            .as_ref()
+            .ok_or_else(|| "no auth channel available".to_string())?
+            .send(response)
+            .map_err(|_| "auth channel closed".to_string())
     }
 
     pub fn control_capabilities(&self) -> ControlProtocolCapabilities {
@@ -371,6 +384,7 @@ fn start_threaded_adapter_run(adapter: AdapterInstance, request: AgentRequest) -
         receiver,
         cancel,
         approval_sender: None,
+        auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
         pending_provider_session: None,
         cancellation_artifacts: ProviderCancellationArtifactStore::default(),

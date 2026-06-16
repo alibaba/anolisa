@@ -149,7 +149,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -186,7 +186,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       return 0
       ;;
   esac
@@ -409,7 +409,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       printf '%s' "slash"
       return 0
       ;;
@@ -446,7 +446,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skill)
       return 0
       ;;
   esac

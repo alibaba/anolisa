@@ -149,6 +149,7 @@ pub(super) fn start_cancellable_claude_process(
         receiver,
         cancel,
         approval_sender: None,
+        auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(
             control_protocol::ControlProtocolCapabilities::default(),
         )),
@@ -371,6 +372,24 @@ pub(super) fn start_control_protocol_claude_process(
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);
                         }
+                        control_protocol::ControlRequest::AuthRequired {
+                            request_id,
+                            reason,
+                            error_message,
+                            providers,
+                        } => {
+                            send_agent_event(
+                                &event_tx,
+                                AgentEvent::AuthRequired {
+                                    run_id: run_id.clone(),
+                                    request_id,
+                                    reason,
+                                    error_message,
+                                    providers,
+                                },
+                            );
+                            return Ok(ProviderLineProgress::AwaitingApproval);
+                        }
                     }
                     return Ok(ProviderLineProgress::NoProgress);
                 }
@@ -447,6 +466,7 @@ pub(super) fn start_control_protocol_claude_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        auth_sender: None,
         control_capabilities,
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,

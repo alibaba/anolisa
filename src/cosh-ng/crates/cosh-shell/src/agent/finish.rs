@@ -86,6 +86,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     );
     render_selectable_recommendations(&active_run.governed_events, active_run.language, output)?;
     record_agent_run_facts(state, &active_run);
+    state.auth.state = None;
     if provider_timed_out {
         let dropped = trim_queued_requests_after_provider_timeout(state);
         if dropped > 0 {
