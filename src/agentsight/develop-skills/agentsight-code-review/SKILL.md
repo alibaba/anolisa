@@ -68,14 +68,13 @@ git log --oneline origin/main..HEAD
 
 #### 维度 6：文档同步
 
-检查变更是否需要同步更新文档：
+检查代码变更是否需要同步更新以下文档（根据变更内容自行判断）：
 
-- 新增/修改 CLI 子命令 → `AGENTS.md ## 7. CLI Subcommands` 和 `CLAUDE.md` 是否更新
-- 新增/修改 API endpoint → `AGENTS.md ## 8. API Endpoints` 是否更新
-- 新增 eBPF 探针 → `AGENTS.md ## 6. eBPF Probes` 是否更新
-- 新增模块 → `AGENTS.md ## 4. Module Map` 是否更新
-- 修改配置项 → `AGENTS.md ## 10. Configuration` 和 `CLAUDE.md` 是否更新
-- 新增/修改 FFI 导出 → `src/FFI_AGENTS.md` 是否需要更新
+- `AGENTS.md`
+- `CLAUDE.md`
+- `src/FFI_AGENTS.md`
+- `src/UNIFIED_AGENTS.md`
+- `src/storage/AGENTS.md`
 
 ### 步骤 3：输出 Findings
 
