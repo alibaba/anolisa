@@ -43,6 +43,7 @@ pub use config::{AgentsightConfig, default_base_path};
 pub mod aggregator;
 pub mod analyzer;
 pub mod atif;
+pub(crate) mod background;
 pub mod chrome_trace;
 pub mod discovery;
 pub mod event;
