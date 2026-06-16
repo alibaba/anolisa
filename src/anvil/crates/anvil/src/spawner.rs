@@ -83,9 +83,13 @@ pub type DynSpawner = Arc<dyn BackendSpawner>;
 // LinuxSandboxSpawner
 // ---------------------------------------------------------------------------
 
-/// Production spawner: runs `linux-sandbox run --bundle <work_dir>` via
-/// [`tokio::process::Command`]. v0.1 only fires-and-forgets the child;
-/// `wait()` is a placeholder until the supervisor lands in v0.2.
+/// Production spawner: invokes `bwrap` (bubblewrap) directly with a
+/// minimal namespace-isolation profile. v0.1 only fires-and-forgets the
+/// child; `wait()` is a placeholder until the supervisor lands in v0.2.
+///
+/// The OCI bundle interface (`linux-sandbox run --bundle <dir>`) is
+/// deferred — bwrap gives us a real, runnable isolation primitive on
+/// any modern Linux host without needing a custom shim binary.
 pub struct LinuxSandboxSpawner;
 
 #[async_trait]
@@ -96,10 +100,29 @@ impl BackendSpawner for LinuxSandboxSpawner {
         binary_path: &Path,
         work_dir: &Path,
     ) -> Result<SpawnHandle, AnvilError> {
+        // v0.1: spawn a minimal bwrap sandbox running `/bin/sleep 3600`
+        // so the lifecycle (Running -> Destroyed via SIGTERM) can be
+        // exercised end-to-end. `work_dir` is reserved for the future
+        // OCI-bundle path; not consumed by bwrap today.
+        let _ = work_dir;
         let child = tokio::process::Command::new(binary_path)
-            .arg("run")
-            .arg("--bundle")
-            .arg(work_dir)
+            .args([
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--unshare-pid",
+                "--unshare-net",
+                "--die-with-parent",
+                "--",
+                "/bin/sleep",
+                "3600",
+            ])
             .env("ANVIL_INSTANCE_ID", instance.id.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -117,8 +140,7 @@ impl BackendSpawner for LinuxSandboxSpawner {
             backend = %instance.backend,
             ?pid,
             binary = %binary_path.display(),
-            bundle = %work_dir.display(),
-            "spawned linux-sandbox process",
+            "spawned bwrap sandbox process",
         );
         Ok(SpawnHandle {
             pid,
