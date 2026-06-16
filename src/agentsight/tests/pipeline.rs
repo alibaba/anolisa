@@ -116,6 +116,16 @@ fn test_openai_non_streaming_pipeline() {
 
     assert_eq!(call.provider, "openai");
     assert_eq!(call.model, "gpt-4o-mini");
+
+    // Token usage must be extracted from the non-streaming JSON `usage` field
+    // (the fix in #789: extract_token_from_json_body on HttpComplete). Before
+    // that fix, non-streaming responses reported zero/absent token usage.
+    let usage = call
+        .token_usage
+        .as_ref()
+        .expect("non-streaming call must carry token usage");
+    assert_eq!(usage.input_tokens, 8, "input tokens from JSON usage");
+    assert_eq!(usage.output_tokens, 4, "output tokens from JSON usage");
 }
 
 #[test]
