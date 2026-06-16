@@ -437,6 +437,9 @@ pub fn events_to_flat_records(
                 if let Some(path) = call.metadata.get("path") {
                     m.insert("agentsight.http.path".to_string(), path.clone());
                 }
+                if let Some(domain) = call.metadata.get("http.domain") {
+                    m.insert("agentsight.http.domain".to_string(), domain.clone());
+                }
                 if let Some(status) = call.metadata.get("status_code") {
                     m.insert("agentsight.http.status_code".to_string(), status.clone());
                 }

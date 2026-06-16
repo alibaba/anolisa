@@ -229,6 +229,9 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                if let Some(addr) = meta.get("server.address").cloned() {
+                    meta.insert("http.domain".to_string(), addr);
+                }
                 // Derive gen_ai.operation.name from path
                 if http.path.contains("/chat/completions") || http.path.contains("/v1/messages") {
                     meta.insert("operation_name".to_string(), "chat".to_string());
@@ -695,6 +698,7 @@ mod tests {
             "api.openai.com"
         );
         assert_eq!(call.metadata.get("server.port").unwrap(), "443");
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "api.openai.com");
         assert_eq!(call.metadata.get("operation_name").unwrap(), "chat");
         assert!(call.metadata.contains_key("user_query"));
     }
@@ -708,6 +712,7 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert_eq!(call.metadata.get("server.address").unwrap(), "example.com");
         assert!(!call.metadata.contains_key("server.port"));
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "example.com");
     }
 
     #[test]
