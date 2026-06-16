@@ -30,7 +30,11 @@ git diff origin/main..HEAD
 gh pr list --head $(git branch --show-current) --repo alibaba/anolisa --state open --json number,title,body
 ```
 
-### 步骤 1.5：Preflight 检查
+### 步骤 1.5：Code Review 自检
+
+在生成 PR 描述前，先执行 `agentsight-code-review` skill 对当前变更进行自检。如果存在 findings，先修复再继续。
+
+### 步骤 1.6：Preflight 检查
 
 在分析变更前，运行以下检查并记录结果（后续自动填入 Checklist）：
 
