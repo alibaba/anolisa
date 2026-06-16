@@ -40,7 +40,7 @@ ALLOWED_DEPS = {
     "aggregator":  {"parser", "probes", "event"},
     "analyzer":    {"aggregator", "tokenizer", "parser"},
     "tokenizer":   set(),
-    "genai":       {"analyzer", "discovery", "aggregator", "parser"},
+    "genai":       {"analyzer", "aggregator", "parser"},
     "atif":        {"genai", "storage"},
     "storage":     {"analyzer", "genai"},
     "server":      {"storage", "health", "atif"},
