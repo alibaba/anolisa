@@ -394,6 +394,29 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
+            if input.contains("agent memory hook fallback") {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "routing".to_string(),
+                        message: "matching local agent fallback memory hook workflow".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: format!("Received shell prompt request: {input}"),
+                    },
+                    AgentEvent::ToolCall {
+                        run_id: run_id.clone(),
+                        tool_id: None,
+                        name: "Bash".to_string(),
+                        input: "free -m; touch /tmp/cosh-shell-fake-memory-hook-marker".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "local agent fallback requires approval".to_string(),
+                    },
+                ]);
+            }
             if input.contains("provider native tool") {
                 return Ok(vec![
                     AgentEvent::StatusChanged {

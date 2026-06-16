@@ -454,7 +454,26 @@ fn hook_feedback_preference(
 }
 
 fn command_intent_from_suppression_key(suppression_key: &str) -> &str {
-    suppression_key.rsplit(':').next().unwrap_or("unknown")
+    let mut parts = suppression_key.rsplit(':');
+    let last = parts.next().unwrap_or("unknown");
+    if is_command_origin_label(last) {
+        parts.next().unwrap_or("unknown")
+    } else {
+        last
+    }
+}
+
+fn is_command_origin_label(value: &str) -> bool {
+    matches!(
+        value,
+        "user_interactive"
+            | "user_send_to_shell"
+            | "user_analysis_action"
+            | "agent_handoff"
+            | "provider_tool"
+            | "shell_internal"
+            | "unknown"
+    )
 }
 
 fn current_epoch_ms() -> u64 {

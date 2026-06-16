@@ -136,7 +136,6 @@ pub(crate) fn render_approval_actions<W: Write>(
                     }
                     mark_provider_approval_resolved(state);
                     clear_active_approval_panel(state, output)?;
-                    clear_active_approval_panel(state, output)?;
                     render_approval_resolution(state, &decision.request, decision.title, output)?;
                     render_current_approval_request(state, output)?;
                     flush_held_agent_events(state, output)?;

@@ -207,6 +207,7 @@ fn block_for_pending_consultation(consultation: &PendingConsultation) -> Command
         id: consultation.block_id.clone(),
         session_id: "session".to_string(),
         command: consultation.command.clone(),
+        origin: Default::default(),
         cwd: String::new(),
         end_cwd: String::new(),
         started_at_ms: consultation.created_at_ms,

@@ -24,6 +24,7 @@ pub(crate) fn render_approval_journal<W: Write>(
             execution_path: entry.execution_path,
             command_block_id: entry.command_block_id.as_deref(),
             redaction_status: entry.redaction_status,
+            assessment: entry.assessment.as_ref().map(assessment_summary_model),
         })
         .collect::<Vec<_>>();
     RatatuiInlineRenderer::for_terminal()
@@ -189,9 +190,25 @@ pub(crate) fn render_approval_details<W: Write>(
                 execution_path: request.execution_path,
                 command_block_id: request.command_block_id.as_deref(),
                 redaction_status: request.redaction_status,
+                assessment: request.assessment.as_ref().map(assessment_summary_model),
             },
         )?;
     Ok(())
+}
+
+fn assessment_summary_model(
+    assessment: &RuntimeCommandAssessmentSummary,
+) -> CommandAssessmentSummaryModel<'_> {
+    CommandAssessmentSummaryModel {
+        impact: assessment.impact,
+        execution: assessment.execution,
+        confidence: assessment.confidence,
+        primary_reason: assessment.primary_reason,
+        reason_trace: &assessment.reason_trace,
+        auto_allow: assessment.auto_allow,
+        output_stability: assessment.output_stability,
+        output_exposure: assessment.output_exposure,
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +235,7 @@ mod tests {
             execution_path,
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         }
     }
 

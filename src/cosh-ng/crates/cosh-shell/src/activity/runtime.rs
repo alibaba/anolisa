@@ -1781,6 +1781,7 @@ mod tests {
             id: "cmd-1".to_string(),
             session_id: "session-1".to_string(),
             command: "sleep 100".to_string(),
+            origin: Default::default(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             started_at_ms: 1,

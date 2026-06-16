@@ -353,6 +353,7 @@ mod tests {
                 id: "blk".to_string(),
                 session_id: "sess".to_string(),
                 command: "echo test".to_string(),
+                origin: Default::default(),
                 cwd: "/tmp".to_string(),
                 end_cwd: "/tmp".to_string(),
                 started_at_ms: 0,

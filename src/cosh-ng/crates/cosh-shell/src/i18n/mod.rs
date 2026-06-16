@@ -304,6 +304,8 @@ pub enum MessageId {
     HookFindingDetailsTitle,
     HookConsultationHookLabel,
     HookConsultationConfidenceReasonLine,
+    HookConsultationFindingLine,
+    HookConsultationSuggestionLine,
     HookConsultationAnalyzeAction,
     HookConsultationIgnoreAction,
     HookDetailsConfidenceLine,
@@ -324,6 +326,7 @@ pub enum MessageId {
     HookDetailsReasonDiagnosticIntent,
     HookDetailsReasonOtherIntent,
     HookDetailsTopicLine,
+    HookDetailsOriginLine,
     HookDetailsSuppressionKeyLine,
     HookDetailsOutputRefLine,
     HookDetailsCreatedAtLine,
@@ -434,6 +437,8 @@ pub enum MessageId {
     ApprovalDetailsPendingValue,
     ApprovalDetailsNoneValue,
     ApprovalDetailsNotApplicableValue,
+    ApprovalAssessmentSummaryLine,
+    ApprovalAssessmentReasonLine,
     ApprovalJournalTitle,
     ApprovalJournalDecisionCount,
     ApprovalJournalEmptyBody,
@@ -921,6 +926,8 @@ impl MessageId {
         MessageId::ApprovalDetailsPendingValue,
         MessageId::ApprovalDetailsNoneValue,
         MessageId::ApprovalDetailsNotApplicableValue,
+        MessageId::ApprovalAssessmentSummaryLine,
+        MessageId::ApprovalAssessmentReasonLine,
         MessageId::ApprovalJournalTitle,
         MessageId::ApprovalJournalDecisionCount,
         MessageId::ApprovalJournalEmptyBody,
@@ -1456,6 +1463,8 @@ fn en_message(id: MessageId) -> &'static str {
         MessageId::HookConsultationConfidenceReasonLine => {
             "Confidence: {confidence}; reason: {reason}"
         }
+        MessageId::HookConsultationFindingLine => "Finding: {finding}",
+        MessageId::HookConsultationSuggestionLine => "Recommended action: {suggestion}",
         MessageId::HookConsultationAnalyzeAction => "Analyze",
         MessageId::HookConsultationIgnoreAction => "Ignore",
         MessageId::HookDetailsConfidenceLine => "Confidence: {confidence}; policy reason: {reason}",
@@ -1504,6 +1513,7 @@ fn en_message(id: MessageId) -> &'static str {
         }
         MessageId::HookDetailsReasonOtherIntent => "no explicit diagnostic intent was identified",
         MessageId::HookDetailsTopicLine => "Topic: {topic}; entity: {entity}",
+        MessageId::HookDetailsOriginLine => "Command origin: {origin}",
         MessageId::HookDetailsSuppressionKeyLine => "Suppression key: {key}",
         MessageId::HookDetailsOutputRefLine => "Output capture: {ref}",
         MessageId::HookDetailsCreatedAtLine => "Created at: {created_at}",
@@ -1634,6 +1644,12 @@ fn en_message(id: MessageId) -> &'static str {
         MessageId::ApprovalDetailsPendingValue => "<pending>",
         MessageId::ApprovalDetailsNoneValue => "<none>",
         MessageId::ApprovalDetailsNotApplicableValue => "<not-applicable>",
+        MessageId::ApprovalAssessmentSummaryLine => {
+            "Assessment: impact {impact}; decision {decision}; confidence {confidence}"
+        }
+        MessageId::ApprovalAssessmentReasonLine => {
+            "Reason: {reason}"
+        }
         MessageId::ApprovalJournalTitle => "Approval journal",
         MessageId::ApprovalJournalDecisionCount => "{count} decisions",
         MessageId::ApprovalJournalEmptyBody => {
@@ -2085,6 +2101,8 @@ fn zh_message(id: MessageId) -> &'static str {
         MessageId::HookFindingDetailsTitle => "Hook 发现详情",
         MessageId::HookConsultationHookLabel => "Hook",
         MessageId::HookConsultationConfidenceReasonLine => "置信度: {confidence}; 原因: {reason}",
+        MessageId::HookConsultationFindingLine => "发现: {finding}",
+        MessageId::HookConsultationSuggestionLine => "建议动作: {suggestion}",
         MessageId::HookConsultationAnalyzeAction => "分析",
         MessageId::HookConsultationIgnoreAction => "忽略",
         MessageId::HookDetailsConfidenceLine => "置信度: {confidence}; 策略原因: {reason}",
@@ -2127,6 +2145,7 @@ fn zh_message(id: MessageId) -> &'static str {
         MessageId::HookDetailsReasonDiagnosticIntent => "明确的诊断命令且证据充分。",
         MessageId::HookDetailsReasonOtherIntent => "没有识别到明确的诊断意图。",
         MessageId::HookDetailsTopicLine => "主题: {topic}; 实体: {entity}",
+        MessageId::HookDetailsOriginLine => "命令来源: {origin}",
         MessageId::HookDetailsSuppressionKeyLine => "抑制键: {key}",
         MessageId::HookDetailsOutputRefLine => "输出捕获: {ref}",
         MessageId::HookDetailsCreatedAtLine => "创建时间: {created_at}",
@@ -2245,6 +2264,10 @@ fn zh_message(id: MessageId) -> &'static str {
         MessageId::ApprovalDetailsPendingValue => "<待处理>",
         MessageId::ApprovalDetailsNoneValue => "<无>",
         MessageId::ApprovalDetailsNotApplicableValue => "<不适用>",
+        MessageId::ApprovalAssessmentSummaryLine => {
+            "评估: 影响 {impact}；决策 {decision}；置信度 {confidence}"
+        }
+        MessageId::ApprovalAssessmentReasonLine => "原因: {reason}",
         MessageId::ApprovalJournalTitle => "审批记录",
         MessageId::ApprovalJournalDecisionCount => "{count} 条决策",
         MessageId::ApprovalJournalEmptyBody => "本 shell 会话还没有审批决策记录。",

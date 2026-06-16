@@ -24,7 +24,7 @@ fn hook_hint_ignore_records_session_suppression_without_pending_queue() {
     assert!(state
         .hooks
         .ignored_cards
-        .contains("memory:memory-pressure:free"));
+        .contains("memory:system-memory:memory-pressure:free:user_interactive"));
     assert!(state.hooks.pending_consultation.is_none());
     assert!(state.hooks.pending_consultation_queue.is_empty());
     assert!(state.hooks.display_events.iter().any(|event| {
@@ -107,7 +107,13 @@ fn hook_hint_details_renders_without_pending_queue() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("Suppression key: memory:memory-pressure:free"),
+        rendered.contains("Command origin: user_interactive"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Suppression key: memory:system-memory:memory-pressure:free:user_interactive"
+        ),
         "{rendered}"
     );
     assert!(rendered.contains("Output capture: captured"), "{rendered}");

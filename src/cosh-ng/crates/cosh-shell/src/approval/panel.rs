@@ -71,6 +71,10 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 id: &request.id,
                 kind: request.kind.label(),
                 risk: request.risk,
+                reason: request
+                    .assessment
+                    .as_ref()
+                    .map(|assessment| assessment.primary_reason),
                 subject: &request.subject,
                 preview_label,
                 preview: &request.preview,

@@ -75,7 +75,7 @@ fn queued_consultation_rechecks_ignore_before_rendering() {
     state
         .hooks
         .ignored_cards
-        .insert("memory:memory-pressure:free".to_string());
+        .insert(hint.suppression_key.clone());
     let mut output = Vec::new();
 
     render_next_queued_consultation(&mut state, &mut output).expect("recheck queued consultation");

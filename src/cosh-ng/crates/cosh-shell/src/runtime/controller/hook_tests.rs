@@ -159,9 +159,12 @@ fn smart_mode_top_memory_finding_renders_consultation_card() {
         .expect("render queued hook card");
 
     let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(rendered.contains("Hook: memory-pressure"), "{rendered}");
+    assert!(rendered.contains("Available memory is low"), "{rendered}");
+    assert!(rendered.contains("Finding:"), "{rendered}");
+    assert!(rendered.contains("Recommended action:"), "{rendered}");
+    assert!(!rendered.contains("Hook: memory-pressure"), "{rendered}");
     assert!(
-        rendered.contains("Confidence: high; reason: allowed"),
+        !rendered.contains("Confidence: high; reason: allowed"),
         "{rendered}"
     );
     assert!(rendered.contains("[Analyze] [Ignore]"), "{rendered}");
@@ -260,7 +263,10 @@ fn analyze_consultation_starts_agent_with_hook_finding() {
     assert_eq!(hook_hint.topic, "memory");
     assert_eq!(hook_hint.entity_key, "system-memory");
     assert_eq!(hook_hint.effective_severity, FindingSeverity::Critical);
-    assert_eq!(hook_hint.suppression_key, "memory:memory-pressure:top");
+    assert_eq!(
+        hook_hint.suppression_key,
+        "memory:system-memory:memory-pressure:top:user_interactive"
+    );
     assert_eq!(
         hook_hint.recommended_skill.as_deref(),
         Some("memory-analysis")

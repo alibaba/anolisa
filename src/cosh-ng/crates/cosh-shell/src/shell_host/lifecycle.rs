@@ -25,6 +25,7 @@ pub(super) fn push_shell_started_event(parser: &mut OscParser, config: &ShellHos
         input: None,
         component: None,
         message: None,
+        command_origin: None,
     });
 }
 
@@ -50,6 +51,7 @@ pub(super) fn push_shell_exited_event(
         input: None,
         component: None,
         message: None,
+        command_origin: None,
     });
     Ok(())
 }

@@ -32,7 +32,7 @@ pub use actions::{
 };
 pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};
 pub use approval::ApprovalPanelModel;
-pub use approval_details::ApprovalDetailsPanelModel;
+pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
 pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;

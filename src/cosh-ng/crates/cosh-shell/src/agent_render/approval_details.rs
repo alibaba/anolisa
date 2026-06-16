@@ -29,6 +29,19 @@ pub struct ApprovalDetailsPanelModel<'a> {
     pub execution_path: Option<&'a str>,
     pub command_block_id: Option<&'a str>,
     pub redaction_status: Option<&'a str>,
+    pub assessment: Option<CommandAssessmentSummaryModel<'a>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommandAssessmentSummaryModel<'a> {
+    pub impact: &'a str,
+    pub execution: &'a str,
+    pub confidence: &'a str,
+    pub primary_reason: &'a str,
+    pub reason_trace: &'a str,
+    pub auto_allow: Option<&'a str>,
+    pub output_stability: &'a str,
+    pub output_exposure: &'a str,
 }
 
 impl RatatuiInlineRenderer {
@@ -53,10 +66,10 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_details_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = approval_details_panel_height(&model, width, &i18n);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        let i18n = self.i18n();
         render_approval_details_panel(model, area, &mut buffer, &i18n);
         buffer_to_lines(&buffer, area)
     }
@@ -70,10 +83,10 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_details_panel_height(&model, width);
+        let i18n = self.i18n();
+        let height = approval_details_panel_height(&model, width, &i18n);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        let i18n = self.i18n();
         render_approval_details_panel(model, area, &mut buffer, &i18n);
         if self.styled {
             buffer_to_styled_lines(&buffer, area)
@@ -91,7 +104,7 @@ impl RatatuiInlineRenderer {
             crate::MessageId::ApprovalRiskSuffix,
             &[("risk", model.risk)],
         );
-        vec![
+        let mut lines = vec![
             format!(
                 "{} {}",
                 i18n.t(crate::MessageId::ApprovalDetailsTitle),
@@ -148,16 +161,28 @@ impl RatatuiInlineRenderer {
             ),
             i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
                 .to_string(),
-        ]
+        ];
+        if let Some(assessment) = model.assessment {
+            lines.insert(6, assessment_summary_line(&i18n, assessment));
+        }
+        lines
     }
 }
 
-fn approval_details_panel_height(model: &ApprovalDetailsPanelModel<'_>, width: u16) -> u16 {
+fn approval_details_panel_height(
+    model: &ApprovalDetailsPanelModel<'_>,
+    width: u16,
+    i18n: &crate::I18n,
+) -> u16 {
     let content_width = approval_content_width(width);
     let preview_rows = wrapped_preview_rows(model.preview, content_width, 6)
         .len()
         .max(1) as u16;
-    11 + preview_rows
+    let assessment_rows = model
+        .assessment
+        .map(|assessment| assessment_summary_rows(i18n, assessment, content_width).len() as u16)
+        .unwrap_or(0);
+    11 + preview_rows + assessment_rows
 }
 
 fn render_approval_details_panel(
@@ -186,6 +211,12 @@ fn render_approval_details_panel(
 
     let preview_rows =
         wrapped_preview_rows(model.preview, inner.width.saturating_sub(2) as usize, 6);
+    let assessment_rows = model
+        .assessment
+        .map(|assessment| {
+            assessment_summary_rows(i18n, assessment, inner.width.saturating_sub(2) as usize)
+        })
+        .unwrap_or_default();
     let risk = i18n.format(
         crate::MessageId::ApprovalRiskSuffix,
         &[("risk", model.risk)],
@@ -196,6 +227,7 @@ fn render_approval_details_panel(
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(assessment_rows.len() as u16),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -302,8 +334,17 @@ fn render_approval_details_panel(
         ),
     ]))
     .render(chunks[4], buffer);
-    Paragraph::new(i18n.t(crate::MessageId::ApprovalDetailsDefaultDenyLine))
+    if !assessment_rows.is_empty() {
+        Paragraph::new(Text::from(
+            assessment_rows
+                .into_iter()
+                .map(|line| Line::from(Span::raw(line)))
+                .collect::<Vec<_>>(),
+        ))
         .render(chunks[5], buffer);
+    }
+    Paragraph::new(i18n.t(crate::MessageId::ApprovalDetailsDefaultDenyLine))
+        .render(chunks[6], buffer);
     Paragraph::new(Line::from(vec![
         Span::styled(
             format!(
@@ -314,24 +355,63 @@ fn render_approval_details_panel(
         ),
         Span::raw(user_facing_subject(i18n, model.subject)),
     ]))
-    .render(chunks[6], buffer);
+    .render(chunks[7], buffer);
     Paragraph::new(Line::from(Span::styled(
         format!("{}:", user_facing_preview_label(i18n, &model)),
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )))
-    .render(chunks[7], buffer);
+    .render(chunks[8], buffer);
     Paragraph::new(Text::from(
         preview_rows
             .into_iter()
             .map(|line| Line::from(Span::raw(line)))
             .collect::<Vec<_>>(),
     ))
-    .render(chunks[8], buffer);
+    .render(chunks[9], buffer);
     Paragraph::new(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy))
         .wrap(Wrap { trim: true })
-        .render(chunks[9], buffer);
+        .render(chunks[10], buffer);
+}
+
+fn assessment_summary_line(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+) -> String {
+    i18n.format(
+        crate::MessageId::ApprovalAssessmentSummaryLine,
+        &[
+            ("impact", assessment.impact),
+            ("decision", assessment.execution),
+            ("confidence", assessment.confidence),
+        ],
+    )
+}
+
+fn assessment_reason_line(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+) -> String {
+    i18n.format(
+        crate::MessageId::ApprovalAssessmentReasonLine,
+        &[("reason", assessment.primary_reason)],
+    )
+}
+
+fn assessment_summary_rows(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+    content_width: usize,
+) -> Vec<String> {
+    let mut rows =
+        wrapped_preview_rows(&assessment_summary_line(i18n, assessment), content_width, 2);
+    rows.extend(wrapped_preview_rows(
+        &assessment_reason_line(i18n, assessment),
+        content_width,
+        2,
+    ));
+    rows
 }
 
 fn user_facing_subject(i18n: &crate::I18n, subject: &str) -> String {
@@ -351,7 +431,6 @@ fn user_facing_subject(i18n: &crate::I18n, subject: &str) -> String {
         subject.to_string()
     }
 }
-
 fn user_facing_preview_label(i18n: &crate::I18n, model: &ApprovalDetailsPanelModel<'_>) -> String {
     let subject = model.subject.to_ascii_lowercase();
     let en_tool_input =

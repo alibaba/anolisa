@@ -25,6 +25,7 @@ pub(crate) fn make_request(id: &str) -> AgentRequest {
             id: "test-block".to_string(),
             session_id: "test-session".to_string(),
             command: "echo test".to_string(),
+            origin: Default::default(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             started_at_ms: 0,

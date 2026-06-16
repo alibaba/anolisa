@@ -622,6 +622,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 id: "req-1",
                 kind: "tool request",
                 risk: "medium",
+                reason: None,
                 subject: "tool Bash",
                 preview_label: "Tool 输入",
                 preview: "cat /tmp/cosh-shell-中文-smoke.txt",

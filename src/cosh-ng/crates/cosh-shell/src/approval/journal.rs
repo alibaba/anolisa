@@ -32,6 +32,7 @@ pub(super) fn approval_journal_entry(
         execution_path: request.execution_path,
         command_block_id: request.command_block_id.clone(),
         redaction_status: request.redaction_status,
+        assessment: request.assessment.clone(),
     }
 }
 

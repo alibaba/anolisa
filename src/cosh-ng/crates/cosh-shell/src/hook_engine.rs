@@ -1,5 +1,5 @@
 use crate::hook_types::*;
-use crate::types::CommandBlock;
+use crate::types::{CommandBlock, CommandOrigin};
 use loader::load_external_hook_configs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -114,6 +114,19 @@ impl HookEngine {
         block: &CommandBlock,
         disabled_hooks: &HashSet<String>,
     ) -> Vec<HookFinding> {
+        self.evaluate_with_disabled_and_origin(
+            block,
+            disabled_hooks,
+            CommandOrigin::UserInteractive,
+        )
+    }
+
+    pub fn evaluate_with_disabled_and_origin(
+        &self,
+        block: &CommandBlock,
+        disabled_hooks: &HashSet<String>,
+        origin: CommandOrigin,
+    ) -> Vec<HookFinding> {
         let input = runtime::hook_input_from_block(block);
         let mut findings = Vec::new();
         for hook in &self.builtin_hooks {
@@ -131,6 +144,9 @@ impl HookEngine {
                 continue;
             }
             if ext.source == ExternalHookSource::Project && !ext.trusted {
+                continue;
+            }
+            if !external_hook_allowed_for_origin(ext, origin) {
                 continue;
             }
             if matcher::matches_command(&ext.matcher, &input) {
@@ -195,6 +211,16 @@ impl HookEngine {
 
     pub fn external_hooks(&self) -> &[ExternalHookConfig] {
         &self.external_hooks
+    }
+}
+
+fn external_hook_allowed_for_origin(config: &ExternalHookConfig, origin: CommandOrigin) -> bool {
+    match config.source {
+        ExternalHookSource::User => matches!(
+            origin,
+            CommandOrigin::UserInteractive | CommandOrigin::UserSendToShell
+        ),
+        ExternalHookSource::Project => matches!(origin, CommandOrigin::UserInteractive),
     }
 }
 

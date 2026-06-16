@@ -110,6 +110,24 @@ pub enum ShellEventKind {
     ComponentFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandOrigin {
+    UserInteractive,
+    UserSendToShell,
+    UserAnalysisAction,
+    AgentHandoff,
+    ProviderTool,
+    ShellInternal,
+    Unknown,
+}
+
+impl Default for CommandOrigin {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellEvent {
     pub kind: ShellEventKind,
@@ -127,6 +145,8 @@ pub struct ShellEvent {
     pub input: Option<String>,
     pub component: Option<String>,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_origin: Option<CommandOrigin>,
 }
 
 impl ShellEvent {
@@ -153,7 +173,21 @@ impl ShellEvent {
             input: None,
             component: None,
             message: None,
+            command_origin: Some(CommandOrigin::UserInteractive),
         }
+    }
+
+    pub fn command_started_with_origin(
+        session_id: impl Into<String>,
+        command_id: impl Into<String>,
+        command: impl Into<String>,
+        cwd: impl Into<String>,
+        started_at_ms: u64,
+        origin: CommandOrigin,
+    ) -> Self {
+        let mut event = Self::command_started(session_id, command_id, command, cwd, started_at_ms);
+        event.command_origin = Some(origin);
+        event
     }
 
     pub fn command_finished(
@@ -180,6 +214,7 @@ impl ShellEvent {
             input: None,
             component: None,
             message: None,
+            command_origin: None,
         }
     }
 
@@ -200,6 +235,7 @@ impl ShellEvent {
             input: Some(input.into()),
             component: None,
             message: None,
+            command_origin: None,
         }
     }
 }
@@ -222,6 +258,8 @@ pub struct CommandBlock {
     pub id: String,
     pub session_id: String,
     pub command: String,
+    #[serde(default)]
+    pub origin: CommandOrigin,
     pub cwd: String,
     pub end_cwd: String,
     pub started_at_ms: u64,

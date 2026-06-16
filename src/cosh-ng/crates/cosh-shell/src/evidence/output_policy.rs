@@ -719,6 +719,7 @@ mod tests {
             id: id.to_string(),
             session_id: session_id.to_string(),
             command: "echo hi".to_string(),
+            origin: Default::default(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             started_at_ms: 1,

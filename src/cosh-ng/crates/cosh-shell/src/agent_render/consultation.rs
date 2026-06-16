@@ -13,12 +13,10 @@ use super::{buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInl
 
 #[derive(Debug, Clone)]
 pub struct ConsultationCardModel {
-    pub hook_id: String,
     pub details_id: String,
     pub severity: String,
-    pub confidence: String,
-    pub display_reason: String,
     pub title: String,
+    pub finding: String,
     pub suggestion: String,
 }
 
@@ -70,22 +68,13 @@ impl RatatuiInlineRenderer {
     fn plain_consultation_card_lines(&self, model: &ConsultationCardModel) -> Vec<String> {
         let i18n = self.i18n();
         let content_width = self.content_width();
-        let mut lines = vec![format!(
-            "{}: {} [{}]:",
-            i18n.t(crate::MessageId::HookConsultationHookLabel),
-            model.hook_id,
-            model.severity
-        )];
+        let mut lines = vec![format!("{} [{}]:", model.title, model.severity)];
         lines.extend(wrap_plain_line(
-            &format!("  {}", model.title),
+            &format!("  {}", consultation_finding_line(&i18n, model)),
             content_width,
         ));
         lines.extend(wrap_plain_line(
-            &format!("  {}", consultation_card_meta(&i18n, model)),
-            content_width,
-        ));
-        lines.extend(wrap_plain_line(
-            &format!("  {}", model.suggestion),
+            &format!("  {}", consultation_suggestion_line(&i18n, model)),
             content_width,
         ));
         lines.push(format!(
@@ -101,10 +90,11 @@ impl RatatuiInlineRenderer {
 fn consultation_card_height(i18n: &crate::I18n, model: &ConsultationCardModel, width: u16) -> u16 {
     let content_width = panel_content_width(width);
     let title_rows = wrapped_row_count(&model.title, content_width);
-    let meta_rows = wrapped_row_count(&consultation_card_meta(i18n, model), content_width);
-    let suggestion_rows = wrapped_row_count(&model.suggestion, content_width);
+    let finding_rows = wrapped_row_count(&consultation_finding_line(i18n, model), content_width);
+    let suggestion_rows =
+        wrapped_row_count(&consultation_suggestion_line(i18n, model), content_width);
     let actions_rows = 1;
-    title_rows + meta_rows + suggestion_rows + actions_rows + 2
+    title_rows + finding_rows + suggestion_rows + actions_rows + 2
 }
 
 fn render_consultation_card(
@@ -113,11 +103,7 @@ fn render_consultation_card(
     area: Rect,
     buffer: &mut Buffer,
 ) {
-    let title_text = format!(
-        " {}: {} ",
-        i18n.t(crate::MessageId::HookConsultationHookLabel),
-        model.hook_id
-    );
+    let title_text = format!(" {} ", model.title);
     let severity_text = format!(" {} ", model.severity);
 
     let block = Block::bordered()
@@ -137,13 +123,14 @@ fn render_consultation_card(
 
     let content_width = inner.width as usize;
     let title_rows = wrapped_row_count(&model.title, content_width);
-    let meta_text = consultation_card_meta(i18n, model);
-    let meta_rows = wrapped_row_count(&meta_text, content_width);
-    let suggestion_rows = wrapped_row_count(&model.suggestion, content_width);
+    let finding_text = consultation_finding_line(i18n, model);
+    let finding_rows = wrapped_row_count(&finding_text, content_width);
+    let suggestion_text = consultation_suggestion_line(i18n, model);
+    let suggestion_rows = wrapped_row_count(&suggestion_text, content_width);
     let actions_rows = 1u16;
     let chunks = Layout::vertical(vec![
         Constraint::Length(title_rows),
-        Constraint::Length(meta_rows),
+        Constraint::Length(finding_rows),
         Constraint::Length(suggestion_rows),
         Constraint::Length(actions_rows),
     ])
@@ -153,12 +140,11 @@ fn render_consultation_card(
         .wrap(Wrap { trim: true })
         .render(chunks[0], buffer);
 
-    Paragraph::new(meta_text)
-        .style(Style::default().fg(Color::DarkGray))
+    Paragraph::new(finding_text)
         .wrap(Wrap { trim: true })
         .render(chunks[1], buffer);
 
-    Paragraph::new(model.suggestion.as_str())
+    Paragraph::new(suggestion_text)
         .style(Style::default().fg(Color::Gray))
         .wrap(Wrap { trim: true })
         .render(chunks[2], buffer);
@@ -186,13 +172,17 @@ fn render_consultation_card(
     .render(chunks[3], buffer);
 }
 
-fn consultation_card_meta(i18n: &crate::I18n, model: &ConsultationCardModel) -> String {
+fn consultation_finding_line(i18n: &crate::I18n, model: &ConsultationCardModel) -> String {
     i18n.format(
-        crate::MessageId::HookConsultationConfidenceReasonLine,
-        &[
-            ("confidence", model.confidence.as_str()),
-            ("reason", model.display_reason.as_str()),
-        ],
+        crate::MessageId::HookConsultationFindingLine,
+        &[("finding", model.finding.as_str())],
+    )
+}
+
+fn consultation_suggestion_line(i18n: &crate::I18n, model: &ConsultationCardModel) -> String {
+    i18n.format(
+        crate::MessageId::HookConsultationSuggestionLine,
+        &[("suggestion", model.suggestion.as_str())],
     )
 }
 
@@ -218,20 +208,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_consultation_card_includes_confidence_and_reason() {
+    fn plain_consultation_card_is_finding_first() {
         let renderer = RatatuiInlineRenderer::plain_with_width(80);
         let lines = renderer.consultation_card_lines(&ConsultationCardModel {
-            hook_id: "memory-pressure".to_string(),
             details_id: "hook-cmd-1-memory-pressure".to_string(),
             severity: "critical".to_string(),
-            confidence: "high".to_string(),
-            display_reason: "allowed".to_string(),
             title: "Available memory is low".to_string(),
+            finding: "Available memory is low and swap usage is high.".to_string(),
             suggestion: "Analyze the output before taking action.".to_string(),
         });
 
         let rendered = lines.join("\n");
-        assert!(rendered.contains("Confidence: high; reason: allowed"));
+        assert!(rendered.contains("Available memory is low [critical]:"));
+        assert!(rendered.contains("Finding: Available memory is low and swap usage is high."));
+        assert!(rendered.contains("Recommended action: Analyze the output before taking action."));
+        assert!(!rendered.contains("Hook:"), "{rendered}");
+        assert!(!rendered.contains("Confidence:"), "{rendered}");
+        assert!(!rendered.contains("reason:"), "{rendered}");
         assert!(rendered.contains("[Analyze] [Ignore] [Details] hook-cmd-1-memory-pressure"));
     }
 
@@ -240,20 +233,20 @@ mod tests {
         let renderer =
             RatatuiInlineRenderer::plain_with_width(80).with_language(crate::Language::ZhCn);
         let lines = renderer.consultation_card_lines(&ConsultationCardModel {
-            hook_id: "memory-pressure".to_string(),
             details_id: "hook-cmd-1-memory-pressure".to_string(),
             severity: "critical".to_string(),
-            confidence: "high".to_string(),
-            display_reason: "allowed".to_string(),
             title: "Available memory is low".to_string(),
+            finding: "Available memory is low and swap usage is high.".to_string(),
             suggestion: "Analyze the output before taking action.".to_string(),
         });
 
         let rendered = lines.join("\n");
-        assert!(rendered.contains("Hook: memory-pressure [critical]:"));
-        assert!(rendered.contains("置信度: high; 原因: allowed"));
+        assert!(rendered.contains("Available memory is low [critical]:"));
+        assert!(rendered.contains("发现: Available memory is low and swap usage is high."));
+        assert!(rendered.contains("建议动作: Analyze the output before taking action."));
         assert!(rendered.contains("[分析] [忽略] [Details] hook-cmd-1-memory-pressure"));
         assert!(!rendered.contains("Confidence:"), "{rendered}");
+        assert!(!rendered.contains("置信度:"), "{rendered}");
         assert!(!rendered.contains("[Analyze]"), "{rendered}");
     }
 }

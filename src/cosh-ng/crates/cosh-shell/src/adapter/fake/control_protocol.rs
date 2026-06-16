@@ -47,6 +47,33 @@ pub(super) fn emit_fake_control_protocol_stream(
         return Ok(true);
     }
 
+    if input.contains("provider memory hook shell") {
+        sink(AgentEvent::ToolPermissionRequest {
+            run_id: run_id.clone(),
+            request_id: "ctrl-memory-hook-1".to_string(),
+            tool_name: "run_shell_command".to_string(),
+            tool_input: serde_json::json!({ "command": "free -m" }),
+            tool_use_id: "toolu-memory-hook-1".to_string(),
+        })?;
+        thread::sleep(Duration::from_millis(800));
+        sink(AgentEvent::ToolOutputDelta {
+            run_id: run_id.clone(),
+            tool_id: "toolu-memory-hook-1".to_string(),
+            stream: "stdout".to_string(),
+            text: "PROVIDER MEMORY NATIVE OUTPUT SHOULD NOT RENDER AFTER ALLOW\n".to_string(),
+        })?;
+        sink(AgentEvent::ToolCompleted {
+            run_id: run_id.clone(),
+            tool_id: "toolu-memory-hook-1".to_string(),
+            status: "completed".to_string(),
+        })?;
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "provider memory hook fake tool completed".to_string(),
+        })?;
+        return Ok(true);
+    }
+
     if input.contains("provider resume timeout shell") {
         let command = if input.contains("structured before recovery") {
             "printf structured-before-recovery"

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::types::{CommandBlock, CommandStatus, OutputRefs, ShellEvent, ShellEventKind};
+use crate::types::{
+    CommandBlock, CommandOrigin, CommandStatus, OutputRefs, ShellEvent, ShellEventKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerOutput {
@@ -50,6 +52,7 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
                     id: command_id.clone(),
                     session_id: event.session_id.clone(),
                     command: start.command.unwrap_or_default(),
+                    origin: start.command_origin.unwrap_or(CommandOrigin::Unknown),
                     cwd: start.cwd.clone().unwrap_or_default(),
                     end_cwd: event
                         .end_cwd

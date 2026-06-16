@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_render::CommandAssessmentSummaryModel;
 
 #[test]
 fn approval_panel_renders_active_request_with_queue_summary() {
@@ -8,6 +9,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             id: "req-1",
             kind: "tool request",
             risk: "medium",
+            reason: Some("diagnostic-pipeline-heuristic"),
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "top -l 1 -o mem -n 20 | head -30",
@@ -21,6 +23,10 @@ fn approval_panel_renders_active_request_with_queue_summary() {
 
     assert!(text.contains("Approval req-1"), "{text}");
     assert!(text.contains("Run Bash command?"), "{text}");
+    assert!(
+        text.contains("Reason: diagnostic-pipeline-heuristic"),
+        "{text}"
+    );
     assert!(
         text.contains("$ top -l 1 -o mem -n 20 | head -30"),
         "{text}"
@@ -47,6 +53,7 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             id: "req-1",
             kind: "tool request",
             risk: "medium",
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool 输入",
             preview: "top -l 1 -o mem -n 20 | head -30",
@@ -83,6 +90,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             id: "req-1",
             kind: "tool request",
             risk: "medium",
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "echo \"=== 系统内存概览 ===\" && vm_stat && echo \"\" && echo \"=== 内存占用 Top 10 进程 ===\" && ps aux -m | head -11 && echo \"=== CPU 占用 Top 10 进程 ===\" && ps aux -r | head -11 && echo \"=== AliEntSafe 进程 ===\" && ps aux | grep AliEntSafe",
@@ -109,6 +117,7 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             id: "req-宽",
             kind: "tool request",
             risk: "medium",
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "cat /tmp/cosh-shell-中文-smoke.txt && echo 🧪 系统负载分析完成 && printf 'done\\n'",
@@ -136,6 +145,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             id: "req-2",
             kind: "shell command request",
             risk: "high",
+            reason: None,
             subject: "shell command",
             preview_label: "Command",
             preview: "touch /tmp/cosh-shell-fake-action-should-not-run",
@@ -178,6 +188,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 id: "req-1",
                 kind: "tool request",
                 risk: "high",
+                reason: None,
                 subject: "tool Bash",
                 preview_label: "Tool input",
                 preview: "pwd",
@@ -212,6 +223,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             id: "req-1",
             kind: "tool request",
             risk: "medium",
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "pwd",
@@ -238,6 +250,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             id: "req-2",
             kind: "tool request",
             risk: "medium",
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "pwd",
@@ -266,6 +279,7 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         id: "req-1",
         kind: "tool request",
         risk: "medium",
+        reason: None,
         subject: "tool Bash",
         preview_label: "Tool input",
         preview: "git status",
@@ -550,6 +564,16 @@ fn approval_details_panel_renders_structured_request_context() {
             execution_path: Some("foreground_shell_pty"),
             command_block_id: Some("cmd-7"),
             redaction_status: Some("ref_only"),
+            assessment: Some(CommandAssessmentSummaryModel {
+                impact: "medium",
+                execution: "ask-user",
+                confidence: "medium",
+                primary_reason: "diagnostic-pipeline-heuristic",
+                reason_trace: "diagnostic-pipeline-heuristic,pipeline-not-auto-executable",
+                auto_allow: None,
+                output_stability: "stable-snapshot",
+                output_exposure: "may-contain-command-line",
+            }),
         })
         .join("\n");
 
@@ -560,6 +584,14 @@ fn approval_details_panel_renders_structured_request_context() {
     assert!(text.contains("Execution: foreground_shell_pty"), "{text}");
     assert!(text.contains("Command block: cmd-7"), "{text}");
     assert!(text.contains("Redaction: ref_only"), "{text}");
+    assert!(
+        text.contains("Assessment: impact medium; decision ask-user; confidence medium"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Reason: diagnostic-pipeline-heuristic"),
+        "{text}"
+    );
     assert!(text.contains("Default: deny"), "{text}");
     assert!(text.contains("Request: Bash command"), "{text}");
     assert!(text.contains("Command:"), "{text}");
@@ -590,6 +622,16 @@ fn approval_details_panel_uses_zh_catalog_labels() {
             execution_path: Some("foreground_shell_pty"),
             command_block_id: Some("cmd-7"),
             redaction_status: Some("ref_only"),
+            assessment: Some(CommandAssessmentSummaryModel {
+                impact: "medium",
+                execution: "ask-user",
+                confidence: "medium",
+                primary_reason: "diagnostic-pipeline-heuristic",
+                reason_trace: "diagnostic-pipeline-heuristic,pipeline-not-auto-executable",
+                auto_allow: None,
+                output_stability: "stable-snapshot",
+                output_exposure: "may-contain-command-line",
+            }),
         })
         .join("\n");
 
@@ -600,6 +642,14 @@ fn approval_details_panel_uses_zh_catalog_labels() {
     assert!(text.contains("执行: foreground_shell_pty"), "{text}");
     assert!(text.contains("命令块: cmd-7"), "{text}");
     assert!(text.contains("脱敏: ref_only"), "{text}");
+    assert!(
+        text.contains("评估: 影响 medium；决策 ask-user；置信度 medium"),
+        "{text}"
+    );
+    assert!(
+        text.contains("原因: diagnostic-pipeline-heuristic"),
+        "{text}"
+    );
     assert!(text.contains("默认: 拒绝"), "{text}");
     assert!(text.contains("请求: Bash 命令"), "{text}");
     assert!(text.contains("命令:"), "{text}");
@@ -630,6 +680,7 @@ fn approval_details_panel_keeps_cjk_and_emoji_borders_aligned() {
             execution_path: None,
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         })
         .join("\n");
 
@@ -660,6 +711,16 @@ fn approval_journal_panel_renders_decision_history() {
             execution_path: Some("foreground_shell_pty"),
             command_block_id: Some("cmd-1"),
             redaction_status: Some("ref_only"),
+            assessment: Some(CommandAssessmentSummaryModel {
+                impact: "low",
+                execution: "auto-allow",
+                confidence: "high",
+                primary_reason: "bounded-readonly",
+                reason_trace: "bounded-readonly",
+                auto_allow: Some("bounded-readonly"),
+                output_stability: "stable-snapshot",
+                output_exposure: "normal",
+            }),
         },
         ApprovalJournalEntryModel {
             id: "req-2",
@@ -677,6 +738,7 @@ fn approval_journal_panel_renders_decision_history() {
             execution_path: Some("not_executed_denied"),
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         },
     ];
     let text = renderer
@@ -689,6 +751,11 @@ fn approval_journal_panel_renders_decision_history() {
     assert!(text.contains("Execution: foreground_shell_pty"), "{text}");
     assert!(text.contains("Command block: cmd-1"), "{text}");
     assert!(text.contains("Redaction: ref_only"), "{text}");
+    assert!(
+        text.contains("Assessment: impact low; decision auto-allow; confidence high"),
+        "{text}"
+    );
+    assert!(text.contains("Reason: bounded-readonly"), "{text}");
     assert!(text.contains("Actor: agent-auto"), "{text}");
     assert!(text.contains("Command: git status"), "{text}");
     assert!(
@@ -722,6 +789,7 @@ fn approval_journal_panel_uses_zh_catalog_labels() {
         execution_path: Some("foreground_shell_pty"),
         command_block_id: Some("cmd-1"),
         redaction_status: Some("ref_only"),
+        assessment: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -763,6 +831,7 @@ fn approval_journal_panel_keeps_cjk_and_emoji_borders_aligned() {
         execution_path: Some("not_executed_denied"),
         command_block_id: None,
         redaction_status: None,
+        assessment: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -795,6 +864,7 @@ fn plain_approval_journal_panel_keeps_decision_history() {
         execution_path: Some("not_executed_cancelled"),
         command_block_id: None,
         redaction_status: None,
+        assessment: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })

@@ -510,6 +510,7 @@ fn resolve_pty_emit<W: Write>(
                     format!("blocked shell handoff: {message}"),
                 )
             })?;
+            parser.register_pending_handoff_origin(&request);
             master.write_all(&bytes)?;
             master.flush()?;
             Ok(RawObserverAction::Continue)

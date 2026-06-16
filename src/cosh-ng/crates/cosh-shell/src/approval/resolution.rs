@@ -183,6 +183,7 @@ pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest
             id: block_id,
             session_id: request.session_id.clone(),
             command: user_input.clone(),
+            origin: Default::default(),
             cwd: request.cwd.clone(),
             end_cwd: request.cwd.clone(),
             started_at_ms: 0,
@@ -295,6 +296,7 @@ mod tests {
             execution_path: Some("provider_control_protocol"),
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         }
     }
 }

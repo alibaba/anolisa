@@ -11,13 +11,15 @@ use crate::runtime::state::{
     RuntimeHookDisplayEvent, RuntimeHookFinding,
 };
 use cosh_shell::hook_types::{FindingSeverity, HookFinding};
+use cosh_shell::types::CommandOrigin;
 
 use super::detector::{aggregate_hook_findings, refresh_aggregate_metadata};
 #[cfg(test)]
 use super::feedback::{
-    apply_session_interruption_policy, decide_session_interruption_policy_with_context,
+    apply_session_interruption_policy, decide_session_interruption_policy,
+    decide_session_interruption_policy_with_context,
 };
-use super::feedback::{decide_session_interruption_policy, display_for_aggregate};
+use super::feedback::{decide_session_interruption_policy_with_origin, display_for_aggregate};
 use super::policy::{classify_command_intent, command_intent_key, CommandIntent};
 use super::presentation::render_consultation_details;
 use super::prompt::{
@@ -49,18 +51,24 @@ pub(crate) struct AggregatedHookFinding {
     pub(crate) suppression_key: String,
 }
 
-pub(crate) fn record_command_hook_findings(blocks: &[CommandBlock], state: &mut InlineState) {
+pub(crate) fn record_command_hook_findings(
+    events: &[ShellEvent],
+    blocks: &[CommandBlock],
+    state: &mut InlineState,
+) {
     for block in blocks {
         if !state.hooks.handled_command_hooks.insert(block.id.clone()) {
             continue;
         }
+        let origin = command_origin_for_block(events, block);
 
-        let findings = state
-            .hooks
-            .engine
-            .evaluate_with_disabled(block, &state.hooks.disabled);
+        let findings = state.hooks.engine.evaluate_with_disabled_and_origin(
+            block,
+            &state.hooks.disabled,
+            origin,
+        );
         for aggregate in aggregate_hook_findings(findings) {
-            record_aggregated_hook_finding(block, aggregate, state);
+            record_aggregated_hook_finding_with_origin(block, aggregate, origin, state);
         }
     }
 
@@ -68,6 +76,13 @@ pub(crate) fn record_command_hook_findings(blocks: &[CommandBlock], state: &mut 
         let drop_count = state.hooks.findings.len() - MAX_HOOK_FINDINGS;
         state.hooks.findings.drain(0..drop_count);
     }
+}
+
+pub(crate) fn command_origin_for_block(
+    _events: &[ShellEvent],
+    block: &CommandBlock,
+) -> CommandOrigin {
+    block.origin
 }
 
 pub(crate) fn record_blocks_followed_by_user_input(
@@ -273,18 +288,34 @@ pub(crate) fn handle_consultation_events<W: Write>(
 
 fn record_aggregated_hook_finding(
     block: &CommandBlock,
+    aggregate: AggregatedHookFinding,
+    state: &mut InlineState,
+) {
+    record_aggregated_hook_finding_with_origin(
+        block,
+        aggregate,
+        CommandOrigin::UserInteractive,
+        state,
+    );
+}
+
+fn record_aggregated_hook_finding_with_origin(
+    block: &CommandBlock,
     mut aggregate: AggregatedHookFinding,
+    origin: CommandOrigin,
     state: &mut InlineState,
 ) {
     attach_recent_memory_pressure(block, &mut aggregate, state);
     apply_memory_pressure_severity_upgrade(&mut aggregate);
     refresh_aggregate_metadata(block, &mut aggregate);
+    aggregate.suppression_key = computed_suppression_key_with_origin(block, &aggregate, origin);
     let base_display = display_for_aggregate(block, &aggregate, state.analysis_mode);
-    let decision = decide_session_interruption_policy(
+    let decision = decide_session_interruption_policy_with_origin(
         block,
         &aggregate,
         base_display,
         &aggregate.suppression_key,
+        origin,
         state,
     );
     let recommended_skill = aggregate.recommended_skill.clone();
@@ -687,28 +718,42 @@ fn suppression_key(block: &CommandBlock, aggregate: &AggregatedHookFinding) -> S
     if !aggregate.suppression_key.is_empty() {
         return aggregate.suppression_key.clone();
     }
-    computed_suppression_key(block, aggregate)
+    computed_suppression_key_with_origin(block, aggregate, CommandOrigin::UserInteractive)
 }
 
 pub(crate) fn computed_suppression_key(
     block: &CommandBlock,
     aggregate: &AggregatedHookFinding,
 ) -> String {
-    if aggregate.primary.hook_id == "high-memory-process" {
-        return format!(
-            "{}:{}:{}:{}",
-            finding_topic(aggregate),
-            aggregate.primary.hook_id,
-            entity_key(block, aggregate),
-            command_intent_key(&block.command)
-        );
-    }
+    computed_suppression_key_with_origin(block, aggregate, CommandOrigin::UserInteractive)
+}
+
+pub(crate) fn computed_suppression_key_with_origin(
+    block: &CommandBlock,
+    aggregate: &AggregatedHookFinding,
+    origin: CommandOrigin,
+) -> String {
+    let origin = command_origin_label(origin);
     format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         finding_topic(aggregate),
+        entity_key(block, aggregate),
         aggregate.primary.hook_id,
-        command_intent_key(&block.command)
+        command_intent_key(&block.command),
+        origin
     )
+}
+
+pub(crate) fn command_origin_label(origin: CommandOrigin) -> &'static str {
+    match origin {
+        CommandOrigin::UserInteractive => "user_interactive",
+        CommandOrigin::UserSendToShell => "user_send_to_shell",
+        CommandOrigin::UserAnalysisAction => "user_analysis_action",
+        CommandOrigin::AgentHandoff => "agent_handoff",
+        CommandOrigin::ProviderTool => "provider_tool",
+        CommandOrigin::ShellInternal => "shell_internal",
+        CommandOrigin::Unknown => "unknown",
+    }
 }
 
 pub(crate) fn entity_key(block: &CommandBlock, aggregate: &AggregatedHookFinding) -> String {

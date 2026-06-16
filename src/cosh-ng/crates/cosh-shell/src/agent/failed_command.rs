@@ -373,6 +373,7 @@ mod tests {
             id: format!("cmd-{exit_code}"),
             session_id: "session-1".to_string(),
             command: command.to_string(),
+            origin: Default::default(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             started_at_ms: 1,
@@ -404,6 +405,7 @@ mod tests {
             input: input.map(str::to_string),
             component: Some("card".to_string()),
             message: Some(message.to_string()),
+            command_origin: Some(cosh_shell::types::CommandOrigin::UserInteractive),
         }
     }
 

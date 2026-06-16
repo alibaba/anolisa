@@ -833,6 +833,7 @@ mod tests {
             execution_path: None,
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         });
 
         assert_eq!(state.next_request_id(), "req-2");
@@ -899,6 +900,7 @@ mod tests {
                 id: format!("{id}-block"),
                 session_id: "test-session".to_string(),
                 command: "echo test".to_string(),
+                origin: Default::default(),
                 cwd: "/tmp".to_string(),
                 end_cwd: "/tmp".to_string(),
                 started_at_ms: 0,
@@ -975,6 +977,19 @@ pub(crate) struct RuntimeApprovalRequest {
     pub(crate) execution_path: Option<&'static str>,
     pub(crate) command_block_id: Option<String>,
     pub(crate) redaction_status: Option<&'static str>,
+    pub(crate) assessment: Option<RuntimeCommandAssessmentSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeCommandAssessmentSummary {
+    pub(crate) impact: &'static str,
+    pub(crate) execution: &'static str,
+    pub(crate) confidence: &'static str,
+    pub(crate) primary_reason: &'static str,
+    pub(crate) reason_trace: String,
+    pub(crate) auto_allow: Option<&'static str>,
+    pub(crate) output_stability: &'static str,
+    pub(crate) output_exposure: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1007,6 +1022,7 @@ pub(crate) struct RuntimeApprovalJournalEntry {
     pub(crate) execution_path: Option<&'static str>,
     pub(crate) command_block_id: Option<String>,
     pub(crate) redaction_status: Option<&'static str>,
+    pub(crate) assessment: Option<RuntimeCommandAssessmentSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

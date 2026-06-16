@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::types::{
-    ShellEvent, ShellEventKind, COMMAND_OUTPUT_REF_MAX_BYTES, SESSION_OUTPUT_REF_MAX_BYTES,
+    CommandOrigin, ShellEvent, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
+    SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 const OSC_PREFIX: &[u8] = b"\x1b]1337;COSH;";
@@ -45,6 +46,13 @@ pub(super) struct OscParser {
     intervention_display_cuts: Vec<usize>,
     last_prompt_display_start: Option<usize>,
     captured_output_ref_bytes: usize,
+    pending_command_origin: Option<PendingCommandOrigin>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCommandOrigin {
+    command: String,
+    origin: CommandOrigin,
 }
 
 impl OscParser {
@@ -64,7 +72,15 @@ impl OscParser {
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
             captured_output_ref_bytes: 0,
+            pending_command_origin: None,
         }
+    }
+
+    pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
+        self.pending_command_origin = Some(PendingCommandOrigin {
+            command: request.command.clone(),
+            origin: command_origin_from_handoff_request(request),
+        });
     }
 
     pub(super) fn feed(&mut self, data: &[u8]) -> io::Result<()> {
@@ -116,6 +132,7 @@ impl OscParser {
                     input: None,
                     component: Some("osc_parser".to_string()),
                     message: Some(format!("marker parse failed: {err}")),
+                    command_origin: None,
                 }),
             }
         }
@@ -150,6 +167,7 @@ impl OscParser {
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
+                let origin = self.consume_pending_command_origin(&command);
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
@@ -157,8 +175,8 @@ impl OscParser {
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
                 });
-                self.events.push(ShellEvent::command_started(
-                    session_id, command_id, command, cwd, timestamp,
+                self.events.push(ShellEvent::command_started_with_origin(
+                    session_id, command_id, command, cwd, timestamp, origin,
                 ));
             }
             "precmd" => {
@@ -182,6 +200,7 @@ impl OscParser {
                         input: None,
                         component: None,
                         message: None,
+                        command_origin: None,
                     });
                     return Ok(());
                 };
@@ -221,6 +240,17 @@ impl OscParser {
         }
 
         Ok(())
+    }
+
+    fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
+        let Some(pending) = self.pending_command_origin.take() else {
+            return CommandOrigin::UserInteractive;
+        };
+        if pending.command == command {
+            pending.origin
+        } else {
+            CommandOrigin::Unknown
+        }
     }
 
     fn capture_command_output_ref(
@@ -387,6 +417,7 @@ impl OscParser {
             input: Some(input),
             component: Some(reason.to_string()),
             message: Some("input intercepted before reaching bash".to_string()),
+            command_origin: None,
         });
     }
 
@@ -407,6 +438,7 @@ impl OscParser {
             input: Some(input.to_string()),
             component: Some("control".to_string()),
             message: Some("control input observed while relaying to bash".to_string()),
+            command_origin: None,
         });
     }
 
@@ -427,6 +459,7 @@ impl OscParser {
             input: Some(value.to_string()),
             component: Some("card".to_string()),
             message: Some(action.to_string()),
+            command_origin: None,
         });
     }
 }
@@ -549,7 +582,19 @@ fn command_finished_event(
                         .to_string()
                 }
             }),
+            command_origin: None,
         },
+    }
+}
+
+fn command_origin_from_handoff_request(request: &ShellHandoffRequest) -> CommandOrigin {
+    match request.source.as_str() {
+        "send_to_shell" => CommandOrigin::UserSendToShell,
+        "user_analysis_action" => CommandOrigin::UserAnalysisAction,
+        "approved_provider_shell_tool" => CommandOrigin::ProviderTool,
+        "approved_fallback" => CommandOrigin::AgentHandoff,
+        "validation" => CommandOrigin::ShellInternal,
+        _ => CommandOrigin::Unknown,
     }
 }
 
@@ -746,6 +791,59 @@ mod tests {
     }
 
     #[test]
+    fn pending_handoff_origin_is_consumed_by_matching_preexec() {
+        let mut parser = parser_for_test("origin-match");
+        let request = ShellHandoffRequest::new(
+            "echo hi".to_string(),
+            "$ echo hi".to_string(),
+            "user_analysis_action",
+            "user",
+            "approval-1".to_string(),
+            "run-1".to_string(),
+            1,
+        )
+        .expect("handoff request");
+        parser.register_pending_handoff_origin(&request);
+
+        feed_preexec(&mut parser, "echo hi");
+
+        let event = parser
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandStarted)
+            .expect("command started");
+        assert_eq!(
+            event.command_origin,
+            Some(CommandOrigin::UserAnalysisAction)
+        );
+    }
+
+    #[test]
+    fn pending_handoff_origin_mismatch_becomes_unknown() {
+        let mut parser = parser_for_test("origin-mismatch");
+        let request = ShellHandoffRequest::new(
+            "echo expected".to_string(),
+            "$ echo expected".to_string(),
+            "approved_provider_shell_tool",
+            "user",
+            "approval-1".to_string(),
+            "run-1".to_string(),
+            1,
+        )
+        .expect("handoff request");
+        parser.register_pending_handoff_origin(&request);
+
+        feed_preexec(&mut parser, "echo actual");
+
+        let event = parser
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandStarted)
+            .expect("command started");
+        assert_eq!(event.command_origin, Some(CommandOrigin::Unknown));
+    }
+
+    #[test]
     fn output_ref_file_uses_private_permissions() {
         let dir =
             std::env::temp_dir().join(format!("cosh-shell-osc-output-ref-{}", std::process::id()));
@@ -886,5 +984,13 @@ mod tests {
             std::env::temp_dir().join(format!("cosh-shell-osc-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("output ref dir");
         OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())
+    }
+
+    fn feed_preexec(parser: &mut OscParser, command: &str) {
+        let marker = format!(
+            "\x1b]1337;COSH;{{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":{command_json},\"cwd\":\"/tmp\"}}\x07",
+            command_json = serde_json::to_string(command).expect("command json")
+        );
+        parser.feed(marker.as_bytes()).expect("feed preexec");
     }
 }

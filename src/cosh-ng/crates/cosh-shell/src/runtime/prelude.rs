@@ -8,12 +8,11 @@ pub(crate) use cosh_shell::parser::{
     approval_command_from_event, event_cancels_failed_command_analysis,
     event_confirms_failed_command_analysis, findings_from_blocks, ApprovalCommandKind,
 };
-pub(crate) use cosh_shell::tools::can_run_approved_bash_tool;
 pub(crate) use cosh_shell::{
     agent_render::{
         ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-        ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel, NoticePanelModel,
-        RatatuiInlineRenderer,
+        ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
+        CommandAssessmentSummaryModel, NoticePanelModel, RatatuiInlineRenderer,
     },
     types::{
         AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, Finding, GovernedEvent,
@@ -43,7 +42,7 @@ pub(crate) use crate::approval::handoff::{
 pub(crate) use crate::approval::panel::render_approval_requests;
 pub(crate) use crate::approval::requests::{
     approval_request_from_governed_event, record_approval_requests, record_auto_approved_request,
-    record_deferred_fallback_request,
+    record_deferred_fallback_request, refresh_shell_request_assessment,
 };
 pub(crate) use crate::approval::runtime::render_approval_resolution;
 pub(crate) use crate::hooks::runtime::hook_routing_hints_for_block;
@@ -62,4 +61,5 @@ pub(crate) use crate::runtime::dispatcher::stable_event_key;
 pub(crate) use crate::runtime::state::{
     AnalysisMode, ApprovalRequestKind, ApprovalRequestStatus, CoshApprovalMode, InlineState,
     ProviderShellRequestKind, RuntimeApprovalJournalEntry, RuntimeApprovalRequest,
+    RuntimeCommandAssessmentSummary,
 };

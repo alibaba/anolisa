@@ -12,6 +12,75 @@ fn warning_process_without_pressure_is_hint_not_card() {
 }
 
 #[test]
+fn internal_origins_are_silent_even_for_critical_findings() {
+    for origin in [
+        CommandOrigin::UserAnalysisAction,
+        CommandOrigin::AgentHandoff,
+        CommandOrigin::ProviderTool,
+        CommandOrigin::ShellInternal,
+    ] {
+        let mut state = InlineState::default();
+        let aggregate =
+            aggregate_hook_findings(vec![finding("memory-pressure", FindingSeverity::Critical)])
+                .remove(0);
+        record_aggregated_hook_finding_with_origin(
+            &block_with_command("free -m"),
+            aggregate,
+            origin,
+            &mut state,
+        );
+
+        let hint = state.hooks.findings.last().unwrap();
+        assert_eq!(hint.display, RuntimeHookDisplay::Silent, "{origin:?}");
+        assert_eq!(hint.display_reason, "origin-internal", "{origin:?}");
+        assert!(
+            state.hooks.pending_consultation_queue.is_empty(),
+            "{origin:?}"
+        );
+    }
+}
+
+#[test]
+fn unknown_origin_warning_is_silent() {
+    let mut state = InlineState::default();
+    let aggregate =
+        aggregate_hook_findings(vec![finding("memory-pressure", FindingSeverity::Warning)])
+            .remove(0);
+
+    record_aggregated_hook_finding_with_origin(
+        &block_with_command("free -m"),
+        aggregate,
+        CommandOrigin::Unknown,
+        &mut state,
+    );
+
+    let hint = state.hooks.findings.last().unwrap();
+    assert_eq!(hint.display, RuntimeHookDisplay::Silent);
+    assert_eq!(hint.display_reason, "origin-unknown");
+    assert!(state.hooks.pending_consultation_queue.is_empty());
+}
+
+#[test]
+fn unknown_origin_critical_is_hint_not_consultation() {
+    let mut state = InlineState::default();
+    let aggregate =
+        aggregate_hook_findings(vec![finding("memory-pressure", FindingSeverity::Critical)])
+            .remove(0);
+
+    record_aggregated_hook_finding_with_origin(
+        &block_with_command("free -m"),
+        aggregate,
+        CommandOrigin::Unknown,
+        &mut state,
+    );
+
+    let hint = state.hooks.findings.last().unwrap();
+    assert_eq!(hint.display, RuntimeHookDisplay::Hint);
+    assert_eq!(hint.display_reason, "origin-unknown");
+    assert!(state.hooks.pending_consultation_queue.is_empty());
+}
+
+#[test]
 fn recent_memory_pressure_promotes_followup_process_warning_to_card() {
     let mut state = InlineState::default();
     let pressure_block = block_with_command_at("free -m", 1_000);
@@ -187,7 +256,7 @@ fn high_memory_process_suppression_key_uses_stable_pid() {
 
     assert_eq!(
         suppression_key(&block, &first[0]),
-        "memory:high-memory-process:process:pid:1234:ps"
+        "memory:process:pid:1234:high-memory-process:ps:user_interactive"
     );
     assert_eq!(
         suppression_key(&block, &first[0]),

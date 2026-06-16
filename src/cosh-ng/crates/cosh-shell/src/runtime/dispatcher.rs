@@ -161,7 +161,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
     handle_consultation_events(action_events, &ledger.blocks, adapter, state, output)?;
     render_queued_hook_consultation(state, output)?;
-    record_command_hook_findings(&ledger.blocks, state);
+    record_command_hook_findings(events, &ledger.blocks, state);
     render_recorded_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(
         action_events,

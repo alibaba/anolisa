@@ -10,6 +10,7 @@ use ratatui::{
 
 use super::{
     approval::{approval_content_width, wrapped_preview_rows},
+    approval_details::CommandAssessmentSummaryModel,
     buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer,
 };
 
@@ -30,6 +31,7 @@ pub struct ApprovalJournalEntryModel<'a> {
     pub execution_path: Option<&'a str>,
     pub command_block_id: Option<&'a str>,
     pub redaction_status: Option<&'a str>,
+    pub assessment: Option<CommandAssessmentSummaryModel<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +142,12 @@ impl RatatuiInlineRenderer {
                     .redaction_status
                     .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNotApplicableValue))
             ));
+            if let Some(assessment) = entry.assessment {
+                lines.push(format!(
+                    "  {}",
+                    approval_assessment_summary_line(&i18n, assessment)
+                ));
+            }
             lines.push(format!(
                 "  {}: {}  {}: {}",
                 i18n.t(crate::MessageId::ApprovalDetailsProviderRequestLabel),
@@ -192,6 +200,12 @@ fn approval_journal_panel_height(
         .enumerate()
         .map(|(idx, entry)| {
             let separator_rows = u16::from(idx > 0);
+            let assessment_rows = entry
+                .assessment
+                .map(|assessment| {
+                    approval_assessment_summary_rows(i18n, assessment, content_width).len() as u16
+                })
+                .unwrap_or(0);
             let preview_rows = wrapped_preview_rows(
                 &format!(
                     "{}: {}",
@@ -203,7 +217,7 @@ fn approval_journal_panel_height(
             )
             .len()
             .max(1) as u16;
-            separator_rows + 8 + preview_rows
+            separator_rows + 8 + assessment_rows + preview_rows
         })
         .sum::<u16>();
     2 + row_count
@@ -306,6 +320,15 @@ fn render_approval_journal_panel(
                     .to_string(),
             ),
         ]));
+        if let Some(assessment) = entry.assessment {
+            for row in approval_assessment_summary_rows(
+                i18n,
+                assessment,
+                inner.width.saturating_sub(2) as usize,
+            ) {
+                lines.push(Line::from(row));
+            }
+        }
         lines.push(Line::from(vec![
             Span::styled(
                 format!(
@@ -393,6 +416,48 @@ fn render_approval_journal_panel(
     Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: true })
         .render(inner, buffer);
+}
+
+fn approval_assessment_summary_line(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+) -> String {
+    i18n.format(
+        crate::MessageId::ApprovalAssessmentSummaryLine,
+        &[
+            ("impact", assessment.impact),
+            ("decision", assessment.execution),
+            ("confidence", assessment.confidence),
+        ],
+    )
+}
+
+fn approval_assessment_reason_line(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+) -> String {
+    i18n.format(
+        crate::MessageId::ApprovalAssessmentReasonLine,
+        &[("reason", assessment.primary_reason)],
+    )
+}
+
+fn approval_assessment_summary_rows(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+    content_width: usize,
+) -> Vec<String> {
+    let mut rows = wrapped_preview_rows(
+        &approval_assessment_summary_line(i18n, assessment),
+        content_width,
+        2,
+    );
+    rows.extend(wrapped_preview_rows(
+        &approval_assessment_reason_line(i18n, assessment),
+        content_width,
+        2,
+    ));
+    rows
 }
 
 fn approval_journal_decision_count(i18n: &crate::I18n, count: usize) -> String {

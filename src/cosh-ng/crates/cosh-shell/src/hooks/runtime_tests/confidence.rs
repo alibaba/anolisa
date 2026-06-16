@@ -19,7 +19,10 @@ fn aggregate_metadata_is_explicit_after_refresh() {
     assert_eq!(aggregated.entity_key, "system-memory");
     assert_eq!(aggregated.effective_severity, FindingSeverity::Warning);
     assert_eq!(aggregated.confidence, "high");
-    assert_eq!(aggregated.suppression_key, "memory:memory-pressure:top");
+    assert_eq!(
+        aggregated.suppression_key,
+        "memory:system-memory:memory-pressure:top:user_interactive"
+    );
 }
 
 #[test]

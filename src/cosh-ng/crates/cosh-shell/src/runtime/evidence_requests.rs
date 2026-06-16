@@ -1006,6 +1006,7 @@ mod tests {
             id: "cmd-1".to_string(),
             session_id: "session-1".to_string(),
             command: "printf 'one\\ntwo\\nthree\\n'".to_string(),
+            origin: Default::default(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             status: CommandStatus::Completed,

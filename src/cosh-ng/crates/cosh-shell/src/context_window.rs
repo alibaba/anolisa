@@ -431,6 +431,7 @@ mod tests {
             id: id.to_string(),
             session_id: "s1".to_string(),
             command: format!("cmd-{id}"),
+            origin: Default::default(),
             cwd: "/repo".to_string(),
             end_cwd: "/repo".to_string(),
             started_at_ms: ended_at_ms.saturating_sub(100),

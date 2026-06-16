@@ -19,12 +19,10 @@ pub(crate) fn render_consultation_card<W: Write>(
         .write_consultation_card(
             output,
             &ConsultationCardModel {
-                hook_id: finding.hook_id.clone(),
                 details_id: consultation.finding_id.clone(),
                 severity: severity_label(finding.severity).to_string(),
-                confidence: consultation.confidence.clone(),
-                display_reason: consultation.display_reason.clone(),
                 title: finding.title.clone(),
+                finding: finding.description.clone(),
                 suggestion: finding.suggestion.clone(),
             },
         )?;
@@ -69,6 +67,13 @@ pub(crate) fn render_consultation_details<W: Write>(
             ],
         ),
         i18n.format(
+            cosh_shell::MessageId::HookDetailsOriginLine,
+            &[(
+                "origin",
+                command_origin_from_suppression_key(&consultation.suppression_key),
+            )],
+        ),
+        i18n.format(
             cosh_shell::MessageId::HookDetailsSuppressionKeyLine,
             &[("key", consultation.suppression_key.as_str())],
         ),
@@ -110,6 +115,26 @@ pub(crate) fn render_consultation_details<W: Write>(
             footer: Some(i18n.t(cosh_shell::MessageId::HookDetailsFooter)),
         },
     )
+}
+
+fn command_origin_from_suppression_key(suppression_key: &str) -> &str {
+    let Some(origin) = suppression_key.rsplit(':').next() else {
+        return "unknown";
+    };
+    if matches!(
+        origin,
+        "user_interactive"
+            | "user_send_to_shell"
+            | "user_analysis_action"
+            | "agent_handoff"
+            | "provider_tool"
+            | "shell_internal"
+            | "unknown"
+    ) {
+        origin
+    } else {
+        "unknown"
+    }
 }
 
 struct UserInterestReason {

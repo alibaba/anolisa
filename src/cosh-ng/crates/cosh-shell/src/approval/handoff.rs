@@ -49,11 +49,7 @@ pub(crate) fn queue_approved_shell_handoff(
     let Ok(handoff_request) = build_shell_handoff_request(ShellHandoffBuildInput {
         command: &command,
         exact_preview,
-        source: if request.provider_shell_request_kind != ProviderShellRequestKind::LocalApproval {
-            "approved_provider_shell_tool"
-        } else {
-            "approved_fallback"
-        },
+        source: approved_shell_handoff_source(state, request),
         actor: "user",
         approval_id: request.id.clone(),
         run_id: request.run_id.clone(),
@@ -69,6 +65,28 @@ pub(crate) fn queue_approved_shell_handoff(
         .control
         .shell_handoff_mut()
         .enqueue_approved_request(handoff_request);
+}
+
+fn approved_shell_handoff_source(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> &'static str {
+    if state
+        .agent_run
+        .active
+        .as_ref()
+        .is_some_and(|run| run.request.id == request.run_id && run.request.hook_finding.is_some())
+    {
+        return "user_analysis_action";
+    }
+    if request.source == "provider-tool-call" {
+        return "approved_provider_shell_tool";
+    }
+    match request.provider_shell_request_kind {
+        ProviderShellRequestKind::ControlPermission => "approved_provider_shell_tool",
+        ProviderShellRequestKind::StreamedToolCallFallback
+        | ProviderShellRequestKind::LocalApproval => "approved_fallback",
+    }
 }
 
 pub(crate) fn queue_interactive_shell_handoff<W: Write>(

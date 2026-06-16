@@ -1,5 +1,5 @@
 use cosh_shell::hook_types::FindingSeverity;
-use cosh_shell::types::CommandBlock;
+use cosh_shell::types::{CommandBlock, CommandOrigin};
 use std::collections::HashMap;
 
 use super::policy::{command_intent_key, should_downgrade_success_finding};
@@ -85,7 +85,25 @@ pub(crate) fn decide_session_interruption_policy(
     suppression_key: &str,
     state: &InlineState,
 ) -> RuntimeHookDecision {
-    decide_session_interruption_policy_with_context(
+    decide_session_interruption_policy_with_origin(
+        block,
+        aggregate,
+        display,
+        suppression_key,
+        CommandOrigin::UserInteractive,
+        state,
+    )
+}
+
+pub(crate) fn decide_session_interruption_policy_with_origin(
+    block: &CommandBlock,
+    aggregate: &AggregatedHookFinding,
+    display: RuntimeHookDisplay,
+    suppression_key: &str,
+    origin: CommandOrigin,
+    state: &InlineState,
+) -> RuntimeHookDecision {
+    decide_session_interruption_policy_with_context_and_origin(
         block,
         aggregate,
         display,
@@ -93,6 +111,7 @@ pub(crate) fn decide_session_interruption_policy(
         state,
         state.agent_run.active.is_some(),
         state.hooks.block_followed_by_user_input(&block.id),
+        origin,
     )
 }
 
@@ -105,10 +124,44 @@ pub(crate) fn decide_session_interruption_policy_with_context(
     active_agent_run: bool,
     user_continued_input: bool,
 ) -> RuntimeHookDecision {
+    decide_session_interruption_policy_with_context_and_origin(
+        block,
+        aggregate,
+        display,
+        suppression_key,
+        state,
+        active_agent_run,
+        user_continued_input,
+        CommandOrigin::UserInteractive,
+    )
+}
+
+pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
+    block: &CommandBlock,
+    aggregate: &AggregatedHookFinding,
+    display: RuntimeHookDisplay,
+    suppression_key: &str,
+    state: &InlineState,
+    active_agent_run: bool,
+    user_continued_input: bool,
+    origin: CommandOrigin,
+) -> RuntimeHookDecision {
     if display == RuntimeHookDisplay::Silent {
         return RuntimeHookDecision {
             display: RuntimeHookDisplay::Silent,
             reason: "base-silent",
+        };
+    }
+    if internal_origin(origin) {
+        return RuntimeHookDecision {
+            display: RuntimeHookDisplay::Silent,
+            reason: "origin-internal",
+        };
+    }
+    if origin == CommandOrigin::Unknown {
+        return RuntimeHookDecision {
+            display: unknown_origin_display(aggregate),
+            reason: "origin-unknown",
         };
     }
     if is_muted_hook_target(aggregate, state) {
@@ -225,6 +278,24 @@ pub(crate) fn decide_session_interruption_policy_with_context(
     RuntimeHookDecision {
         display,
         reason: "allowed",
+    }
+}
+
+fn internal_origin(origin: CommandOrigin) -> bool {
+    matches!(
+        origin,
+        CommandOrigin::UserAnalysisAction
+            | CommandOrigin::AgentHandoff
+            | CommandOrigin::ProviderTool
+            | CommandOrigin::ShellInternal
+    )
+}
+
+fn unknown_origin_display(aggregate: &AggregatedHookFinding) -> RuntimeHookDisplay {
+    if aggregate.effective_severity == FindingSeverity::Critical {
+        RuntimeHookDisplay::Hint
+    } else {
+        RuntimeHookDisplay::Silent
     }
 }
 

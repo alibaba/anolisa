@@ -1,7 +1,11 @@
 use crate::approval::journal::approval_journal_entry;
 use crate::runtime::prelude::*;
-use cosh_shell::tools::display::{display_for_tool, ToolColor};
+use cosh_shell::tools::display::display_for_tool;
 use cosh_shell::tools::is_readonly_builtin_tool_name;
+use cosh_shell::tools::{
+    assess_shell_command, blocked_shell_binding_assessment, AssessmentPolicy, AssessmentSource,
+    AutoAllowEvidence, CommandAssessment, ExecutionDecision, OutputExposure,
+};
 use cosh_shell::types::GovernancePolicyDecision;
 
 pub(crate) fn record_approval_requests(
@@ -113,10 +117,11 @@ fn approval_request_from_event(
             if is_readonly_builtin_tool_name(&info.label) {
                 return None;
             }
-            let risk = match info.color {
-                ToolColor::Dangerous => "high",
-                _ => "medium",
-            };
+            let assessment = shell_tool_assessment_from_preview(&info.label, &info.preview);
+            let risk = assessment
+                .as_ref()
+                .map(|assessment| assessment.impact.legacy_risk())
+                .unwrap_or("medium");
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
@@ -136,28 +141,33 @@ fn approval_request_from_event(
                 execution_path: None,
                 command_block_id: None,
                 redaction_status: None,
+                assessment: assessment.as_ref().map(runtime_assessment_summary),
             })
         }
-        AgentEvent::Action { run_id, command } => Some(RuntimeApprovalRequest {
-            id: next_approval_id(state),
-            run_id: run_id.clone(),
-            session_id: session_id.to_string(),
-            cwd: cwd.to_string(),
-            source: "agent",
-            provider_shell_request_kind: ProviderShellRequestKind::LocalApproval,
-            kind: ApprovalRequestKind::ShellCommand,
-            subject: "shell command".to_string(),
-            preview: command.clone(),
-            risk: risk_for_command(command),
-            request_id: None,
-            tool_use_id: None,
-            tool_input: None,
-            original_user_request: original_user_request.map(ToString::to_string),
-            status: ApprovalRequestStatus::Pending,
-            execution_path: None,
-            command_block_id: None,
-            redaction_status: None,
-        }),
+        AgentEvent::Action { run_id, command } => {
+            let assessment = shell_command_assessment(command);
+            Some(RuntimeApprovalRequest {
+                id: next_approval_id(state),
+                run_id: run_id.clone(),
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+                source: "agent",
+                provider_shell_request_kind: ProviderShellRequestKind::LocalApproval,
+                kind: ApprovalRequestKind::ShellCommand,
+                subject: "shell command".to_string(),
+                preview: command.clone(),
+                risk: assessment.impact.legacy_risk(),
+                request_id: None,
+                tool_use_id: None,
+                tool_input: None,
+                original_user_request: original_user_request.map(ToString::to_string),
+                status: ApprovalRequestStatus::Pending,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: Some(runtime_assessment_summary(&assessment)),
+            })
+        }
         AgentEvent::ToolPermissionRequest {
             run_id,
             request_id,
@@ -168,7 +178,11 @@ fn approval_request_from_event(
         } => {
             let input_str = serde_json::to_string(tool_input).unwrap_or_default();
             let info = display_for_tool(tool_name, &input_str);
-            let risk = provider_tool_permission_risk(tool_name, tool_input);
+            let assessment = provider_tool_permission_assessment(tool_name, tool_input);
+            let risk = assessment
+                .as_ref()
+                .map(|assessment| assessment.impact.legacy_risk())
+                .unwrap_or("medium");
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
@@ -188,24 +202,11 @@ fn approval_request_from_event(
                 execution_path: Some("provider_control_protocol"),
                 command_block_id: None,
                 redaction_status: None,
+                assessment: assessment.as_ref().map(runtime_assessment_summary),
             })
         }
         _ => None,
     }
-}
-
-fn provider_tool_permission_risk(tool_name: &str, tool_input: &serde_json::Value) -> &'static str {
-    if !cosh_shell::tools::is_shell_tool_name(tool_name) {
-        return "medium";
-    }
-    let command = tool_input
-        .get("command")
-        .or_else(|| tool_input.get("cmd"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    cosh_shell::tools::classify_command_interaction(command)
-        .approval_risk
-        .as_str()
 }
 
 fn original_user_request(run_request: Option<&AgentRequest>) -> Option<String> {
@@ -253,12 +254,125 @@ pub(crate) fn record_deferred_fallback_request(
     request
 }
 
+pub(crate) fn refresh_shell_request_assessment(
+    request: &mut RuntimeApprovalRequest,
+    policy: AssessmentPolicy,
+) -> Option<CommandAssessment> {
+    if !cosh_shell::tools::is_shell_tool_name(&request.subject) {
+        return None;
+    }
+    let command = request
+        .preview
+        .strip_prefix("$ ")
+        .unwrap_or(&request.preview)
+        .trim();
+    let assessment = if command.is_empty() {
+        blocked_shell_binding_assessment(policy.source, command, "unsafe-binding")
+    } else {
+        assess_shell_command(command, policy)
+    };
+    request.risk = assessment.impact.legacy_risk();
+    request.assessment = Some(runtime_assessment_summary(&assessment));
+    Some(assessment)
+}
+
 fn next_approval_id(state: &InlineState) -> String {
     state.approvals.next_request_id()
 }
 
-fn risk_for_command(command: &str) -> &'static str {
-    cosh_shell::tools::classify_command_interaction(command)
-        .approval_risk
-        .as_str()
+fn shell_tool_assessment_from_preview(subject: &str, preview: &str) -> Option<CommandAssessment> {
+    if !cosh_shell::tools::is_shell_tool_name(subject) {
+        return None;
+    }
+    let command = preview.strip_prefix("$ ").unwrap_or(preview).trim();
+    if command.is_empty() {
+        return Some(blocked_shell_binding_assessment(
+            AssessmentSource::ProviderShellTool,
+            command,
+            "unsafe-binding",
+        ));
+    }
+    Some(shell_command_assessment(command))
+}
+
+fn provider_tool_permission_assessment(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Option<CommandAssessment> {
+    if !cosh_shell::tools::is_shell_tool_name(tool_name) {
+        return None;
+    }
+    let command = tool_input
+        .get("command")
+        .or_else(|| tool_input.get("cmd"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim();
+    if command.is_empty() {
+        return Some(blocked_shell_binding_assessment(
+            AssessmentSource::ProviderShellTool,
+            command,
+            "unsafe-binding",
+        ));
+    }
+    Some(shell_command_assessment(command))
+}
+
+fn shell_command_assessment(command: &str) -> CommandAssessment {
+    assess_shell_command(
+        command,
+        AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+    )
+}
+
+fn runtime_assessment_summary(assessment: &CommandAssessment) -> RuntimeCommandAssessmentSummary {
+    RuntimeCommandAssessmentSummary {
+        impact: assessment.impact.legacy_risk(),
+        execution: execution_label(assessment.execution),
+        confidence: confidence_label(assessment.confidence),
+        primary_reason: assessment.primary_reason(),
+        reason_trace: assessment.reason_trace(),
+        auto_allow: assessment.auto_allow.map(AutoAllowEvidence::reason_code),
+        output_stability: output_stability_label(assessment.output_stability),
+        output_exposure: output_exposure_label(assessment.output_exposure),
+    }
+}
+
+fn execution_label(decision: ExecutionDecision) -> &'static str {
+    match decision {
+        ExecutionDecision::AutoAllow => "auto-allow",
+        ExecutionDecision::AskUser => "ask-user",
+        ExecutionDecision::Block => "block",
+        ExecutionDecision::ForegroundHandoffRequired => "foreground-handoff-required",
+    }
+}
+
+fn confidence_label(confidence: cosh_shell::tools::AssessmentConfidence) -> &'static str {
+    match confidence {
+        cosh_shell::tools::AssessmentConfidence::High => "high",
+        cosh_shell::tools::AssessmentConfidence::Medium => "medium",
+        cosh_shell::tools::AssessmentConfidence::Low => "low",
+    }
+}
+
+fn output_stability_label(
+    stability: cosh_shell::tools::CommandRiskOutputStability,
+) -> &'static str {
+    match stability {
+        cosh_shell::tools::CommandRiskOutputStability::StableSnapshot => "stable-snapshot",
+        cosh_shell::tools::CommandRiskOutputStability::PotentiallyLarge => "potentially-large",
+        cosh_shell::tools::CommandRiskOutputStability::Streaming => "streaming",
+        cosh_shell::tools::CommandRiskOutputStability::UnstableInteractive => {
+            "unstable-interactive"
+        }
+    }
+}
+
+fn output_exposure_label(exposure: OutputExposure) -> &'static str {
+    match exposure {
+        OutputExposure::Normal => "normal",
+        OutputExposure::MayContainCommandLine => "may-contain-command-line",
+        OutputExposure::MayContainEnvironment => "may-contain-environment",
+        OutputExposure::MayContainSecrets => "may-contain-secrets",
+    }
 }

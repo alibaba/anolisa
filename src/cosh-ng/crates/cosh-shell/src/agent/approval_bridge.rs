@@ -7,6 +7,7 @@ use crate::approval::broker::{
 };
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::prelude::*;
+use cosh_shell::tools::{AssessmentSource, AutoExecutionPolicy, AutoExecutionRoute};
 
 pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
@@ -155,9 +156,18 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             continue;
         }
 
-        if !request_is_executable_bash_tool(&request)
-            || can_run_approved_bash_tool(raw_cmd).is_err()
-        {
+        if !request_is_executable_bash_tool(&request) {
+            continue;
+        }
+
+        let auto_policy = AutoExecutionPolicy::current_runtime();
+        let Some(assessment) = refresh_shell_request_assessment(
+            &mut request,
+            auto_policy.assessment_policy(AssessmentSource::ProviderShellTool),
+        ) else {
+            continue;
+        };
+        if auto_policy.route(&assessment) != AutoExecutionRoute::DirectReadonlyBroker {
             continue;
         }
 
@@ -532,6 +542,7 @@ mod tests {
                 id: "cmd-1".to_string(),
                 session_id: "session-1".to_string(),
                 command: "ShellCommandCompleted evidence".to_string(),
+                origin: Default::default(),
                 cwd: "/tmp".to_string(),
                 end_cwd: "/tmp".to_string(),
                 started_at_ms: 0,
@@ -668,6 +679,7 @@ mod tests {
             execution_path: None,
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         }
     }
 }

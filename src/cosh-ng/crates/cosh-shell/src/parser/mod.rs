@@ -138,6 +138,7 @@ pub fn agent_request_from_intercepted_input(
             id: block_id,
             session_id: event.session_id.clone(),
             command: input.to_string(),
+            origin: Default::default(),
             cwd: cwd.clone(),
             end_cwd: cwd,
             started_at_ms,

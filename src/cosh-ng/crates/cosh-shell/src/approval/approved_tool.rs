@@ -37,6 +37,7 @@ mod tests {
             execution_path: None,
             command_block_id: None,
             redaction_status: None,
+            assessment: None,
         }
     }
 
