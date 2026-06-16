@@ -19,17 +19,7 @@ git diff --stat origin/main..HEAD
 git log --oneline origin/main..HEAD
 ```
 
-### 步骤 2：运行自动检查
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-记录检查结果，失败项直接作为 finding 输出。
-
-### 步骤 3：按维度审查
+### 步骤 2：按维度审查
 
 对 diff 中每个变更文件，依次检查以下 5 个维度。**不要在发现第一个问题后停止，必须遍历全部文件和全部维度。**
 
@@ -76,7 +66,7 @@ cargo test
 - 跨模块行为是否优先用集成测试而非单元测试
 - 测试代码是否放在 `*_tests.rs` 或 `#[cfg(test)] mod tests` 中
 
-### 步骤 4：输出 Findings
+### 步骤 3：输出 Findings
 
 使用编号列表输出，每条 finding 必须包含：
 
