@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Component manifest for the anvil per-host sandbox orchestrator.
+
+[component]
+name = "anvil"
+version = "0.1.0"
+layer = "runtime"
+domain = "anvil"
+description = "Per-host sandbox orchestrator — multi-backend lifecycle management, kernel coordination"
+
+[build]
+system = "cargo"
+targets = ["release"]
+
+[build.toolchain]
+rust = ">=1.88.0"
+
+# Binary installation handled by dist/anvil.spec (RPM). Not in main build system while in Labs.
+
+[environment]
+requires_os = "linux"
+requires_arch = ["x86_64", "aarch64"]
+
+[dependencies]
+build = ["rust>=1.88"]
+runtime = ["firecracker", "bubblewrap"]
+
+[[features]]
+name = "function_tier"
+label = "Linux-sandbox function tier backend"
+default = true
+
+[[features]]
+name = "warm_pool"
+label = "Warm sandbox pool management"
+default = true

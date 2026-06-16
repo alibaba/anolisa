@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+# Default policy for the agent-tool workload class.
+#
+# This policy targets short-lived tool-use invocations (code execution, web
+# browsing, file manipulation) that need quick spin-up with moderate quotas.
+
+# Policy manifest version. Must be 1 (only supported version).
+manifest_version = 1
+
+# Unique name for this policy. Used in API responses, logs, and metrics.
+policy_name = "agent-tool-default"
+
+# Priority for conflict resolution when multiple policies match the same
+# request. Higher value wins. Type: signed integer. Default: 0.
+priority = 90
+
+# ---------------------------------------------------------------------------
+# Match conditions. ALL fields must match for this policy to apply.
+# ---------------------------------------------------------------------------
+[match]
+# Workload class to match against the request's declared class.
+# Options: agent-rl, agent-tool, serverless, dev-shell, untrusted, function.
+workload_class = "agent-tool"
+
+# Optional: image_labels can be added to narrow matching scope.
+# Omitted here means any image with workload_class=agent-tool matches.
+# image_labels = { "key" = "value" }
+
+# ---------------------------------------------------------------------------
+# Backend and hook selection.
+# ---------------------------------------------------------------------------
+[select]
+# Ordered list of backends to try. Daemon picks the first available.
+# Options: firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
+#          kata-qemu, runc, linux-sandbox, landlock.
+backend_priority = ["firecracker", "linux-sandbox"]
+
+# Kernel hooks to activate. Empty means none.  Default: [].
+kernel_hooks = []
+
+# Memory templates to bind. Empty means none.  Default: [].
+templates = []
+
+# Behavior when a declared kernel hook is not available on this host.
+# Options: "fail" (reject the request), "degrade" (proceed without the hook),
+#          "continue" (silently skip).  Default: "fail".
+fallback_on_missing_hook = "fail"
+
+# ---------------------------------------------------------------------------
+# Warm-pool configuration.
+# ---------------------------------------------------------------------------
+[pool]
+# Whether the warm pool is enabled for this policy.  Default: false.
+enabled = true
+
+# Minimum number of warm instances to maintain.  Default: 0.
+min = 2
+
+# Target pool size the autoscaler aims for.  Default: 0.
+target = 8
+
+# Maximum pool size (hard cap).  Default: 0.
+max = 32
+
+# Time-to-live for idle warm instances before the GC reclaims them.
+# Format: duration string (e.g. "30m", "1h").  Default: "30m".
+warm_ttl = "30m"
+
+# How the pool resets an instance after use.
+# Options: "mm-template", "overlayfs-rollback", "full-recreate".
+# Default: "mm-template".
+reset_mode = "full-recreate"
+
+# ---------------------------------------------------------------------------
+# Resource quotas (cgroup v2 knobs). Optional; omit to leave uncapped.
+# ---------------------------------------------------------------------------
+[quota]
+# CPU weight (cgroup cpu.weight analogue). Range: 1-10000.
+cpu_shares = 1024
+
+# Memory high watermark (soft limit). Format: size string.
+memory_high = "2G"
+
+# Memory hard max. OOM-killed if exceeded. Format: size string.
+memory_max = "4G"
+
+# Maximum number of PIDs (processes + threads).
+pids_max = 4096

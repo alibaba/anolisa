@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: Apache-2.0
+# Example anvil daemon configuration.
+#
+# Production deployments install this file at /etc/anolisa/anvil/config.toml.
+# All fields shown below include their default values; you only need to
+# specify values that differ from the defaults.
+
+# ---------------------------------------------------------------------------
+# Daemon global settings.
+# ---------------------------------------------------------------------------
+[daemon]
+# Log verbosity level. The daemon uses the `tracing` crate internally.
+# Options: trace, debug, info, warn, error.  Default: "info".
+log_level = "info"
+
+# Root directory for persistent daemon state (instance metadata, templates,
+# images). The daemon creates subdirectories automatically on first startup.
+# Default: "/var/lib/anvil".
+state_dir = "/var/lib/anvil"
+
+# Path to the Unix domain socket for local API access.
+# Clients connect via: curl --unix-socket <path> http://localhost/v1/...
+# Default: "/run/anvil/api.sock".
+socket = "/run/anvil/api.sock"
+
+# ---------------------------------------------------------------------------
+# Optional TCP listener for remote API access.
+# ---------------------------------------------------------------------------
+[listen]
+# TCP bind address for remote HTTP API.
+# Leave empty or omit to disable TCP (UDS-only mode).
+# When set, platforms (Substrate, E2B orchestrators) can reach the daemon
+# over the network.  Example: "0.0.0.0:14159".
+# Default: "" (disabled).
+http_addr = ""
+
+# ---------------------------------------------------------------------------
+# Backend binary paths.
+# Maps backend name → absolute path to the executable.
+# The daemon probes each configured backend at startup; backends whose
+# binaries are missing or non-executable are logged and skipped.
+# ---------------------------------------------------------------------------
+[backends]
+# Supported backend names (kebab-case):
+#   firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
+#   kata-qemu, runc, linux-sandbox, landlock.
+firecracker = "/usr/bin/firecracker"
+linux-sandbox = "/usr/bin/anolisa-linux-sandbox"
+# Phase 2+ backends (uncomment when spawner implementations land):
+# gvisor = "/usr/bin/runsc"
+# rund = "/usr/bin/rund"
+# kata-fc = "/usr/bin/containerd-shim-kata-v2"
+# kata-clh = "/usr/bin/containerd-shim-kata-v2"
+# kata-qemu = "/usr/bin/containerd-shim-kata-v2"
+# runc = "/usr/bin/runc"
+
+# ---------------------------------------------------------------------------
+# Policy engine settings.
+# ---------------------------------------------------------------------------
+[policy]
+# Directory containing policy TOML files. The daemon loads all *.toml files
+# in this directory at startup.  Default: "/etc/anolisa/anvil/policies".
+dir = "/etc/anolisa/anvil/policies"
+
+# Behavior when a policy file fails to parse or validate.
+# Options: "fail" (abort daemon startup), "warn" (log and skip the file).
+# Default: "fail".
+on_load_error = "fail"
+
+# ---------------------------------------------------------------------------
+# Image storage settings.
+# ---------------------------------------------------------------------------
+[storage]
+# Primary directory for vmlinux kernels, rootfs base images, and memfile
+# bases. All runtime image files are resolved relative to this path.
+# Default: "/var/lib/anvil/images".
+images_dir = "/var/lib/anvil/images"
+
+# ---------------------------------------------------------------------------
+# Instance pool settings (global defaults for warm-pool recycling).
+# Per-workload pool settings are configured in each policy file.
+# ---------------------------------------------------------------------------
+[pool]
+# Default time-to-live for warm (idle) instances before the GC reclaims them.
+# Format: duration string (e.g. "30m", "1h", "90s").  Default: "30m".
+default_warm_ttl = "30m"
+
+# How often the garbage collector runs to reap expired warm instances.
+# Format: duration string.  Default: "5m".
+gc_interval = "5m"
+
+# ---------------------------------------------------------------------------
+# Template engine settings (memory-template sharing).
+# ---------------------------------------------------------------------------
+[template]
+# Directory where the daemon stores template snapshots.
+# Default: "/var/lib/anvil/templates".
+dir = "/var/lib/anvil/templates"
+
+# How often the template GC runs to evict unused templates.
+# Format: duration string.  Default: "10m".
+gc_interval = "10m"
+
+# Time a template must be idle (no active references) before eviction.
+# Format: duration string.  Default: "1h".
+idle_ttl = "1h"
+
+# ---------------------------------------------------------------------------
+# Metrics / observability.
+# ---------------------------------------------------------------------------
+[metrics]
+# Path to the Unix domain socket serving Prometheus metrics.
+# A Prometheus scraper can connect here to pull /metrics.
+# Default: "/run/anvil/metrics.sock".
+prometheus_socket = "/run/anvil/metrics.sock"
