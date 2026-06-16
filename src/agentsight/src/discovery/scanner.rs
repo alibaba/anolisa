@@ -162,7 +162,7 @@ impl AgentScanner {
 
         // Read full command line from /proc/[pid]/cmdline
         let cmdline_args = read_cmdline(&format!("/proc/{pid}/cmdline"));
-        log::debug!("Process created: pid={pid}, comm='{comm}', cmdline={cmdline_args:?}");
+        log::trace!("Process created: pid={pid}, comm='{comm}', cmdline={cmdline_args:?}");
 
         // Read executable path from /proc/[pid]/exe (symlink)
         let exe_path_str = format!("/proc/{pid}/exe");
@@ -194,7 +194,7 @@ impl AgentScanner {
     ///
     /// Remove the process from tracking if it was a known agent.
     pub fn on_process_exit(&mut self, pid: u32) -> Option<DiscoveredAgent> {
-        log::debug!("Process exited: pid={pid}");
+        log::trace!("Process exited: pid={pid}");
         self.tracked_agents.remove(&pid)
     }
 

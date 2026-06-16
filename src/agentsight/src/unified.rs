@@ -578,7 +578,7 @@ impl AgentSight {
         let event = self.probes.try_recv()?;
         self.event_count += 1;
 
-        log::debug!("Processing event: {:?}", event.event_type());
+        log::trace!("Processing event: {:?}", event.event_type());
 
         // Handle ProcMon events for agent lifecycle tracking
         if let Event::ProcMon(ref procmon_event) = event {
