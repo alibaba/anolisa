@@ -66,7 +66,6 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
-import { useKeypress } from './useKeypress.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 enum StreamProcessingStatus {
@@ -116,7 +115,6 @@ export const useGeminiStream = (
     persistSessionModel?: string;
     showGuidance?: boolean;
   }>,
-  isShellFocused?: boolean,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -353,15 +351,6 @@ export const useGeminiStream = (
     config,
     getPromptCount,
   ]);
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape' && !isShellFocused) {
-        cancelOngoingRequest();
-      }
-    },
-    { isActive: streamingState === StreamingState.Responding },
-  );
 
   const prepareQueryForGemini = useCallback(
     async (

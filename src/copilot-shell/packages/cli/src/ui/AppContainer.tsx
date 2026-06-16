@@ -113,7 +113,8 @@ import {
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
 
-const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+export const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+export const ESC_DOUBLE_PRESS_WINDOW_MS = 500;
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
@@ -165,6 +166,44 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
+  const [reverseSearchActive, setReverseSearchActive] = useState(false);
+  const [commandSearchActive, setCommandSearchActive] = useState(false);
+  const [completionShowSuggestions, setCompletionShowSuggestions] =
+    useState(false);
+  const [shellCompletionShowSuggestions, setShellCompletionShowSuggestions] =
+    useState(false);
+  // Refs for reset functions registered by InputPrompt
+  const resetCompletionRef = useRef<(() => void) | null>(null);
+  const resetShellCompletionRef = useRef<(() => void) | null>(null);
+  const cancelReverseSearchRef = useRef<(() => void) | null>(null);
+  const cancelCommandSearchRef = useRef<(() => void) | null>(null);
+
+  // Stable callback wrappers for reset actions
+  const cancelReverseSearch = useCallback(() => {
+    cancelReverseSearchRef.current?.();
+  }, []);
+  const cancelCommandSearch = useCallback(() => {
+    cancelCommandSearchRef.current?.();
+  }, []);
+  const resetCompletion = useCallback(() => {
+    resetCompletionRef.current?.();
+  }, []);
+  const resetShellCompletion = useCallback(() => {
+    resetShellCompletionRef.current?.();
+  }, []);
+  const registerResetCompletion = useCallback((fn: () => void) => {
+    resetCompletionRef.current = fn;
+  }, []);
+  const registerResetShellCompletion = useCallback((fn: () => void) => {
+    resetShellCompletionRef.current = fn;
+  }, []);
+  const registerCancelReverseSearch = useCallback((fn: () => void) => {
+    cancelReverseSearchRef.current = fn;
+  }, []);
+  const registerCancelCommandSearch = useCallback((fn: () => void) => {
+    cancelCommandSearchRef.current = fn;
+  }, []);
+
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
@@ -756,7 +795,6 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidth,
     terminalHeight,
     handleVisionSwitchRequired, // onVisionSwitchRequired
-    embeddedShellFocused,
   );
 
   // Auto-accept indicator
@@ -982,6 +1020,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [escapePressedOnce, setEscapePressedOnce] = useState(false);
+  const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1046,10 +1086,6 @@ export const AppContainer = (props: AppContainerProps) => {
       appEvents.off(AppEvent.LogError, logErrorHandler);
     };
   }, [handleNewMessage]);
-
-  const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
-    setShowEscapePrompt(showPrompt);
-  }, []);
 
   const handleIdePromptComplete = useCallback(
     (result: IdeIntegrationNudgeResult) => {
@@ -1287,6 +1323,81 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
+      } else if (keyMatchers[Command.ESCAPE](key)) {
+        // Escape key handling - unified at AppContainer level
+
+        // Skip if shell is focused (to allow shell's own escape handling)
+        if (embeddedShellFocused) {
+          return;
+        }
+
+        // Check special contexts first (these should be handled by ESC with single press)
+        // Order matters: reverseSearch/commandSearch should be checked before shellMode
+        if (reverseSearchActive) {
+          cancelReverseSearch();
+          return;
+        }
+        if (commandSearchActive) {
+          cancelCommandSearch();
+          return;
+        }
+        if (shellModeActive) {
+          setShellModeActive(false);
+          return;
+        }
+        if (completionShowSuggestions) {
+          resetCompletion();
+          return;
+        }
+        if (shellCompletionShowSuggestions) {
+          resetShellCompletion();
+          return;
+        }
+
+        // If input has content, use double-press to clear
+        if (buffer.text.length > 0) {
+          if (escapePressedOnce) {
+            // Second press: clear input and reset prompt state
+            buffer.setText('');
+            setEscapePressedOnce(false);
+            setShowEscapePrompt(false);
+            if (escapeTimerRef.current) {
+              clearTimeout(escapeTimerRef.current);
+              escapeTimerRef.current = null;
+            }
+            return;
+          }
+          // First press: set flag and show prompt
+          setEscapePressedOnce(true);
+          setShowEscapePrompt(true);
+          escapeTimerRef.current = setTimeout(() => {
+            setEscapePressedOnce(false);
+            setShowEscapePrompt(false);
+            escapeTimerRef.current = null;
+          }, ESC_DOUBLE_PRESS_WINDOW_MS);
+          return;
+        }
+
+        // Input is empty, cancel request immediately (no double-press needed)
+        if (streamingState === StreamingState.Responding) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          cancelOngoingRequest?.();
+          setEscapePressedOnce(false);
+          setShowEscapePrompt(false);
+          return;
+        }
+
+        // No action available, reset the flag
+        if (escapeTimerRef.current) {
+          clearTimeout(escapeTimerRef.current);
+          escapeTimerRef.current = null;
+        }
+        setEscapePressedOnce(false);
+        setShowEscapePrompt(false);
+        return;
       }
 
       let enteringConstrainHeightMode = false;
@@ -1349,7 +1460,6 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
-      buffer.text.length,
       ctrlDPressedOnce,
       setCtrlDPressedOnce,
       ctrlDTimerRef,
@@ -1359,6 +1469,22 @@ export const AppContainer = (props: AppContainerProps) => {
       settings,
       isAuthenticating,
       streamingState,
+      buffer,
+      cancelOngoingRequest,
+      escapePressedOnce,
+      setEscapePressedOnce,
+      setShowEscapePrompt,
+      escapeTimerRef,
+      reverseSearchActive,
+      commandSearchActive,
+      completionShowSuggestions,
+      shellCompletionShowSuggestions,
+      cancelReverseSearch,
+      cancelCommandSearch,
+      resetCompletion,
+      resetShellCompletion,
+      shellModeActive,
+      setShellModeActive,
     ],
   );
 
@@ -1498,6 +1624,10 @@ export const AppContainer = (props: AppContainerProps) => {
       pendingGeminiHistoryItems,
       thought,
       shellModeActive,
+      reverseSearchActive,
+      commandSearchActive,
+      completionShowSuggestions,
+      shellCompletionShowSuggestions,
       userMessages,
       buffer,
       inputWidth,
@@ -1596,6 +1726,10 @@ export const AppContainer = (props: AppContainerProps) => {
       pendingGeminiHistoryItems,
       thought,
       shellModeActive,
+      reverseSearchActive,
+      commandSearchActive,
+      completionShowSuggestions,
+      shellCompletionShowSuggestions,
       userMessages,
       buffer,
       inputWidth,
@@ -1680,12 +1814,23 @@ export const AppContainer = (props: AppContainerProps) => {
       closeModelDialog,
       closePermissionsDialog,
       setShellModeActive,
+      setReverseSearchActive,
+      setCommandSearchActive,
+      cancelReverseSearch,
+      cancelCommandSearch,
+      resetCompletion,
+      resetShellCompletion,
+      registerResetCompletion,
+      registerResetShellCompletion,
+      registerCancelReverseSearch,
+      registerCancelCommandSearch,
+      setCompletionShowSuggestions,
+      setShellCompletionShowSuggestions,
       vimHandleInput,
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       setConstrainHeight,
-      onEscapePromptChange: handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
       handleClearScreen,
@@ -1728,12 +1873,23 @@ export const AppContainer = (props: AppContainerProps) => {
       closeModelDialog,
       closePermissionsDialog,
       setShellModeActive,
+      setReverseSearchActive,
+      setCommandSearchActive,
+      cancelReverseSearch,
+      cancelCommandSearch,
+      resetCompletion,
+      resetShellCompletion,
+      registerResetCompletion,
+      registerResetShellCompletion,
+      registerCancelReverseSearch,
+      registerCancelCommandSearch,
+      setCompletionShowSuggestions,
+      setShellCompletionShowSuggestions,
       vimHandleInput,
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       setConstrainHeight,
-      handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
       handleClearScreen,
