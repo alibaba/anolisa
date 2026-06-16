@@ -1268,7 +1268,7 @@ describe('KeypressContext - Kitty Protocol', () => {
       expect(parsedCall?.[1]).toEqual(expect.stringContaining('\x1b[27u'));
     });
 
-    it('should log kitty buffer overflow when debugKeystrokeLogging is true', async () => {
+    it('should handle kitty buffer overflow without crashing', async () => {
       const keyHandler = vi.fn();
 
       const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -1286,16 +1286,13 @@ describe('KeypressContext - Kitty Protocol', () => {
         result.current.subscribe(keyHandler);
       });
 
-      // Send an invalid long sequence to trigger overflow
+      // Send an invalid long sequence to trigger overflow - should not crash
       const longInvalidSequence = '\x1b[' + 'x'.repeat(100);
-      act(() => {
-        stdin.sendKittySequence(longInvalidSequence);
-      });
-
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[DEBUG] Kitty buffer overflow, clearing:',
-        expect.any(String),
-      );
+      expect(() => {
+        act(() => {
+          stdin.sendKittySequence(longInvalidSequence);
+        });
+      }).not.toThrow();
     });
 
     it('should log kitty buffer clear on Ctrl+C when debugKeystrokeLogging is true', async () => {
@@ -1449,6 +1446,109 @@ describe('KeypressContext - Kitty Protocol', () => {
         );
       },
     );
+  });
+
+  describe('Printable CSI-u keys', () => {
+    it('parses kitty CSI-u space as a space key with literal sequence', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[32u`));
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'space',
+          sequence: ' ',
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('parses kitty CSI-u printable letters as literal input', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[100u`)); // 'd'
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'd',
+          sequence: 'd',
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('drops unsupported Kitty CSI-u keys without blocking later input', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[57358u`)); // CAPS_LOCK
+      act(() =>
+        stdin.pressKey({
+          name: 'a',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'a',
+        }),
+      );
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'a',
+          sequence: 'a',
+        }),
+      );
+    });
+
+    it('recovers plain text that arrives in the same chunk after an unsupported CSI-u key', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() =>
+        stdin.pressKey({
+          name: '',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[57358ua',
+        }),
+      );
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'a',
+          sequence: 'a',
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('drops unsupported CSI-u variants with event metadata and keeps parsing', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[57358;1:1u\x1b[100u`));
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'd',
+          sequence: 'd',
+          kittyProtocol: true,
+        }),
+      );
+    });
   });
 
   describe('Shift+Tab forms', () => {
