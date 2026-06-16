@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod auth;
 mod cli;
 mod compression;
 mod config;
@@ -30,12 +31,23 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
             "No API key configured. Please set DASHSCOPE_API_KEY or configure [ai.providers] in config.toml.",
         ));
     }
+    create_provider_from_resolved(&resolved)
+}
+
+fn create_provider_from_resolved(
+    resolved: &config::ResolvedProvider,
+) -> Box<dyn provider::ContentGenerator> {
     let provider_profile = profile::profile_from_name(&resolved.provider_type);
     Box::new(OpenAICompatProvider::new(
         &resolved.base_url,
         &resolved.api_key,
         provider_profile,
     ))
+}
+
+/// Check if auth is needed (no API key configured).
+fn needs_auth(config: &CoreConfig) -> bool {
+    config.resolve_provider().api_key.is_empty()
 }
 
 #[tokio::main]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -28,13 +28,17 @@ pub struct AiConfig {
     pub providers: HashMap<String, ProviderConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_params: Option<Value>,
 }
 
@@ -243,6 +247,90 @@ pub struct ResolvedProvider {
     pub model: String,
     pub provider_type: String,
     pub extra_params: Option<Value>,
+}
+
+/// Persist the current provider config to `~/.copilot-shell/config.toml`.
+/// Only writes the [ai] section to avoid overwriting other settings.
+pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create config dir: {e}"))?;
+
+    let config_path = dir.join("config.toml");
+
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    let mut preserved = String::new();
+    let mut in_ai_section = false;
+    for line in existing.lines() {
+        if line.trim().starts_with("[ai") {
+            in_ai_section = true;
+            continue;
+        }
+        if in_ai_section && line.trim().starts_with('[') && !line.trim().starts_with("[ai") {
+            in_ai_section = false;
+        }
+        if !in_ai_section {
+            preserved.push_str(line);
+            preserved.push('\n');
+        }
+    }
+
+    preserved.push_str("[ai]\n");
+    if let Some(ref active) = config.ai.active_provider {
+        preserved.push_str(&format!("active_provider = \"{}\"\n", escape_toml_value(active)));
+    }
+    if let Some(ref model) = config.ai.active_model {
+        preserved.push_str(&format!("active_model = \"{}\"\n", escape_toml_value(model)));
+    }
+    if let Some(ref lang) = config.ai.output_language {
+        preserved.push_str(&format!("output_language = \"{}\"\n", escape_toml_value(lang)));
+    }
+    if let Some(ref thinking) = config.ai.thinking {
+        preserved.push_str(&format!("thinking = \"{}\"\n", escape_toml_value(thinking)));
+    }
+    preserved.push('\n');
+
+    for (name, provider) in &config.ai.providers {
+        preserved.push_str(&format!("[ai.providers.{}]\n", name));
+        if let Some(ref t) = provider.provider_type {
+            preserved.push_str(&format!("type = \"{}\"\n", escape_toml_value(t)));
+        }
+        if let Some(ref url) = provider.base_url {
+            preserved.push_str(&format!("base_url = \"{}\"\n", escape_toml_value(url)));
+        }
+        if let Some(ref key) = provider.api_key {
+            preserved.push_str(&format!("api_key = \"{}\"\n", escape_toml_value(key)));
+        }
+        if let Some(ref m) = provider.model {
+            preserved.push_str(&format!("model = \"{}\"\n", escape_toml_value(m)));
+        }
+        preserved.push('\n');
+    }
+
+    let pid = std::process::id();
+    let tmp_path = dir.join(format!("config.toml.tmp.{pid}"));
+    std::fs::write(&tmp_path, &preserved)
+        .map_err(|e| format!("Failed to write config: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&tmp_path, perms);
+    }
+
+    std::fs::rename(&tmp_path, &config_path)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Failed to rename config: {e}")
+        })?;
+
+    Ok(())
+}
+
+fn escape_toml_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
 #[cfg(test)]

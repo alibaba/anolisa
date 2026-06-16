@@ -5,6 +5,44 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // =====================================================================
+// Auth types (used by CoreControlRequest::AuthRequired)
+// =====================================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub enum AuthReason {
+    #[serde(rename = "not_configured")]
+    NotConfigured,
+    #[serde(rename = "invalid")]
+    Invalid,
+    #[serde(rename = "expired")]
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthField {
+    pub name: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    pub secret: bool,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthProvider {
+    pub id: String,
+    pub label: String,
+    pub fields: Vec<AuthField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin_base_url: Option<String>,
+    pub builtin_provider_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin_default_model: Option<String>,
+}
+
+// =====================================================================
 // Input messages (Shell → Core, read from stdin)
 // =====================================================================
 
@@ -92,6 +130,11 @@ pub struct ControlResponseBody {
     pub updated_permissions: Option<Value>,
     pub answer: Option<String>,
     pub selected_options: Option<Vec<usize>>,
+    // Auth response fields
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub values: Option<HashMap<String, String>>,
+    pub persist: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +289,14 @@ pub enum CoreControlRequest {
         options: Vec<AskUserOption>,
         allow_free_text: bool,
         multi_select: bool,
+    },
+
+    #[serde(rename = "auth_required")]
+    AuthRequired {
+        reason: AuthReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_message: Option<String>,
+        providers: Vec<AuthProvider>,
     },
 }
 
@@ -494,6 +545,22 @@ impl OutputMessage {
                 input,
                 description: None,
                 tool_use_id: tool_use_id.to_string(),
+            },
+        }
+    }
+
+    pub fn auth_required(
+        request_id: &str,
+        reason: AuthReason,
+        error_message: Option<String>,
+        providers: Vec<AuthProvider>,
+    ) -> Self {
+        Self::ControlRequest {
+            request_id: request_id.to_string(),
+            request: CoreControlRequest::AuthRequired {
+                reason,
+                error_message,
+                providers,
             },
         }
     }

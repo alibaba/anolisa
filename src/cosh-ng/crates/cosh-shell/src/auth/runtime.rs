@@ -262,7 +262,9 @@ fn send_auth_response<W: std::io::Write>(
     };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
-        let _ = active_run.handle.respond_auth(response);
+        if active_run.handle.respond_auth(response.clone()).is_err() {
+            persist_auth_credentials(&response);
+        }
     } else {
         persist_auth_credentials(&response);
     }
@@ -341,17 +343,17 @@ fn persist_auth_credentials(response: &AuthResponse) {
     content.push_str("[ai]\n");
     content.push_str(&format!(
         "active_provider = \"{}\"\n",
-        response.provider_id
+        escape_toml(response.provider_id.as_str())
     ));
-    content.push_str(&format!("active_model = \"{}\"\n\n", final_model));
+    content.push_str(&format!("active_model = \"{}\"\n\n", escape_toml(final_model)));
     content.push_str(&format!(
         "[ai.providers.{}]\n",
         response.provider_id
     ));
-    content.push_str(&format!("type = \"{}\"\n", provider_type));
-    content.push_str(&format!("base_url = \"{}\"\n", final_base_url));
-    content.push_str(&format!("api_key = \"{}\"\n", api_key));
-    content.push_str(&format!("model = \"{}\"\n", final_model));
+    content.push_str(&format!("type = \"{}\"\n", escape_toml(provider_type)));
+    content.push_str(&format!("base_url = \"{}\"\n", escape_toml(&final_base_url)));
+    content.push_str(&format!("api_key = \"{}\"\n", escape_toml(&api_key)));
+    content.push_str(&format!("model = \"{}\"\n", escape_toml(final_model)));
 
     let pid = std::process::id();
     let tmp_path = config_dir.join(format!("config.toml.tmp.{pid}"));
@@ -555,4 +557,8 @@ fn parse_card_id_usize(event: &ShellEvent) -> Option<(String, usize)> {
 fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
     let (id, text) = event.input.as_deref()?.split_once(':')?;
     Some((id.trim().to_string(), text.to_string()))
+}
+
+fn escape_toml(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }

@@ -8,7 +8,8 @@ use tokio::io::AsyncBufReadExt;
 use cosh_platform::audit::{self, LoadedPolicy};
 use cosh_types::audit::Outcome;
 
-use crate::config::CoreConfig;
+use crate::auth::{apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response};
+use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::loop_detect::LoopDetector;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
@@ -156,10 +157,22 @@ impl CoshCore {
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
             msgs_with_system.extend(self.messages.clone());
 
-            let mut stream = self
+            let stream_result = self
                 .provider
                 .generate(&msgs_with_system, &tool_decls, &generate_config)
-                .await?;
+                .await;
+
+            let mut stream = match stream_result {
+                Ok(s) => s,
+                Err(e) if is_auth_error(&e) => {
+                    // Attempt re-auth
+                    if self.try_reauth(reader, writer).await {
+                        continue; // Retry the turn with new credentials
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            };
 
             let mut text_buf = String::new();
             let mut tool_calls: Vec<PendingToolCall> = Vec::new();
@@ -615,6 +628,61 @@ impl CoshCore {
             }
         }
         ApprovalResult::Interrupted
+    }
+
+    /// Attempt to re-authenticate by sending auth_required to Shell.
+    /// Returns true if re-auth succeeded and provider was rebuilt.
+    async fn try_reauth<W, R>(
+        &mut self,
+        reader: &mut tokio::io::Lines<R>,
+        writer: &mut W,
+    ) -> bool
+    where
+        W: Write,
+        R: AsyncBufReadExt + Unpin,
+    {
+        use crate::protocol::AuthReason;
+
+        let request_id = self.next_request_id();
+        let providers = builtin_auth_providers();
+
+        let auth_msg = OutputMessage::auth_required(
+            &request_id,
+            AuthReason::Invalid,
+            Some("API authentication failed (401/403)".to_string()),
+            providers,
+        );
+        self.emit(writer, &auth_msg);
+
+        let auth_result = wait_for_auth_response(&request_id, reader).await;
+        // Note: buffered_lines during mid-session re-auth are discarded since
+        // the retry loop will re-send if needed.
+        let response = match auth_result.response {
+            Some(r) => r,
+            None => return false,
+        };
+
+        apply_auth_credentials(&mut self.config, &response);
+
+        if response.persist {
+            if let Err(e) = config::persist_config(&self.config) {
+                eprintln!("[cosh-tui] Warning: failed to persist config: {e}");
+            }
+        }
+
+        // Rebuild provider
+        let resolved = self.config.resolve_provider();
+        let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
+        self.provider = Box::new(
+            crate::provider::openai_compat::OpenAICompatProvider::new(
+                &resolved.base_url,
+                &resolved.api_key,
+                profile,
+            ),
+        );
+
+        self.emit(writer, &OutputMessage::system_status("auth_ok"));
+        true
     }
 }
 
