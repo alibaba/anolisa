@@ -5,6 +5,7 @@ use anolisa_core::sandbox_install::{
     SandboxInstallRequest, build_dry_run_plan, execute_sandbox_install, validate_request,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::privilege;
 
 use crate::context::CliContext;
 use crate::response::{self, CliError};
@@ -194,6 +195,7 @@ pub enum SecurityCommands {
 }
 
 pub fn handle(args: OsbaseArgs, ctx: &CliContext) -> Result<(), CliError> {
+    osbase_preflight()?;
     match args.command {
         OsbaseCommands::Sandbox(s) => handle_sandbox(s.command, ctx),
         OsbaseCommands::Kernel(k) => {
@@ -233,25 +235,6 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
         } => {
             let backend = sandbox_target_to_kind(&target);
             let variant_str = variant.unwrap_or_else(|| backend.default_variant().to_string());
-
-            // sandbox install writes to /etc, /var/lib, /usr/lib and enables
-            // systemd units — all of which are system-scoped. The default
-            // global --install-mode is `user`, under which sandbox
-            // install would silently route audit log + state to
-            // ~/.local/state/anolisa/ while the actual writes still target
-            // /etc and /var/lib (and need root). Reject that mismatch up
-            // front with a clear error rather than letting it surface as a
-            // permission-denied or `dnf` failure deep in Phase 2/3.
-            if !matches!(ctx.install_mode, crate::context::InstallMode::System) {
-                return Err(CliError::InvalidArgument {
-                    command: format!(
-                        "osbase sandbox install {target} --variant={variant_str}"
-                    ),
-                    reason:
-                        "sandbox install is system-only; pass --install-mode=system (and run as root)"
-                            .to_string(),
-                });
-            }
 
             let request = SandboxInstallRequest {
                 backend,
@@ -325,6 +308,26 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
 }
 
 // ===========================================================================
+// Preflight
+// ===========================================================================
+
+/// osbase operates exclusively in system mode — it writes to /etc, /var/lib,
+/// /usr/lib and enables systemd units.  Instead of inspecting the global
+/// `--install-mode` flag (whose default is `user` for most anolisa commands),
+/// we simply require euid==0.  The `--install-mode=user` rejection is handled
+/// at the clap layer: osbase subcommands do not accept that flag.
+fn osbase_preflight() -> Result<(), CliError> {
+    if !privilege::is_root() {
+        return Err(CliError::PermissionDenied {
+            command: "osbase".to_string(),
+            reason: "osbase only operates in system mode and requires root privileges".to_string(),
+            hint: Some("re-run with: sudo anolisa osbase ...".to_string()),
+        });
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -340,13 +343,9 @@ fn sandbox_target_to_kind(target: &SandboxTarget) -> SandboxBackendKind {
 }
 
 fn resolve_layout(ctx: &CliContext) -> FsLayout {
-    match ctx.install_mode {
-        crate::context::InstallMode::System => FsLayout::system(ctx.prefix.clone()),
-        crate::context::InstallMode::User => {
-            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-            FsLayout::user(home)
-        }
-    }
+    // osbase is inherently system-scoped; ignore ctx.install_mode which
+    // defaults to User for the rest of the CLI.
+    FsLayout::system(ctx.prefix.clone())
 }
 
 fn render_install_outcome(
