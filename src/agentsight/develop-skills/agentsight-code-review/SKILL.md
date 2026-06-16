@@ -1,6 +1,6 @@
 ---
 name: agentsight-code-review
-description: 对当前分支的变更执行 AgentSight 专属代码审查。覆盖 5 个维度：硬性规则合规、eBPF 安全、FFI 边界、Footprint Ladder、流水线测试覆盖。输出编号的 findings 列表，每条包含文件路径和行号。
+description: 对当前分支的变更执行 AgentSight 专属代码审查。覆盖 6 个维度：硬性规则合规、eBPF 安全、FFI 边界、Footprint Ladder、流水线测试覆盖、文档同步。输出编号的 findings 列表，每条包含文件路径和行号。
 ---
 
 # AgentSight Code Review
@@ -66,6 +66,17 @@ git log --oneline origin/main..HEAD
 - 跨模块行为是否优先用集成测试而非单元测试
 - 测试代码是否放在 `*_tests.rs` 或 `#[cfg(test)] mod tests` 中
 
+#### 维度 6：文档同步
+
+检查变更是否需要同步更新文档：
+
+- 新增/修改 CLI 子命令 → `AGENTS.md ## 7. CLI Subcommands` 和 `CLAUDE.md` 是否更新
+- 新增/修改 API endpoint → `AGENTS.md ## 8. API Endpoints` 是否更新
+- 新增 eBPF 探针 → `AGENTS.md ## 6. eBPF Probes` 是否更新
+- 新增模块 → `AGENTS.md ## 4. Module Map` 是否更新
+- 修改配置项 → `AGENTS.md ## 10. Configuration` 和 `CLAUDE.md` 是否更新
+- 新增/修改 FFI 导出 → `src/FFI_AGENTS.md` 是否需要更新
+
 ### 步骤 3：输出 Findings
 
 使用编号列表输出，每条 finding 必须包含：
@@ -93,5 +104,5 @@ N. [维度名] 文件路径:行号 — 问题描述
 如果所有维度检查通过且自动检查全绿，输出：
 
 ```
-✓ 全部 5 个维度检查通过，未发现问题。
+✓ 全部 6 个维度检查通过，未发现问题。
 ```

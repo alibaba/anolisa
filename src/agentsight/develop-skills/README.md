@@ -30,4 +30,4 @@ AgentSight 为开发者提供的 AI coding skill 集合，帮助 AI agent 遵循
 | Skill | 说明 |
 |-------|------|
 | `agentsight-pr-body` | 分析分支变更，按 anolisa 规范生成/更新 PR 标题和正文 |
-| `agentsight-code-review` | 5 维度代码审查：硬性规则、eBPF 安全、FFI 边界、Footprint Ladder、流水线测试 |
+| `agentsight-code-review` | 6 维度代码审查：硬性规则、eBPF 安全、FFI 边界、Footprint Ladder、流水线测试、文档同步 |
