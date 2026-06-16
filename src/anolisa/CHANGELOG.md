@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-06-16
+
+### Added
+
+- `anolisa install --all` can install every available component from the catalog.
+- `anolisa install --all --fail-fast` can stop after the first failed component.
+- `anolisa install --all --json` returns one batch summary with per-component results.
+- `anolisa status` now shows adapter summaries for installed components.
+
+### Changed
+
+- `installed.toml` now distinguishes ANOLISA-managed packages from observed system RPMs.
+
 ## [0.1.8] - 2026-06-15
 
 ### Added
@@ -159,6 +172,19 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.9] - 2026-06-16
+
+### 新增
+
+- `anolisa install --all` 可安装目录中的所有可用组件。
+- `anolisa install --all --fail-fast` 可在首个失败组件后停止。
+- `anolisa install --all --json` 现返回按组件汇总的批量结果。
+- `anolisa status` 现显示已安装组件的适配器摘要。
+
+### 变更
+
+- `installed.toml` 现区分 ANOLISA 管理包和只观察的系统 RPM。
 
 ## [0.1.8] - 2026-06-15
 
