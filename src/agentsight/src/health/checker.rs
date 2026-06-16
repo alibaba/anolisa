@@ -90,7 +90,11 @@ impl HealthChecker {
             const OFFLINE_TTL_MS: u64 = 5 * 60 * 1000;
             let removed = store.cleanup_stale_offline(OFFLINE_TTL_MS);
             if removed > 0 {
-                log::info!("HealthStore: cleaned {} stale offline entries (TTL={}s)", removed, OFFLINE_TTL_MS / 1000);
+                log::info!(
+                    "HealthStore: cleaned {} stale offline entries (TTL={}s)",
+                    removed,
+                    OFFLINE_TTL_MS / 1000
+                );
             }
             offline
         } else {
