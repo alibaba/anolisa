@@ -1,0 +1,6 @@
+{
+  "PostToolUse": {
+    "match": "Edit|Write|MultiEdit",
+    "command": "python3 scripts/hooks/post-edit-format.py"
+  }
+}
