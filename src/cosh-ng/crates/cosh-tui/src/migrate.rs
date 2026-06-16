@@ -117,6 +117,10 @@ fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
     let tag_bytes = hex_decode(parts[1])?;
     let ct_bytes = hex_decode(parts[2])?;
 
+    if iv_bytes.len() != 12 || tag_bytes.len() != 16 {
+        return None;
+    }
+
     let salt = std::fs::read(salt_path).ok()?;
     if salt.len() != 32 {
         return None;
