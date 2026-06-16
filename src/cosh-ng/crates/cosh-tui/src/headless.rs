@@ -122,6 +122,24 @@ where
                     engine.tool_names(),
                 );
                 engine.emit(writer, &init_msg);
+
+                // ─── Hook: SessionStart ───
+                let cwd_str = engine.cwd().to_string_lossy().to_string();
+                let ss_result = engine
+                    .hook_system
+                    .fire_session_start(&engine.session_id, &cwd_str)
+                    .await;
+                for n in &ss_result.notifications {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::hook_notification(&n.hook_name, &n.message),
+                    );
+                }
+                if let Some(ref ctx) = ss_result.additional_context {
+                    engine.messages.push(
+                        crate::provider::Message::system(&format!("[Hook context] {ctx}")),
+                    );
+                }
             }
             ShellControlRequest::Interrupt => {
                 engine.provider.cancel();

@@ -82,6 +82,31 @@ fn default_max_tool_calls() -> u32 {
 pub struct HooksConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    #[serde(default, rename = "PreToolUse")]
+    pub pre_tool_use: Vec<HookDefinition>,
+    #[serde(default, rename = "PostToolUse")]
+    pub post_tool_use: Vec<HookDefinition>,
+    #[serde(default, rename = "UserPromptSubmit")]
+    pub user_prompt_submit: Vec<HookDefinition>,
+    #[serde(default, rename = "SessionStart")]
+    pub session_start: Vec<HookDefinition>,
+    #[serde(default, rename = "Stop")]
+    pub stop: Vec<HookDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HookDefinition {
+    pub command: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub sequential: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

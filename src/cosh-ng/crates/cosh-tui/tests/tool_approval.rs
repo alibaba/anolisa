@@ -141,3 +141,61 @@ fn result_has_duration_ms() {
     let result = msgs.iter().find(|m| m["type"] == "result").unwrap();
     assert!(result["duration_ms"].is_number());
 }
+
+#[test]
+fn session_start_hook_emits_notification() {
+    // Create a temp HOME with .copilot-shell/config.toml that has hooks enabled
+    let home = tempfile::tempdir().expect("temp home");
+    let config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[hooks]
+enabled = true
+
+[[hooks.SessionStart]]
+command = "echo '{\"system_message\":\"hello from hook\"}'"
+name = "test-hook"
+"#,
+    )
+    .unwrap();
+
+    let bin = binary_path();
+    let mut child = Command::new(&bin)
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, r#"{{"type":"control_request","request_id":"init-1","request":{{"subtype":"initialize"}}}}"#).unwrap();
+        writeln!(stdin, r#"{{"type":"control_request","request_id":"shut-1","request":{{"subtype":"shutdown"}}}}"#).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let msgs: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect();
+
+    let hook_notification = msgs
+        .iter()
+        .find(|m| m["type"] == "system" && m["subtype"] == "hook_notification");
+    assert!(
+        hook_notification.is_some(),
+        "expected hook_notification in output, got: {:?}",
+        msgs
+    );
+    let notif = hook_notification.unwrap();
+    assert!(
+        notif["status"].as_str().unwrap().contains("hello from hook"),
+        "hook notification should contain message"
+    );
+}

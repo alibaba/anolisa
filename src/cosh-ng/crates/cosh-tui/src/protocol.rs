@@ -402,6 +402,16 @@ impl OutputMessage {
         }
     }
 
+    pub fn hook_notification(hook_name: &str, message: &str) -> Self {
+        Self::System {
+            subtype: "hook_notification".to_string(),
+            payload: SystemPayload {
+                status: Some(format!("[{hook_name}] {message}")),
+                ..Default::default()
+            },
+        }
+    }
+
     pub fn assistant_text(session_id: &str, text: &str) -> Self {
         Self::Assistant {
             session_id: session_id.to_string(),

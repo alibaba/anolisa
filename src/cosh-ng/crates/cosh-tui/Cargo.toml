@@ -27,6 +27,7 @@ dirs = "5"
 chrono = { workspace = true, features = ["clock"] }
 which.workspace = true
 toml.workspace = true
+regex.workspace = true
 aes-gcm = "0.10"
 scrypt = "0.11"
 

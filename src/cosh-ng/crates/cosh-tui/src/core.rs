@@ -11,6 +11,7 @@ use cosh_types::audit::Outcome;
 use crate::auth::{apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response};
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
+use crate::hook::{HookDecision, HookNotification, HookSystem};
 use crate::loop_detect::LoopDetector;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
 use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
@@ -26,6 +27,7 @@ pub struct CoshCore {
     pub model: String,
     pub shell_context: Option<ShellContext>,
     pub extra_params: Option<serde_json::Value>,
+    pub hook_system: HookSystem,
     loaded_policy: LoadedPolicy,
     request_counter: AtomicU32,
     truncator: OutputTruncator,
@@ -44,6 +46,8 @@ impl CoshCore {
             eprintln!("[cosh-core] {w}");
         }
 
+        let hook_system = HookSystem::from_config(&config.hooks);
+
         Self {
             config,
             provider,
@@ -53,6 +57,7 @@ impl CoshCore {
             model,
             shell_context: None,
             extra_params: None,
+            hook_system,
             loaded_policy,
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
@@ -71,6 +76,12 @@ impl CoshCore {
         if let Ok(json) = serde_json::to_string(msg) {
             let _ = writeln!(writer, "{json}");
             let _ = writer.flush();
+        }
+    }
+
+    fn emit_hook_notifications<W: Write>(&self, writer: &mut W, notifications: &[HookNotification]) {
+        for n in notifications {
+            self.emit(writer, &OutputMessage::hook_notification(&n.hook_name, &n.message));
         }
     }
 
@@ -133,7 +144,27 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        // ─── Hook: UserPromptSubmit ───
+        let cwd_str = self.cwd().to_string_lossy().to_string();
+        let prompt_result = self
+            .hook_system
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
+            .await;
+        self.emit_hook_notifications(writer, &prompt_result.notifications);
+        if let HookDecision::Block(reason) = &prompt_result.decision {
+            self.emit(
+                writer,
+                &OutputMessage::assistant_text(&self.session_id, &format!("Prompt blocked by hook: {reason}")),
+            );
+            return Ok(());
+        }
+
         self.messages.push(Message::user(content));
+
+        // Inject additional context from hooks
+        if let Some(ref ctx) = prompt_result.additional_context {
+            self.messages.push(Message::system(&format!("[Hook context] {ctx}")));
+        }
 
         let tool_decls = self.tools.declarations();
         let generate_config = GenerateConfig {
@@ -319,6 +350,22 @@ impl CoshCore {
                     )));
                     continue;
                 }
+
+                // ─── Hook: Stop ───
+                let stop_result = self
+                    .hook_system
+                    .fire_stop(&self.session_id, &cwd_str, &text_buf)
+                    .await;
+                self.emit_hook_notifications(writer, &stop_result.notifications);
+                if stop_result.reject {
+                    let reason = stop_result.reject_reason.unwrap_or_else(|| "rejected by hook".to_string());
+                    self.messages.push(Message::assistant(&text_buf));
+                    self.messages.push(Message::user(&format!(
+                        "[Hook rejected response] {reason}. Please revise your answer."
+                    )));
+                    continue;
+                }
+
                 self.messages.push(Message::assistant(&text_buf));
                 return Ok(());
             }
@@ -368,6 +415,36 @@ impl CoshCore {
 
                 let outcome = self.classify_tool(&tc.name, &params);
 
+                // ─── Hook: PreToolUse ───
+                let hook_result = self
+                    .hook_system
+                    .fire_pre_tool_use(&self.session_id, &cwd_str, &tc.name, &params)
+                    .await;
+                self.emit_hook_notifications(writer, &hook_result.notifications);
+
+                let (outcome, params) = match hook_result.decision {
+                    HookDecision::Block(reason) => {
+                        let result = ToolResult::error(format!("Blocked by hook: {reason}"));
+                        self.messages.push(Message::tool_result(
+                            &tc.id,
+                            &result.output,
+                            result.is_error,
+                        ));
+                        continue;
+                    }
+                    HookDecision::Ask => (Outcome::RequireApproval, params),
+                    _ => {
+                        let params = if let Some(patch) = hook_result.tool_input_patch {
+                            crate::hook::merge_json_pub(params, patch)
+                        } else {
+                            params
+                        };
+                        (outcome, params)
+                    }
+                };
+
+                let params_for_post_hook = params.clone();
+
                 let result = match outcome {
                     Outcome::Allow => {
                         let result = self.execute_tool(&tc.name, params, &ctx).await;
@@ -416,6 +493,31 @@ impl CoshCore {
                     Outcome::Deny => {
                         ToolResult::error(format!("Tool '{}' denied by security policy", tc.name))
                     }
+                };
+
+                // ─── Hook: PostToolUse ───
+                let post_hook = self
+                    .hook_system
+                    .fire_post_tool_use(
+                        &self.session_id,
+                        &cwd_str,
+                        &tc.name,
+                        &params_for_post_hook,
+                        &result.output,
+                    )
+                    .await;
+                self.emit_hook_notifications(writer, &post_hook.notifications);
+
+                let result = if post_hook.deny {
+                    let reason = post_hook.deny_reason.unwrap_or_else(|| "denied by hook".to_string());
+                    ToolResult::error(format!("Post-tool hook denied: {reason}"))
+                } else if let Some(ref extra) = post_hook.additional_context {
+                    ToolResult {
+                        output: format!("{}\n[Hook context] {extra}", result.output),
+                        is_error: result.is_error,
+                    }
+                } else {
+                    result
                 };
 
                 self.messages.push(Message::tool_result(
