@@ -41,10 +41,9 @@ use anolisa_core::adapter::driver::{AdapterStatusReport, DriverPlan};
 use anolisa_core::adapter::manager::{
     AdapterManager, DisableOutcome, EnableOutcome, ScanEntry, ScanReport, StatusReport,
 };
-use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
-use crate::context::{CliContext, InstallMode};
+use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
 /// CLI arguments for the `adapter` sub-surface.
@@ -169,21 +168,9 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
     }
 }
 
-/// Build a manager for the active layout. A user-mode CLI also searches
-/// the packaged/system datadir so system-installed adapter resources are
-/// still discoverable.
+/// Build a manager for the active layout.
 fn build_manager(ctx: &CliContext) -> AdapterManager {
-    let layout = common::resolve_layout(ctx);
-    let env = anolisa_env::EnvService::detect();
-    let system_datadir = crate::packaged::packaged_datadir_root(&layout);
-    let mut manager = AdapterManager::new(layout, Some(env.home), env.user);
-    if let Some(root) = system_datadir {
-        manager.push_datadir_root(root);
-    }
-    if ctx.install_mode == InstallMode::User {
-        manager.push_state_root(FsLayout::system(ctx.prefix.clone()).state_dir);
-    }
-    manager
+    common::build_adapter_manager(ctx)
 }
 
 // ---------------------------------------------------------------------------

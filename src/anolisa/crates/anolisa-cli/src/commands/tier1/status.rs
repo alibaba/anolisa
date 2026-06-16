@@ -18,6 +18,8 @@ use serde::Serialize;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use anolisa_core::adapter::claim::ClaimStatus;
+use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
     Catalog, HealthEntry, HealthSpec, InstalledObject, InstalledState, IntegrityStatus, ObjectKind,
@@ -59,6 +61,24 @@ pub struct StatusArgs {
     pub component: Option<String>,
 }
 
+/// Summary of one adapter associated with a component, derived from
+/// `AdapterManager::scan()`. Included in the component status record
+/// when adapter declarations/resources/receipts exist.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct AdapterSummaryRecord {
+    component: String,
+    framework: String,
+    declared: bool,
+    resource_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_root: Option<String>,
+    driver_available: bool,
+    framework_detected: bool,
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_status: Option<ClaimStatus>,
+}
+
 /// JSON-shaped record for a single component, used in both the wire
 /// envelope and the human renderer. Fields are projected straight from
 /// the matching [`InstalledObject`] on disk; optional/empty fields are
@@ -81,6 +101,9 @@ struct ComponentRecord {
     /// users see whatever the install runner recorded.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     health: Vec<HealthEntry>,
+    /// Associated adapter summaries from `AdapterManager::scan()`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    adapters: Vec<AdapterSummaryRecord>,
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
@@ -92,12 +115,16 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     // would mask a working install.
     let catalog = common::load_bundled_catalog(ctx, COMMAND).ok();
     let install_mode = ctx.install_mode.as_str();
+
+    let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
+
     let records = select_components(
         &state,
         &layout,
         catalog.as_ref(),
         install_mode,
         args.component.as_deref(),
+        adapter_scan.as_ref().map(|r| r.entries.as_slice()),
     );
 
     if ctx.json {
@@ -121,6 +148,7 @@ fn select_components(
     catalog: Option<&Catalog>,
     install_mode: &str,
     name: Option<&str>,
+    adapter_scan: Option<&[ScanEntry]>,
 ) -> Vec<ComponentRecord> {
     let installed: Vec<&InstalledObject> = state
         .objects
@@ -131,10 +159,18 @@ fn select_components(
     match name {
         None => installed
             .iter()
-            .map(|o| record_from_object(layout, catalog, install_mode, o))
+            .map(|o| {
+                let mut rec = record_from_object(layout, catalog, install_mode, o);
+                rec.adapters = adapter_summaries_for(&o.name, adapter_scan);
+                rec
+            })
             .collect(),
         Some(target) => match installed.iter().find(|o| o.name == target) {
-            Some(obj) => vec![record_from_object(layout, catalog, install_mode, obj)],
+            Some(obj) => {
+                let mut rec = record_from_object(layout, catalog, install_mode, obj);
+                rec.adapters = adapter_summaries_for(&obj.name, adapter_scan);
+                vec![rec]
+            }
             None => vec![ComponentRecord {
                 name: target.to_string(),
                 status: "not_installed".to_string(),
@@ -143,9 +179,32 @@ fn select_components(
                 last_operation_id: None,
                 enabled_features: Vec::new(),
                 health: Vec::new(),
+                adapters: Vec::new(),
             }],
         },
     }
+}
+
+/// Build adapter summary records for `component` from the scan entries.
+fn adapter_summaries_for(component: &str, scan: Option<&[ScanEntry]>) -> Vec<AdapterSummaryRecord> {
+    let Some(entries) = scan else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|e| e.component == component)
+        .map(|e| AdapterSummaryRecord {
+            component: e.component.clone(),
+            framework: e.framework.clone(),
+            declared: e.declared,
+            resource_present: e.resource_root.is_some(),
+            resource_root: e.resource_root.as_ref().map(|p| p.display().to_string()),
+            driver_available: e.driver_available,
+            framework_detected: e.framework_detected,
+            enabled: e.enabled,
+            claim_status: e.claim_status,
+        })
+        .collect()
 }
 
 fn record_from_object(
@@ -186,6 +245,7 @@ fn record_from_object(
         last_operation_id: obj.last_operation_id.clone(),
         enabled_features: obj.enabled_features.clone(),
         health,
+        adapters: Vec::new(),
     }
 }
 
@@ -697,6 +757,53 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
                 );
             }
         }
+        if !record.adapters.is_empty() {
+            println!("    {}", color.label("Associated Adapters:"));
+            for adapter in &record.adapters {
+                println!("      {}/{}", adapter.component, adapter.framework);
+                println!(
+                    "        {} {}",
+                    color.label("Resource:"),
+                    if adapter.resource_present {
+                        "present"
+                    } else {
+                        "missing"
+                    }
+                );
+                println!(
+                    "        {} {}",
+                    color.label("Framework:"),
+                    if adapter.framework_detected {
+                        "detected"
+                    } else {
+                        "not detected"
+                    }
+                );
+                println!(
+                    "        {} {}",
+                    color.label("Driver:"),
+                    if adapter.driver_available {
+                        "available"
+                    } else {
+                        "missing"
+                    }
+                );
+                println!(
+                    "        {} {}",
+                    color.label("State:"),
+                    color.status(adapter_state_label(adapter))
+                );
+            }
+        }
+    }
+}
+
+fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
+    match (adapter.enabled, adapter.claim_status) {
+        (_, Some(ClaimStatus::CleanupFailed)) => "cleanup_failed",
+        (true, Some(ClaimStatus::Enabled)) => "enabled",
+        (true, None) => "enabled",
+        (false, _) => "not enabled",
     }
 }
 
@@ -761,7 +868,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
         let state = InstalledState::load(&path).expect("missing file is not an error");
-        let records = select_components(&state, &dummy_layout(), None, "system", None);
+        let records = select_components(&state, &dummy_layout(), None, "system", None, None);
         assert!(records.is_empty());
     }
 
@@ -779,7 +886,7 @@ mod tests {
             ObjectStatus::Partial,
         ));
 
-        let records = select_components(&state, &dummy_layout(), None, "system", None);
+        let records = select_components(&state, &dummy_layout(), None, "system", None, None);
         assert_eq!(records.len(), 2);
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"agentsight"));
@@ -801,7 +908,14 @@ mod tests {
             ObjectStatus::Installed,
         ));
 
-        let records = select_components(&state, &dummy_layout(), None, "system", Some("ws-ckpt"));
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("ws-ckpt"),
+            None,
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "ws-ckpt");
         assert_eq!(records[0].status, "not_installed");
@@ -826,8 +940,14 @@ mod tests {
         }];
         state.upsert_object(obj);
 
-        let records =
-            select_components(&state, &dummy_layout(), None, "system", Some("agentsight"));
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         assert_eq!(records.len(), 1);
         let only = &records[0];
         assert_eq!(only.name, "agentsight");
@@ -863,7 +983,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "installed");
         // Exactly one integrity entry, status "ok", with the path in the name.
@@ -896,7 +1016,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "failed", "missing file -> failed");
         let integrity = only
@@ -928,7 +1048,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "failed", "sha mismatch -> failed");
         let integrity = only
@@ -959,7 +1079,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "degraded");
         let integrity = only
@@ -988,7 +1108,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "disabled");
         // The integrity entry is still surfaced so users can see the drift,
@@ -1022,7 +1142,7 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"));
+        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
         let only = &records[0];
         assert_eq!(only.status, "failed", "out-of-bounds path -> failed");
         let integrity = only
@@ -1097,6 +1217,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "installed");
@@ -1153,6 +1274,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "failed", "required missing file -> failed");
@@ -1203,6 +1325,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded", "optional missing file -> degraded");
@@ -1265,6 +1388,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "installed");
@@ -1312,6 +1436,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "failed");
@@ -1359,6 +1484,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(
@@ -1421,6 +1547,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1479,6 +1606,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(
@@ -1530,6 +1658,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1575,6 +1704,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1625,6 +1755,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
@@ -1667,8 +1798,14 @@ mod tests {
         ));
 
         // user mode is the portable "no service backend" install_mode.
-        let records =
-            select_components(&state, &layout, Some(&catalog), "user", Some("agentsight"));
+        let records = select_components(
+            &state,
+            &layout,
+            Some(&catalog),
+            "user",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "degraded", "unsupported -> degraded");
         let entry = only
@@ -1720,6 +1857,7 @@ mod tests {
             Some(&catalog),
             "system",
             Some("agentsight"),
+            None,
         );
         let only = &records[0];
         assert_eq!(
@@ -1740,5 +1878,188 @@ mod tests {
                 .any(|h| h.name == "agentsight:command:self-check" && h.status == "ok"),
             "manifest entry present",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Adapter summary tests
+    // -----------------------------------------------------------------
+
+    fn sample_scan_entry(component: &str, framework: &str, enabled: bool) -> ScanEntry {
+        ScanEntry {
+            component: component.to_string(),
+            framework: framework.to_string(),
+            declared: true,
+            resource_root: Some(PathBuf::from(format!(
+                "/usr/local/share/anolisa/adapters/{component}/{framework}"
+            ))),
+            driver_available: true,
+            framework_detected: true,
+            enabled,
+            claim_status: if enabled {
+                Some(ClaimStatus::Enabled)
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn component_record_has_no_adapters_by_default() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        assert!(records[0].adapters.is_empty());
+    }
+
+    #[test]
+    fn adapter_summaries_filtered_to_requested_component() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "tokenless",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let scan = vec![
+            sample_scan_entry("tokenless", "openclaw", true),
+            sample_scan_entry("agentsight", "openclaw", false),
+        ];
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("tokenless"),
+            Some(&scan),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].adapters.len(), 1);
+        assert_eq!(records[0].adapters[0].component, "tokenless");
+        assert_eq!(records[0].adapters[0].framework, "openclaw");
+        assert!(records[0].adapters[0].enabled);
+        assert_eq!(
+            records[0].adapters[0].claim_status,
+            Some(ClaimStatus::Enabled)
+        );
+    }
+
+    #[test]
+    fn adapter_summaries_included_in_unfiltered_listing() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "tokenless",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let scan = vec![sample_scan_entry("tokenless", "openclaw", true)];
+        let records = select_components(&state, &dummy_layout(), None, "system", None, Some(&scan));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].adapters.len(), 1);
+        assert_eq!(records[0].adapters[0].component, "tokenless");
+    }
+
+    #[test]
+    fn synthetic_not_installed_record_has_no_adapters() {
+        let state = InstalledState::default();
+        let scan = vec![sample_scan_entry("ghost", "openclaw", false)];
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("ghost"),
+            Some(&scan),
+        );
+        assert_eq!(records[0].status, "not_installed");
+        assert!(records[0].adapters.is_empty());
+    }
+
+    #[test]
+    fn adapter_summary_json_serialization() {
+        let record = AdapterSummaryRecord {
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            declared: true,
+            resource_present: true,
+            resource_root: Some("/data/adapters/tokenless/openclaw".to_string()),
+            driver_available: true,
+            framework_detected: true,
+            enabled: true,
+            claim_status: Some(ClaimStatus::Enabled),
+        };
+        let json = serde_json::to_value(&record).expect("serialize");
+        assert_eq!(json["component"], "tokenless");
+        assert_eq!(json["framework"], "openclaw");
+        assert_eq!(json["declared"], true);
+        assert_eq!(json["resource_present"], true);
+        assert_eq!(json["driver_available"], true);
+        assert_eq!(json["framework_detected"], true);
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["claim_status"], "enabled");
+    }
+
+    #[test]
+    fn adapter_summary_skips_empty_adapters_in_json() {
+        let record = ComponentRecord {
+            name: "agentsight".to_string(),
+            status: "installed".to_string(),
+            version: Some("0.1.0".to_string()),
+            installed_at: Some("2026-06-01T10:00:00Z".to_string()),
+            last_operation_id: None,
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+            adapters: Vec::new(),
+        };
+        let json = serde_json::to_value(&record).expect("serialize");
+        assert!(
+            json.get("adapters").is_none(),
+            "empty adapters must be omitted from JSON"
+        );
+    }
+
+    #[test]
+    fn adapter_state_label_values() {
+        let base = AdapterSummaryRecord {
+            component: "x".to_string(),
+            framework: "y".to_string(),
+            declared: true,
+            resource_present: true,
+            resource_root: None,
+            driver_available: true,
+            framework_detected: true,
+            enabled: true,
+            claim_status: Some(ClaimStatus::Enabled),
+        };
+
+        assert_eq!(adapter_state_label(&base), "enabled");
+
+        let mut cleanup = base.clone();
+        cleanup.claim_status = Some(ClaimStatus::CleanupFailed);
+        assert_eq!(adapter_state_label(&cleanup), "cleanup_failed");
+
+        let mut enabled_no_claim = base.clone();
+        enabled_no_claim.claim_status = None;
+        assert_eq!(adapter_state_label(&enabled_no_claim), "enabled");
+
+        let mut not_enabled = base.clone();
+        not_enabled.enabled = false;
+        assert_eq!(adapter_state_label(&not_enabled), "not enabled");
     }
 }

@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anolisa_core::adapter::manager::AdapterManager;
 use anolisa_core::{
     Catalog, CatalogLayers, FetchFailure, HttpFetch, InstalledState, ObjectStatus, UreqFetch,
 };
@@ -235,6 +236,22 @@ pub(crate) fn object_status_str(status: ObjectStatus) -> &'static str {
 /// `list --enabled` to exclude `disabled`/`failed`/`not_installed`.
 pub(crate) fn status_is_enabled(status_label: &str) -> bool {
     matches!(status_label, "installed" | "degraded" | "adopted")
+}
+
+/// Build an [`AdapterManager`] for the active layout, shared between
+/// `adapter` and `status` handlers.
+pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
+    let layout = resolve_layout(ctx);
+    let env = anolisa_env::EnvService::detect();
+    let system_datadir = packaged::packaged_datadir_root(&layout);
+    let mut manager = AdapterManager::new(layout, Some(env.home), env.user);
+    if let Some(root) = system_datadir {
+        manager.push_datadir_root(root);
+    }
+    if ctx.install_mode == InstallMode::User {
+        manager.push_state_root(FsLayout::system(ctx.prefix.clone()).state_dir);
+    }
+    manager
 }
 
 #[cfg(test)]
