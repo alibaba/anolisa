@@ -435,14 +435,14 @@ pub fn download_with_progress(
             }
         })?;
         downloaded += n as u64;
-        if let Some(limit) = max_bytes {
-            if downloaded > limit {
-                let _ = fs::remove_file(dest);
-                return Err(SelfUpdateError::DownloadTooLarge {
-                    limit,
-                    received: downloaded,
-                });
-            }
+        if let Some(limit) = max_bytes
+            && downloaded > limit
+        {
+            let _ = fs::remove_file(dest);
+            return Err(SelfUpdateError::DownloadTooLarge {
+                limit,
+                received: downloaded,
+            });
         }
         if let Some(cb) = on_progress {
             cb(downloaded, progress_total);

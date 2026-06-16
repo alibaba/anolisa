@@ -108,10 +108,10 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
         // system is NOT in Registered state.  Another process may have raced
         // us and successfully registered; in that case its upload config is
         // valid and we must NOT tear it down.
-        if mgr.read_state() != ConsentState::Registered {
-            if let Err(rollback_err) = starter.stop() {
-                eprintln!("warn: rollback of upload start also failed: {rollback_err}");
-            }
+        if mgr.read_state() != ConsentState::Registered
+            && let Err(rollback_err) = starter.stop()
+        {
+            eprintln!("warn: rollback of upload start also failed: {rollback_err}");
         }
         return Err(CliError::Runtime {
             command: "register".to_string(),
@@ -122,10 +122,10 @@ fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError>
     println!();
     println!("Registered successfully.");
     println!("  Status:       registered");
-    if let Some(rec) = mgr.read_record() {
-        if let Some(t) = rec.registration_time {
-            println!("  Registered:   {}", t.format("%Y-%m-%dT%H:%M:%SZ"));
-        }
+    if let Some(rec) = mgr.read_record()
+        && let Some(t) = rec.registration_time
+    {
+        println!("  Registered:   {}", t.format("%Y-%m-%dT%H:%M:%SZ"));
     }
     println!("  Usage Report: active");
 
@@ -260,11 +260,11 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
         ConsentState::Unregistered => {
             println!("  Consent State: UNREGISTERED");
             println!("  Usage Report:  disabled (local only)");
-            if let Some(r) = &rec {
-                if let Some(t) = r.registration_time {
-                    let via = format_source(&r.source);
-                    println!("  Last Registered: {}{via}", t.format("%Y-%m-%d %H:%M"));
-                }
+            if let Some(r) = &rec
+                && let Some(t) = r.registration_time
+            {
+                let via = format_source(&r.source);
+                println!("  Last Registered: {}{via}", t.format("%Y-%m-%d %H:%M"));
             }
             println!();
             println!("  To enable registration: sudo anolisa register");

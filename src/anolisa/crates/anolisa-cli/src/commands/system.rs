@@ -290,14 +290,13 @@ fn resolve_sandbox_config_path(layout: &FsLayout) -> PathBuf {
 }
 
 fn deploy_sandbox_config(cmd: &str, layout: &FsLayout) -> Result<(), CliError> {
-    const SANDBOX_TOML_TEMPLATE: &str =
-        include_str!("../../../../manifests/osbase/sandbox.toml");
+    const SANDBOX_TOML_TEMPLATE: &str = include_str!("../../../../manifests/sandbox.toml");
 
     let config_path = resolve_sandbox_config_path(layout);
 
     if config_path.exists() {
         eprintln!(
-            "[setup] sandbox.toml already exists, skipping (use --reset-config to overwrite)"
+            "[setup] sandbox.toml already exists, skipping (remove the file manually to regenerate)"
         );
         return Ok(());
     }
@@ -318,7 +317,10 @@ fn deploy_sandbox_config(cmd: &str, layout: &FsLayout) -> Result<(), CliError> {
         ),
     })?;
 
-    eprintln!("[setup] sandbox.toml deployed \u{2192} {}", config_path.display());
+    eprintln!(
+        "[setup] sandbox.toml deployed \u{2192} {}",
+        config_path.display()
+    );
     Ok(())
 }
 
@@ -658,15 +660,14 @@ fn check_service_state() -> StatusServiceState {
     }
 }
 
+/// Handshake result: (helper_version, compatible)
+type HandshakeInfo = (String, bool);
+/// Status info: (uptime_secs, last_operation, last_operation_time)
+type StatusInfo = (u64, Option<String>, Option<String>);
+
 /// Attempt to connect to the helper socket, perform handshake, and query
 /// system status. Returns (connectable, handshake_info, status_info).
-fn try_status_connection(
-    cli_version: &str,
-) -> (
-    bool,
-    Option<(String, bool)>,
-    Option<(u64, Option<String>, Option<String>)>,
-) {
+fn try_status_connection(cli_version: &str) -> (bool, Option<HandshakeInfo>, Option<StatusInfo>) {
     let mut stream = match UnixStream::connect(SYSTEM_HELPER_SOCKET) {
         Ok(s) => s,
         Err(_) => return (false, None, None),

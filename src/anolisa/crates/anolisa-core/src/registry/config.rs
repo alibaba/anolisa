@@ -146,10 +146,8 @@ impl RegistryConfig {
         if let Some(table) = file_table {
             config.apply_file_table(table);
         }
-        if env_opted {
-            if let Some(url) = env_url {
-                config.index_url = url.trim().to_string();
-            }
+        if env_opted && let Some(url) = env_url {
+            config.index_url = url.trim().to_string();
         }
         Ok(Some(config))
     }

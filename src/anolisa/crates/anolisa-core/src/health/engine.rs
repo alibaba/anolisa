@@ -189,14 +189,14 @@ fn check_binary(
                     )),
                 );
             }
-            if let Some(pattern) = expect_pattern {
-                if !stdout.contains(pattern) {
-                    return CheckOutcome::leaf(
-                        label,
-                        CheckStatus::Failed,
-                        Some(format!("version output did not contain '{pattern}'")),
-                    );
-                }
+            if let Some(pattern) = expect_pattern
+                && !stdout.contains(pattern)
+            {
+                return CheckOutcome::leaf(
+                    label,
+                    CheckStatus::Failed,
+                    Some(format!("version output did not contain '{pattern}'")),
+                );
             }
             CheckOutcome::leaf(label, CheckStatus::Ok, None)
         }

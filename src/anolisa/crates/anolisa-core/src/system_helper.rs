@@ -32,6 +32,8 @@ pub enum HelperRequest {
     },
     /// Remove a scenario.
     OsbaseRemove { scenario: String, purge: bool },
+    /// Uninstall scenario packages (dnf remove).
+    OsbaseUninstall { scenario: String, dry_run: bool },
     /// List scenarios (filter: "available" | "installed" | None).
     OsbaseList { filter: Option<String> },
     /// Query status of scenario(s).
@@ -97,6 +99,7 @@ pub enum OperationType {
     Handshake,
     OsbaseInstall,
     OsbaseRemove,
+    OsbaseUninstall,
     OsbaseList,
     OsbaseStatus,
     OsbaseSetDefault,
@@ -113,6 +116,7 @@ pub fn operation_type(req: &HelperRequest) -> OperationType {
         HelperRequest::Handshake { .. } => OperationType::Handshake,
         HelperRequest::OsbaseInstall { .. } => OperationType::OsbaseInstall,
         HelperRequest::OsbaseRemove { .. } => OperationType::OsbaseRemove,
+        HelperRequest::OsbaseUninstall { .. } => OperationType::OsbaseUninstall,
         HelperRequest::OsbaseList { .. } => OperationType::OsbaseList,
         HelperRequest::OsbaseStatus { .. } => OperationType::OsbaseStatus,
         HelperRequest::OsbaseSetDefault { .. } => OperationType::OsbaseSetDefault,

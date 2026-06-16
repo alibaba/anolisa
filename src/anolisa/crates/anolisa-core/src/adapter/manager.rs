@@ -218,10 +218,10 @@ impl AdapterManager {
     /// (e.g. exe-sibling `/usr/share/anolisa/` vs install prefix
     /// `/usr/local/share/anolisa/`).
     pub fn push_primary_datadir_root(&mut self, root: PathBuf) {
-        if let Some(primary) = self.visible_roots.first_mut() {
-            if !primary.contract_datadir_roots.contains(&root) {
-                primary.contract_datadir_roots.push(root.clone());
-            }
+        if let Some(primary) = self.visible_roots.first_mut()
+            && !primary.contract_datadir_roots.contains(&root)
+        {
+            primary.contract_datadir_roots.push(root.clone());
         }
         if !self.all_datadir_roots.contains(&root) {
             self.all_datadir_roots.push(root);
@@ -349,14 +349,14 @@ impl AdapterManager {
         // plugin) is supported. Any other adapter_type must be rejected
         // before we invoke a driver.
         let adapter_type = declared_adapter_type(&manifest, &framework);
-        if let Some(ref at) = adapter_type {
-            if at != "plugin" {
-                return Err(AdapterError::UnsupportedAdapterType {
-                    component: component.to_string(),
-                    framework: framework.clone(),
-                    adapter_type: at.clone(),
-                });
-            }
+        if let Some(ref at) = adapter_type
+            && at != "plugin"
+        {
+            return Err(AdapterError::UnsupportedAdapterType {
+                component: component.to_string(),
+                framework: framework.clone(),
+                adapter_type: at.clone(),
+            });
         }
 
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
@@ -707,7 +707,7 @@ impl AdapterManager {
 
         let manifest = super::contract::resolve_component_contract(
             component,
-            &[vr.state_dir.clone()],
+            std::slice::from_ref(&vr.state_dir),
             &vr.contract_datadir_roots,
         )
         .map_err(|err| map_contract_error(component, err))?;
@@ -798,7 +798,7 @@ impl AdapterManager {
         for (component, vr) in &component_vr {
             let manifest = match super::contract::resolve_component_contract(
                 component,
-                &[vr.state_dir.clone()],
+                std::slice::from_ref(&vr.state_dir),
                 &vr.contract_datadir_roots,
             ) {
                 Ok(m) => m,
@@ -807,7 +807,7 @@ impl AdapterManager {
                         other.state_dir != vr.state_dir
                             && super::contract::resolve_component_contract(
                                 component,
-                                &[other.state_dir.clone()],
+                                std::slice::from_ref(&other.state_dir),
                                 &other.contract_datadir_roots,
                             )
                             .is_ok()

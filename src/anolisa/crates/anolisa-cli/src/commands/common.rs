@@ -255,10 +255,10 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
         // may differ (RPM uses /usr/share, CLI installs to /usr/local/share).
         let system_layout = FsLayout::system(ctx.prefix.clone());
         let mut system_datadirs = vec![system_layout.datadir.clone()];
-        if let Some(packaged) = packaged::packaged_datadir_root(&system_layout) {
-            if !system_datadirs.contains(&packaged) {
-                system_datadirs.push(packaged);
-            }
+        if let Some(packaged) = packaged::packaged_datadir_root(&system_layout)
+            && !system_datadirs.contains(&packaged)
+        {
+            system_datadirs.push(packaged);
         }
         manager.push_visible_root(VisibleRoot {
             state_dir: system_layout.state_dir,
@@ -269,10 +269,10 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
         // If the packaged datadir differs (exe-sibling vs install prefix),
         // add it to the primary root's contract datadirs so RPM-installed
         // contracts at /usr/share/... are found.
-        if let Some(packaged) = packaged::packaged_datadir_root(&layout) {
-            if packaged != layout.datadir {
-                manager.push_primary_datadir_root(packaged);
-            }
+        if let Some(packaged) = packaged::packaged_datadir_root(&layout)
+            && packaged != layout.datadir
+        {
+            manager.push_primary_datadir_root(packaged);
         }
     }
 

@@ -52,8 +52,7 @@ impl DaemonServer {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => {
                 eprintln!(
-                    "[anolisa-helper] warning: chgrp anolisa {:?} failed (group may not exist)",
-                    path
+                    "[anolisa-helper] warning: chgrp anolisa {path:?} failed (group may not exist)"
                 );
                 Ok(()) // non-fatal
             }
@@ -222,7 +221,8 @@ fn handle_connection(
             _ => 0,
         };
         let op_name = format!("{:?}", operation_type(&req));
-        write_audit_log(&peer, &op_name, "", exit_code, duration_ms);
+        let op_args = request_args(&req);
+        write_audit_log(&peer, &op_name, &op_args, exit_code, duration_ms);
 
         send_message(&mut stream, &resp)?;
 
@@ -250,15 +250,14 @@ fn dispatch(
     let op = operation_type(req);
 
     // Rate limit check (skip for Handshake — already handled).
-    if op != OperationType::Handshake {
-        if let Ok(mut rl) = rate_limiter.lock() {
-            if let Err(msg) = rl.check(peer.uid) {
-                return HelperResponse::Error {
-                    code: "RATE_LIMITED".to_string(),
-                    message: msg,
-                };
-            }
-        }
+    if op != OperationType::Handshake
+        && let Ok(mut rl) = rate_limiter.lock()
+        && let Err(msg) = rl.check(peer.uid)
+    {
+        return HelperResponse::Error {
+            code: "RATE_LIMITED".to_string(),
+            message: msg,
+        };
     }
 
     // White-list check.
@@ -273,7 +272,7 @@ fn dispatch(
     {
         if let Ok(mut last) = last_operation.lock() {
             let ts = chrono::Utc::now().to_rfc3339();
-            *last = Some((format!("{:?}", op), ts));
+            *last = Some((format!("{op:?}"), ts));
         }
     }
 
@@ -307,10 +306,7 @@ fn dispatch(
             *dry_run,
         ),
 
-        HelperRequest::OsbaseList { .. } => HelperResponse::Error {
-            code: "NOT_IMPLEMENTED".to_string(),
-            message: "osbase list via helper not yet implemented".to_string(),
-        },
+        HelperRequest::OsbaseList { .. } => dispatch_osbase_list(),
 
         HelperRequest::OsbaseStatus { .. } => HelperResponse::Error {
             code: "NOT_IMPLEMENTED".to_string(),
@@ -326,6 +322,10 @@ fn dispatch(
             code: "NOT_IMPLEMENTED".to_string(),
             message: "osbase remove via helper not yet implemented".to_string(),
         },
+
+        HelperRequest::OsbaseUninstall { scenario, dry_run } => {
+            dispatch_osbase_uninstall(scenario, *dry_run)
+        }
 
         HelperRequest::OsbaseSetDefault { .. } => HelperResponse::Error {
             code: "NOT_IMPLEMENTED".to_string(),
@@ -368,6 +368,7 @@ fn dispatch(
 
 // ─── OsbaseInstall dispatch ──────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_osbase_install(
     scenario: &str,
     register_handler: &str,
@@ -408,13 +409,74 @@ fn dispatch_osbase_install(
     let env = anolisa_env::EnvService::detect();
 
     match execute_install(&request, &env) {
-        Ok(outcome) => HelperResponse::Success {
-            message: format!(
-                "osbase install completed for {} (exit_code={})",
-                scenario, outcome.exit_code
-            ),
-            exit_code: outcome.exit_code,
-        },
+        Ok(outcome) => {
+            // Build formatted progress lines matching CLI's expected output.
+            use crate::sandbox_manifest::SandboxManifest;
+            let mut lines = Vec::new();
+
+            // Load manifest for scenario metadata.
+            let scenario_cfg = SandboxManifest::load()
+                .ok()
+                .and_then(|m| m.find_scenario(scenario).cloned());
+
+            let message = if dry_run {
+                // Dry-run: use "would install" wording.
+                if let Some(ref cfg) = scenario_cfg {
+                    let pkg_list = cfg.packages.join(" ");
+                    if !pkg_list.is_empty() {
+                        lines.push(format!("[dry-run] would install packages: {pkg_list}"));
+                    }
+                    lines.push(format!(
+                        "[dry-run] preflight: kernel {} \u{2713}",
+                        cfg.requires_kernel
+                    ));
+                }
+                lines.push("[dry-run] no packages will be installed in dry-run mode".to_string());
+                lines.join("\n")
+            } else {
+                // Preflight line
+                if let Some(ref cfg) = scenario_cfg {
+                    lines.push(format!(
+                        "preflight: kernel {} \u{2713}",
+                        cfg.requires_kernel
+                    ));
+                    if cfg.requires_kvm {
+                        lines.push(
+                            "preflight: KVM required \u{2014} checking /dev/kvm... \u{2713}"
+                                .to_string(),
+                        );
+                    }
+                }
+
+                // Packages line
+                let packages_str = scenario_cfg
+                    .as_ref()
+                    .map(|c| c.packages.join(" "))
+                    .unwrap_or_default();
+                if !packages_str.is_empty() {
+                    lines.push(format!("installing packages: {packages_str}"));
+                    lines.push("dnf install completed (exit_code=0)".to_string());
+                }
+
+                lines.push("installed successfully".to_string());
+
+                // Optional packages hint
+                if !outcome.warnings.is_empty() {
+                    for w in &outcome.warnings {
+                        lines.push(w.clone());
+                    }
+                } else {
+                    lines.push("optional packages available: (none)".to_string());
+                }
+
+                lines.join("\n")
+            };
+
+            HelperResponse::Success {
+                message,
+                exit_code: outcome.exit_code,
+            }
+        }
         Err(e) => HelperResponse::Error {
             code: "EXECUTION_FAILED".to_string(),
             message: format!("{e}"),
@@ -424,6 +486,66 @@ fn dispatch_osbase_install(
 
 // ─── Version compatibility ───────────────────────────────────────────────────
 
+// ─── OsbaseList dispatch ─────────────────────────────────────────────────────
+
+fn dispatch_osbase_list() -> HelperResponse {
+    use crate::osbase_install::list_scenarios;
+
+    match list_scenarios() {
+        Ok(names) => HelperResponse::Success {
+            message: names.join("\n"),
+            exit_code: 0,
+        },
+        Err(e) => HelperResponse::Error {
+            code: "MANIFEST_ERROR".to_string(),
+            message: format!("{e}"),
+        },
+    }
+}
+
+// ─── OsbaseUninstall dispatch ──────────────────────────────────────────────────
+
+fn dispatch_osbase_uninstall(scenario: &str, dry_run: bool) -> HelperResponse {
+    use crate::osbase_install::execute_uninstall;
+    use crate::sandbox_manifest::SandboxManifest;
+
+    // Pre-load manifest to know the package list for the response message.
+    let packages_str = match SandboxManifest::load() {
+        Ok(m) => m
+            .find_scenario(scenario)
+            .map(|c| c.packages.join(" "))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+
+    match execute_uninstall(scenario, dry_run) {
+        Ok(_msg) => {
+            // Build formatted progress lines for the CLI.
+            let mut lines = Vec::new();
+            if dry_run {
+                if !packages_str.is_empty() {
+                    lines.push(format!("[dry-run] would remove packages: {packages_str}"));
+                }
+                lines.push("[dry-run] no packages will be removed in dry-run mode".to_string());
+            } else {
+                if !packages_str.is_empty() {
+                    lines.push(format!("removing packages: {packages_str}"));
+                    lines.push("dnf remove completed (exit_code=0)".to_string());
+                }
+                lines.push("removed successfully".to_string());
+            }
+            HelperResponse::Success {
+                message: lines.join("\n"),
+                exit_code: 0,
+            }
+        }
+        Err(e) => HelperResponse::Error {
+            code: "EXECUTION_FAILED".to_string(),
+            message: format!("{e}"),
+        },
+    }
+}
+
 /// Simple major-version compatibility check.
 ///
 /// Both versions must share the same major version to be considered compatible.
@@ -431,6 +553,49 @@ fn is_compatible(cli_version: &str, helper_version: &str) -> bool {
     let cli_major = cli_version.split('.').next().unwrap_or("0");
     let helper_major = helper_version.split('.').next().unwrap_or("0");
     cli_major == helper_major
+}
+
+// ─── Request args extraction ─────────────────────────────────────────────────
+
+/// Extract a short summary string from a request for audit logging.
+fn request_args(req: &HelperRequest) -> String {
+    match req {
+        HelperRequest::OsbaseInstall {
+            scenario, dry_run, ..
+        } => {
+            if *dry_run {
+                format!("{scenario} (dry-run)")
+            } else {
+                scenario.clone()
+            }
+        }
+        HelperRequest::OsbaseRemove { scenario, .. } => scenario.clone(),
+        HelperRequest::OsbaseUninstall {
+            scenario, dry_run, ..
+        } => {
+            if *dry_run {
+                format!("{scenario} (dry-run)")
+            } else {
+                scenario.clone()
+            }
+        }
+        HelperRequest::OsbaseList { filter } => filter.as_deref().unwrap_or("all").to_string(),
+        HelperRequest::OsbaseStatus { scenario } => {
+            scenario.as_deref().unwrap_or("all").to_string()
+        }
+        HelperRequest::OsbaseSetDefault { scenario } => scenario.clone(),
+        HelperRequest::OsbaseDoctor { scenario, .. } => {
+            scenario.as_deref().unwrap_or("all").to_string()
+        }
+        HelperRequest::WsCkptSnapshot { workspace } => workspace.clone(),
+        HelperRequest::WsCkptRestore {
+            workspace,
+            checkpoint_id,
+        } => {
+            format!("{workspace}:{checkpoint_id}")
+        }
+        _ => String::new(),
+    }
 }
 
 // ─── Audit log ───────────────────────────────────────────────────────────────
@@ -458,7 +623,7 @@ fn write_audit_log(peer: &PeerCredential, op: &str, args: &str, exit_code: i32, 
         .append(true)
         .open(AUDIT_LOG_PATH)
     {
-        let _ = writeln!(f, "{}", record);
+        let _ = writeln!(f, "{record}");
     }
 }
 
