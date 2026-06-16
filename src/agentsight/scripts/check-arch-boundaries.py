@@ -67,7 +67,7 @@ CROSS_CUTTING = {
 # Known violations: (source_file_relative_to_src, target_module, reason)
 KNOWN_VIOLATIONS = [
     ("genai/builder.rs", "storage",
-     "L5->L6: PendingCallInfo/SseEnrichment types pending migration"),
+     "L5->L6: PendingCallInfo/SseEnrichment types pending migration (#906)"),
 ]
 
 USE_RE = re.compile(r"use\s+crate::(\w+)")
