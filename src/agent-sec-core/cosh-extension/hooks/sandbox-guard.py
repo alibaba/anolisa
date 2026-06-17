@@ -68,6 +68,28 @@ def _log_sandbox_event(
 
 LINUX_SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 规则收敛设计说明
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 当前启用的规则集为「默认策略」，仅保留高风险且误报率低的核心规则。
+# 用户可根据自身安全需求，取消注释或新增规则来定制更精细化的拦截策略。
+#
+# 收敛原因：
+#   1. 减少对用户的频繁打扰。在安全与易用性之间取平衡，优先保障用户体验的流畅性。
+#   2. 实际场景验证：此前规则过宽时（如包管理器、systemctl、mount 等全部启用），
+#      用户在执行 openclaw 安装等正常运维操作时会被频繁拦截/弹窗确认，
+#      严重影响工作效率和使用体验。
+#   3. 被注释掉的规则并非无意义，而是作为「可选加固项」保留，供安全要求更高的
+#      场景（如生产环境、多租户环境）按需启用。
+#
+# 定制方式：
+#   - 取消注释已收敛的规则即可启用对应拦截
+#   - 新增自定义规则：添加 (regex_pattern, reason_label) 元组到对应列表
+#   - 通过 `/hooks disable sandbox-guard` 可临时关闭整个沙箱防护
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 # 危险命令检测规则：(regex_pattern, reason_label)
 # 分为两类：
 #   BLOCK_PATTERNS  - 直接阻止，不进沙箱（沙箱内也无法缓解的风险）
@@ -85,73 +107,80 @@ BLOCK_PATTERNS = [
 # 替换为沙箱执行的命令（文件系统/权限/服务类）- 网络隔离
 # 注意：sudo 不在此列表，由 strip_sudo() 预处理后对底层命令评估
 DANGEROUS_PATTERNS = [
-    (r"\bsu\b", "su 切换用户"),
-    (r"\bpkexec\b", "pkexec 提权"),
     # rm 危险操作：-rf、-fr、-r -f、--recursive、--force 各种写法
     (r"\brm\b.*(-[a-zA-Z]*[rf]|-[a-zA-Z]*[fr]|--recursive|--force)", "递归/强制删除"),
     (r"\bchmod\s+[0-7]{3,4}\s+/", "修改系统路径权限"),
     (r"\bchown\b", "修改文件所有者"),
-    (r"\bmkfs\.?\w*\b", "格式化磁盘"),
-    (r"\bdd\s+(if|of)=", "dd 磁盘读写操作"),
-    # 写入系统目录：> / tee / cp / mv 等多种方式
-    (r"(>|>>)\s*/etc/", "重定向写入 /etc"),
-    (r"(>|>>)\s*/usr/", "重定向写入 /usr"),
-    (r"(>|>>)\s*/var/", "重定向写入 /var"),
-    (r"(>|>>)\s*/boot/", "重定向写入 /boot"),
-    (r"\btee\s+.*/etc/", "tee 写入 /etc"),
-    (r"\btee\s+.*/usr/", "tee 写入 /usr"),
-    (r"\btee\s+.*/var/", "tee 写入 /var"),
     (r"\b(cp|mv)\s+.*\s+/etc/", "cp/mv 操作 /etc"),
     (r"\b(cp|mv)\s+.*\s+/usr/", "cp/mv 操作 /usr"),
     (r"\b(cp|mv)\s+.*\s+/var/", "cp/mv 操作 /var"),
-    (r"\bsystemctl\s+(stop|disable|mask|restart|kill)", "systemctl 危险操作"),
-    (r"\bservice\s+\w+\s+(stop|restart)", "service 危险操作"),
-    (r"\bkill\s+-9\b", "强制杀进程 SIGKILL"),
-    (r"\bkillall\b", "killall 批量杀进程"),
-    (r"\bmount\b", "挂载文件系统"),
-    (r"\bumount\b", "卸载文件系统"),
-    (r"\biptables\b", "iptables 修改防火墙"),
-    (r"\bnft\b", "nftables 修改防火墙"),
-    (r"\bcrontab\s+(-[re]|.*\|)", "crontab 修改定时任务"),
+    # ── 以下规则已收敛，按需恢复 ──
+    # (r"\bsu\b", "su 切换用户"),
+    # (r"\bpkexec\b", "pkexec 提权"),
+    # (r"\bmkfs\.?\w*\b", "格式化磁盘"),
+    # (r"\bdd\s+(if|of)=", "dd 磁盘读写操作"),
+    # 写入系统目录：> / tee / cp / mv 等多种方式
+    # (r"(>|>>)\s*/etc/", "重定向写入 /etc"),
+    # (r"(>|>>)\s*/usr/", "重定向写入 /usr"),
+    # (r"(>|>>)\s*/var/", "重定向写入 /var"),
+    # (r"(>|>>)\s*/boot/", "重定向写入 /boot"),
+    # (r"\btee\s+.*/etc/", "tee 写入 /etc"),
+    # (r"\btee\s+.*/usr/", "tee 写入 /usr"),
+    # (r"\btee\s+.*/var/", "tee 写入 /var"),
+    # (r"\bsystemctl\s+(stop|disable|mask|restart|kill)", "systemctl 危险操作"),
+    # (r"\bservice\s+\w+\s+(stop|restart)", "service 危险操作"),
+    # (r"\bkill\s+-9\b", "强制杀进程 SIGKILL"),
+    # (r"\bkillall\b", "killall 批量杀进程"),
+    # (r"\bmount\b", "挂载文件系统"),
+    # (r"\bumount\b", "卸载文件系统"),
+    # (r"\biptables\b", "iptables 修改防火墙"),
+    # (r"\bnft\b", "nftables 修改防火墙"),
+    # (r"\bcrontab\s+(-[re]|.*\|)", "crontab 修改定时任务"),
 ]
 
 # 网络相关命令 - 需要放开网络权限，但保留文件系统隔离
 NETWORK_PATTERNS = [
     (r"\bcurl\b", "curl 网络请求"),
     (r"\bwget\b", "wget 网络下载"),
-    (r"\bnc\b|\bnetcat\b", "netcat 网络工具"),
-    (r"\bnmap\b", "nmap 网络扫描"),
-    # 包管理器：需要网络下载，且会写入系统目录（/var/lib、/etc 等），
-    # 沙箱执行会因文件系统只读而失败，触发 bypass 审批弹框让用户决策
-    (r"\byum\s+\S", "yum 包管理"),
-    (r"\bdnf\s+\S", "dnf 包管理"),
-    (r"\bapt\s+\S", "apt 包管理"),
-    (r"\bapt-get\s+\S", "apt-get 包管理"),
-    (r"\bapt-cache\s+\S", "apt-cache 包管理"),
-    (r"\bpip[23]?\s+\S", "pip 包管理"),
-    (r"\bnpm\s+\S", "npm 包管理"),
-    (r"\bpnpm\s+\S", "pnpm 包管理"),
-    (r"\byarn\s+\S", "yarn 包管理"),
-    (r"\bgem\s+\S", "gem 包管理"),
-    (r"\bcargo\s+(install|add|update)\b", "cargo 包管理"),
-    # ssh 远程连接命令（排除 .ssh 目录路径，如 ~/.ssh/config 只是查看本地配置）
-    (r"\bssh\s+[^/\s]", "ssh 远程连接"),
-    (r"\bscp\b", "scp 远程传输"),
     # 管道执行网络内容（curl/wget pipe to shell）
     (
         r"(curl|wget)\b.*(\|\s*(bash|sh|python|python3|perl|ruby|node))",
         "网络内容直接执行",
     ),
     (r"(\|\s*(bash|sh|python|python3)).*\b(curl|wget)\b", "网络内容直接执行(反向管道)"),
-    # 脚本语言网络操作（Python socket / HTTP 库等）
-    (r"python[23]?\b.*\bsocket\b", "Python socket 网络操作"),
-    (
-        r"python[23]?\b.*\b(requests|urllib|aiohttp|httpx|httplib)\b",
-        "Python HTTP 网络请求",
-    ),
-    (r"python[23]?\b.*\.connect\(", "Python 建立网络连接"),
-    (r"\bnode\b.*\b(http|https|net|dgram)\b", "Node.js 网络模块"),
-    (r"\bperl\b.*\b(socket|IO::Socket|LWP)\b", "Perl 网络操作"),
+    # ── 以下规则已收敛，按需恢复 ──
+    # (r"\bnc\b|\bnetcat\b", "netcat 网络工具"),
+    # (r"\bnmap\b", "nmap 网络扫描"),
+    # 包管理器（已收敛）：
+    # 注意：以下包管理器规则默认不启用。如启用，因沙箱文件系统只读，包管理器
+    # 写入系统目录会失败，从而触发 sandbox-failure-handler bypass 弹框让用户决策。
+    # 默认不启用的原因：安装 openclaw 等正常运维流程会频繁触发弹框，严重影响体验。
+    # (r"\byum\s+\S", "yum 包管理"),
+    # (r"\bdnf\s+\S", "dnf 包管理"),
+    # (r"\bapt\s+\S", "apt 包管理"),
+    # (r"\bapt-get\s+\S", "apt-get 包管理"),
+    # (r"\bapt-cache\s+\S", "apt-cache 包管理"),
+    # (r"\bpip[23]?\s+\S", "pip 包管理"),
+    # (r"\bnpm\s+\S", "npm 包管理"),
+    # (r"\bpnpm\s+\S", "pnpm 包管理"),
+    # (r"\byarn\s+\S", "yarn 包管理"),
+    # (r"\bgem\s+\S", "gem 包管理"),
+    # (r"\bcargo\s+(install|add|update)\b", "cargo 包管理"),
+    # ssh/scp 远程连接（已收敛）：
+    # 安全论证：ssh/scp 本身需要认证凭据，无凭据时无法建立连接，风险可控。
+    # 且开发者频繁使用 ssh 进行远程调试/部署，误报率较高。
+    # 如需启用，取消注释以下规则：
+    # (r"\bssh\s+[^/\s]", "ssh 远程连接"),
+    # (r"\bscp\b", "scp 远程传输"),
+    # 脚本语言网络操作（已收敛 - 误报率高，正常开发频繁触发）
+    # (r"python[23]?\b.*\bsocket\b", "Python socket 网络操作"),
+    # (
+    #     r"python[23]?\b.*\b(requests|urllib|aiohttp|httpx|httplib)\b",
+    #     "Python HTTP 网络请求",
+    # ),
+    # (r"python[23]?\b.*\.connect\(", "Python 建立网络连接"),
+    # (r"\bnode\b.*\b(http|https|net|dgram)\b", "Node.js 网络模块"),
+    # (r"\bperl\b.*\b(socket|IO::Socket|LWP)\b", "Perl 网络操作"),
 ]
 
 # 沙箱文件系统策略 JSON
