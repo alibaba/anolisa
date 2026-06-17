@@ -54,8 +54,9 @@ pub(crate) fn path_matches_target(paths: &[PathBuf], target: &Option<OsString>) 
 /// Decision produced by [`decide_sls_config_change`]: what the config watcher
 /// should do in response to a parsed `runtime.sls_logtail_path` value.
 ///
-/// Side effects (process exit, exporter construction, mailbox write) are carried
-/// out by the thread shell so the decision logic stays pure and testable.
+/// Side effects (process exit, exporter construction, mailbox write, dynamic
+/// logtail-path update) are carried out by the thread shell so the decision
+/// logic stays pure and testable.
 #[derive(Debug, PartialEq)]
 pub(crate) enum SlsConfigAction {
     /// Field missing / parse error, or empty path while already inactive: no-op.
@@ -71,8 +72,11 @@ pub(crate) enum SlsConfigAction {
     Reactivated { path: String },
 }
 
-/// Decide how to react to a parsed `runtime.sls_logtail_path`, mutating the
-/// shared `sls_activated` flag and the process-global dynamic logtail path.
+/// Decide how to react to a parsed `runtime.sls_logtail_path`. Mutates only the
+/// caller-owned `sls_activated` flag (the test-and-set that distinguishes first
+/// activation from reactivation); the process-global dynamic logtail path is
+/// updated by the caller (`handle_config_event`) from the returned action, so
+/// this function touches no cross-module global state.
 ///
 /// `uid` is passed in (not fetched here) because `get_owner_account_id` blocks on
 /// ECS metadata and `process::exit`s the test harness; the shell fetches it and
@@ -86,7 +90,6 @@ pub(crate) fn decide_sls_config_change(
         None => SlsConfigAction::NoChange,
         Some(None) => {
             if sls_activated.swap(false, Ordering::SeqCst) {
-                crate::genai::logtail::set_dynamic_logtail_path("");
                 SlsConfigAction::Deactivated
             } else {
                 SlsConfigAction::NoChange
@@ -96,7 +99,6 @@ pub(crate) fn decide_sls_config_change(
             if uid.is_empty() {
                 return SlsConfigAction::AbortUidMissing;
             }
-            crate::genai::logtail::set_dynamic_logtail_path(&new_path);
             if !sls_activated.swap(true, Ordering::SeqCst) {
                 SlsConfigAction::Activate { path: new_path }
             } else {
@@ -107,8 +109,9 @@ pub(crate) fn decide_sls_config_change(
 }
 
 /// Handle one config-file change: parse `runtime.sls_logtail_path`, decide the
-/// SLS reaction, and carry out the in-process side effects (build a
-/// LogtailExporter and deposit it into the mailbox on first activation).
+/// SLS reaction, and carry out the in-process side effects (update the
+/// process-global dynamic logtail path, and on first activation build a
+/// LogtailExporter and deposit it into the mailbox).
 ///
 /// Returns the [`SlsConfigAction`] so the thread shell can perform the only
 /// non-testable action (`process::exit` on uid failure). `fetch_uid` is injected
@@ -131,6 +134,7 @@ pub(crate) fn handle_config_event(
     match &action {
         SlsConfigAction::NoChange => {}
         SlsConfigAction::Deactivated => {
+            crate::genai::logtail::set_dynamic_logtail_path("");
             log::info!(
                 "Config watcher: SLS Logtail deactivated \
                  (runtime.sls_logtail_path cleared)"
@@ -143,6 +147,7 @@ pub(crate) fn handle_config_event(
             );
         }
         SlsConfigAction::Activate { path } => {
+            crate::genai::logtail::set_dynamic_logtail_path(path);
             let exporter = LogtailExporter::new_with_path(path, encryption_pem, trace_enabled);
             log::info!("Config watcher: LogtailExporter created (path={path}, uid={uid})");
             if let Ok(mut guard) = pending_logtail.lock() {
@@ -151,6 +156,7 @@ pub(crate) fn handle_config_event(
             log::info!("Config watcher: SLS Logtail activated dynamically");
         }
         SlsConfigAction::Reactivated { path } => {
+            crate::genai::logtail::set_dynamic_logtail_path(path);
             log::info!("Config watcher: SLS Logtail re-activated with path={path}");
         }
     }
@@ -771,8 +777,6 @@ mod tests {
             }
         );
         assert!(flag.load(Ordering::SeqCst), "flag set on activation");
-        // Reset global dynamic path mutated by the call.
-        crate::genai::logtail::set_dynamic_logtail_path("");
     }
 
     #[test]
@@ -786,7 +790,6 @@ mod tests {
             }
         );
         assert!(flag.load(Ordering::SeqCst));
-        crate::genai::logtail::set_dynamic_logtail_path("");
     }
 
     // ── decide_token_collector_action ───────────────────────────────
@@ -1001,6 +1004,85 @@ mod tests {
         Mutex::new(None)
     }
 
+    // Serializes tests that read or write the process-global dynamic logtail
+    // path (`genai::logtail::DYNAMIC_LOGTAIL_PATH`); cargo runs tests in parallel
+    // and would otherwise let them clobber each other's path assertions.
+    static SLS_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_sls_path() -> std::sync::MutexGuard<'static, ()> {
+        // Recover from poisoning so one failing test does not cascade-panic the rest.
+        SLS_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn test_dynamic_path_side_effect_is_in_handler_not_decider() {
+        let _guard = lock_sls_path();
+        let reset = || crate::genai::logtail::set_dynamic_logtail_path("");
+        reset();
+        assert_eq!(
+            crate::genai::logtail::logtail_path(),
+            None,
+            "precondition: no SLS_LOGTAIL_FILE env in the test process"
+        );
+
+        // (1) decide_sls_config_change must be PURE w.r.t. the global dynamic
+        //     path. Reverting the fix (set_dynamic_logtail_path back inside
+        //     decide) makes this assertion fail.
+        let flag = AtomicBool::new(false);
+        let action =
+            decide_sls_config_change(Some(Some("/decide-only.log".into())), &flag, "ecs-uid");
+        assert_eq!(
+            action,
+            SlsConfigAction::Activate {
+                path: "/decide-only.log".to_string()
+            }
+        );
+        assert_eq!(
+            crate::genai::logtail::logtail_path(),
+            None,
+            "decide must NOT touch the global dynamic path"
+        );
+
+        // (2) handle_config_event MUST set the global dynamic path on
+        //     activation. Forgetting to move the side effect into the handler
+        //     makes this assertion fail.
+        reset();
+        let flag = AtomicBool::new(false);
+        let mailbox = empty_mailbox();
+        handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":"/handler-set.log"}}"#,
+            &flag,
+            || "ecs-uid".to_string(),
+            None,
+            false,
+            &mailbox,
+        );
+        assert_eq!(
+            crate::genai::logtail::logtail_path(),
+            Some("/handler-set.log".to_string()),
+            "handler must set the global dynamic path on activation"
+        );
+
+        // (3) handle_config_event MUST clear it on deactivation.
+        let flag = AtomicBool::new(true);
+        let mailbox = empty_mailbox();
+        handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":""}}"#,
+            &flag,
+            || "uid".to_string(),
+            None,
+            false,
+            &mailbox,
+        );
+        assert_eq!(
+            crate::genai::logtail::logtail_path(),
+            None,
+            "handler must clear the global dynamic path on deactivation"
+        );
+
+        reset();
+    }
+
     #[test]
     fn test_handle_event_none_is_nochange() {
         let flag = AtomicBool::new(false);
@@ -1020,6 +1102,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_deactivate() {
+        let _guard = lock_sls_path();
         let flag = AtomicBool::new(true); // currently active
         let mailbox = empty_mailbox();
         let action = handle_config_event(
@@ -1055,6 +1138,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_activate_builds_exporter() {
+        let _guard = lock_sls_path();
         let flag = AtomicBool::new(false);
         let mailbox = empty_mailbox();
         let action = handle_config_event(
@@ -1079,8 +1163,12 @@ mod tests {
 
     #[test]
     fn test_handle_event_reactivate_no_new_exporter() {
+        let _guard = lock_sls_path();
         let flag = AtomicBool::new(true); // already active
         let mailbox = empty_mailbox();
+        // Seed a different active path: an active->active change (the production
+        // token-collector flow) must OVERWRITE it, not leave the stale value.
+        crate::genai::logtail::set_dynamic_logtail_path("/stale.log");
         let action = handle_config_event(
             r#"{"runtime":{"sls_logtail_path":"/p2.log"}}"#,
             &flag,
@@ -1097,6 +1185,14 @@ mod tests {
         );
         // Reactivation does NOT build a new exporter.
         assert!(mailbox.lock().unwrap().is_none());
+        // ...but the Reactivated arm MUST overwrite the global dynamic path to
+        // the new value (load-bearing: dropping its set_dynamic_logtail_path
+        // would silently keep writing GenAI events to the stale path).
+        assert_eq!(
+            crate::genai::logtail::logtail_path(),
+            Some("/p2.log".to_string()),
+            "reactivation must overwrite the dynamic path to the new value"
+        );
         crate::genai::logtail::set_dynamic_logtail_path("");
     }
 }
