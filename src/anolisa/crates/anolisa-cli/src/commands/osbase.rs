@@ -1,10 +1,14 @@
+use std::os::unix::net::UnixStream;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 use anolisa_core::sandbox_install::{
     InstallPhase, PhaseStatus, SandboxBackendKind, SandboxInstallError, SandboxInstallOutcome,
     SandboxInstallRequest, build_dry_run_plan, execute_sandbox_install, validate_request,
 };
+use anolisa_core::system_helper::{HelperRequest, HelperResponse};
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::ipc::{SYSTEM_HELPER_SOCKET, recv_message, send_message};
 use anolisa_platform::privilege;
 
 use crate::context::CliContext;
@@ -195,9 +199,9 @@ pub enum SecurityCommands {
 }
 
 pub fn handle(args: OsbaseArgs, ctx: &CliContext) -> Result<(), CliError> {
-    osbase_preflight()?;
+    let mode = osbase_preflight()?;
     match args.command {
-        OsbaseCommands::Sandbox(s) => handle_sandbox(s.command, ctx),
+        OsbaseCommands::Sandbox(s) => handle_sandbox(s.command, ctx, mode),
         OsbaseCommands::Kernel(k) => {
             let command = match k.command {
                 KernelCommands::Install { .. } => "osbase kernel install",
@@ -222,7 +226,11 @@ pub fn handle(args: OsbaseArgs, ctx: &CliContext) -> Result<(), CliError> {
     }
 }
 
-fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliError> {
+fn handle_sandbox(
+    command: SandboxCommands,
+    ctx: &CliContext,
+    mode: ExecutionMode,
+) -> Result<(), CliError> {
     match command {
         SandboxCommands::Install {
             target,
@@ -232,10 +240,97 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
             dry_run,
             force,
             no_verify,
-        } => {
-            let backend = sandbox_target_to_kind(&target);
-            let variant_str = variant.unwrap_or_else(|| backend.default_variant().to_string());
+        } => handle_sandbox_install(
+            ctx,
+            mode,
+            target,
+            variant,
+            runtime,
+            control_panel,
+            dry_run,
+            force,
+            no_verify,
+        ),
+        SandboxCommands::Remove {
+            target,
+            variant,
+            purge,
+            ..
+        } => match mode {
+            ExecutionMode::ViaHelper(mut stream) => {
+                let scenario = target.to_string();
+                let req = HelperRequest::OsbaseRemove { scenario, purge };
+                send_helper_request(&mut stream, &req, "osbase sandbox remove")
+            }
+            ExecutionMode::Direct => {
+                let cmd = match variant {
+                    Some(v) => format!("osbase sandbox remove {target} --variant={v}"),
+                    None => format!("osbase sandbox remove {target}"),
+                };
+                Err(CliError::not_implemented(cmd))
+            }
+        },
+        SandboxCommands::List { available, .. } => match mode {
+            ExecutionMode::ViaHelper(mut stream) => {
+                let filter = if available {
+                    Some("available".to_string())
+                } else {
+                    None
+                };
+                let req = HelperRequest::OsbaseList { filter };
+                send_helper_request(&mut stream, &req, "osbase sandbox list")
+            }
+            ExecutionMode::Direct => Err(CliError::not_implemented("osbase sandbox list")),
+        },
+        SandboxCommands::Status { target, .. } => match mode {
+            ExecutionMode::ViaHelper(mut stream) => {
+                let scenario = target.map(|t| t.to_string());
+                let req = HelperRequest::OsbaseStatus { scenario };
+                send_helper_request(&mut stream, &req, "osbase sandbox status")
+            }
+            ExecutionMode::Direct => {
+                let cmd = match target {
+                    Some(t) => format!("osbase sandbox status {t}"),
+                    None => "osbase sandbox status".to_string(),
+                };
+                Err(CliError::not_implemented(cmd))
+            }
+        },
+    }
+}
 
+fn handle_sandbox_install(
+    ctx: &CliContext,
+    mode: ExecutionMode,
+    target: SandboxTarget,
+    variant: Option<String>,
+    runtime: Option<String>,
+    control_panel: Option<String>,
+    dry_run: bool,
+    force: bool,
+    no_verify: bool,
+) -> Result<(), CliError> {
+    let backend = sandbox_target_to_kind(&target);
+    let variant_str = variant.unwrap_or_else(|| backend.default_variant().to_string());
+
+    match mode {
+        ExecutionMode::ViaHelper(mut stream) => {
+            let scenario = format!("{target}");
+            let register_handler = runtime.as_deref().unwrap_or("none").to_string();
+            let register_runtimeclass = register_handler == "containerd";
+            let req = HelperRequest::OsbaseInstall {
+                scenario,
+                register_handler,
+                register_runtimeclass,
+                config_override: control_panel,
+                set_default: false,
+                force,
+                skip_verify: no_verify,
+                dry_run: dry_run || ctx.dry_run,
+            };
+            send_helper_request(&mut stream, &req, "osbase sandbox install")
+        }
+        ExecutionMode::Direct => {
             let request = SandboxInstallRequest {
                 backend,
                 variant: variant_str,
@@ -287,23 +382,6 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
                 Err(err) => Err(map_sandbox_err(err, &request)),
             }
         }
-        SandboxCommands::Remove {
-            target, variant, ..
-        } => {
-            let cmd = match variant {
-                Some(v) => format!("osbase sandbox remove {target} --variant={v}"),
-                None => format!("osbase sandbox remove {target}"),
-            };
-            Err(CliError::not_implemented(cmd))
-        }
-        SandboxCommands::List { .. } => Err(CliError::not_implemented("osbase sandbox list")),
-        SandboxCommands::Status { target, .. } => {
-            let cmd = match target {
-                Some(t) => format!("osbase sandbox status {t}"),
-                None => "osbase sandbox status".to_string(),
-            };
-            Err(CliError::not_implemented(cmd))
-        }
     }
 }
 
@@ -311,20 +389,124 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
 // Preflight
 // ===========================================================================
 
+/// Execution path for osbase operations.
+///
+/// The three-level fallback chain:
+/// 1. Connect to system-helper socket → `ViaHelper` (normal case, no sudo needed)
+/// 2. Socket unavailable + already root → `Direct` (sudo scenario, backward compat)
+/// 3. Socket unavailable + not root → error with actionable hints
+pub enum ExecutionMode {
+    /// Proxy execution via the privileged system-helper daemon.
+    ViaHelper(UnixStream),
+    /// Direct execution (process already has root privileges).
+    Direct,
+}
+
 /// osbase operates exclusively in system mode — it writes to /etc, /var/lib,
-/// /usr/lib and enables systemd units.  Instead of inspecting the global
-/// `--install-mode` flag (whose default is `user` for most anolisa commands),
-/// we simply require euid==0.  The `--install-mode=user` rejection is handled
-/// at the clap layer: osbase subcommands do not accept that flag.
-fn osbase_preflight() -> Result<(), CliError> {
-    if !privilege::is_root() {
-        return Err(CliError::PermissionDenied {
-            command: "osbase".to_string(),
-            reason: "osbase only operates in system mode and requires root privileges".to_string(),
-            hint: Some("re-run with: sudo anolisa osbase ...".to_string()),
-        });
+/// /usr/lib and enables systemd units.
+///
+/// Attempts to connect to the system-helper socket first (allowing unprivileged
+/// users to issue osbase commands). Falls back to direct execution when root,
+/// or returns a descriptive error otherwise.
+fn osbase_preflight() -> Result<ExecutionMode, CliError> {
+    // 1. Try connecting to the system-helper socket.
+    match UnixStream::connect(SYSTEM_HELPER_SOCKET) {
+        Ok(mut stream) => {
+            // Perform version handshake.
+            let req = HelperRequest::Handshake {
+                cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            send_message(&mut stream, &req).map_err(|e| CliError::Runtime {
+                command: "osbase".to_string(),
+                reason: format!("failed to send handshake to system-helper: {e}"),
+            })?;
+            let resp: HelperResponse =
+                recv_message(&mut stream).map_err(|e| CliError::Runtime {
+                    command: "osbase".to_string(),
+                    reason: format!("failed to receive handshake from system-helper: {e}"),
+                })?;
+            match resp {
+                HelperResponse::HandshakeOk { compatible, .. } => {
+                    if !compatible {
+                        eprintln!(
+                            "warning: system-helper version mismatch, \
+                             consider: sudo anolisa system setup --upgrade"
+                        );
+                    }
+                    Ok(ExecutionMode::ViaHelper(stream))
+                }
+                _ => Err(CliError::Runtime {
+                    command: "osbase".to_string(),
+                    reason: "system-helper returned unexpected handshake response".to_string(),
+                }),
+            }
+        }
+        Err(_) => {
+            // 2. Socket not available — check if we already have root.
+            if privilege::is_root() {
+                Ok(ExecutionMode::Direct)
+            } else {
+                // 3. Non-root + no helper → actionable error.
+                let exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "anolisa".into());
+                Err(CliError::PermissionDenied {
+                    command: "osbase".to_string(),
+                    reason: "osbase requires root privileges and system-helper is not running"
+                        .to_string(),
+                    hint: Some(format!(
+                        "Either:\n  1. Install helper: sudo {exe} system setup\n  \
+                         2. Run directly: sudo {exe} osbase ..."
+                    )),
+                })
+            }
+        }
     }
-    Ok(())
+}
+
+// ===========================================================================
+// Helper IPC utilities
+// ===========================================================================
+
+/// Send a `HelperRequest` over an established stream and render the response.
+///
+/// This is the common path for all osbase subcommands routed via the helper.
+fn send_helper_request(
+    stream: &mut UnixStream,
+    req: &HelperRequest,
+    command_label: &str,
+) -> Result<(), CliError> {
+    send_message(stream, req).map_err(|e| CliError::Runtime {
+        command: command_label.to_string(),
+        reason: format!("failed to send request to system-helper: {e}"),
+    })?;
+
+    let resp: HelperResponse = recv_message(stream).map_err(|e| CliError::Runtime {
+        command: command_label.to_string(),
+        reason: format!("failed to receive response from system-helper: {e}"),
+    })?;
+
+    match resp {
+        HelperResponse::Success { message, exit_code } => {
+            if exit_code == 0 {
+                println!("{message}");
+                Ok(())
+            } else {
+                Err(CliError::Runtime {
+                    command: command_label.to_string(),
+                    reason: format!("{message} (exit_code={exit_code})"),
+                })
+            }
+        }
+        HelperResponse::Error { code, message } => Err(CliError::Runtime {
+            command: command_label.to_string(),
+            reason: format!("[{code}] {message}"),
+        }),
+        other => Err(CliError::Runtime {
+            command: command_label.to_string(),
+            reason: format!("unexpected response from system-helper: {other:?}"),
+        }),
+    }
 }
 
 // ===========================================================================
