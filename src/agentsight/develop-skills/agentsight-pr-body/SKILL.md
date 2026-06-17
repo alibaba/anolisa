@@ -128,11 +128,55 @@ closes #<issue-number>
 <示例：用 qodercli 发起 LLM 请求，确认 agentsight 正确解析 SSE 响应并提取 token 数。>
 ```
 
-### 步骤 5：应用
+### 步骤 5：预览与确认
 
-**新建 PR 场景**：输出生成的 title 和 body，供 `github-issue-pr` skill 或手动 `gh pr create` 使用。
+将生成的 PR 标题和正文**完整展示**给用户，然后使用 `AskUserQuestion` 工具询问用户下一步操作：
 
-**更新已有 PR 场景**：
+**问题**：「PR 内容已生成，请确认下一步操作？」
+
+**选项**：
+1. **创建 Issue 和 PR** — 自动创建关联 Issue（如果尚无关联 Issue），然后创建 PR
+2. **仅创建 PR** — 跳过 Issue，直接创建 PR
+3. **更新已有 PR** — 将生成的内容更新到当前分支已有的 PR（仅当已有 PR 时显示）
+4. **仅输出，不提交** — 只展示内容，不执行任何 GitHub 操作
+
+用户确认后再执行对应操作，**未经确认不得自动提交**。
+
+### 步骤 6：执行操作
+
+根据用户在步骤 5 中的选择执行：
+
+**选择「创建 Issue 和 PR」**：
+
+1. 先创建 Issue：
+```bash
+gh issue create --repo alibaba/anolisa \
+  --title "<从变更中提取的 issue 标题>" \
+  --body "<issue 描述：背景、问题、期望>"
+```
+2. 获取新建 Issue 编号，更新 PR body 中的 `closes #N`
+3. 创建 PR：
+```bash
+gh pr create --repo alibaba/anolisa \
+  --title "type(sight): 描述" \
+  --body "$(cat <<'EOF'
+<生成的 body，包含 closes #N>
+EOF
+)"
+```
+
+**选择「仅创建 PR」**：
+
+```bash
+gh pr create --repo alibaba/anolisa \
+  --title "type(sight): 描述" \
+  --body "$(cat <<'EOF'
+<生成的 body>
+EOF
+)"
+```
+
+**选择「更新已有 PR」**：
 
 ```bash
 gh pr edit <PR-NUMBER> --repo alibaba/anolisa \
@@ -147,6 +191,10 @@ EOF
 - 保留已有 body 中的图片（不要删除 `![...](...)`）
 - 保留人工添加的补充说明
 - 只更新自动生成的部分
+
+**选择「仅输出，不提交」**：
+
+不执行任何 GitHub 操作，流程结束。
 
 ## 内容质量规则
 
