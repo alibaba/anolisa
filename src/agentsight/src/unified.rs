@@ -1276,9 +1276,24 @@ impl AgentSight {
                 ConnectionState::RequestPending { request } => ("RequestPending", request, vec![]),
                 ConnectionState::SseActive {
                     request: Some(req),
+                    response_headers,
                     sse_events,
-                    ..
-                } => ("SseActive", req, sse_events),
+                    compressed_buffer,
+                    content_encoding,
+                } => {
+                    // A *compressed* SSE stream buffers raw bytes and only decodes at
+                    // completion. If the PID died before the stream completed (e.g.
+                    // HTTP/2, no `0\r\n\r\n` terminator), sse_events is empty and the
+                    // body — model/tokens/output — would be lost on drain. Recover it
+                    // via the same decode path as the live finalizer.
+                    let events = drained_sse_events(
+                        sse_events,
+                        compressed_buffer,
+                        content_encoding,
+                        &response_headers,
+                    );
+                    ("SseActive", req, events)
+                }
                 _ => continue,
             };
 
@@ -1722,6 +1737,27 @@ impl Drop for AgentSight {
     }
 }
 
+fn drained_sse_events(
+    sse_events: Vec<crate::parser::sse::ParsedSseEvent>,
+    compressed_buffer: Option<Vec<u8>>,
+    content_encoding: Option<String>,
+    response_headers: &crate::parser::http::ParsedResponse,
+) -> Vec<crate::parser::sse::ParsedSseEvent> {
+    match compressed_buffer {
+        Some(ref buf) if sse_events.is_empty() && !buf.is_empty() => {
+            let is_chunked =
+                crate::aggregator::HttpConnectionAggregator::is_chunked_response(response_headers);
+            crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
+                buf,
+                content_encoding.as_deref(),
+                is_chunked,
+                &response_headers.source_event,
+            )
+        }
+        _ => sse_events,
+    }
+}
+
 /// Complete deferred GenAI events: promote pending DB rows to 'complete',
 /// then export to non-SQLite exporters (or FFI).
 ///
@@ -1777,6 +1813,12 @@ fn complete_deferred_genai(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::parser::http::ParsedResponse;
+    use crate::parser::sse::ParsedSseEvent;
+    use crate::probes::sslsniff::SslEvent;
+    use std::collections::HashMap;
+    use std::rc::Rc;
 
     /// Generate a unique temp directory for each test invocation.
     fn unique_tmp_dir(tag: &str) -> PathBuf {
@@ -2001,5 +2043,87 @@ mod tests {
             vec![Box::new(RecordingExporter::new("test-recorder"))];
 
         complete_deferred_genai(&[event], None, &exporters, None);
+    }
+
+    fn ssl_event() -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 0,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: 0,
+            rw: 0,
+            comm: String::new(),
+            buf: Vec::new(),
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        })
+    }
+
+    /// A zstd-compressed, chunk-framed SSE body (the #973 shape).
+    fn chunked_zstd_sse() -> Vec<u8> {
+        let sse = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\ndata: [DONE]\n\n";
+        let comp = zstd::encode_all(&sse[..], 3).unwrap();
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(format!("{:x}\r\n", comp.len()).as_bytes());
+        chunked.extend_from_slice(&comp);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+        chunked
+    }
+
+    fn chunked_zstd_response() -> ParsedResponse {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event(),
+        }
+    }
+
+    #[test]
+    fn drained_sse_events_decodes_unfinalized_compressed_stream() {
+        // fix(#973): a compressed stream that died before finalizing (events empty,
+        // buffer non-empty) must be DECODED on drain, not lost. Reverting the drain
+        // decode yields an empty vec here, so this is discriminating.
+        let events = drained_sse_events(
+            vec![],
+            Some(chunked_zstd_sse()),
+            Some("zstd".to_string()),
+            &chunked_zstd_response(),
+        );
+        assert!(
+            !events.is_empty(),
+            "compressed buffer must be decoded into events on drain"
+        );
+    }
+
+    #[test]
+    fn drained_sse_events_passes_through_when_no_buffer() {
+        // Uncompressed stream: no compressed_buffer -> nothing to decode.
+        let out = drained_sse_events(vec![], None, None, &chunked_zstd_response());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn drained_sse_events_does_not_redecode_when_events_present() {
+        // Live parsing already produced events -> pass them through, don't re-decode.
+        let existing = vec![ParsedSseEvent::new(None, None, None, 0, 0, ssl_event())];
+        let n = existing.len();
+        let out = drained_sse_events(
+            existing,
+            Some(chunked_zstd_sse()),
+            Some("zstd".to_string()),
+            &chunked_zstd_response(),
+        );
+        assert_eq!(out.len(), n, "non-empty events must pass through unchanged");
     }
 }

@@ -8,6 +8,43 @@
 
 use std::io::Read;
 
+/// Hard cap on a single decompressed body. Decompression operates on traffic
+/// from observed, untrusted processes, where a crafted "compression bomb" (a
+/// few KB expanding to many GB) could OOM the single privileged observer and
+/// take down the whole observation plane. 32 MiB clears even a maximal
+/// extended-thinking response (bounded by output tokens) while keeping peak
+/// memory to a small multiple of the cap (not the GB a bomb would reach),
+/// regardless of ratio. An over-cap body falls back to raw (that call's SSE
+/// enrichment is dropped).
+const MAX_DECOMPRESSED_LEN: usize = 32 * 1024 * 1024;
+
+/// Decompress through `reader` with a hard output cap (bomb defense). Reads at
+/// most `MAX_DECOMPRESSED_LEN + 1` bytes, so an over-cap stream is detected and
+/// peak memory stays a small multiple of the cap (the read buffer grows by
+/// doubling) rather than the unbounded GB a decompressed bomb would reach; on
+/// over-cap or decoder error it falls back to the raw (still-compressed) `raw`
+/// bytes, matching the existing graceful-degradation policy.
+fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    match reader
+        .by_ref()
+        .take(MAX_DECOMPRESSED_LEN as u64 + 1)
+        .read_to_end(&mut decoded)
+    {
+        Ok(_) if decoded.len() > MAX_DECOMPRESSED_LEN => {
+            log::warn!(
+                "{codec} decompressed output exceeds {MAX_DECOMPRESSED_LEN} bytes, using raw body (possible decompression bomb)"
+            );
+            raw.to_vec()
+        }
+        Ok(_) => decoded,
+        Err(e) => {
+            log::warn!("{codec} decompression failed ({e:?}), using raw body");
+            raw.to_vec()
+        }
+    }
+}
+
 /// Decompress an HTTP body based on its `Content-Encoding` header value.
 ///
 /// - `None` or `"identity"` → return body unchanged
@@ -53,47 +90,24 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
 
     match effective_encoding.as_deref() {
         Some("gzip") | Some("x-gzip") => {
-            let mut decoded = Vec::new();
-            match flate2::read::GzDecoder::new(body).read_to_end(&mut decoded) {
-                Ok(_) => decoded,
-                Err(e) => {
-                    log::warn!("gzip decompression failed ({e:?}), using raw body");
-                    body.to_vec()
-                }
-            }
+            read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
         }
-        Some("deflate") => {
-            let mut decoded = Vec::new();
-            match flate2::read::DeflateDecoder::new(body).read_to_end(&mut decoded) {
-                Ok(_) => decoded,
-                Err(e) => {
-                    log::warn!("deflate decompression failed ({e:?}), using raw body");
-                    body.to_vec()
-                }
-            }
-        }
+        Some("deflate") => read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate"),
         Some("zstd") => {
-            // `decode_all` handles a stream of one or more concatenated frames,
-            // which is what a flushed-per-event zstd SSE stream produces.
-            match zstd::decode_all(body) {
-                Ok(decoded) => decoded,
+            // A streaming decoder (capped via `read_capped`) replaces
+            // `zstd::decode_all`, which would allocate the full output up front
+            // and so could not bound a bomb. `read::Decoder` still consumes the
+            // whole reader, i.e. all concatenated frames of a flushed-per-event
+            // zstd SSE stream.
+            match zstd::stream::read::Decoder::new(body) {
+                Ok(decoder) => read_capped(decoder, body, "zstd"),
                 Err(e) => {
                     log::warn!("zstd decompression failed ({e:?}), using raw body");
                     body.to_vec()
                 }
             }
         }
-        Some("br") => {
-            let mut decoded = Vec::new();
-            let mut reader = brotli::Decompressor::new(body, 4096);
-            match reader.read_to_end(&mut decoded) {
-                Ok(_) => decoded,
-                Err(e) => {
-                    log::warn!("brotli decompression failed ({e:?}), using raw body");
-                    body.to_vec()
-                }
-            }
-        }
+        Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
     }
 }
@@ -146,6 +160,48 @@ pub fn dechunk_body(raw: &[u8]) -> Vec<u8> {
         i += 2;
     }
     out
+}
+
+/// Whether a chunk-framed body contains the terminating zero-size chunk, i.e.
+/// the stream is complete. Unlike scanning the raw bytes for `b"0\r\n\r\n"`
+/// (which can match by chance *inside* a compressed payload and finish a stream
+/// prematurely — truncating the body so decompression fails and the call is
+/// silently dropped), this walks the chunk framing and only reports completion
+/// at a real zero-size chunk boundary. Mirrors `dechunk_body`'s parser.
+pub fn chunked_stream_complete(raw: &[u8]) -> bool {
+    let mut i = 0;
+    while i < raw.len() {
+        // Find the CRLF terminating the chunk-size line.
+        let mut j = i;
+        while j + 1 < raw.len() && !(raw[j] == b'\r' && raw[j + 1] == b'\n') {
+            j += 1;
+        }
+        if j + 1 >= raw.len() {
+            return false; // incomplete chunk-size line
+        }
+        let size_line = &raw[i..j];
+        let hex_end = size_line
+            .iter()
+            .position(|&b| b == b';')
+            .unwrap_or(size_line.len());
+        let size = match std::str::from_utf8(&size_line[..hex_end])
+            .ok()
+            .map(|s| s.trim())
+            .and_then(|s| usize::from_str_radix(s, 16).ok())
+        {
+            Some(s) => s,
+            None => return false, // malformed size line
+        };
+        i = j + 2; // skip CRLF after the size line
+        if size == 0 {
+            return true; // terminating zero-size chunk reached
+        }
+        if i + size > raw.len() {
+            return false; // incomplete final chunk
+        }
+        i += size + 2; // skip chunk data + its trailing CRLF
+    }
+    false
 }
 
 /// Convenience: decompress and then convert to String.
@@ -306,5 +362,93 @@ mod tests {
         let dechunked = dechunk_body(&chunked);
         assert_eq!(dechunked, comp);
         assert_eq!(decompress_body(&dechunked, Some("zstd")), sse);
+    }
+
+    #[test]
+    fn zstd_multiframe_still_decodes() {
+        // Regression guard: replacing `zstd::decode_all` with a streaming capped
+        // decoder must NOT drop concatenated frames — a flushed-per-event zstd
+        // SSE stream is multiple frames back-to-back.
+        let f1 = zstd::encode_all(&b"event: a\ndata: {\"x\":1}\n\n"[..], 3).unwrap();
+        let f2 = zstd::encode_all(&b"event: b\ndata: {\"y\":2}\n\n"[..], 3).unwrap();
+        let mut concat = f1;
+        concat.extend_from_slice(&f2);
+        let out = decompress_body(&concat, Some("zstd"));
+        assert_eq!(
+            out, b"event: a\ndata: {\"x\":1}\n\nevent: b\ndata: {\"y\":2}\n\n",
+            "multi-frame zstd must decode all frames, not just the first"
+        );
+    }
+
+    #[test]
+    fn zstd_bomb_falls_back_to_raw() {
+        // A high-ratio zstd stream expanding past the cap must fall back to the
+        // raw (tiny) body, bounding memory — NOT allocate the full expansion.
+        let huge = vec![0u8; MAX_DECOMPRESSED_LEN + 1024 * 1024];
+        let bomb = zstd::encode_all(&huge[..], 3).unwrap();
+        assert!(
+            bomb.len() < 1024 * 1024,
+            "precondition: bomb is tiny compressed"
+        );
+        let out = decompress_body(&bomb, Some("zstd"));
+        assert_eq!(out, bomb, "over-cap zstd must fall back to raw, not expand");
+        assert!(
+            out.len() <= MAX_DECOMPRESSED_LEN,
+            "output must be bounded by the cap"
+        );
+    }
+
+    #[test]
+    fn gzip_bomb_falls_back_to_raw() {
+        let huge = vec![0u8; MAX_DECOMPRESSED_LEN + 1024 * 1024];
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&huge).unwrap();
+        let bomb = enc.finish().unwrap();
+        let out = decompress_body(&bomb, Some("gzip"));
+        assert_eq!(out, bomb, "over-cap gzip must fall back to raw");
+    }
+
+    #[test]
+    fn under_cap_still_decompresses_fully() {
+        // Discriminating: a large-but-under-cap body must still decompress in
+        // full, so the cap does not break legitimate large SSE responses.
+        let big = vec![b'x'; 2 * 1024 * 1024]; // 2 MiB, well under the cap
+        let comp = zstd::encode_all(&big[..], 3).unwrap();
+        assert_eq!(decompress_body(&comp, Some("zstd")), big);
+    }
+
+    #[test]
+    fn chunked_stream_complete_detects_terminator() {
+        assert!(chunked_stream_complete(b"5\r\nhello\r\n0\r\n\r\n"));
+        assert!(chunked_stream_complete(
+            b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn chunked_stream_complete_false_until_terminator() {
+        assert!(!chunked_stream_complete(b"5\r\nhello\r\n")); // mid-stream, no zero chunk
+        assert!(!chunked_stream_complete(b"a\r\nabc")); // incomplete final data
+        assert!(!chunked_stream_complete(b"zz\r\ndata\r\n0\r\n\r\n")); // malformed size
+    }
+
+    #[test]
+    fn chunked_stream_complete_ignores_embedded_terminator() {
+        // THE bug this fixes: the 5-byte terminator pattern occurs *inside* a
+        // chunk's data while the stream is NOT complete. Naive `windows(5).any`
+        // would wrongly report complete; framing-aware parsing must not be fooled.
+        let payload = b"AB0\r\n\r\nCD"; // contains b"0\r\n\r\n" inside the data
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("{:x}\r\n", payload.len()).as_bytes());
+        raw.extend_from_slice(payload);
+        raw.extend_from_slice(b"\r\n"); // chunk-data CRLF, but no zero chunk yet
+        assert!(
+            raw.windows(5).any(|w| w == b"0\r\n\r\n"),
+            "precondition: the naive scan WOULD falsely match"
+        );
+        assert!(
+            !chunked_stream_complete(&raw),
+            "framing-aware check must not be fooled by an embedded terminator"
+        );
     }
 }

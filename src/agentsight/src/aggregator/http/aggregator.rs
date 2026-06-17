@@ -13,6 +13,14 @@ use crate::probes::sslsniff::SslEvent;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
+/// Hard cap on a *compressed* SSE buffer awaiting completion. A malicious or
+/// buggy stream that never sends a chunk terminator would otherwise grow this
+/// buffer unboundedly — the decompression output cap in `utils::decompress`
+/// does not help here because decoding only runs once the stream completes.
+/// 8 MiB of compressed SSE is far beyond any real stream; on overflow the
+/// stream is finalized best-effort so memory stays bounded.
+const MAX_COMPRESSED_SSE_BUFFER: usize = 8 * 1024 * 1024;
+
 /// Connection identifier - uniquely identifies an SSL connection
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct ConnectionId {
@@ -167,27 +175,23 @@ impl HttpConnectionAggregator {
     /// Finish a compressed SSE stream: de-frame chunked transfer-encoding,
     /// decompress the buffered body, parse it into SSE events, and build the
     /// aggregated result (mirrors the live `SseComplete` construction).
-    fn finish_compressed_sse(
-        connection_id: ConnectionId,
-        request: Option<ParsedRequest>,
-        response_headers: ParsedResponse,
-        content_encoding: Option<String>,
-        raw_buffer: Vec<u8>,
-    ) -> AggregatedResult {
-        let is_chunked = response_headers
-            .headers
-            .get("transfer-encoding")
-            .map(|v| v.to_lowercase().contains("chunked"))
-            .unwrap_or(false);
+    /// Decode a buffered *compressed* SSE body into parsed events. Shared by the
+    /// live completion path (`finish_compressed_sse`) and the drain path
+    /// (`drain_and_persist_dead_connections`) so both decode identically. `src`
+    /// supplies provenance (pid/tid/uid/comm/timestamps) for the synthetic event
+    /// handed to the parser.
+    pub(crate) fn decode_compressed_sse(
+        raw_buffer: &[u8],
+        content_encoding: Option<&str>,
+        is_chunked: bool,
+        src: &SslEvent,
+    ) -> Vec<ParsedSseEvent> {
         let body = if is_chunked {
-            crate::utils::decompress::dechunk_body(&raw_buffer)
+            crate::utils::decompress::dechunk_body(raw_buffer)
         } else {
-            raw_buffer
+            raw_buffer.to_vec()
         };
-        let decompressed =
-            crate::utils::decompress::decompress_body(&body, content_encoding.as_deref());
-
-        let src = &response_headers.source_event;
+        let decompressed = crate::utils::decompress::decompress_body(&body, content_encoding);
         let synthetic = std::rc::Rc::new(SslEvent {
             source: src.source,
             timestamp_ns: src.timestamp_ns,
@@ -202,7 +206,32 @@ impl HttpConnectionAggregator {
             is_handshake: src.is_handshake,
             ssl_ptr: src.ssl_ptr,
         });
-        let sse_events = SseParser::new().parse(synthetic);
+        SseParser::new().parse(synthetic)
+    }
+
+    /// Whether a response declares chunked transfer-encoding.
+    pub(crate) fn is_chunked_response(response_headers: &ParsedResponse) -> bool {
+        response_headers
+            .headers
+            .get("transfer-encoding")
+            .map(|v| v.to_lowercase().contains("chunked"))
+            .unwrap_or(false)
+    }
+
+    fn finish_compressed_sse(
+        connection_id: ConnectionId,
+        request: Option<ParsedRequest>,
+        response_headers: ParsedResponse,
+        content_encoding: Option<String>,
+        raw_buffer: Vec<u8>,
+    ) -> AggregatedResult {
+        let is_chunked = Self::is_chunked_response(&response_headers);
+        let sse_events = Self::decode_compressed_sse(
+            &raw_buffer,
+            content_encoding.as_deref(),
+            is_chunked,
+            &response_headers.source_event,
+        );
         log::debug!(
             "[HttpAggregator] Decoded compressed SSE | conn={connection_id:?} | encoding={content_encoding:?} | events={}",
             sse_events.len(),
@@ -313,7 +342,7 @@ impl HttpConnectionAggregator {
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
-                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                        if crate::utils::decompress::chunked_stream_complete(buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 Some(completed_request),
@@ -352,7 +381,7 @@ impl HttpConnectionAggregator {
                     response_headers.body_len = 0;
                     // Transition to SSE active state, wait for SSE events
                     if let Some(buf) = &compressed_buffer {
-                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                        if crate::utils::decompress::chunked_stream_complete(buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 Some(request),
@@ -398,7 +427,7 @@ impl HttpConnectionAggregator {
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
-                        if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                        if crate::utils::decompress::chunked_stream_complete(buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 None,
@@ -514,7 +543,19 @@ impl HttpConnectionAggregator {
                 // terminator, then de-frame + decompress + parse.
                 let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
                 buf.extend_from_slice(data);
-                if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                if buf.len() > MAX_COMPRESSED_SSE_BUFFER {
+                    log::warn!(
+                        "[HttpAggregator] compressed SSE buffer exceeded {MAX_COMPRESSED_SSE_BUFFER} bytes, finalizing best-effort | conn={connection_id:?}"
+                    );
+                    return Some(Self::finish_compressed_sse(
+                        connection_id,
+                        request,
+                        response_headers,
+                        content_encoding,
+                        buf,
+                    ));
+                }
+                if crate::utils::decompress::chunked_stream_complete(&buf) {
                     Some(Self::finish_compressed_sse(
                         connection_id,
                         request,
@@ -1418,6 +1459,116 @@ mod tests {
             }
             other => panic!("expected SseComplete, got {other:?}"),
         }
+    }
+
+    /// Put `aggregator` into a compressed (zstd, chunked) `SseActive` state with
+    /// an empty buffer, ready to receive body fragments via
+    /// `process_raw_body_data`.
+    fn enter_compressed_sse_active(
+        aggregator: &mut HttpConnectionAggregator,
+        pid: u32,
+        ssl_ptr: u64,
+    ) {
+        let req_event = create_mock_ssl_event(pid, ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let resp_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        aggregator.process_response(response);
+    }
+
+    fn raw_frag(pid: u32, ssl_ptr: u64, buf: Vec<u8>) -> SslEvent {
+        SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf,
+            is_handshake: false,
+            ssl_ptr,
+        }
+    }
+
+    #[test]
+    fn compressed_completion_ignores_embedded_terminator() {
+        // fix(#973): completion must walk chunk framing, not scan the raw bytes
+        // for b"0\r\n\r\n" — that pattern can occur *inside* a compressed payload
+        // and finish the stream early, truncating it so the call is silently
+        // dropped. Reverting to `windows(5).any` makes this return Some and fail.
+        let mut aggregator = HttpConnectionAggregator::new();
+        enter_compressed_sse_active(&mut aggregator, 9, 0x900);
+
+        let data = b"AB0\r\n\r\nCD"; // chunk data that itself contains the terminator
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("{:x}\r\n", data.len()).as_bytes());
+        raw.extend_from_slice(data);
+        raw.extend_from_slice(b"\r\n"); // chunk-data CRLF, but NO zero-size chunk yet
+        assert!(
+            raw.windows(5).any(|w| w == b"0\r\n\r\n"),
+            "precondition: the old naive scan WOULD falsely finish here"
+        );
+
+        let result = aggregator.process_raw_body_data(&raw_frag(9, 0x900, raw));
+        assert!(
+            result.is_none(),
+            "embedded terminator must not finish the stream prematurely"
+        );
+    }
+
+    #[test]
+    fn compressed_buffer_cap_finalizes_when_exceeded() {
+        // fix(#973): a never-terminating compressed stream must not grow the
+        // buffer unboundedly; past MAX_COMPRESSED_SSE_BUFFER it finalizes
+        // best-effort. Without the cap this keeps buffering (returns None).
+        let mut aggregator = HttpConnectionAggregator::new();
+        enter_compressed_sse_active(&mut aggregator, 10, 0xA00);
+
+        let over = vec![b'x'; MAX_COMPRESSED_SSE_BUFFER + 1024]; // over cap, no terminator
+        let result = aggregator.process_raw_body_data(&raw_frag(10, 0xA00, over));
+        assert!(
+            result.is_some(),
+            "over-cap compressed buffer must finalize early, not keep buffering"
+        );
+    }
+
+    #[test]
+    fn decode_compressed_sse_decodes_chunked_zstd() {
+        // The shared decode reused by both the live finalizer and the drain path.
+        let (_plain, chunked) = make_zstd_chunked_sse();
+        let src = create_mock_ssl_event(11, 0xB00);
+        let events =
+            HttpConnectionAggregator::decode_compressed_sse(&chunked, Some("zstd"), true, &src);
+        assert!(
+            !events.is_empty(),
+            "must decode chunked zstd SSE into parsed events"
+        );
     }
 
     #[test]
