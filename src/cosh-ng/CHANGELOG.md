@@ -4,6 +4,29 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-06-17
+
+### Added
+- Extension discovery and loading module with `cosh-extension.json` manifest support
+- Extension hooks integrated into startup lifecycle
+- Skill module with multi-level loading (built-in, user, project) and hot-reload
+- SkillManager integrated into tool registry and startup
+- Available skills injected into system prompt for LLM discovery
+
+### Fixed
+- Infinite loop in `expand_env_vars` when environment variable is undefined
+- Warn on unsupported extension hook events (`PostToolUseFailure`, `BeforeModel`, `AfterModel`) instead of silently discarding
+- Align extension hooks format with copilot-shell nested group structure
+- Remove unused `args` parameter from skill tool schema to avoid misleading LLM
+- Show question free text answers in cosh-shell
+- Harden foreground shell handoffs
+- Share copilot shell config path and keep legacy config fallback
+
+### Changed
+- Normalize cosh-shell config keys
+- Standardize cosh-shell code and test organization
+- Move user state under copilot shell scope
+
 ## [0.6.0] — 2026-06-16
 
 ### Added
