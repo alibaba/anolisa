@@ -12,6 +12,7 @@ pub mod tier1;
 pub mod adapter;
 pub mod osbase;
 pub mod register;
+pub mod system;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -120,6 +121,8 @@ pub enum ManagementCommands {
     Bug(tier1::bug::BugArgs),
     /// Manage OS base layer (kernel / sandbox / security)
     Osbase(osbase::OsbaseArgs),
+    /// System helper daemon management
+    System(system::SystemArgs),
 }
 
 /// Build the top-level [`clap::Command`] with grouped help rendering.
@@ -213,6 +216,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ManagementCommands::Env(args) => tier1::env::handle(args, ctx),
             ManagementCommands::Bug(args) => tier1::bug::handle(args, ctx),
             ManagementCommands::Osbase(args) => osbase::handle(args, ctx),
+            ManagementCommands::System(args) => system::handle(args, ctx),
         },
     }
 }
