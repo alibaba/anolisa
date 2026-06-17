@@ -50,6 +50,13 @@ class TestPreAction(unittest.TestCase):
 
 
 class TestPostAction(unittest.TestCase):
+    def setUp(self):
+        self.telemetry_patch = patch(
+            "agent_sec_cli.security_middleware.lifecycle.record_security_event_telemetry"
+        )
+        self.mock_telemetry = self.telemetry_patch.start()
+        self.addCleanup(self.telemetry_patch.stop)
+
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_post_action_logs_event(self, mock_log):
         ctx = RequestContext(action="harden", trace_id="t-123")
@@ -118,6 +125,38 @@ class TestPostAction(unittest.TestCase):
         self.assertEqual(event.call_id, "call-1")
         self.assertEqual(event.tool_call_id, "tool-1")
 
+    def test_post_action_writes_telemetry_for_security_event(self):
+        ctx = RequestContext(action="code_scan", trace_id="trace-telemetry")
+        result = ActionResult(success=True, data={"verdict": "pass"})
+
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        self.mock_telemetry.assert_called_once_with(event)
+
+    def test_post_action_swallows_telemetry_failure(self):
+        ctx = RequestContext(action="code_scan", trace_id="trace-telemetry-fail")
+        result = ActionResult(success=True, data={"verdict": "pass"})
+
+        self.mock_telemetry.side_effect = RuntimeError("telemetry failed")
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
+
+        mock_log.assert_called_once()
+
+    def test_post_action_log_event_failure_does_not_block_telemetry(self):
+        ctx = RequestContext(action="code_scan", trace_id="trace-log-fail")
+        result = ActionResult(success=True, data={"verdict": "pass"})
+
+        with patch(
+            "agent_sec_cli.security_middleware.lifecycle.log_event",
+            side_effect=RuntimeError("log failed"),
+        ):
+            post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
+
+        self.mock_telemetry.assert_called_once()
+
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_pii_scan_event_redacts_request_and_result(self, mock_log):
         ctx = RequestContext(action="pii_scan", trace_id="t-pii")
@@ -168,6 +207,13 @@ class TestPostAction(unittest.TestCase):
 
 
 class TestOnError(unittest.TestCase):
+    def setUp(self):
+        self.telemetry_patch = patch(
+            "agent_sec_cli.security_middleware.lifecycle.record_security_event_telemetry"
+        )
+        self.mock_telemetry = self.telemetry_patch.start()
+        self.addCleanup(self.telemetry_patch.stop)
+
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_on_error_logs_event(self, mock_log):
         ctx = RequestContext(action="verify", trace_id="t-456")
@@ -203,6 +249,38 @@ class TestOnError(unittest.TestCase):
         self.assertEqual(event.run_id, "run-1")
         self.assertEqual(event.call_id, "call-1")
         self.assertEqual(event.tool_call_id, "tool-1")
+
+    def test_on_error_writes_telemetry_for_security_event(self):
+        ctx = RequestContext(action="verify", trace_id="trace-error-telemetry")
+        exc = RuntimeError("boom")
+
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        self.mock_telemetry.assert_called_once_with(event)
+
+    def test_on_error_swallows_telemetry_failure(self):
+        ctx = RequestContext(action="verify", trace_id="trace-error-telemetry-fail")
+        exc = RuntimeError("boom")
+
+        self.mock_telemetry.side_effect = RuntimeError("telemetry failed")
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
+
+        mock_log.assert_called_once()
+
+    def test_on_error_log_event_failure_does_not_block_telemetry(self):
+        ctx = RequestContext(action="verify", trace_id="trace-error-log-fail")
+        exc = RuntimeError("boom")
+
+        with patch(
+            "agent_sec_cli.security_middleware.lifecycle.log_event",
+            side_effect=RuntimeError("log failed"),
+        ):
+            on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
+
+        self.mock_telemetry.assert_called_once()
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_pii_scan_error_redacts_request(self, mock_log):

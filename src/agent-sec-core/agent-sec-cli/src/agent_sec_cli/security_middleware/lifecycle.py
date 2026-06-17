@@ -6,6 +6,7 @@ from agent_sec_cli.security_events import SecurityEvent, log_event
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
+from agent_sec_cli.telemetry import record_security_event_telemetry
 
 # ---------------------------------------------------------------------------
 # Action → SecurityEvent category mapping
@@ -26,6 +27,18 @@ _ACTION_CATEGORY: dict[str, str] = {
 def _category_for(action: str) -> str:
     """Return the event category for *action*, defaulting to the action name."""
     return _ACTION_CATEGORY.get(action, action)
+
+
+def _emit_event(event: SecurityEvent) -> None:
+    """Best-effort emit of security event and derived telemetry."""
+    try:
+        log_event(event)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        record_security_event_telemetry(event)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +81,7 @@ def post_action(
             call_id=ctx.call_id,
             tool_call_id=ctx.tool_call_id,
         )
-        log_event(event)
+        _emit_event(event)
     except Exception:  # noqa: BLE001
         pass
 
@@ -97,6 +110,6 @@ def on_error(
             call_id=ctx.call_id,
             tool_call_id=ctx.tool_call_id,
         )
-        log_event(event)
+        _emit_event(event)
     except Exception:  # noqa: BLE001
         pass

@@ -549,7 +549,7 @@ class TestSqliteEventWriter:
         conn.commit()
         conn.close()
 
-        writer = SqliteEventWriter(path=db_path)
+        writer = SqliteEventWriter(path=db_path, max_age_days=None)
         writer.write(
             SecurityEvent(
                 event_type="prompt_scan",
