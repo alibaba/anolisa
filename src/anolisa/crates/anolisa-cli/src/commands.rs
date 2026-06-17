@@ -95,7 +95,7 @@ pub enum ComponentCommands {
     Logs(tier1::logs::LogsArgs),
     /// Restart a component's service
     Restart(tier1::restart::RestartArgs),
-    /// Update anolisa itself (no args) or a specific component
+    /// Update a component (`update <component>`), the CLI binary (`self`), or everything (`all`)
     Update(tier1::update::UpdateArgs),
     /// Manage component-to-framework adapters
     Adapter(adapter::AdapterArgs),

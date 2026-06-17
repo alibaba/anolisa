@@ -10,14 +10,16 @@
 //! contract, installing the declared files, and recording state plus a
 //! central-log audit entry.
 //!
-//! The `rpm` backend additionally supports **adopt** (issue #958): in system
+//! The `rpm` backend supports two actions. **Adopt** (issue #958): in system
 //! mode, when a component is already present as a system RPM, `install`
 //! records it as `rpm-observed` state without downloading or running
-//! `dnf install`. The backend decision is two-layered — pick a backend name
+//! `dnf install`. **Delegated install** (issue #959): in system mode, when the
+//! component is *not* yet present, `install` delegates the file transaction to
+//! `dnf install` and records it as `rpm-managed` state (ANOLISA owns the
+//! removal). The backend decision is two-layered — pick a backend name
 //! (`--backend` > existing state > system RPM presence > `default_backend`),
-//! then pick an action by `(backend, rpmdb hit, install mode)`. Delegated
-//! `dnf install` for not-yet-installed RPM components is out of scope (#959),
-//! and `npm` remains NOT_IMPLEMENTED.
+//! then pick an action by `(backend, rpmdb hit, install mode)`. `npm` remains
+//! NOT_IMPLEMENTED.
 //!
 //! Deliberately out of scope for this milestone: execution-policy gating,
 //! pre/post hooks, health checks, and service start/enable. Installed
@@ -47,7 +49,10 @@ use anolisa_core::{
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
+use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
+use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
+use anolisa_platform::rpm_transaction::RpmTransaction;
 use chrono::{SecondsFormat, Utc};
 
 use crate::color::Palette;
@@ -223,25 +228,48 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     handle_one(component, args, ctx).map(|_| ())
 }
 
+/// RPM-path execution dependencies, bundled so the raw trunk can carry them
+/// untouched while the rpm branch injects fakes in tests.
+///
+/// - [`query`](Self::query) reads rpmdb/repo metadata (probe + post-install
+///   refresh).
+/// - [`txn`](Self::txn) runs the delegated `dnf install` for not-yet-present
+///   components (#959).
+/// - [`is_root`](Self::is_root) gates the privileged dnf transaction so the
+///   user gets an actionable message instead of dnf's mid-transaction refusal.
+struct RpmExec<'a> {
+    query: &'a dyn PackageQuery,
+    txn: &'a dyn PackageTransaction,
+    is_root: bool,
+}
+
 fn handle_one(
     component: String,
     args: InstallArgs,
     ctx: &CliContext,
 ) -> Result<InstallOutcome, CliError> {
-    // Production uses the real rpm/dnf-backed query; tests inject a fake via
-    // `handle_one_with_query`. Construction is side-effect-free (it only holds
-    // a command runner), so building it on the raw path costs nothing.
+    // Production uses the real rpm/dnf-backed query and transaction; tests
+    // inject fakes via `handle_one_with_exec`. Both constructors are
+    // side-effect-free (they only hold a command runner), so building them on
+    // the raw path costs nothing.
     let query = RpmPackageQuery::system();
-    handle_one_with_query(component, args, ctx, &query)
+    let txn = RpmTransaction::system();
+    let exec = RpmExec {
+        query: &query,
+        txn: &txn,
+        is_root: privilege::is_root(),
+    };
+    handle_one_with_exec(component, args, ctx, &exec)
 }
 
-/// Core of [`handle_one`] with the package query injected, so tests can drive
-/// the adopt path without a live rpmdb.
-fn handle_one_with_query(
+/// Core of [`handle_one`] with the RPM execution dependencies injected, so
+/// tests can drive the adopt and delegated-install paths without a live
+/// rpmdb/dnf or real privileges.
+fn handle_one_with_exec(
     component: String,
     args: InstallArgs,
     ctx: &CliContext,
-    query: &dyn PackageQuery,
+    exec: &RpmExec,
 ) -> Result<InstallOutcome, CliError> {
     let command = format!("install {component}");
 
@@ -261,29 +289,34 @@ fn handle_one_with_query(
     // `--backend raw` hint (§7.1) rather than silently installing raw over a
     // possibly-unobserved system RPM.
     let mut adopt_situation: Option<RpmSituation> = None;
-    let (backend_name, source): (String, BackendSource) = if let Some(explicit) =
-        args.backend.as_deref()
-    {
-        (explicit.to_string(), BackendSource::Explicit)
-    } else if let Some(label) = installed
-        .find_object(ObjectKind::Component, &component)
-        .and_then(installed_backend_label)
-    {
-        // Provenance is sticky: a re-`install` of an adopted rpm-observed
-        // component lands on `rpm` here and is routed to adopt-refresh by
-        // layer 2, rather than being rejected by the raw trunk.
-        (label.to_string(), BackendSource::ExistingState)
-    } else if ctx.install_mode == InstallMode::System {
-        let situation = probe_rpm_situation(&component, &args, &repo_config, ctx, query, &command)?;
-        if matches!(situation, RpmSituation::Absent) {
-            (repo_config.default_backend.clone(), BackendSource::Default)
+    let (backend_name, source): (String, BackendSource) =
+        if let Some(explicit) = args.backend.as_deref() {
+            (explicit.to_string(), BackendSource::Explicit)
+        } else if let Some(label) = installed
+            .find_object(ObjectKind::Component, &component)
+            .and_then(installed_backend_label)
+        {
+            // Provenance is sticky: a re-`install` of an adopted rpm-observed
+            // component lands on `rpm` here and is routed to adopt-refresh by
+            // layer 2, rather than being rejected by the raw trunk.
+            (label.to_string(), BackendSource::ExistingState)
+        } else if ctx.install_mode == InstallMode::System {
+            let situation =
+                probe_rpm_situation(&component, &args, &repo_config, ctx, exec.query, &command)?;
+            if matches!(situation, RpmSituation::Absent { .. }) {
+                // Absent + no `--backend`: fall through to the default backend.
+                // If that is `rpm`, layer 2 re-probes and delegates a `dnf
+                // install`; if it is `raw`, the raw trunk installs. Either way
+                // the probe's `adopt_situation` is dropped — the package is not
+                // present to adopt.
+                (repo_config.default_backend.clone(), BackendSource::Default)
+            } else {
+                adopt_situation = Some(situation);
+                ("rpm".to_string(), BackendSource::SystemRpm)
+            }
         } else {
-            adopt_situation = Some(situation);
-            ("rpm".to_string(), BackendSource::SystemRpm)
-        }
-    } else {
-        (repo_config.default_backend.clone(), BackendSource::Default)
-    };
+            (repo_config.default_backend.clone(), BackendSource::Default)
+        };
 
     // ── Layer 2: pick the action by (backend, rpmdb, mode) (§7.1). ──
     if backend_name == "rpm" {
@@ -297,7 +330,7 @@ fn handle_one_with_query(
             &installed,
             source,
             adopt_situation,
-            query,
+            exec,
         );
     }
 
@@ -411,11 +444,15 @@ enum RpmSituation {
         info: PackageInfo,
     },
     /// Not present as a system RPM: the single candidate is not installed
-    /// (rpm tooling ran and returned nothing). Layer 1 falls through to the
-    /// default backend; an explicit `--backend rpm` turns this into the
-    /// "dnf install not implemented" hint (§7.4). A *missing* rpm/dnf binary
-    /// is a different case — it is a hard warn-and-exit, not `Absent`.
-    Absent,
+    /// (rpm tooling ran and returned nothing). Auto-detect falls through to the
+    /// default backend; an explicit `--backend rpm` (or `default_backend =
+    /// "rpm"`) delegates a `dnf install` of this package and records it as
+    /// `rpm-managed`. A *missing* rpm/dnf binary is a different case —
+    /// it is a hard warn-and-exit, not `Absent`.
+    Absent {
+        /// Resolved package name to hand to `dnf install`.
+        package: String,
+    },
     /// `provides` reverse-lookup matched several distinct installed packages
     /// (§5.5). Reported, never silently adopted.
     Ambiguous(Vec<String>),
@@ -469,7 +506,7 @@ fn probe_rpm_situation(
 
     match query.query_installed(&package) {
         Ok(Some(info)) => Ok(RpmSituation::Adoptable { package, info }),
-        Ok(None) => Ok(RpmSituation::Absent),
+        Ok(None) => Ok(RpmSituation::Absent { package }),
         // Same name, several installed versions: a drift the caller reports.
         Err(PackageQueryError::UnexpectedOutput { .. }) => Ok(RpmSituation::MultiVersion(package)),
         // No rpm/dnf on this host: refuse to silently fall back to raw (§7.1).
@@ -526,9 +563,10 @@ fn load_optional_manifest(ctx: &CliContext, component: &str) -> Option<Component
 }
 
 /// Layer 2 for the `rpm` backend: reject in user mode, otherwise adopt an
-/// installed package, or surface the ambiguous / drift / not-yet-installed
-/// cases (§7.1). `situation` is reused from layer 1's probe when present
-/// (the `SystemRpm` source), and computed here otherwise (`Explicit` rpm).
+/// installed package, delegate a `dnf install` for an absent one, or surface
+/// the ambiguous / drift cases. `situation` is reused from layer 1's probe when
+/// present (the `SystemRpm` source), and computed here otherwise
+/// (`Explicit` rpm).
 #[allow(clippy::too_many_arguments)]
 fn route_rpm_adopt(
     component: &str,
@@ -540,7 +578,7 @@ fn route_rpm_adopt(
     installed: &InstalledState,
     source: BackendSource,
     situation: Option<RpmSituation>,
-    query: &dyn PackageQuery,
+    exec: &RpmExec,
 ) -> Result<InstallOutcome, CliError> {
     // Adopt is a system-scope action (§4.1). The only way to reach `rpm` in
     // user mode is an explicit `--backend rpm`, which we reject rather than
@@ -563,18 +601,16 @@ fn route_rpm_adopt(
 
     let situation = match situation {
         Some(s) => s,
-        None => probe_rpm_situation(component, args, repo_config, ctx, query, command)?,
+        None => probe_rpm_situation(component, args, repo_config, ctx, exec.query, command)?,
     };
 
     match situation {
         RpmSituation::Adoptable { package, info } => {
-            execute_adopt(ctx, layout, command, component, package, info, query)
+            execute_adopt(ctx, layout, command, component, package, info, exec.query)
         }
-        RpmSituation::Absent => Err(CliError::not_implemented_with_hint(
-            format!("install --backend rpm {component}"),
-            "--backend rpm requires the package to be installed for adopt; delegated 'dnf install' is not implemented yet (tracked in #959)"
-                .to_string(),
-        )),
+        RpmSituation::Absent { package } => {
+            execute_delegated_install(exec, ctx, layout, command, component, &package)
+        }
         RpmSituation::Ambiguous(names) => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
@@ -799,6 +835,367 @@ fn render_adopt(ctx: &CliContext, payload: &AdoptResultPayload) {
         color.ok("Adopted as rpm-observed. ANOLISA will not replace it with raw.")
     );
     render_warnings(&payload.warnings, &color);
+}
+
+// ── rpm delegated install path (#959) ───────────────────────────────
+
+/// Wire shape for a delegated `dnf install` result (`--json`) and its dry-run
+/// preview.
+#[derive(Serialize)]
+struct DelegatedInstallPayload {
+    component: String,
+    package: String,
+    /// Always `rpm`: delegated install routes through the rpm backend.
+    backend: &'static str,
+    /// Always `rpm-managed`: ANOLISA drove the install and owns the removal.
+    ownership: &'static str,
+    install_mode: String,
+    /// EVR recorded after install (rpmdb truth); `None` on dry-run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+    /// Repo candidate EVRs surfaced in the dry-run preview (best-effort).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    available_candidates: Vec<String>,
+    /// `None` on dry-run (nothing recorded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    dry_run: bool,
+    warnings: Vec<String>,
+}
+
+/// Install a not-yet-present RPM component by delegating to `dnf install`, then
+/// record it as ANOLISA-managed `rpm-managed` state.
+///
+/// This is the write-side mirror of [`execute_adopt`]: where adopt only
+/// observes an already-installed package, delegated install drives the package
+/// manager to place it and records ANOLISA ownership of the removal
+/// (`owns_removal=true`). ANOLISA never fetches bytes itself — dnf owns the
+/// file transaction. Gated on root for the real run; `--dry-run` previews the
+/// `dnf install` without touching the host.
+fn execute_delegated_install(
+    exec: &RpmExec,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    command: &str,
+    component: &str,
+    package: &str,
+) -> Result<InstallOutcome, CliError> {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Dry-run: preview the dnf transaction with best-effort repo candidates.
+    // Never needs root, never writes state.
+    if ctx.dry_run {
+        let candidates = match exec.query.query_available(package) {
+            Ok(infos) => {
+                let mut evrs: Vec<String> =
+                    infos.into_iter().map(|i| i.version.to_string()).collect();
+                // Display list, not a version ranking — rpmvercmp is dnf's job.
+                evrs.sort();
+                evrs.dedup();
+                evrs
+            }
+            Err(err) => {
+                warnings.push(format!(
+                    "could not query available versions for '{package}': {err}; dnf will still resolve candidates at install time"
+                ));
+                Vec::new()
+            }
+        };
+        let payload = DelegatedInstallPayload {
+            component: component.to_string(),
+            package: package.to_string(),
+            backend: "rpm",
+            ownership: "rpm-managed",
+            install_mode: ctx.install_mode.as_str().to_string(),
+            version: None,
+            arch: None,
+            source_repo: None,
+            available_candidates: candidates,
+            operation_id: None,
+            dry_run: true,
+            warnings,
+        };
+        render_delegated_install(ctx, &payload);
+        return Ok(InstallOutcome::Installed);
+    }
+
+    // Privilege gate: dnf transactions need root. Check up front so the user
+    // gets an actionable message instead of dnf's raw mid-transaction refusal.
+    if !exec.is_root {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "installing system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa --install-mode system install --backend rpm {component}`"
+            ),
+        });
+    }
+
+    // dnf install — delegate the file transaction.
+    exec.txn
+        .install(package)
+        .map_err(|err| txn_install_err(err, command))?;
+
+    // Refresh from rpmdb: the authoritative installed EVR/arch.
+    let info = match exec.query.query_installed(package) {
+        Ok(Some(info)) => info,
+        // dnf reported success, so the package should be present; a miss here is
+        // anomalous (a no-op transaction?). Refuse rather than record a phantom.
+        Ok(None) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "dnf install of '{package}' reported success but rpmdb has no such package; the transaction may have been a no-op — run `anolisa status {component}`"
+                ),
+            });
+        }
+        Err(PackageQueryError::UnexpectedOutput { .. }) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "RPM package '{package}' has multiple installed versions after install; refusing to record an ambiguous version"
+                ),
+            });
+        }
+        Err(err) => return Err(pkg_query_err(err, command)),
+    };
+
+    // source_repo is supplementary metadata: a failed origin lookup degrades to
+    // `None` with a warning and never fails the install (mirrors adopt).
+    let source_repo = match exec.query.installed_origin(package) {
+        Ok(origin) => origin,
+        Err(err) => {
+            warnings.push(format!(
+                "could not determine source repo for '{package}': {err}"
+            ));
+            None
+        }
+    };
+
+    let operation_id = persist_delegated_install(
+        ctx,
+        layout,
+        command,
+        component,
+        package,
+        &info,
+        source_repo.as_deref(),
+        &warnings,
+    )?;
+
+    let payload = DelegatedInstallPayload {
+        component: component.to_string(),
+        package: package.to_string(),
+        backend: "rpm",
+        ownership: "rpm-managed",
+        install_mode: ctx.install_mode.as_str().to_string(),
+        version: Some(info.version.to_string()),
+        arch: Some(info.arch.clone()),
+        source_repo,
+        available_candidates: Vec::new(),
+        operation_id: Some(operation_id),
+        dry_run: false,
+        warnings,
+    };
+    render_delegated_install(ctx, &payload);
+    Ok(InstallOutcome::Installed)
+}
+
+/// Persist a delegated install as `rpm-managed` state under the install lock,
+/// then append an audit record. Returns the operation id.
+///
+/// Mirrors [`execute_adopt`]'s state write but records ANOLISA ownership
+/// (`managed=true`, `adopted=false`, [`Ownership::RpmManaged`]) — the file
+/// transaction was ANOLISA-driven, so a later uninstall delegates back to dnf.
+#[allow(clippy::too_many_arguments)]
+fn persist_delegated_install(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    command: &str,
+    component: &str,
+    package: &str,
+    info: &PackageInfo,
+    source_repo: Option<&str>,
+    warnings: &[String],
+) -> Result<String, CliError> {
+    let evr = info.version.to_string();
+    let started_at = now_iso8601();
+
+    // Acquire the lock, then load state inside it so a concurrent writer is not
+    // clobbered — mirrors `execute_adopt`/`execute_raw` ordering.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut state =
+        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+
+    // Re-validate against the freshly-reloaded state: a concurrent raw install
+    // may have won the lock and recorded the component first. Refuse rather than
+    // overwrite its provenance with rpm-managed.
+    ensure_component_backend_compatible(&state, component, "rpm", command)?;
+
+    let lock_ts = Utc::now();
+    let operation_id = format!(
+        "op-install-{}-{}",
+        lock_ts.format("%Y%m%d%H%M%S"),
+        lock_ts.timestamp_subsec_nanos()
+    );
+
+    // Delegated install is system-scope by construction (route_rpm_adopt
+    // rejects user mode before reaching the Absent branch).
+    state.install_mode = StateInstallMode::System;
+    state.prefix = layout.prefix.clone();
+    state.upsert_object(InstalledObject {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        version: evr.clone(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        // Not an ANOLISA-delivered raw artifact; dnf resolved the source.
+        distribution_source: None,
+        install_backend: Some("rpm".to_string()),
+        ownership: Some(Ownership::RpmManaged),
+        rpm_metadata: Some(RpmMetadata {
+            package_name: info.name.clone(),
+            evr: Some(evr.clone()),
+            arch: Some(info.arch.clone()),
+            source_repo: source_repo.map(str::to_string),
+        }),
+        installed_at: started_at.clone(),
+        last_operation_id: Some(operation_id.clone()),
+        // ANOLISA delegated the install and owns the removal (owns_removal=true).
+        managed: true,
+        // Not an adoption: ANOLISA drove the install.
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        // dnf owns the file transaction; RPM-owned files stay out of state.
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+    });
+    state.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: started_at.clone(),
+        finished_at: Some(now_iso8601()),
+    });
+
+    let state_path = layout.state_dir.join("installed.toml");
+    state.save(&state_path).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to save state: {err}"),
+    })?;
+
+    // Audit log is best-effort: the install already persisted, so a log failure
+    // downgrades to a warning instead of unwinding.
+    let log = CentralLog::open(layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(operation_id.clone()),
+        command: command.to_string(),
+        source: "anolisa-cli".to_string(),
+        component: Some(component.to_string()),
+        severity: Severity::Info,
+        message: format!(
+            "installed RPM package {package} ({evr}) as rpm-managed for component {component} via dnf"
+        ),
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at,
+        finished_at: Some(now_iso8601()),
+        status: Some(LogStatus::Ok),
+        objects: vec![component.to_string()],
+        backup_ids: Vec::new(),
+        warnings: warnings.to_vec(),
+        details: serde_json::Value::Null,
+    };
+    if let Err(err) = log.append(&record) {
+        eprintln!("warning: failed to write central log: {err}");
+    }
+
+    Ok(operation_id)
+}
+
+/// Render a delegated-install result (JSON envelope or human text). Silent in
+/// quiet mode; the `--all` batch path drives its own summary.
+fn render_delegated_install(ctx: &CliContext, payload: &DelegatedInstallPayload) {
+    if ctx.json {
+        // Errors here are unreachable for a plain Serialize struct; ignore the
+        // Result so the (already-persisted) install is not reported as failed.
+        let _ = render_json(COMMAND, payload);
+        return;
+    }
+    if ctx.quiet {
+        return;
+    }
+    let color = Palette::new(ctx.no_color);
+    if payload.dry_run {
+        println!(
+            "{} {} {} {}",
+            color.command("install"),
+            payload.component,
+            color.muted(format!("(rpm-managed, {})", payload.package)),
+            color.muted("(dry-run — nothing installed)"),
+        );
+        if payload.available_candidates.is_empty() {
+            println!(
+                "{} {}",
+                color.label("available:"),
+                color.muted("no repo candidates reported"),
+            );
+        } else {
+            println!(
+                "{} {}",
+                color.label("available:"),
+                payload.available_candidates.join(", "),
+            );
+        }
+        println!("  would run: dnf install -y {}", payload.package);
+    } else {
+        println!(
+            "{} {} {} {}",
+            color.command("install"),
+            payload.component,
+            color.muted(format!("(rpm-managed, {})", payload.package)),
+            color.ok("installed via dnf"),
+        );
+        if let Some(v) = &payload.version {
+            println!("{} {}", color.label("version:"), v);
+        }
+    }
+    render_warnings(&payload.warnings, &color);
+}
+
+/// Map a [`PackageTransactionError`] from `dnf install` onto a CLI runtime
+/// error with an actionable hint.
+fn txn_install_err(err: PackageTransactionError, command: &str) -> CliError {
+    match err {
+        PackageTransactionError::CommandMissing { .. } => rpm_tooling_missing_error(command),
+        PackageTransactionError::PermissionDenied { command: bin } => CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("permission denied running {bin}; re-run the install with sudo"),
+        },
+        PackageTransactionError::TransactionFailed { code, stderr, .. } => CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "dnf install failed (exit {}): {}",
+                code.map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                stderr.trim(),
+            ),
+        },
+    }
 }
 
 /// Map a [`PackageQueryError`] onto a CLI error. Spawn/permission/query
@@ -3321,6 +3718,129 @@ scope = "@anolisa"
 
     use anolisa_platform::pkg_query::PackageVersion;
 
+    use std::cell::{Cell, RefCell};
+
+    /// No-op transaction for adopt-path tests, which never delegate to dnf.
+    /// A call here means a routing bug sent an adopt down the install path.
+    struct NoTxn;
+
+    impl PackageTransaction for NoTxn {
+        fn install(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            panic!("adopt-path test reached a delegated dnf install");
+        }
+        fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            panic!("adopt-path test reached a dnf update");
+        }
+    }
+
+    /// Test seam that drives [`handle_one_with_exec`] with only a query (no
+    /// delegated install, non-root). Adopt-path and raw-path tests use this; the
+    /// delegated-install tests build a full [`RpmExec`] instead.
+    fn handle_one_with_query(
+        component: String,
+        args: InstallArgs,
+        ctx: &CliContext,
+        query: &dyn PackageQuery,
+    ) -> Result<InstallOutcome, CliError> {
+        let txn = NoTxn;
+        let exec = RpmExec {
+            query,
+            txn: &txn,
+            is_root: false,
+        };
+        handle_one_with_exec(component, args, ctx, &exec)
+    }
+
+    /// Combined fake [`PackageQuery`] + [`PackageTransaction`] for
+    /// delegated-install tests: the package is absent until `install()` runs,
+    /// after which `query_installed` reports [`installs_to`](Self::installs_to),
+    /// modelling rpmdb gaining the package once dnf places it.
+    struct FakeInstaller {
+        package: String,
+        /// PackageInfo rpmdb reports after a successful install.
+        installs_to: PackageInfo,
+        origin: Option<String>,
+        available: Vec<PackageInfo>,
+        /// `false` makes the dnf install transaction fail.
+        install_succeeds: bool,
+        installed: RefCell<Option<PackageInfo>>,
+        install_calls: Cell<usize>,
+    }
+
+    impl FakeInstaller {
+        fn new(package: &str, installs_to: PackageInfo) -> Self {
+            Self {
+                package: package.to_string(),
+                installs_to,
+                origin: None,
+                available: Vec::new(),
+                install_succeeds: true,
+                installed: RefCell::new(None),
+                install_calls: Cell::new(0),
+            }
+        }
+        fn with_origin(mut self, repo: &str) -> Self {
+            self.origin = Some(repo.to_string());
+            self
+        }
+        fn failing_install(mut self) -> Self {
+            self.install_succeeds = false;
+            self
+        }
+    }
+
+    impl PackageQuery for FakeInstaller {
+        fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            if package != self.package {
+                return Ok(None);
+            }
+            Ok(self.installed.borrow().clone())
+        }
+
+        fn query_available(&self, package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            if package != self.package {
+                return Ok(Vec::new());
+            }
+            Ok(self.available.clone())
+        }
+
+        fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+            if package != self.package {
+                return Ok(None);
+            }
+            Ok(self.origin.clone())
+        }
+
+        fn what_provides_installed(
+            &self,
+            _capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            // Default-naming path: the probe falls through to `anolisa-<name>`.
+            Ok(Vec::new())
+        }
+    }
+
+    impl PackageTransaction for FakeInstaller {
+        fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
+            self.install_calls.set(self.install_calls.get() + 1);
+            assert_eq!(package, self.package, "install targeted the wrong package");
+            if !self.install_succeeds {
+                return Err(PackageTransactionError::TransactionFailed {
+                    command: "dnf".to_string(),
+                    operation: "install".to_string(),
+                    code: Some(1),
+                    stderr: "No match for argument".to_string(),
+                });
+            }
+            // rpmdb now holds the package, modelling dnf placing it.
+            *self.installed.borrow_mut() = Some(self.installs_to.clone());
+            Ok(())
+        }
+        fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            panic!("delegated-install test must not run a dnf update");
+        }
+    }
+
     /// Configurable in-memory [`PackageQuery`] so adopt tests run without a
     /// live rpmdb.
     #[derive(Default)]
@@ -3552,7 +4072,7 @@ scope = "@anolisa"
             "install",
         )
         .expect("probe");
-        assert!(matches!(situation, RpmSituation::Absent));
+        assert!(matches!(situation, RpmSituation::Absent { .. }));
     }
 
     #[test]
@@ -3601,7 +4121,7 @@ scope = "@anolisa"
     fn situation_label(s: &RpmSituation) -> &'static str {
         match s {
             RpmSituation::Adoptable { .. } => "Adoptable",
-            RpmSituation::Absent => "Absent",
+            RpmSituation::Absent { .. } => "Absent",
             RpmSituation::Ambiguous(_) => "Ambiguous",
             RpmSituation::MultiVersion(_) => "MultiVersion",
         }
@@ -3829,18 +4349,146 @@ scope = "@anolisa"
         );
     }
 
+    // ── delegated install (#959) ──
+
+    /// `--backend rpm` on a not-yet-installed component delegates a `dnf
+    /// install` and records `rpm-managed` state: ANOLISA owns the removal,
+    /// the EVR is read back from rpmdb, and ownership/backend are rpm.
     #[test]
-    fn explicit_rpm_not_installed_is_not_implemented() {
+    fn delegated_install_writes_rpm_managed_state() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
-        let q = FakeQuery::default();
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .with_origin("anolisa");
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
         let mut a = args("copilot-shell");
         a.backend = Some("rpm".to_string());
-        let err = handle_one_with_query("copilot-shell".to_string(), a, &ctx, &q)
-            .expect_err("not installed → not implemented");
-        assert_eq!(err.code(), "NOT_IMPLEMENTED");
-        // The #959 delegation hint rides on the NotImplemented variant; reason()
-        // surfaces the command, which still names the rpm backend.
-        assert!(err.reason().contains("rpm"), "got: {}", err.reason());
+
+        let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect("delegated install ok");
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(fake.install_calls.get(), 1, "dnf install must run once");
+
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("component recorded");
+        assert_eq!(obj.status, ObjectStatus::Installed);
+        assert_eq!(obj.ownership, Some(Ownership::RpmManaged));
+        assert_eq!(obj.install_backend.as_deref(), Some("rpm"));
+        assert!(obj.managed, "rpm-managed must be ANOLISA-managed");
+        assert!(!obj.adopted, "delegated install is not an adoption");
+        assert!(obj.files.is_empty(), "dnf-owned files stay out of state");
+        assert_eq!(obj.version, "2.3.0-1.al8");
+        let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
+        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
+        assert_eq!(meta.arch.as_deref(), Some("x86_64"));
+        assert_eq!(meta.source_repo.as_deref(), Some("anolisa"));
+        assert!(state.operations[0].id.starts_with("op-install-"));
+    }
+
+    /// A non-root real run is refused with an actionable message; dnf never
+    /// runs and no state is written.
+    #[test]
+    fn delegated_install_non_root_is_refused() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: false,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect_err("must refuse without root");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("root") && err.reason().contains("sudo"),
+            "reason must point at sudo: {}",
+            err.reason()
+        );
+        assert_eq!(fake.install_calls.get(), 0, "dnf must not run without root");
+        assert!(
+            load_state(&ctx)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "refused install must not write state"
+        );
+    }
+
+    /// Dry-run previews the `dnf install` without running it, needing root, or
+    /// writing state — even for a non-root caller.
+    #[test]
+    fn delegated_install_dry_run_previews_without_txn_or_state() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(true);
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: false,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let outcome =
+            handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec).expect("dry-run ok");
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(fake.install_calls.get(), 0, "dry-run must not run dnf");
+        assert!(
+            load_state(&ctx)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "dry-run must not persist state"
+        );
+    }
+
+    /// A `dnf install` failure surfaces as EXECUTION_FAILED and writes no state.
+    #[test]
+    fn delegated_install_dnf_failure_surfaces() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .failing_install();
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect_err("dnf failure must propagate");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("dnf install failed"),
+            "got: {}",
+            err.reason()
+        );
+        assert_eq!(fake.install_calls.get(), 1);
+        assert!(
+            load_state(&ctx)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "failed install must not write state"
+        );
     }
 
     #[test]
@@ -3926,6 +4574,12 @@ scope = "@anolisa"
 
         let mut a = args("copilot-shell");
         a.backend = Some("rpm".to_string());
+        let txn = NoTxn;
+        let exec = RpmExec {
+            query: &q,
+            txn: &txn,
+            is_root: false,
+        };
         let err = route_rpm_adopt(
             "copilot-shell",
             &a,
@@ -3936,7 +4590,7 @@ scope = "@anolisa"
             &installed,
             BackendSource::Explicit,
             None,
-            &q,
+            &exec,
         )
         .expect_err("user mode must be rejected");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
