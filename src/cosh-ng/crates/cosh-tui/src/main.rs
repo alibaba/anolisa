@@ -14,6 +14,7 @@ mod migrate;
 mod protocol;
 mod provider;
 mod session;
+mod skill;
 mod tool;
 mod truncator;
 

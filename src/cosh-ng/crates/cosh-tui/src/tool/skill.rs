@@ -127,10 +127,6 @@ impl Tool for SkillTool {
                 "name": {
                     "type": "string",
                     "description": "Name of the skill to invoke (required for 'invoke' action)"
-                },
-                "args": {
-                    "type": "string",
-                    "description": "Arguments to pass to the skill"
                 }
             },
             "required": ["action"]
