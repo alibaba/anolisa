@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
-import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine } from '../utils/apiClient';
+import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -83,25 +83,130 @@ const SAVED_PIE_COLORS = ['#f59e0b', '#8b5cf6']; // 工具橙, MCP紫
 const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      {/* Explanation banner */}
+      <div className="px-3 py-2 bg-blue-50 border-b border-blue-100 flex items-start gap-2">
+        <span className="text-blue-500 mt-0.5">💡</span>
+        <div>
+          <p className="text-sm text-blue-800 font-medium">{item.explanation}</p>
+          <p className="text-xs text-blue-600 mt-0.5">
+            压缩率 <span className="font-semibold">{item.compression_ratio.toFixed(1)}%</span>
+            {' · '}
+            影响后续 <span className="font-semibold">{item.compounding_turns}</span> 轮调用
+            {' · '}
+            复合节省 <span className="font-semibold text-green-700">{fmtTokens(item.compounded_saved)}</span> tokens
+          </p>
+        </div>
+      </div>
       <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
         <div className="grid grid-cols-2 divide-x divide-gray-200">
           <div>
-            <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">
-              原始内容
+            <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200 flex justify-between">
+              <span>原始内容</span>
+              <span className="text-gray-400 font-normal">{fmtTokens(item.before_tokens)} tokens</span>
             </div>
             <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-red-50 text-red-700">
               {item.before_text ?? (item.diff_lines.filter(l => l.type === 'remove').map(l => l.content).join('\n') || '无变更')}
             </pre>
           </div>
           <div>
-            <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">
-              优化后
+            <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200 flex justify-between">
+              <span>优化后</span>
+              <span className="text-gray-400 font-normal">{fmtTokens(item.after_tokens)} tokens</span>
             </div>
             <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-green-50 text-green-700">
               {item.after_text ?? (item.diff_lines.filter(l => l.type === 'add').map(l => l.content).join('\n') || '无变更')}
             </pre>
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Optimization Tips Panel ─────────────────────────────────────────────────
+
+const TIP_STYLE: Record<string, { icon: string; border: string; bg: string; text: string }> = {
+  success: { icon: '✅', border: 'border-green-200', bg: 'bg-green-50', text: 'text-green-800' },
+  info: { icon: '💡', border: 'border-blue-200', bg: 'bg-blue-50', text: 'text-blue-800' },
+  warning: { icon: '⚠️', border: 'border-yellow-200', bg: 'bg-yellow-50', text: 'text-yellow-800' },
+};
+
+const OptimizationTipsPanel: React.FC<{ tips: OptimizationTip[] }> = ({ tips }) => {
+  if (tips.length === 0) return null;
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+        <span>🎯</span> 优化建议
+      </h3>
+      <div className="space-y-2">
+        {tips.map((tip, idx) => {
+          const style = TIP_STYLE[tip.level] || TIP_STYLE.info;
+          return (
+            <div key={idx} className={`flex items-start gap-2 px-3 py-2 rounded-lg border ${style.border} ${style.bg}`}>
+              <span className="mt-0.5">{style.icon}</span>
+              <div>
+                <p className={`text-sm font-medium ${style.text}`}>{tip.title}</p>
+                <p className={`text-xs ${style.text} opacity-80 mt-0.5`}>{tip.description}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─── Savings Breakdown Panel ─────────────────────────────────────────────────
+
+const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessions }) => {
+  // Get top 5 optimization items across all sessions by compounded_saved
+  const allItems = sessions.flatMap(s =>
+    s.optimization_items.map(item => ({
+      ...item,
+      session_id: s.session_id,
+      agent_name: s.agent_name,
+    }))
+  );
+  const topItems = [...allItems]
+    .sort((a, b) => b.compounded_saved - a.compounded_saved)
+    .slice(0, 5);
+
+  if (topItems.length === 0) return null;
+
+  const maxSaved = topItems[0]?.compounded_saved || 1;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+        <span>📊</span> 节省排行 Top 5（按复合节省量）
+      </h3>
+      <div className="space-y-2">
+        {topItems.map((item, idx) => {
+          const cfg = CATEGORY_CONFIG[item.category];
+          const pct = (item.compounded_saved / maxSaved) * 100;
+          return (
+            <div key={item.id || idx} className="flex items-center gap-3">
+              <span className="text-xs text-gray-400 w-4 text-right">#{idx + 1}</span>
+              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color} flex-shrink-0`}>
+                {cfg.label}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="h-5 bg-gray-100 rounded-full overflow-hidden relative">
+                  <div
+                    className="h-full bg-gradient-to-r from-green-400 to-green-600 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                  <span className="absolute inset-0 flex items-center px-2 text-xs font-medium text-gray-700">
+                    {fmtTokens(item.compounded_saved)} tokens
+                  </span>
+                </div>
+              </div>
+              <span className="text-xs text-gray-400 flex-shrink-0 truncate max-w-[100px]" title={item.agent_name}>
+                {item.agent_name}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -275,6 +380,7 @@ export const TokenSavingsPage: React.FC = () => {
   const [sessions, setSessions] = useState<SessionSavings[]>([]);
   const [summary, setSummary] = useState<SavingsSummary | null>(null);
   const [statsAvailable, setStatsAvailable] = useState(true);
+  const [tips, setTips] = useState<OptimizationTip[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agentNames, setAgentNames] = useState<string[]>([]);
@@ -300,6 +406,7 @@ export const TokenSavingsPage: React.FC = () => {
       setSessions(resp.sessions);
       setSummary(resp.summary);
       setStatsAvailable(resp.stats_available);
+      setTips(resp.optimization_tips ?? []);
     } catch (e: any) {
       setError(e.message || 'Failed to fetch token savings');
     } finally {
@@ -528,6 +635,12 @@ export const TokenSavingsPage: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* ── Optimization tips + Savings breakdown ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <OptimizationTipsPanel tips={tips} />
+        <SavingsBreakdownPanel sessions={sessions} />
       </div>
 
       {/* ── Session table ── */}

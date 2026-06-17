@@ -209,6 +209,8 @@ export interface OptimizationItem {
   saved_tokens: number;
   compounded_saved: number;
   compounding_turns: number;
+  compression_ratio: number;
+  explanation: string;
   before_summary: string;
   after_summary: string;
   before_text: string | null;
@@ -246,10 +248,17 @@ export interface SavingsSummary {
   total_compounded_mcp_saved: number;
 }
 
+export interface OptimizationTip {
+  level: 'success' | 'info' | 'warning';
+  title: string;
+  description: string;
+}
+
 export interface TokenSavingsResponse {
   stats_available: boolean;
   summary: SavingsSummary;
   sessions: SessionSavings[];
+  optimization_tips: OptimizationTip[];
 }
 
 /**

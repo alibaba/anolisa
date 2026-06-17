@@ -975,6 +975,8 @@ pub struct OptimizationItemDto {
     pub saved_tokens: i64,
     pub compounded_saved: i64,
     pub compounding_turns: i64,
+    pub compression_ratio: f64,
+    pub explanation: String,
     pub before_summary: String,
     pub after_summary: String,
     pub before_text: Option<String>,
@@ -1008,12 +1010,21 @@ pub struct SessionSavingsDto {
     pub optimization_items: Vec<OptimizationItemDto>,
 }
 
+/// An actionable optimization tip
+#[derive(Debug, Serialize)]
+pub struct OptimizationTip {
+    pub level: String,
+    pub title: String,
+    pub description: String,
+}
+
 /// Full response for /api/token-savings
 #[derive(Debug, Serialize)]
 pub struct TokenSavingsResponse {
     pub stats_available: bool,
     pub summary: SavingsSummary,
     pub sessions: Vec<SessionSavingsDto>,
+    pub optimization_tips: Vec<OptimizationTip>,
 }
 
 /// Map stats.db operation field to frontend category.
@@ -1149,6 +1160,24 @@ pub async fn get_token_savings(
 
                 let diff_lines: Vec<DiffLineDto> = Vec::new();
 
+                let compression_ratio = if row.before_tokens > 0 {
+                    (1.0 - row.after_tokens as f64 / row.before_tokens as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                let explanation = if category == "mcp_response" {
+                    format!(
+                        "MCP\u{54cd}\u{5e94}\u{538b}\u{7f29}: \u{539f}\u{59cb} {} tokens \u{2192} {} tokens\u{ff0c}\u{538b}\u{7f29}\u{7387} {:.1}%\u{3002}\u{540e}\u{7eed} {} \u{8f6e}LLM\u{8c03}\u{7528}\u{5747}\u{53d7}\u{76ca}\u{ff0c}\u{590d}\u{5408}\u{8282}\u{7701} {} tokens\u{3002}",
+                        row.before_tokens, row.after_tokens, compression_ratio, compounding_turns, compounded
+                    )
+                } else {
+                    format!(
+                        "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}: \u{539f}\u{59cb} {} tokens \u{2192} {} tokens\u{ff0c}\u{538b}\u{7f29}\u{7387} {:.1}%\u{3002}\u{540e}\u{7eed} {} \u{8f6e}LLM\u{8c03}\u{7528}\u{5747}\u{53d7}\u{76ca}\u{ff0c}\u{590d}\u{5408}\u{8282}\u{7701} {} tokens\u{3002}",
+                        row.before_tokens, row.after_tokens, compression_ratio, compounding_turns, compounded
+                    )
+                };
+
                 items.push(OptimizationItemDto {
                     id: row.tool_use_id.clone(),
                     category: category.to_string(),
@@ -1158,6 +1187,8 @@ pub async fn get_token_savings(
                     saved_tokens: saved,
                     compounded_saved: compounded,
                     compounding_turns,
+                    compression_ratio,
+                    explanation,
                     before_summary: format!(
                         "\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens",
                         row.before_tokens
@@ -1219,6 +1250,63 @@ pub async fn get_token_savings(
         0.0
     };
 
+    // ── Generate optimization tips ──────────────────────────────────────────
+    let mut optimization_tips: Vec<OptimizationTip> = Vec::new();
+
+    if !stats_available {
+        optimization_tips.push(OptimizationTip {
+            level: "warning".to_string(),
+            title: "\u{672a}\u{68c0}\u{6d4b}\u{5230} Tokenless \u{7ec4}\u{4ef6}".to_string(),
+            description: "\u{672a}\u{53d1}\u{73b0} stats.db\u{ff0c}\u{8bf7}\u{786e}\u{8ba4} tokenless \u{7ec4}\u{4ef6}\u{5df2}\u{5b89}\u{88c5}\u{5e76}\u{542f}\u{7528}\u{3002}\u{542f}\u{7528}\u{540e}\u{53ef}\u{81ea}\u{52a8}\u{538b}\u{7f29}\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{548c} MCP \u{54cd}\u{5e94}\u{ff0c}\u{663e}\u{8457}\u{964d}\u{4f4e} Token \u{6d88}\u{8017}\u{3002}".to_string(),
+        });
+    } else if grand_compounded_rate < 5.0 && grand_total > 0 {
+        optimization_tips.push(OptimizationTip {
+            level: "warning".to_string(),
+            title: "\u{8282}\u{7701}\u{7387}\u{8f83}\u{4f4e}".to_string(),
+            description: "\u{5f53}\u{524d}\u{590d}\u{5408}\u{8282}\u{7701}\u{7387}\u{4e0d}\u{8db3} 5%\u{ff0c}\u{5efa}\u{8bae}\u{68c0}\u{67e5} tokenless \u{914d}\u{7f6e}\u{662f}\u{5426}\u{5df2}\u{5bf9}\u{6240}\u{6709} Agent \u{751f}\u{6548}\u{ff0c}\u{786e}\u{4fdd}\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{548c} MCP \u{54cd}\u{5e94}\u{538b}\u{7f29}\u{5747}\u{5df2}\u{5f00}\u{542f}\u{3002}".to_string(),
+        });
+    }
+
+    if grand_compounded_tool_saved > 0 && grand_compounded_mcp_saved == 0 && grand_total > 0 {
+        optimization_tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: "\u{5efa}\u{8bae}\u{5f00}\u{542f} MCP \u{54cd}\u{5e94}\u{538b}\u{7f29}".to_string(),
+            description: "\u{5f53}\u{524d}\u{4ec5}\u{6709}\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}\u{ff0c}\u{672a}\u{68c0}\u{6d4b}\u{5230} MCP \u{54cd}\u{5e94}\u{538b}\u{7f29}\u{3002}\u{5f00}\u{542f}\u{540e}\u{53ef}\u{8fdb}\u{4e00}\u{6b65}\u{964d}\u{4f4e} Token \u{6d88}\u{8017}\u{3002}".to_string(),
+        });
+    }
+
+    if grand_compounded_mcp_saved > 0 && grand_compounded_tool_saved == 0 && grand_total > 0 {
+        optimization_tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: "\u{5efa}\u{8bae}\u{5f00}\u{542f}\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}".to_string(),
+            description: "\u{5f53}\u{524d}\u{4ec5}\u{6709} MCP \u{54cd}\u{5e94}\u{538b}\u{7f29}\u{ff0c}\u{672a}\u{68c0}\u{6d4b}\u{5230}\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}\u{3002}\u{5f00}\u{542f}\u{540e}\u{53ef}\u{8fdb}\u{4e00}\u{6b65}\u{964d}\u{4f4e} Token \u{6d88}\u{8017}\u{3002}".to_string(),
+        });
+    }
+
+    // Tip for sessions with zero savings
+    let zero_savings_sessions = resp_sessions.iter().filter(|s| s.compounded_saved == 0 && s.total_tokens > 1000).count();
+    if zero_savings_sessions > 0 {
+        optimization_tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: format!("\u{53d1}\u{73b0} {} \u{4e2a}\u{672a}\u{4f18}\u{5316}\u{4f1a}\u{8bdd}", zero_savings_sessions),
+            description: "\u{90e8}\u{5206}\u{4f1a}\u{8bdd}\u{6d88}\u{8017}\u{8f83}\u{9ad8}\u{4f46}\u{65e0}\u{4f18}\u{5316}\u{8bb0}\u{5f55}\u{ff0c}\u{53ef}\u{80fd}\u{662f}\u{5bf9}\u{5e94} Agent \u{672a}\u{542f}\u{7528} tokenless \u{6216}\u{5de5}\u{5177}\u{8c03}\u{7528}\u{8f83}\u{5c11}\u{3002}\u{5efa}\u{8bae}\u{68c0}\u{67e5}\u{8fd9}\u{4e9b}\u{4f1a}\u{8bdd}\u{7684} Agent \u{914d}\u{7f6e}\u{3002}".to_string(),
+        });
+    }
+
+    if grand_compounded_rate >= 30.0 {
+        optimization_tips.push(OptimizationTip {
+            level: "success".to_string(),
+            title: "\u{8282}\u{7701}\u{6548}\u{679c}\u{4f18}\u{79c0}".to_string(),
+            description: format!("\u{5f53}\u{524d}\u{590d}\u{5408}\u{8282}\u{7701}\u{7387} {:.1}%\u{ff0c}\u{8868}\u{73b0}\u{4f18}\u{79c0}\u{ff01}\u{7ee7}\u{7eed}\u{4fdd}\u{6301}\u{5f53}\u{524d}\u{914d}\u{7f6e}\u{3002}", grand_compounded_rate),
+        });
+    } else if grand_compounded_rate >= 15.0 {
+        optimization_tips.push(OptimizationTip {
+            level: "success".to_string(),
+            title: "\u{8282}\u{7701}\u{6548}\u{679c}\u{826f}\u{597d}".to_string(),
+            description: format!("\u{5f53}\u{524d}\u{590d}\u{5408}\u{8282}\u{7701}\u{7387} {:.1}%\u{ff0c}\u{5df2}\u{8fbe}\u{5230}\u{826f}\u{597d}\u{6c34}\u{5e73}\u{3002}\u{53ef}\u{5c1d}\u{8bd5}\u{8c03}\u{6574}\u{538b}\u{7f29}\u{7b56}\u{7565}\u{4ee5}\u{8fdb}\u{4e00}\u{6b65}\u{63d0}\u{5347}\u{3002}", grand_compounded_rate),
+        });
+    }
+
     HttpResponse::Ok().json(TokenSavingsResponse {
         stats_available,
         summary: SavingsSummary {
@@ -1235,6 +1323,7 @@ pub async fn get_token_savings(
             total_compounded_mcp_saved: grand_compounded_mcp_saved,
         },
         sessions: resp_sessions,
+        optimization_tips,
     })
 }
 
