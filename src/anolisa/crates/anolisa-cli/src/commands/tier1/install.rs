@@ -254,8 +254,12 @@ fn handle_one_with_query(
     //
     // Priority: explicit --backend > existing state > system RPM presence
     // (system mode only) > default_backend. The system-RPM probe runs only
-    // when nothing earlier decided, so non-RPM hosts and the common raw path
-    // never shell out to rpm/dnf.
+    // when nothing earlier decided AND we are in system mode, so user mode,
+    // an explicit --backend, and existing-state hits never shell out to
+    // rpm/dnf. The default/auto-detect system path DOES probe rpm; when that
+    // probe cannot run because rpm/dnf is absent it fail-fasts with a
+    // `--backend raw` hint (§7.1) rather than silently installing raw over a
+    // possibly-unobserved system RPM.
     let mut adopt_situation: Option<RpmSituation> = None;
     let (backend_name, source): (String, BackendSource) = if let Some(explicit) =
         args.backend.as_deref()
@@ -663,6 +667,13 @@ fn execute_adopt(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+
+    // Re-validate against the freshly-reloaded state, mirroring execute_raw's
+    // post-lock guard. Layer 1 may have decided "adopt" from a pre-lock read
+    // where the component was absent, but a concurrent raw install can win the
+    // lock and record it first. Without this check the adopt would clobber the
+    // raw provenance; with it, the loser is rejected rather than overwriting.
+    ensure_component_backend_compatible(&state, component, "rpm", command)?;
 
     let started_at = now_iso8601();
     let lock_ts = Utc::now();
@@ -3723,6 +3734,71 @@ scope = "@anolisa"
             obj.rpm_metadata.as_ref().and_then(|m| m.evr.as_deref()),
             Some("2.3.0-1.al8")
         );
+    }
+
+    #[test]
+    fn adopt_refuses_to_clobber_concurrent_raw_install() {
+        // Post-lock TOCTOU guard: layer 1 may decide "adopt" from a pre-lock
+        // read where the component is absent, but a concurrent raw install can
+        // win the lock and record it first. After reloading state under the
+        // lock, adopt must re-check backend compatibility and refuse rather
+        // than overwrite the raw provenance with rpm-observed. Calling
+        // `execute_adopt` directly reproduces the "state changed under the lock"
+        // window that layer 1's routing would otherwise hide.
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "1.0.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("raw".to_string()),
+            ownership: Some(Ownership::RawManaged),
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-raw".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed raw record");
+
+        let q = FakeQuery::default();
+        let err = execute_adopt(
+            &ctx,
+            &layout,
+            "install copilot-shell",
+            "copilot-shell",
+            "anolisa-copilot-shell".to_string(),
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            &q,
+        )
+        .expect_err("must refuse to clobber a concurrent raw install");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("raw"), "got: {}", err.reason());
+
+        // The raw record survives untouched: nothing was overwritten.
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("raw record preserved");
+        assert_eq!(installed_backend_label(obj), Some("raw"));
+        assert!(obj.rpm_metadata.is_none(), "raw record must stay raw");
     }
 
     #[test]
