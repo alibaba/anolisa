@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-06-17
+
+### Added
+
+- `anolisa install --backend rpm` can install missing RPM components through `dnf` and track them as managed.
+- `anolisa install` can adopt matching pre-installed system RPMs without downloading a raw package.
+- `anolisa update <component>` can update RPM-managed and RPM-observed components through `dnf`.
+- `anolisa status` now shows package, version, architecture, and source repo for RPM-backed components.
+- `anolisa status <component>` now reports matching untracked system RPMs as observed.
+
+### Changed
+
+- `anolisa update runtime <component>` is now `anolisa update <component>`; `self` and `all` stay subcommands.
+- `repo.toml` now uses `[backends.rpm]` instead of `[backends.yum]`.
+- `anolisa install --all` now lists adopted RPM components in the batch summary.
+
+### Fixed
+
+- `anolisa install --all` now prints the reason for each failed component in human output.
+- `anolisa install` now refuses automatic RPM detection when `rpm` or `dnf` is missing, with a `--backend raw` hint.
+- `anolisa install` no longer replaces a raw install if another install finishes first.
+
 ## [0.1.9] - 2026-06-16
 
 ### Added
@@ -172,6 +194,28 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.10] - 2026-06-17
+
+### 新增
+
+- `anolisa install --backend rpm` 可通过 `dnf` 安装缺失 RPM 组件。
+- `anolisa install` 可接管匹配的预装系统 RPM。
+- `anolisa update <component>` 可通过 `dnf` 更新 RPM 组件。
+- `anolisa status` 现显示 RPM 组件的软件包来源。
+- `anolisa status <component>` 现显示匹配的未跟踪系统 RPM。
+
+### 变更
+
+- `anolisa update runtime <component>` 改为 `anolisa update <component>`。
+- `repo.toml` 现使用 `[backends.rpm]` 替代 `[backends.yum]`。
+- `anolisa install --all` 现在批量摘要列出接管的 RPM。
+
+### 修复
+
+- `anolisa install --all` 现在普通输出显示各组件失败原因。
+- `anolisa install` 在缺少 `rpm` 或 `dnf` 时提示 `--backend raw`。
+- `anolisa install` 不再覆盖先完成的 raw 安装。
 
 ## [0.1.9] - 2026-06-16
 
