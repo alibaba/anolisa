@@ -216,6 +216,79 @@ mod tests {
     }
 
     #[test]
+    fn brotli_corrupt_falls_back_to_raw() {
+        let body = b"not really brotli";
+        assert_eq!(decompress_body(body, Some("br")), body);
+    }
+
+    #[test]
+    fn gzip_decompresses_and_corrupt_falls_back() {
+        let plain = b"hello gzip";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(decompress_body(&compressed, Some("gzip")), plain);
+        assert_eq!(decompress_body(&compressed, Some("x-gzip")), plain);
+
+        let bad = b"not gzip at all!!";
+        assert_eq!(decompress_body(bad, Some("gzip")), bad);
+    }
+
+    #[test]
+    fn deflate_decompresses_and_corrupt_falls_back() {
+        let plain = b"hello deflate";
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(decompress_body(&compressed, Some("deflate")), plain);
+
+        let bad = b"not deflate";
+        assert_eq!(decompress_body(bad, Some("deflate")), bad);
+    }
+
+    #[test]
+    fn gzip_autodetected_by_magic() {
+        let plain = b"auto-detect gzip";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(&compressed[..2], &[0x1f, 0x8b]);
+        assert_eq!(decompress_body(&compressed, None), plain);
+    }
+
+    #[test]
+    fn dechunk_incomplete_final_chunk() {
+        // Chunk header says 10 bytes but only 3 are present
+        let raw = b"a\r\nabc";
+        let result = dechunk_body(raw);
+        assert_eq!(result, b"abc");
+    }
+
+    #[test]
+    fn dechunk_malformed_size_stops() {
+        let raw = b"zz\r\ndata\r\n0\r\n\r\n";
+        let result = dechunk_body(raw);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dechunk_no_crlf_returns_empty() {
+        let raw = b"5hello";
+        let result = dechunk_body(raw);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decompress_body_to_string_works() {
+        let plain = b"hello string";
+        let compressed = zstd::encode_all(&plain[..], 3).unwrap();
+        let result = decompress_body_to_string(&compressed, Some("zstd"));
+        assert_eq!(result.as_deref(), Some("hello string"));
+
+        assert_eq!(decompress_body_to_string(b"", None), None);
+    }
+
+    #[test]
     fn dechunk_then_zstd_recovers_sse_stream() {
         // The real failure mode: a chunk-framed, zstd-compressed SSE response.
         let sse = b"event: content_block_delta\ndata: {\"text\":\"hi\"}\n\nevent: message_stop\ndata: {}\n\n";

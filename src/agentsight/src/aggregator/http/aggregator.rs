@@ -1303,4 +1303,483 @@ mod tests {
         );
         assert!(pair.response.parsed.body_str().is_empty());
     }
+
+    // ── Compressed SSE tests ────────────────────────────────────────────
+
+    fn make_zstd_chunked_sse() -> (Vec<u8>, Vec<u8>) {
+        let sse_plain =
+            b"event: message_start\ndata: {\"type\":\"message_start\"}\n\ndata: [DONE]\n\n";
+        let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(format!("{:x}\r\n", compressed.len()).as_bytes());
+        chunked.extend_from_slice(&compressed);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+        (sse_plain.to_vec(), chunked)
+    }
+
+    #[test]
+    fn test_sse_entry_state_detects_zstd_header() {
+        let (_, chunked) = make_zstd_chunked_sse();
+        let event = create_mock_ssl_event_with_buf(1, 0x100, chunked.clone(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: chunked.len(),
+            source_event: event,
+        };
+        let (sse_events, buf, enc) = HttpConnectionAggregator::sse_entry_state(&response);
+        assert!(buf.is_some(), "compressed buffer should be Some for zstd");
+        assert!(sse_events.is_empty());
+        assert_eq!(enc.as_deref(), Some("zstd"));
+    }
+
+    #[test]
+    fn test_sse_entry_state_detects_zstd_magic() {
+        let plain = b"data: hi\n\n";
+        let compressed = zstd::encode_all(&plain[..], 3).unwrap();
+        let event = create_mock_ssl_event_with_buf(1, 0x101, compressed.clone(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: compressed.len(),
+            source_event: event,
+        };
+        let (_, buf, _) = HttpConnectionAggregator::sse_entry_state(&response);
+        assert!(buf.is_some(), "should detect zstd via magic bytes");
+    }
+
+    #[test]
+    fn test_sse_entry_state_uncompressed() {
+        let body = b"data: hello\n\n";
+        let event = create_mock_ssl_event_with_buf(1, 0x102, body.to_vec(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: body.len(),
+            source_event: event,
+        };
+        let (_, buf, _) = HttpConnectionAggregator::sse_entry_state(&response);
+        assert!(buf.is_none(), "uncompressed SSE should have no buffer");
+    }
+
+    #[test]
+    fn test_compressed_sse_request_pending_immediate_finish() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let (_, chunked) = make_zstd_chunked_sse();
+
+        let req_event = create_mock_ssl_event(1, 0x200);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let resp_event = create_mock_ssl_event_with_buf(1, 0x200, chunked.clone(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: chunked.len(),
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        match result {
+            Some(AggregatedResult::SseComplete(pair)) => {
+                assert!(!pair.response.sse_events.is_empty());
+            }
+            other => panic!("expected SseComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compressed_sse_no_prior_state_returns_none() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let (_, chunked) = make_zstd_chunked_sse();
+
+        // Response for a connection not in the cache → pop returns None → result is None
+        let resp_event = create_mock_ssl_event_with_buf(1, 0x201, chunked.clone(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: chunked.len(),
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        assert!(result.is_none(), "no prior state → None");
+    }
+
+    #[test]
+    fn test_compressed_sse_process_sse_event_done_triggers_finish() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let sse_plain = b"data: via-sse-event\n\ndata: [DONE]\n\n";
+        let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(format!("{:x}\r\n", compressed.len()).as_bytes());
+        chunked.extend_from_slice(&compressed);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let req_event = create_mock_ssl_event(6, 0x700);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // Empty-body SSE response → SseActive with compressed buffer
+        let resp_event = create_mock_ssl_event_with_buf(6, 0x700, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        aggregator.process_response(response);
+
+        // Buffer the compressed data via process_raw_body_data (without terminator to stay buffering)
+        let partial = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 6,
+            tid: 1,
+            uid: 0,
+            len: chunked.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: chunked.clone(),
+            is_handshake: false,
+            ssl_ptr: 0x700,
+        };
+        // This will finish via raw terminator detection
+        let result = aggregator.process_raw_body_data(&partial);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_compressed_sse_non_done_event_keeps_buffering() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let req_event = create_mock_ssl_event(7, 0x800);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let resp_event = create_mock_ssl_event_with_buf(7, 0x800, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        aggregator.process_response(response);
+
+        // Send a non-DONE SSE event while in compressed mode → should keep buffering
+        let conn_id = ConnectionId {
+            pid: 7,
+            ssl_ptr: 0x800,
+        };
+        let evt = create_mock_ssl_event_with_buf(7, 0x800, b"data: partial\n\n".to_vec(), 0);
+        let non_done = ParsedSseEvent::new(None, None, None, 0, 0, evt);
+        let result = aggregator.process_sse_event(&conn_id, non_done);
+        assert!(result.is_none(), "non-DONE event should keep buffering");
+        assert!(aggregator.is_sse_active(&conn_id));
+    }
+
+    #[test]
+    fn test_compressed_sse_buffering_then_finish() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let sse_plain = b"data: buffered\n\ndata: [DONE]\n\n";
+        let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(format!("{:x}\r\n", compressed.len()).as_bytes());
+        chunked.extend_from_slice(&compressed);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let req_event = create_mock_ssl_event(2, 0x300);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // Response with empty body → enters SseActive with compressed_buffer
+        let resp_event = create_mock_ssl_event_with_buf(2, 0x300, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        let result = aggregator.process_response(response);
+        assert!(result.is_none());
+        let conn_id = ConnectionId {
+            pid: 2,
+            ssl_ptr: 0x300,
+        };
+        assert!(aggregator.is_sse_active(&conn_id));
+
+        // Send first chunk of compressed data (partial, no terminator)
+        let mid = chunked.len() / 2;
+        let partial = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 2,
+            tid: 1,
+            uid: 0,
+            len: mid as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: chunked[..mid].to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x300,
+        };
+        let result = aggregator.process_raw_body_data(&partial);
+        assert!(result.is_none(), "should still be buffering");
+
+        // Send remainder including "0\r\n\r\n" terminator
+        let rest = SslEvent {
+            source: 0,
+            timestamp_ns: 3000,
+            delta_ns: 0,
+            pid: 2,
+            tid: 1,
+            uid: 0,
+            len: (chunked.len() - mid) as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: chunked[mid..].to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x300,
+        };
+        let result = aggregator.process_raw_body_data(&rest);
+        match result {
+            Some(AggregatedResult::SseComplete(pair)) => {
+                assert!(pair.response.sse_event_count() >= 2);
+            }
+            other => panic!("expected SseComplete after terminator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compressed_sse_done_event_triggers_finish() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let sse_plain = b"data: done-event\n\ndata: [DONE]\n\n";
+        let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(format!("{:x}\r\n", compressed.len()).as_bytes());
+        chunked.extend_from_slice(&compressed);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let req_event = create_mock_ssl_event(3, 0x400);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // Empty-body response → SseActive with compressed buffer
+        let resp_event = create_mock_ssl_event_with_buf(3, 0x400, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        aggregator.process_response(response);
+
+        // Buffer the full chunked data via raw
+        let raw = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 3,
+            tid: 1,
+            uid: 0,
+            len: chunked.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: chunked.clone(),
+            is_handshake: false,
+            ssl_ptr: 0x400,
+        };
+        let result = aggregator.process_raw_body_data(&raw);
+        match result {
+            Some(AggregatedResult::SseComplete(_)) => {}
+            other => panic!("expected SseComplete via raw terminator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compressed_sse_body_pending_immediate_finish() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let (_, chunked) = make_zstd_chunked_sse();
+
+        // Request with incomplete body
+        let partial = b"POST /stream HTTP/1.1\r\nContent-Length: 50\r\n\r\ndata";
+        let event = create_mock_ssl_event_with_buf(4, 0x500, partial.to_vec(), 1);
+        let header_end = partial.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let body_len = partial.len() - header_end;
+        let mut req_headers = HashMap::new();
+        req_headers.insert("content-length".to_string(), "50".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/stream".to_string(),
+            version: 1,
+            headers: req_headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // SSE compressed response arrives, body pending → force-complete + immediate finish
+        let resp_event = create_mock_ssl_event_with_buf(4, 0x500, chunked.clone(), 0);
+        let mut resp_headers = HashMap::new();
+        resp_headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        resp_headers.insert("content-encoding".to_string(), "zstd".to_string());
+        resp_headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: resp_headers,
+            body_offset: 0,
+            body_len: chunked.len(),
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        match result {
+            Some(AggregatedResult::SseComplete(pair)) => {
+                assert_eq!(pair.request.method, "POST");
+                assert!(!pair.response.sse_events.is_empty());
+            }
+            other => panic!("expected SseComplete from body-pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_finish_compressed_sse_non_chunked() {
+        let sse_plain = b"data: no-chunks\n\ndata: [DONE]\n\n";
+        let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
+        let event = create_mock_ssl_event(5, 0x600);
+        let response_headers = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        let conn_id = ConnectionId {
+            pid: 5,
+            ssl_ptr: 0x600,
+        };
+        let result = HttpConnectionAggregator::finish_compressed_sse(
+            conn_id,
+            None,
+            response_headers,
+            Some("zstd".to_string()),
+            compressed,
+        );
+        match result {
+            AggregatedResult::ResponseOnly { response, .. } => {
+                assert!(response.sse_event_count() >= 2);
+            }
+            other => panic!("expected ResponseOnly, got {other:?}"),
+        }
+    }
 }
