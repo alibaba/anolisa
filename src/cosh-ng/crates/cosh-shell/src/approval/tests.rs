@@ -8,8 +8,9 @@ use crate::approval::requests::{approval_request_from_governed_event, record_app
 use crate::approval::resolution::{
     apply_approval_decision, approval_outcome_for_request, approval_resolution_agent_request,
 };
-use cosh_shell::adapter::ApprovalDecision;
-use cosh_shell::types::{GovernanceDecision, GovernancePolicyDecision};
+use crate::runtime::prelude::{
+    ApprovalDecision, GovernanceDecision, GovernancePolicyDecision, I18n, Language,
+};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -449,7 +450,7 @@ fn provider_approval_response_refreshes_active_run_idle_clock() {
 
 #[test]
 fn shell_handoff_validation_message_uses_active_language() {
-    let zh = cosh_shell::I18n::new(cosh_shell::Language::ZhCn);
+    let zh = I18n::new(Language::ZhCn);
     let text = approval_shell_handoff_validation_message(
         &zh,
         "shell handoff command contains newline; multiline handoff is not enabled",
@@ -531,7 +532,7 @@ fn active_run_for_approval_test() -> ActiveAgentRun {
         request,
         handle,
         provider_name: "fake",
-        language: cosh_shell::Language::EnUs,
+        language: Language::EnUs,
         renderer: renderer.clone(),
         status_animation: renderer.status_animation(),
         markdown_stream: renderer.stream_markdown_agent(),

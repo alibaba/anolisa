@@ -21,6 +21,20 @@ pub(crate) fn ledger_from_output(output: &ShellHostOutput) -> LedgerOutput {
     ledger
 }
 
+pub(crate) fn ledger_output_refs_text(ledger: &LedgerOutput) -> String {
+    let mut text = String::new();
+    for block in &ledger.blocks {
+        let Some(path) = block.output.terminal_output_ref.as_deref() else {
+            continue;
+        };
+        if let Ok(output) = std::fs::read_to_string(path) {
+            text.push_str(&output);
+            text.push('\n');
+        }
+    }
+    text
+}
+
 pub(crate) fn assert_no_osc_marker(output: &[u8]) {
     assert!(!output
         .windows(b"\x1b]1337;COSH;".len())
@@ -47,6 +61,70 @@ pub(crate) fn assert_clean_shell_output_ref(block: &CommandBlock, expected: &str
 pub(crate) fn shell_arg(path: &Path) -> String {
     let value = path.display().to_string();
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub(crate) fn stty_flag_probe(
+    flag: &str,
+    on_marker: &str,
+    off_marker: &str,
+    cleanup: &str,
+) -> String {
+    format!(
+        "if stty -a | tr ' ;' '\\n\\n' | grep -qx -- {flag}; then printf '%s\\n' {on_marker}; else printf '%s\\n' {off_marker}; fi; {cleanup}",
+    )
+}
+
+pub(crate) fn assert_no_synthetic_terminal_restore_after_interrupt(rendered: &[u8]) {
+    for sequence in [
+        b"\x1b[?1049l".as_slice(),
+        b"\x1b[2J".as_slice(),
+        b"\x1bc".as_slice(),
+        b"COSH_INTERNAL_RESTORE".as_slice(),
+        b"stty echo icanon".as_slice(),
+    ] {
+        assert!(
+            !rendered
+                .windows(sequence.len())
+                .any(|window| window == sequence),
+            "unexpected synthetic terminal restore sequence {:?} in {}",
+            sequence,
+            String::from_utf8_lossy(rendered)
+        );
+    }
+}
+
+pub(crate) fn assert_fullscreen_terminal_modes_balanced(rendered: &[u8]) {
+    for (enter, leave) in [
+        (b"\x1b[?1049h".as_slice(), b"\x1b[?1049l".as_slice()),
+        (b"\x1b[?25l".as_slice(), b"\x1b[?25h".as_slice()),
+        (b"\x1b[?2004h".as_slice(), b"\x1b[?2004l".as_slice()),
+        (b"\x1b[?7l".as_slice(), b"\x1b[?7h".as_slice()),
+    ] {
+        let Some(enter_pos) = find_bytes(rendered, enter) else {
+            continue;
+        };
+        let Some(leave_pos) = find_bytes(rendered, leave) else {
+            panic!(
+                "terminal mode {:?} was entered but {:?} was not restored in {}",
+                enter,
+                leave,
+                String::from_utf8_lossy(rendered)
+            );
+        };
+        assert!(
+            leave_pos > enter_pos,
+            "terminal restore {:?} appeared before enter {:?} in {}",
+            leave,
+            enter,
+            String::from_utf8_lossy(rendered)
+        );
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 #[cfg(unix)]

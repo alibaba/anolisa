@@ -20,7 +20,7 @@ pub(crate) fn render_agent_heartbeat<W: Write>(
         return Ok(());
     }
 
-    let i18n = cosh_shell::I18n::new(active_run.language);
+    let i18n = I18n::new(active_run.language);
     let now = Instant::now();
     if active_run.status_animation.is_enabled() {
         let elapsed = now.duration_since(active_run.started_at).as_secs();
@@ -31,14 +31,14 @@ pub(crate) fn render_agent_heartbeat<W: Write>(
                 active_run.current_message.as_str()
             };
             let text = i18n.format(
-                cosh_shell::MessageId::AgentThinkingElapsed,
+                MessageId::AgentThinkingElapsed,
                 &[("elapsed", &elapsed.to_string()), ("detail", detail)],
             );
             return active_run.status_animation.render(output, &text);
         }
         return active_run
             .status_animation
-            .render(output, i18n.t(cosh_shell::MessageId::AgentThinking));
+            .render(output, i18n.t(MessageId::AgentThinking));
     }
 
     if now.duration_since(active_run.started_at) < AGENT_HEARTBEAT_AFTER {
@@ -63,12 +63,12 @@ pub(crate) fn render_agent_heartbeat<W: Write>(
     active_run.renderer.write_notice_panel(
         output,
         NoticePanelModel {
-            title: i18n.t(cosh_shell::MessageId::AgentStatusTitle),
+            title: i18n.t(MessageId::AgentStatusTitle),
             body: vec![i18n.format(
-                cosh_shell::MessageId::AgentStillWorking,
+                MessageId::AgentStillWorking,
                 &[("elapsed", &elapsed_text), ("detail", detail)],
             )],
-            footer: Some(i18n.t(cosh_shell::MessageId::AgentStatusFooter)),
+            footer: Some(i18n.t(MessageId::AgentStatusFooter)),
         },
     )
 }
@@ -78,7 +78,7 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
         return;
     }
 
-    let i18n = cosh_shell::I18n::new(active_run.language);
+    let i18n = I18n::new(active_run.language);
     let now = Instant::now();
     active_run.last_activity_at = now;
     for event in governed {
@@ -88,89 +88,69 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_message = message.clone();
             }
             AgentEvent::TextDelta { .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusStreaming)
-                    .to_string();
-                active_run.current_message = i18n
-                    .t(cosh_shell::MessageId::AgentStatusReceivingResponse)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusStreaming).to_string();
+                active_run.current_message =
+                    i18n.t(MessageId::AgentStatusReceivingResponse).to_string();
             }
             AgentEvent::SkillLoadStarted { skill, .. } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusSkill).to_string();
-                active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusLoadingSkill,
-                    &[("skill", skill)],
-                );
+                active_run.current_phase = i18n.t(MessageId::AgentStatusSkill).to_string();
+                active_run.current_message =
+                    i18n.format(MessageId::AgentStatusLoadingSkill, &[("skill", skill)]);
             }
             AgentEvent::ToolCall { name, .. } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusTool).to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
                 active_run.current_message = format!(
                     "{}: {name}",
-                    i18n.t(cosh_shell::MessageId::AgentStatusRunningApprovedProviderTool)
+                    i18n.t(MessageId::AgentStatusRunningApprovedProviderTool)
                 );
             }
             AgentEvent::UserQuestion { question, .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusQuestion)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusQuestion).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusWaitingUserAnswer,
+                    MessageId::AgentStatusWaitingUserAnswer,
                     &[("question", question)],
                 );
             }
             AgentEvent::Action { command, .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusApproval)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusApproval).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusWaitingApprovalCommand,
+                    MessageId::AgentStatusWaitingApprovalCommand,
                     &[("command", command)],
                 );
             }
             AgentEvent::ToolPermissionRequest { tool_name, .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusApproval)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusApproval).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusWaitingApprovalTool,
+                    MessageId::AgentStatusWaitingApprovalTool,
                     &[("tool", tool_name)],
                 );
             }
             AgentEvent::ToolOutputDelta { tool_id, .. } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusTool).to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusCapturingToolOutput,
+                    MessageId::AgentStatusCapturingToolOutput,
                     &[("tool_id", tool_id)],
                 );
             }
             AgentEvent::ToolCompleted {
                 tool_id, status, ..
             } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusTool).to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusToolCompleted,
+                    MessageId::AgentStatusToolCompleted,
                     &[("tool_id", tool_id), ("status", status)],
                 );
             }
             AgentEvent::AgentCompleted { summary, .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusCompleted)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusCompleted).to_string();
                 active_run.current_message = summary.clone();
             }
             AgentEvent::AgentFailed { error, .. } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusFailed).to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusFailed).to_string();
                 active_run.current_message = error.clone();
             }
             AgentEvent::AgentCancelled { reason, .. } => {
-                active_run.current_phase = i18n
-                    .t(cosh_shell::MessageId::AgentStatusCancelled)
-                    .to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusCancelled).to_string();
                 active_run.current_message = reason.clone();
             }
             AgentEvent::Recommendation { summary, .. }
@@ -178,17 +158,15 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_message = summary.clone();
             }
             AgentEvent::SkillLoadFailed { skill, error, .. } => {
-                active_run.current_phase =
-                    i18n.t(cosh_shell::MessageId::AgentStatusSkill).to_string();
+                active_run.current_phase = i18n.t(MessageId::AgentStatusSkill).to_string();
                 active_run.current_message = i18n.format(
-                    cosh_shell::MessageId::AgentStatusSkillFailed,
+                    MessageId::AgentStatusSkillFailed,
                     &[("skill", skill), ("error", error)],
                 );
             }
             AgentEvent::AuthRequired { .. } => {
                 active_run.current_phase = "auth".to_string();
-                active_run.current_message =
-                    "Authentication credentials required".to_string();
+                active_run.current_message = "Authentication credentials required".to_string();
             }
         }
     }
@@ -235,7 +213,7 @@ mod tests {
             request,
             handle,
             provider_name: "fake",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),
@@ -263,8 +241,8 @@ mod tests {
         remember_agent_activity(
             &mut active_run,
             &[GovernedEvent {
-                decision: cosh_shell::types::GovernanceDecision::Display,
-                policy_decision: cosh_shell::types::GovernancePolicyDecision::NeedsUserApproval,
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::NeedsUserApproval,
                 event: AgentEvent::ToolCall {
                     run_id: "run-1".to_string(),
                     tool_id: Some("tool-1".to_string()),

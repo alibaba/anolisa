@@ -368,6 +368,55 @@ pub(crate) fn assert_inline_before_followup(
     assert!(inline_pos < followup_pos, "{output}");
 }
 
+pub(crate) fn assert_agent_loading_visible(output: &str) {
+    assert!(
+        output.contains("Thinking...") || output.contains("正在思考..."),
+        "{output}"
+    );
+}
+
+pub(crate) fn agent_loading_count(output: &str) -> usize {
+    count_occurrences(output, "Thinking...") + count_occurrences(output, "正在思考...")
+}
+
+pub(crate) fn json_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub(crate) fn process_is_alive(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn read_pid_file_with_retry(path: &Path) -> u32 {
+    let mut last_error = None;
+    for _ in 0..40 {
+        match fs::read_to_string(path) {
+            Ok(pid_text) => return pid_text.trim().parse::<u32>().expect("provider pid"),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    panic!("provider pid file {}: {last_error:?}", path.display());
+}
+
+pub(crate) fn signal_process_group(pid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .args([format!("-{signal}"), format!("-{pid}")])
+        .status();
+}
+
+pub(crate) fn signal_pid(pid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .status();
+}
+
 pub(crate) fn assert_no_prompt_between(output: &str, start_marker: &str, end_marker: &str) {
     let start = output.find(start_marker).expect("start marker");
     let end = output[start..]

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::evidence::output_policy::{shell_evidence_view, EvidenceFacts, EvidenceView};
-use cosh_shell::types::{CommandBlock, ShellHandoffRequest};
+use crate::runtime::prelude::{CommandBlock, ShellHandoffRequest};
 
 #[derive(Debug, Default)]
 pub(crate) struct EvidenceState {

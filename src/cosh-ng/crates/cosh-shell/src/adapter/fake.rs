@@ -1,4 +1,4 @@
-use crate::context_window::provider_safe_command_fact_line;
+use crate::evidence::provider_safe_command_fact_line;
 use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
 
 use super::{first_token, AdapterError, AgentAdapter, AgentBackendCapabilities};

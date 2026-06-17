@@ -1,4 +1,4 @@
-use cosh_shell::types::ShellEvent;
+use crate::runtime::prelude::ShellEvent;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ShellEventCursor(usize);

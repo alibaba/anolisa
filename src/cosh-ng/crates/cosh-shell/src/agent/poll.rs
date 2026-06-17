@@ -1,8 +1,5 @@
 use std::time::Duration;
 
-use cosh_shell::adapter::AgentRunPoll;
-use cosh_shell::tools::is_shell_tool_name;
-
 use crate::agent::continuation::{
     render_fresh_turn_recovery_notice, run_request_is_analysis_only_continuation,
     shell_handoff_first_text_fallback_request,
@@ -446,7 +443,7 @@ mod tests {
             request,
             handle,
             provider_name: "fake",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),

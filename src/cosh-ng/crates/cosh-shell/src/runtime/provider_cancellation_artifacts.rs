@@ -1,4 +1,6 @@
-use cosh_shell::adapter::{ProviderCancellationArtifactKind, ProviderCancellationArtifactStore};
+use crate::runtime::prelude::{
+    ProviderCancellationArtifactKind, ProviderCancellationArtifactStore,
+};
 
 #[derive(Default)]
 pub(crate) struct ProviderCancellationArtifactState {

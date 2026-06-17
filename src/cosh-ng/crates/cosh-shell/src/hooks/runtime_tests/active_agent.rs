@@ -11,7 +11,7 @@ fn active_agent_run_defers_success_consultation_until_run_finishes() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &InlineState::default(),
+        &HookRuntimeState::default(),
         true,
         false,
     );
@@ -33,7 +33,7 @@ fn active_agent_run_does_not_downgrade_failed_command_consultation() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &InlineState::default(),
+        &HookRuntimeState::default(),
         true,
         false,
     );
@@ -89,7 +89,13 @@ fn active_agent_run_queues_deferred_consultation_and_renders_after_completion() 
 
     state.agent_run.active = None;
     mark_front_consultation_idle(&mut state);
-    render_next_queued_consultation(&mut state, &mut output).expect("render deferred consultation");
+    render_next_queued_consultation(
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        state.language,
+        &mut output,
+    )
+    .expect("render deferred consultation");
 
     assert!(state.hooks.pending_consultation.is_some());
     assert!(state.hooks.pending_consultation_queue.is_empty());

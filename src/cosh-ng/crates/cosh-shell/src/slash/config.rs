@@ -21,20 +21,17 @@ pub(crate) fn render_config_command<W: Write>(
             Ok(true)
         }
         (Some("language"), Some(value)) => {
-            let Some(setting) = cosh_shell::parse_language_setting(value) else {
+            let Some(setting) = parse_language_setting(value) else {
                 let i18n = state.i18n();
                 render_notice_panel(
                     output,
-                    i18n.t(cosh_shell::MessageId::SlashInfoConfigTitle),
-                    vec![i18n.format(
-                        cosh_shell::MessageId::ConfigInvalidLanguageBody,
-                        &[("language", value)],
-                    )],
-                    Some(i18n.t(cosh_shell::MessageId::ConfigSupportedLanguagesFooter)),
+                    i18n.t(MessageId::SlashInfoConfigTitle),
+                    vec![i18n.format(MessageId::ConfigInvalidLanguageBody, &[("language", value)])],
+                    Some(i18n.t(MessageId::ConfigSupportedLanguagesFooter)),
                 )?;
                 return Ok(true);
             };
-            let status = cosh_shell::language_config_status();
+            let status = language_config_status();
             if !begin_config_language_confirmation(state, &status, setting.as_config_value()) {
                 render_config_home_missing(state, output)?;
                 return Ok(true);
@@ -43,7 +40,7 @@ pub(crate) fn render_config_command<W: Write>(
             Ok(false)
         }
         (Some("language"), None) => {
-            let status = cosh_shell::language_config_status();
+            let status = language_config_status();
             state
                 .control
                 .set_pending_config_language_panel(language_option_index(&status.setting));
@@ -54,12 +51,9 @@ pub(crate) fn render_config_command<W: Write>(
             let i18n = state.i18n();
             render_notice_panel(
                 output,
-                i18n.t(cosh_shell::MessageId::SlashInfoConfigTitle),
-                vec![i18n.format(
-                    cosh_shell::MessageId::ConfigUnknownKeyBody,
-                    &[("key", other)],
-                )],
-                Some(i18n.t(cosh_shell::MessageId::ModeLanguageFooter)),
+                i18n.t(MessageId::SlashInfoConfigTitle),
+                vec![i18n.format(MessageId::ConfigUnknownKeyBody, &[("key", other)])],
+                Some(i18n.t(MessageId::ModeLanguageFooter)),
             )?;
             Ok(true)
         }
@@ -68,7 +62,7 @@ pub(crate) fn render_config_command<W: Write>(
 
 fn begin_config_language_confirmation(
     state: &mut InlineState,
-    status: &cosh_shell::LanguageConfigStatus,
+    status: &LanguageConfigStatus,
     pending_value: &str,
 ) -> bool {
     let Some(config_path) = status.config_path.clone() else {
@@ -93,11 +87,9 @@ fn render_config_home_missing<W: Write>(
     let i18n = state.i18n();
     render_notice_panel(
         output,
-        i18n.t(cosh_shell::MessageId::SlashInfoConfigTitle),
-        vec![i18n
-            .t(cosh_shell::MessageId::ConfigHomeMissingBody)
-            .to_string()],
-        Some(i18n.t(cosh_shell::MessageId::ConfigHomeMissingFooter)),
+        i18n.t(MessageId::SlashInfoConfigTitle),
+        vec![i18n.t(MessageId::ConfigHomeMissingBody).to_string()],
+        Some(i18n.t(MessageId::ConfigHomeMissingFooter)),
     )
 }
 
@@ -143,7 +135,7 @@ pub(crate) fn render_config_card_actions<W: Write>(
                     let pending_value = language_option_value(selected);
                     clear_active_config_language_panel(state, output)?;
                     state.control.clear_pending_config_language_panel();
-                    let status = cosh_shell::language_config_status();
+                    let status = language_config_status();
                     if !begin_config_language_confirmation(state, &status, pending_value) {
                         render_config_home_missing(state, output)?;
                         write_shell_prompt(state, output)?;
@@ -165,10 +157,8 @@ pub(crate) fn render_config_card_actions<W: Write>(
                     let i18n = state.i18n();
                     render_notice_panel(
                         output,
-                        i18n.t(cosh_shell::MessageId::ConfigUnchangedTitle),
-                        vec![i18n
-                            .t(cosh_shell::MessageId::ConfigNoFileChangedBody)
-                            .to_string()],
+                        i18n.t(MessageId::ConfigUnchangedTitle),
+                        vec![i18n.t(MessageId::ConfigNoFileChangedBody).to_string()],
                         None,
                     )?;
                     write_shell_prompt(state, output)?;
@@ -213,42 +203,39 @@ pub(crate) fn render_config_card_actions<W: Write>(
                 };
                 clear_active_config_panel(state, output)?;
                 state.control.clear_pending_config_panel();
-                let result = cosh_shell::write_user_language_config(&panel.pending_value);
+                let result = write_user_language_config(&panel.pending_value);
                 let (title, body, footer) = match result {
                     Ok(path) => {
-                        state.language = cosh_shell::parse_language_setting(&panel.pending_value)
-                            .map(cosh_shell::resolve_language_setting)
+                        state.language = parse_language_setting(&panel.pending_value)
+                            .map(resolve_language_setting)
                             .unwrap_or(state.language);
                         let i18n = state.i18n();
                         (
-                            i18n.t(cosh_shell::MessageId::ConfigSavedTitle),
+                            i18n.t(MessageId::ConfigSavedTitle),
                             vec![
                                 i18n.format(
-                                    cosh_shell::MessageId::ConfigSavedValueLine,
+                                    MessageId::ConfigSavedValueLine,
                                     &[("setting", &panel.setting), ("value", &panel.pending_value)],
                                 ),
                                 i18n.format(
-                                    cosh_shell::MessageId::ConfigCurrentSessionLanguageLine,
+                                    MessageId::ConfigCurrentSessionLanguageLine,
                                     &[("language", state.language.as_config_value())],
                                 ),
                                 i18n.format(
-                                    cosh_shell::MessageId::ConfigFileLine,
+                                    MessageId::ConfigFileLine,
                                     &[("path", &path.display().to_string())],
                                 ),
                             ],
-                            i18n.t(cosh_shell::MessageId::ConfigSavedFooter),
+                            i18n.t(MessageId::ConfigSavedFooter),
                         )
                     }
                     Err(err) => {
                         let i18n = state.i18n();
                         let err = err.to_string();
                         (
-                            i18n.t(cosh_shell::MessageId::ConfigSaveFailedTitle),
-                            vec![i18n.format(
-                                cosh_shell::MessageId::ConfigSaveFailedBody,
-                                &[("error", &err)],
-                            )],
-                            i18n.t(cosh_shell::MessageId::ConfigNoFileChangedBody),
+                            i18n.t(MessageId::ConfigSaveFailedTitle),
+                            vec![i18n.format(MessageId::ConfigSaveFailedBody, &[("error", &err)])],
+                            i18n.t(MessageId::ConfigNoFileChangedBody),
                         )
                     }
                 };
@@ -268,10 +255,8 @@ pub(crate) fn render_config_card_actions<W: Write>(
                 let i18n = state.i18n();
                 render_notice_panel(
                     output,
-                    i18n.t(cosh_shell::MessageId::ConfigUnchangedTitle),
-                    vec![i18n
-                        .t(cosh_shell::MessageId::ConfigNoFileChangedBody)
-                        .to_string()],
+                    i18n.t(MessageId::ConfigUnchangedTitle),
+                    vec![i18n.t(MessageId::ConfigNoFileChangedBody).to_string()],
                     None,
                 )?;
                 write_shell_prompt(state, output)?;
@@ -302,32 +287,24 @@ fn render_current_config_panel<W: Write>(
     let i18n = state.i18n();
     let body = vec![
         i18n.format(
-            cosh_shell::MessageId::ConfigFileLine,
+            MessageId::ConfigFileLine,
             &[("path", &panel.config_path.display().to_string())],
         ),
         i18n.format(
-            cosh_shell::MessageId::ConfigPendingChangeLine,
+            MessageId::ConfigPendingChangeLine,
             &[
                 ("setting", &panel.setting),
                 ("before", &panel.before_value),
                 ("after", &panel.pending_value),
             ],
         ),
-        format!(
-            "{}[ {}   ]",
-            marker(0),
-            i18n.t(cosh_shell::MessageId::ConfigSaveButton)
-        ),
-        format!(
-            "{}[ {} ]",
-            marker(1),
-            i18n.t(cosh_shell::MessageId::ConfigCancelButton)
-        ),
+        format!("{}[ {}   ]", marker(0), i18n.t(MessageId::ConfigSaveButton)),
+        format!("{}[ {} ]", marker(1), i18n.t(MessageId::ConfigCancelButton)),
     ];
-    let footer = i18n.t(cosh_shell::MessageId::ConfigApplyKeysFooter);
+    let footer = i18n.t(MessageId::ConfigApplyKeysFooter);
     render_notice_panel(
         output,
-        i18n.t(cosh_shell::MessageId::ConfigSavePromptTitle),
+        i18n.t(MessageId::ConfigSavePromptTitle),
         body.clone(),
         Some(footer),
     )?;
@@ -388,26 +365,14 @@ fn render_current_config_language_panel<W: Write>(
     };
     let i18n = state.i18n();
     let body = vec![
-        format!(
-            "{}{}",
-            marker(0),
-            i18n.t(cosh_shell::MessageId::ConfigLanguageAutoLine)
-        ),
-        format!(
-            "{}{}",
-            marker(1),
-            i18n.t(cosh_shell::MessageId::ConfigLanguageEnLine)
-        ),
-        format!(
-            "{}{}",
-            marker(2),
-            i18n.t(cosh_shell::MessageId::ConfigLanguageZhLine)
-        ),
+        format!("{}{}", marker(0), i18n.t(MessageId::ConfigLanguageAutoLine)),
+        format!("{}{}", marker(1), i18n.t(MessageId::ConfigLanguageEnLine)),
+        format!("{}{}", marker(2), i18n.t(MessageId::ConfigLanguageZhLine)),
     ];
-    let footer = i18n.t(cosh_shell::MessageId::ConfigLanguageKeysFooter);
+    let footer = i18n.t(MessageId::ConfigLanguageKeysFooter);
     render_notice_panel(
         output,
-        i18n.t(cosh_shell::MessageId::ConfigLanguageTitle),
+        i18n.t(MessageId::ConfigLanguageTitle),
         body.clone(),
         Some(footer),
     )?;
@@ -544,7 +509,7 @@ mod tests {
 
     fn zh_state() -> InlineState {
         InlineState {
-            language: cosh_shell::Language::ZhCn,
+            language: Language::ZhCn,
             ..InlineState::default()
         }
     }
@@ -583,9 +548,9 @@ mod tests {
     #[test]
     fn config_save_panel_uses_zh_catalog_text() {
         let mut state = zh_state();
-        let status = cosh_shell::LanguageConfigStatus {
+        let status = LanguageConfigStatus {
             setting: "auto".to_string(),
-            effective: cosh_shell::Language::ZhCn,
+            effective: Language::ZhCn,
             source: "config",
             config_path: Some(std::env::temp_dir().join("cosh-shell-config-test.toml")),
         };
@@ -607,9 +572,9 @@ mod tests {
     #[test]
     fn config_cancel_notice_uses_zh_catalog_text() {
         let mut state = zh_state();
-        let status = cosh_shell::LanguageConfigStatus {
+        let status = LanguageConfigStatus {
             setting: "auto".to_string(),
-            effective: cosh_shell::Language::ZhCn,
+            effective: Language::ZhCn,
             source: "config",
             config_path: Some(std::env::temp_dir().join("cosh-shell-config-test.toml")),
         };

@@ -34,12 +34,12 @@ pub(crate) fn render_approval_journal<W: Write>(
 }
 
 pub(super) fn write_approval_receipt<W: Write>(
-    language: cosh_shell::Language,
+    language: Language,
     request: &RuntimeApprovalRequest,
     title: &str,
     output: &mut W,
 ) -> std::io::Result<()> {
-    let i18n = cosh_shell::I18n::new(language);
+    let i18n = I18n::new(language);
     let foreground_shell_handoff = request.status == ApprovalRequestStatus::Approved
         && request_is_executable_bash_tool(request)
         && request.execution_path != Some("provider_native_shell_tool_execution");
@@ -54,9 +54,9 @@ pub(super) fn write_approval_receipt<W: Write>(
     );
 
     let message = if foreground_shell_handoff {
-        i18n.t(cosh_shell::MessageId::ApprovalReceiptBashSentToShellMessage)
+        i18n.t(MessageId::ApprovalReceiptBashSentToShellMessage)
     } else if provider_native_shell {
-        i18n.t(cosh_shell::MessageId::ApprovalReceiptProviderNativeAllowedMessage)
+        i18n.t(MessageId::ApprovalReceiptProviderNativeAllowedMessage)
     } else {
         ""
     };
@@ -97,78 +97,70 @@ fn approval_receipt_is_negative(status: ApprovalRequestStatus) -> bool {
 }
 
 fn approval_receipt_decision<'a>(
-    i18n: &'a cosh_shell::I18n,
+    i18n: &'a I18n,
     request: &RuntimeApprovalRequest,
     foreground_shell_handoff: bool,
     provider_native_shell: bool,
 ) -> &'a str {
     match request.status {
-        ApprovalRequestStatus::Pending => {
-            i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionPending)
-        }
+        ApprovalRequestStatus::Pending => i18n.t(MessageId::ApprovalReceiptDecisionPending),
         ApprovalRequestStatus::Approved => {
             if foreground_shell_handoff {
-                i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionSentToShell)
+                i18n.t(MessageId::ApprovalReceiptDecisionSentToShell)
             } else if provider_native_shell {
-                i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionProviderNativeAllowed)
+                i18n.t(MessageId::ApprovalReceiptDecisionProviderNativeAllowed)
             } else if request.kind == ApprovalRequestKind::Tool {
-                i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionApproved)
+                i18n.t(MessageId::ApprovalReceiptDecisionApproved)
             } else {
-                i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionApprovedDisplayOnly)
+                i18n.t(MessageId::ApprovalReceiptDecisionApprovedDisplayOnly)
             }
         }
-        ApprovalRequestStatus::Denied => {
-            i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionDenied)
-        }
-        ApprovalRequestStatus::Cancelled => {
-            i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionCancelled)
-        }
-        ApprovalRequestStatus::Blocked => {
-            i18n.t(cosh_shell::MessageId::ApprovalReceiptDecisionBlocked)
-        }
+        ApprovalRequestStatus::Denied => i18n.t(MessageId::ApprovalReceiptDecisionDenied),
+        ApprovalRequestStatus::Cancelled => i18n.t(MessageId::ApprovalReceiptDecisionCancelled),
+        ApprovalRequestStatus::Blocked => i18n.t(MessageId::ApprovalReceiptDecisionBlocked),
     }
 }
 
 fn approval_receipt_kind<'a>(
-    i18n: &'a cosh_shell::I18n,
+    i18n: &'a I18n,
     request: &RuntimeApprovalRequest,
     foreground_shell_handoff: bool,
 ) -> &'a str {
     if foreground_shell_handoff {
-        return i18n.t(cosh_shell::MessageId::ApprovalReceiptKindBashTool);
+        return i18n.t(MessageId::ApprovalReceiptKindBashTool);
     }
     match request.kind {
-        ApprovalRequestKind::Tool => i18n.t(cosh_shell::MessageId::ApprovalReceiptKindToolRequest),
+        ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalReceiptKindToolRequest),
         ApprovalRequestKind::ShellCommand => {
-            i18n.t(cosh_shell::MessageId::ApprovalReceiptKindShellCommandRequest)
+            i18n.t(MessageId::ApprovalReceiptKindShellCommandRequest)
         }
     }
 }
 
 fn approval_receipt_subject<'a>(
-    i18n: &'a cosh_shell::I18n,
+    i18n: &'a I18n,
     request: &'a RuntimeApprovalRequest,
     foreground_shell_handoff: bool,
     provider_native_shell: bool,
 ) -> &'a str {
     if foreground_shell_handoff {
-        i18n.t(cosh_shell::MessageId::ApprovalReceiptSubjectBashSentToShell)
+        i18n.t(MessageId::ApprovalReceiptSubjectBashSentToShell)
     } else if provider_native_shell {
-        i18n.t(cosh_shell::MessageId::ApprovalReceiptSubjectBashProviderNative)
+        i18n.t(MessageId::ApprovalReceiptSubjectBashProviderNative)
     } else {
         &request.subject
     }
 }
 
 pub(crate) fn render_approval_details<W: Write>(
-    language: cosh_shell::Language,
+    language: Language,
     request: &RuntimeApprovalRequest,
     output: &mut W,
 ) -> std::io::Result<()> {
-    let i18n = cosh_shell::I18n::new(language);
+    let i18n = I18n::new(language);
     let preview_label = match request.kind {
-        ApprovalRequestKind::Tool => i18n.t(cosh_shell::MessageId::ApprovalToolInputLabel),
-        ApprovalRequestKind::ShellCommand => i18n.t(cosh_shell::MessageId::ApprovalCommandLabel),
+        ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalToolInputLabel),
+        ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
     };
 
     RatatuiInlineRenderer::for_terminal()
@@ -245,20 +237,8 @@ mod tests {
         let provider_native = approved_bash_request(Some("provider_native_shell_tool_execution"));
         let mut output = Vec::new();
 
-        write_approval_receipt(
-            cosh_shell::Language::ZhCn,
-            &foreground,
-            "Approved",
-            &mut output,
-        )
-        .unwrap();
-        write_approval_receipt(
-            cosh_shell::Language::ZhCn,
-            &provider_native,
-            "Approved",
-            &mut output,
-        )
-        .unwrap();
+        write_approval_receipt(Language::ZhCn, &foreground, "Approved", &mut output).unwrap();
+        write_approval_receipt(Language::ZhCn, &provider_native, "Approved", &mut output).unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Bash tool 已发送到 shell"), "{text}");
@@ -274,7 +254,7 @@ mod tests {
 
     #[test]
     fn approval_receipt_metadata_uses_zh_catalog() {
-        let i18n = cosh_shell::I18n::new(cosh_shell::Language::ZhCn);
+        let i18n = I18n::new(Language::ZhCn);
         let foreground = approved_bash_request(None);
         let provider_native = approved_bash_request(Some("provider_native_shell_tool_execution"));
 

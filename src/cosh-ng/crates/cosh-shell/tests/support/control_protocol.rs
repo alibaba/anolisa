@@ -9,11 +9,30 @@ use cosh_shell::types::{AgentEvent, AgentRequest};
 
 pub(crate) fn mock_cli_path(name: &str) -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_path = manifest_dir
+        .join("tests")
+        .join("fixtures")
+        .join("provider")
+        .join(provider_fixture_dir(name))
+        .join(name);
+    if fixture_path.exists() {
+        return fixture_path.to_string_lossy().to_string();
+    }
     manifest_dir
         .join("tests")
         .join(name)
         .to_string_lossy()
         .to_string()
+}
+
+fn provider_fixture_dir(name: &str) -> &'static str {
+    if name.starts_with("mock_qwen_") {
+        "qwen"
+    } else if name.starts_with("mock_cosh_tui_") {
+        "cosh_tui"
+    } else {
+        "claude"
+    }
 }
 
 pub(crate) fn make_request(id: &str) -> AgentRequest {

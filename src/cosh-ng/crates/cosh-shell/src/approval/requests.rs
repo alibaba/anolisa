@@ -1,12 +1,5 @@
 use crate::approval::journal::approval_journal_entry;
 use crate::runtime::prelude::*;
-use cosh_shell::tools::display::display_for_tool;
-use cosh_shell::tools::is_readonly_builtin_tool_name;
-use cosh_shell::tools::{
-    assess_shell_command, blocked_shell_binding_assessment, AssessmentPolicy, AssessmentSource,
-    AutoAllowEvidence, CommandAssessment, ExecutionDecision, OutputExposure,
-};
-use cosh_shell::types::GovernancePolicyDecision;
 
 pub(crate) fn record_approval_requests(
     state: &mut InlineState,
@@ -258,7 +251,7 @@ pub(crate) fn refresh_shell_request_assessment(
     request: &mut RuntimeApprovalRequest,
     policy: AssessmentPolicy,
 ) -> Option<CommandAssessment> {
-    if !cosh_shell::tools::is_shell_tool_name(&request.subject) {
+    if !is_shell_tool_name(&request.subject) {
         return None;
     }
     let command = request
@@ -281,7 +274,7 @@ fn next_approval_id(state: &InlineState) -> String {
 }
 
 fn shell_tool_assessment_from_preview(subject: &str, preview: &str) -> Option<CommandAssessment> {
-    if !cosh_shell::tools::is_shell_tool_name(subject) {
+    if !is_shell_tool_name(subject) {
         return None;
     }
     let command = preview.strip_prefix("$ ").unwrap_or(preview).trim();
@@ -299,7 +292,7 @@ fn provider_tool_permission_assessment(
     tool_name: &str,
     tool_input: &serde_json::Value,
 ) -> Option<CommandAssessment> {
-    if !cosh_shell::tools::is_shell_tool_name(tool_name) {
+    if !is_shell_tool_name(tool_name) {
         return None;
     }
     let command = tool_input
@@ -347,24 +340,20 @@ fn execution_label(decision: ExecutionDecision) -> &'static str {
     }
 }
 
-fn confidence_label(confidence: cosh_shell::tools::AssessmentConfidence) -> &'static str {
+fn confidence_label(confidence: AssessmentConfidence) -> &'static str {
     match confidence {
-        cosh_shell::tools::AssessmentConfidence::High => "high",
-        cosh_shell::tools::AssessmentConfidence::Medium => "medium",
-        cosh_shell::tools::AssessmentConfidence::Low => "low",
+        AssessmentConfidence::High => "high",
+        AssessmentConfidence::Medium => "medium",
+        AssessmentConfidence::Low => "low",
     }
 }
 
-fn output_stability_label(
-    stability: cosh_shell::tools::CommandRiskOutputStability,
-) -> &'static str {
+fn output_stability_label(stability: CommandRiskOutputStability) -> &'static str {
     match stability {
-        cosh_shell::tools::CommandRiskOutputStability::StableSnapshot => "stable-snapshot",
-        cosh_shell::tools::CommandRiskOutputStability::PotentiallyLarge => "potentially-large",
-        cosh_shell::tools::CommandRiskOutputStability::Streaming => "streaming",
-        cosh_shell::tools::CommandRiskOutputStability::UnstableInteractive => {
-            "unstable-interactive"
-        }
+        CommandRiskOutputStability::StableSnapshot => "stable-snapshot",
+        CommandRiskOutputStability::PotentiallyLarge => "potentially-large",
+        CommandRiskOutputStability::Streaming => "streaming",
+        CommandRiskOutputStability::UnstableInteractive => "unstable-interactive",
     }
 }
 

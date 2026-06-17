@@ -1,8 +1,6 @@
-use crate::runtime::state::{PendingConsultation, RuntimeHookFinding};
-use cosh_shell::context_window::provider_safe_command_facts;
-use cosh_shell::types::CommandBlock;
-
-use super::runtime::{severity_label, AggregatedHookFinding};
+use super::aggregate::{severity_label, AggregatedHookFinding};
+use super::prelude::{CommandBlock, CommandStatus, I18n, MessageId};
+use super::state::{PendingConsultation, RuntimeHookFinding};
 
 const HOOK_ANALYSIS_EXCERPT_LINES: usize = 120;
 const HOOK_ANALYSIS_EXCERPT_MAX_BYTES: usize = 12 * 1024;
@@ -42,8 +40,8 @@ fn hook_analysis_evidence_excerpt(block: &CommandBlock, output_id: &str) -> Stri
     let output_excerpt_status =
         crate::evidence::output_policy::output_excerpt_status_for_block(block);
     let status = match block.status {
-        cosh_shell::types::CommandStatus::Completed => "completed",
-        cosh_shell::types::CommandStatus::Failed => "failed",
+        CommandStatus::Completed => "completed",
+        CommandStatus::Failed => "failed",
     };
     let text = excerpt.text.as_deref().unwrap_or("<unavailable>");
     format!(
@@ -110,44 +108,41 @@ pub(crate) fn prompt_hint_for_finding(
 pub(crate) fn finding_markdown_for_aggregate(
     block: &CommandBlock,
     aggregate: &AggregatedHookFinding,
-    i18n: cosh_shell::I18n,
+    i18n: I18n,
 ) -> String {
     let output_id = command_output_id(block);
     let mut lines = vec![
-        format!(
-            "## {}",
-            i18n.t(cosh_shell::MessageId::HookFindingMarkdownTitle)
-        ),
+        format!("## {}", i18n.t(MessageId::HookFindingMarkdownTitle)),
         String::new(),
         i18n.format(
-            cosh_shell::MessageId::HookFindingMarkdownHookLine,
+            MessageId::HookFindingMarkdownHookLine,
             &[("hook_id", aggregate.primary.hook_id.as_str())],
         ),
         i18n.format(
-            cosh_shell::MessageId::HookFindingMarkdownSeverityLine,
+            MessageId::HookFindingMarkdownSeverityLine,
             &[("severity", severity_label(aggregate.primary.severity))],
         ),
         i18n.format(
-            cosh_shell::MessageId::HookFindingMarkdownFindingLine,
+            MessageId::HookFindingMarkdownFindingLine,
             &[("finding", aggregate.primary.title.as_str())],
         ),
         i18n.format(
-            cosh_shell::MessageId::HookFindingMarkdownOutputRefLine,
+            MessageId::HookFindingMarkdownOutputRefLine,
             &[("output_ref", output_id.as_str())],
         ),
         i18n.format(
-            cosh_shell::MessageId::HookFindingMarkdownSuggestionLine,
+            MessageId::HookFindingMarkdownSuggestionLine,
             &[("suggestion", aggregate.primary.suggestion.as_str())],
         ),
     ];
     if !aggregate.related.is_empty() {
         lines.push(
-            i18n.t(cosh_shell::MessageId::HookFindingMarkdownRelatedTitle)
+            i18n.t(MessageId::HookFindingMarkdownRelatedTitle)
                 .to_string(),
         );
         lines.extend(aggregate.related.iter().map(|finding| {
             i18n.format(
-                cosh_shell::MessageId::HookFindingMarkdownRelatedLine,
+                MessageId::HookFindingMarkdownRelatedLine,
                 &[
                     ("hook_id", finding.hook_id.as_str()),
                     ("severity", severity_label(finding.severity)),
@@ -158,7 +153,7 @@ pub(crate) fn finding_markdown_for_aggregate(
     }
     lines.push(String::new());
     lines.push(
-        i18n.t(cosh_shell::MessageId::HookFindingMarkdownAgentFollowUpLine)
+        i18n.t(MessageId::HookFindingMarkdownAgentFollowUpLine)
             .to_string(),
     );
     lines.join("\n")
@@ -194,6 +189,9 @@ pub(crate) fn format_runtime_hint(hint: &RuntimeHookFinding) -> String {
 }
 
 fn command_output_id(block: &CommandBlock) -> String {
-    let facts = provider_safe_command_facts(block);
-    facts.output_id
+    if block.output.terminal_output_ref.is_some() {
+        format!("terminal-output://{}/{}", block.session_id, block.id)
+    } else {
+        "<missing>".to_string()
+    }
 }

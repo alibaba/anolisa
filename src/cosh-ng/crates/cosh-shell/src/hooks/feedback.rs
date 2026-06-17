@@ -1,16 +1,16 @@
-use cosh_shell::hook_types::FindingSeverity;
-use cosh_shell::types::{CommandBlock, CommandOrigin};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use super::aggregate::{
+    entity_key, finding_confidence, finding_topic, has_memory_pressure_with_process, severity_rank,
+    AggregatedHookFinding,
+};
 use super::policy::{command_intent_key, should_downgrade_success_finding};
-use super::queue::interruption_budget_exhausted;
-use super::runtime::{
-    entity_key, finding_confidence, finding_topic, has_memory_pressure_with_process,
-    is_muted_hook_target, severity_rank, AggregatedHookFinding,
+use super::prelude::{
+    load_hook_feedback_preference_details, CommandBlock, CommandOrigin, FindingSeverity,
+    HookFeedbackPreference,
 };
-use crate::runtime::state::{
-    hook_feedback_group_key, AnalysisMode, HookFeedback, InlineState, RuntimeHookDisplay,
-};
+use super::queue::interruption_budget_exhausted_for_budget;
+use super::state::{hook_feedback_group_key, HookFeedback, HookRuntimeState, RuntimeHookDisplay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeHookDecision {
@@ -18,15 +18,21 @@ pub(crate) struct RuntimeHookDecision {
     pub(crate) reason: &'static str,
 }
 
-pub(crate) fn load_hook_feedback_preferences_into_state(state: &mut InlineState) {
-    let preferences = cosh_shell::config::load_hook_feedback_preference_details();
+#[derive(Default)]
+pub(crate) struct LoadedHookFeedbackPreferences {
+    pub(crate) feedback: HashMap<String, HookFeedback>,
+    pub(crate) noisy_groups: HashSet<String>,
+}
+
+pub(crate) fn load_hook_feedback_preferences() -> LoadedHookFeedbackPreferences {
+    let preferences = load_hook_feedback_preference_details();
     let mut group_scores = HashMap::<String, i32>::new();
+    let mut loaded = LoadedHookFeedbackPreferences::default();
     for preference in preferences {
         let Some(feedback) = hook_feedback_from_label(&preference.label) else {
             continue;
         };
-        state
-            .hooks
+        loaded
             .feedback
             .insert(preference.suppression_key.clone(), feedback);
         let Some(group_key) = hook_feedback_group_key_from_preference(&preference) else {
@@ -40,17 +46,18 @@ pub(crate) fn load_hook_feedback_preferences_into_state(state: &mut InlineState)
     }
     for (group_key, score) in group_scores {
         if score >= 2 {
-            state.hooks.noisy_groups.insert(group_key);
+            loaded.noisy_groups.insert(group_key);
         }
     }
+    loaded
 }
 
 pub(crate) fn display_for_aggregate(
     block: &CommandBlock,
     aggregate: &AggregatedHookFinding,
-    mode: AnalysisMode,
+    manual_mode: bool,
 ) -> RuntimeHookDisplay {
-    if mode == AnalysisMode::Manual || block.exit_code != 0 {
+    if manual_mode || block.exit_code != 0 {
         return RuntimeHookDisplay::Silent;
     }
 
@@ -70,9 +77,18 @@ pub(crate) fn apply_session_interruption_policy(
     aggregate: &AggregatedHookFinding,
     display: RuntimeHookDisplay,
     suppression_key: &str,
-    state: &InlineState,
+    hooks: &HookRuntimeState,
+    active_agent_run: bool,
 ) -> RuntimeHookDisplay {
-    decide_session_interruption_policy(block, aggregate, display, suppression_key, state).display
+    decide_session_interruption_policy(
+        block,
+        aggregate,
+        display,
+        suppression_key,
+        hooks,
+        active_agent_run,
+    )
+    .display
 }
 
 pub(crate) fn decide_session_interruption_policy(
@@ -80,7 +96,8 @@ pub(crate) fn decide_session_interruption_policy(
     aggregate: &AggregatedHookFinding,
     display: RuntimeHookDisplay,
     suppression_key: &str,
-    state: &InlineState,
+    hooks: &HookRuntimeState,
+    active_agent_run: bool,
 ) -> RuntimeHookDecision {
     decide_session_interruption_policy_with_origin(
         block,
@@ -88,7 +105,8 @@ pub(crate) fn decide_session_interruption_policy(
         display,
         suppression_key,
         CommandOrigin::UserInteractive,
-        state,
+        hooks,
+        active_agent_run,
     )
 }
 
@@ -98,16 +116,17 @@ pub(crate) fn decide_session_interruption_policy_with_origin(
     display: RuntimeHookDisplay,
     suppression_key: &str,
     origin: CommandOrigin,
-    state: &InlineState,
+    hooks: &HookRuntimeState,
+    active_agent_run: bool,
 ) -> RuntimeHookDecision {
     decide_session_interruption_policy_with_context_and_origin(
         block,
         aggregate,
         display,
         suppression_key,
-        state,
-        state.agent_run.active.is_some(),
-        state.hooks.block_followed_by_user_input(&block.id),
+        hooks,
+        active_agent_run,
+        hooks.block_followed_by_user_input(&block.id),
         origin,
     )
 }
@@ -118,7 +137,7 @@ pub(crate) fn decide_session_interruption_policy_with_context(
     aggregate: &AggregatedHookFinding,
     display: RuntimeHookDisplay,
     suppression_key: &str,
-    state: &InlineState,
+    hooks: &HookRuntimeState,
     active_agent_run: bool,
     user_continued_input: bool,
 ) -> RuntimeHookDecision {
@@ -127,7 +146,7 @@ pub(crate) fn decide_session_interruption_policy_with_context(
         aggregate,
         display,
         suppression_key,
-        state,
+        hooks,
         active_agent_run,
         user_continued_input,
         CommandOrigin::UserInteractive,
@@ -139,7 +158,7 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
     aggregate: &AggregatedHookFinding,
     display: RuntimeHookDisplay,
     suppression_key: &str,
-    state: &InlineState,
+    hooks: &HookRuntimeState,
     active_agent_run: bool,
     user_continued_input: bool,
     origin: CommandOrigin,
@@ -162,13 +181,13 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
             reason: "origin-unknown",
         };
     }
-    if is_muted_hook_target(aggregate, state) {
+    if is_muted_hook_target(aggregate, &hooks.muted_targets) {
         return RuntimeHookDecision {
             display: RuntimeHookDisplay::Silent,
             reason: "muted",
         };
     }
-    if state.hooks.feedback.get(suppression_key) == Some(&HookFeedback::Noisy) {
+    if hooks.feedback.get(suppression_key) == Some(&HookFeedback::Noisy) {
         return match display {
             RuntimeHookDisplay::Consultation => RuntimeHookDecision {
                 display: RuntimeHookDisplay::Hint,
@@ -184,9 +203,8 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
             },
         };
     }
-    if state.hooks.feedback.get(suppression_key) != Some(&HookFeedback::Useful)
-        && state
-            .hooks
+    if hooks.feedback.get(suppression_key) != Some(&HookFeedback::Useful)
+        && hooks
             .noisy_groups
             .contains(&aggregate_feedback_group_key(block, aggregate))
     {
@@ -238,7 +256,7 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
             reason: "low-confidence",
         };
     }
-    if state.hooks.ignored_cards.contains(suppression_key) {
+    if hooks.ignored_cards.contains(suppression_key) {
         return match display {
             RuntimeHookDisplay::Consultation => RuntimeHookDecision {
                 display: RuntimeHookDisplay::Hint,
@@ -255,7 +273,7 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
         };
     }
     if display == RuntimeHookDisplay::Consultation {
-        if let Some(record) = state.hooks.rendered_cards.get(suppression_key) {
+        if let Some(record) = hooks.rendered_cards.get(suppression_key) {
             if severity_rank(record.severity) >= severity_rank(aggregate.primary.severity) {
                 return RuntimeHookDecision {
                     display: RuntimeHookDisplay::Hint,
@@ -266,7 +284,7 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
     }
     if display == RuntimeHookDisplay::Consultation
         && block.exit_code == 0
-        && interruption_budget_exhausted(block, aggregate, state)
+        && interruption_budget_exhausted_for_budget(block, aggregate, &hooks.interruption_budget)
     {
         return RuntimeHookDecision {
             display: RuntimeHookDisplay::Hint,
@@ -277,6 +295,19 @@ pub(crate) fn decide_session_interruption_policy_with_context_and_origin(
         display,
         reason: "allowed",
     }
+}
+
+fn is_muted_hook_target(
+    aggregate: &AggregatedHookFinding,
+    muted_targets: &HashSet<String>,
+) -> bool {
+    muted_targets.contains(&aggregate.topic)
+        || muted_targets.contains(&aggregate.entity_key)
+        || muted_targets.contains(&aggregate.primary.hook_id)
+        || aggregate
+            .related
+            .iter()
+            .any(|finding| muted_targets.contains(&finding.hook_id))
 }
 
 fn internal_origin(origin: CommandOrigin) -> bool {
@@ -305,9 +336,7 @@ fn aggregate_feedback_group_key(block: &CommandBlock, aggregate: &AggregatedHook
     )
 }
 
-fn hook_feedback_group_key_from_preference(
-    preference: &cosh_shell::config::HookFeedbackPreference,
-) -> Option<String> {
+fn hook_feedback_group_key_from_preference(preference: &HookFeedbackPreference) -> Option<String> {
     if preference.topic.is_empty()
         || preference.entity_key.is_empty()
         || preference.command_intent.is_empty()
@@ -364,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_feedback_preferences_load_into_inline_state() {
+    fn hook_feedback_preferences_load_from_store() {
         let _env_lock = env_lock();
         let store = std::env::temp_dir().join(format!(
             "cosh-shell-main-feedback-store-{}.txt",
@@ -377,22 +406,17 @@ mod tests {
         )
         .expect("write feedback store");
         std::env::set_var("COSH_SHELL_HOOK_FEEDBACK_STORE", &store);
-        let mut state = InlineState::default();
-
-        load_hook_feedback_preferences_into_state(&mut state);
+        let loaded = load_hook_feedback_preferences();
 
         assert_eq!(
-            state.hooks.feedback.get("memory:pressure:free").copied(),
+            loaded.feedback.get("memory:pressure:free").copied(),
             Some(HookFeedback::Noisy)
         );
         assert_eq!(
-            state.hooks.feedback.get("memory:process:pid:1234").copied(),
+            loaded.feedback.get("memory:process:pid:1234").copied(),
             Some(HookFeedback::Useful)
         );
-        assert!(state
-            .hooks
-            .noisy_groups
-            .contains("memory:system-memory:free"));
+        assert!(loaded.noisy_groups.contains("memory:system-memory:free"));
         std::env::remove_var("COSH_SHELL_HOOK_FEEDBACK_STORE");
         let _ = fs::remove_file(&store);
     }

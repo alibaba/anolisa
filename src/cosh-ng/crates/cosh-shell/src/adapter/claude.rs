@@ -337,12 +337,10 @@ fn claude_dry_run_events(request: &AgentRequest, prepared: &PreparedInvocation) 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
-    use super::{driver::start_cancellable_claude_process, ClaudeCodeAdapter, PreparedInvocation};
+    use super::ClaudeCodeAdapter;
     use crate::types::{
-        AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode,
-        OutputRefs,
+        AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
     };
 
     fn test_request() -> AgentRequest {
@@ -523,40 +521,5 @@ mod tests {
         let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
         assert!(!inv.args.contains(&"--resume".to_string()));
         assert!(!inv.args.contains(&"prev-session".to_string()));
-    }
-
-    #[test]
-    fn cancellable_claude_process_emits_cancelled_event() {
-        let handle = start_cancellable_claude_process(
-            "run-cancel".to_string(),
-            PreparedInvocation {
-                program: "/bin/sleep".to_string(),
-                args: vec!["10".to_string()],
-                prompt: String::new(),
-            },
-            Arc::new(Mutex::new(None)),
-        );
-
-        assert!(matches!(
-            handle
-                .next_event_timeout(Duration::from_secs(1))
-                .expect("starting event"),
-            Some(AgentEvent::StatusChanged { phase, .. }) if phase == "starting"
-        ));
-        handle.cancel();
-
-        let mut saw_cancelled = false;
-        for _ in 0..10 {
-            if matches!(
-                handle
-                    .next_event_timeout(Duration::from_millis(300))
-                    .expect("cancel event"),
-                Some(AgentEvent::AgentCancelled { .. })
-            ) {
-                saw_cancelled = true;
-                break;
-            }
-        }
-        assert!(saw_cancelled);
     }
 }

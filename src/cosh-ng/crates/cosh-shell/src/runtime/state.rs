@@ -2,13 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cosh_shell::exit_classify::first_program_token;
-use cosh_shell::hook_engine::HookEngine;
-use cosh_shell::hook_types::{FindingSeverity, HookFinding};
-use cosh_shell::{agent_render::ApprovalPanelAction, types::GovernedEvent};
-
 use crate::activity::runtime::RuntimeActivityRow;
 use crate::agent::run::{ActiveAgentRun, PendingAgentRequest};
+use crate::hooks::state::HookRuntimeState;
 use crate::question::runtime::RuntimeUserQuestion;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
@@ -16,7 +12,10 @@ use crate::runtime::evidence_state::EvidenceState;
 use crate::runtime::provider_cancellation_artifacts::ProviderCancellationArtifactState;
 use crate::runtime::provider_tool_state::ProviderToolState;
 use crate::runtime::shell_handoff_state::ShellHandoffState;
-pub(crate) use cosh_shell::types::CoshApprovalMode;
+pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
+use crate::runtime::state_prelude::{
+    first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
+};
 
 pub(crate) struct AnalysisThrottle {
     recent: HashMap<String, (Instant, usize)>,
@@ -36,8 +35,7 @@ impl AnalysisThrottle {
     pub(crate) fn should_throttle(&mut self, command: &str) -> bool {
         self.should_throttle_at(command, Instant::now())
     }
-
-    fn should_throttle_at(&mut self, command: &str, now: Instant) -> bool {
+    pub(crate) fn should_throttle_at(&mut self, command: &str, now: Instant) -> bool {
         let key = normalize_command(command);
         if let Some((window_started, count)) = self.recent.get_mut(&key) {
             if now.duration_since(*window_started).as_secs() < self.cooldown_secs {
@@ -78,9 +76,9 @@ pub(crate) struct InlineState {
     pub(crate) provider_cancellation_artifacts: ProviderCancellationArtifactState,
     pub(crate) evidence: EvidenceState,
     pub(crate) evidence_requests: EvidenceRequestState,
-    pub(crate) session_blocks: Vec<cosh_shell::types::CommandBlock>,
+    pub(crate) session_blocks: Vec<CommandBlock>,
     pub(crate) shell_exited: bool,
-    pub(crate) language: cosh_shell::Language,
+    pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
     pub(crate) analysis_mode: AnalysisMode,
     pub(crate) debug: bool,
@@ -105,7 +103,6 @@ impl ApprovalState {
     pub(crate) fn next_request_id(&self) -> String {
         format!("req-{}", self.requests.len() + 1)
     }
-
     pub(crate) fn mark_foreground_shell_execution(
         &mut self,
         approval_id: &str,
@@ -151,35 +148,6 @@ impl AgentRunState {
             .position(|queued| !queued.before_held_text)
             .unwrap_or(self.queued_requests.len());
         self.queued_requests.insert(insert_at, pending);
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct HookRuntimeState {
-    pub(crate) handled_command_hooks: HashSet<String>,
-    pub(crate) rendered_findings: HashSet<String>,
-    pub(crate) findings: Vec<RuntimeHookFinding>,
-    pub(crate) engine: HookEngine,
-    pub(crate) disabled: HashSet<String>,
-    pub(crate) pending_consultation: Option<PendingConsultation>,
-    pub(crate) pending_consultation_queue: VecDeque<PendingConsultation>,
-    pub(crate) rendered_cards: HashMap<String, HookSuppressionRecord>,
-    pub(crate) ignored_cards: HashSet<String>,
-    pub(crate) blocks_followed_by_user_input: HashSet<String>,
-    pub(crate) muted_targets: HashSet<String>,
-    pub(crate) feedback: HashMap<String, HookFeedback>,
-    pub(crate) noisy_groups: HashSet<String>,
-    pub(crate) display_events: Vec<RuntimeHookDisplayEvent>,
-    pub(crate) interruption_budget: HashMap<String, InterruptionBudgetRecord>,
-}
-
-impl HookRuntimeState {
-    pub(crate) fn mark_block_followed_by_user_input(&mut self, block_id: impl Into<String>) {
-        self.blocks_followed_by_user_input.insert(block_id.into());
-    }
-
-    pub(crate) fn block_followed_by_user_input(&self, block_id: &str) -> bool {
-        self.blocks_followed_by_user_input.contains(block_id)
     }
 }
 
@@ -230,142 +198,110 @@ impl ControlState {
             selected_option,
         });
     }
-
     pub(crate) fn pending_mode_panel(&self) -> Option<&RuntimeModePanel> {
         self.pending_mode_panel.as_ref()
     }
-
     pub(crate) fn pending_mode_panel_mut(&mut self) -> Option<&mut RuntimeModePanel> {
         self.pending_mode_panel.as_mut()
     }
-
     pub(crate) fn clear_pending_mode_panel(&mut self) {
         self.pending_mode_panel = None;
     }
-
     pub(crate) fn claim_mode_action(&mut self, key: String) -> bool {
         self.handled_mode_actions.insert(key)
     }
-
     pub(crate) fn active_mode_panel_id(&self) -> Option<&str> {
         self.active_mode_panel_id.as_deref()
     }
-
     pub(crate) fn set_active_mode_panel(&mut self, id: String, height: usize) {
         self.active_mode_panel_id = Some(id);
         self.active_mode_panel_height = height;
     }
-
     pub(crate) fn active_mode_panel_height(&self) -> usize {
         self.active_mode_panel_height
     }
-
     pub(crate) fn clear_active_mode_panel(&mut self) {
         self.active_mode_panel_id = None;
         self.active_mode_panel_height = 0;
     }
-
     pub(crate) fn clear_active_mode_panel_id(&mut self) {
         self.active_mode_panel_id = None;
     }
-
     pub(crate) fn set_pending_config_panel(&mut self, panel: RuntimeConfigPanel) {
         self.pending_config_panel = Some(panel);
     }
-
     pub(crate) fn new_config_panel_id(&self) -> String {
         format!("config-{}", self.handled_config_actions.len() + 1)
     }
-
     pub(crate) fn pending_config_panel(&self) -> Option<&RuntimeConfigPanel> {
         self.pending_config_panel.as_ref()
     }
-
     pub(crate) fn pending_config_panel_mut(&mut self) -> Option<&mut RuntimeConfigPanel> {
         self.pending_config_panel.as_mut()
     }
-
     pub(crate) fn clear_pending_config_panel(&mut self) {
         self.pending_config_panel = None;
     }
-
     pub(crate) fn set_pending_config_language_panel(&mut self, selected_option: usize) {
         self.pending_config_language_panel = Some(RuntimeConfigLanguagePanel {
             id: format!("config-language-{}", self.handled_config_actions.len() + 1),
             selected_option,
         });
     }
-
     pub(crate) fn pending_config_language_panel(&self) -> Option<&RuntimeConfigLanguagePanel> {
         self.pending_config_language_panel.as_ref()
     }
-
     pub(crate) fn pending_config_language_panel_mut(
         &mut self,
     ) -> Option<&mut RuntimeConfigLanguagePanel> {
         self.pending_config_language_panel.as_mut()
     }
-
     pub(crate) fn clear_pending_config_language_panel(&mut self) {
         self.pending_config_language_panel = None;
     }
-
     pub(crate) fn claim_config_action(&mut self, key: String) -> bool {
         self.handled_config_actions.insert(key)
     }
-
     pub(crate) fn active_config_panel_id(&self) -> Option<&str> {
         self.active_config_panel_id.as_deref()
     }
-
     pub(crate) fn set_active_config_panel(&mut self, id: String, height: usize) {
         self.active_config_panel_id = Some(id);
         self.active_config_panel_height = height;
     }
-
     pub(crate) fn active_config_panel_height(&self) -> usize {
         self.active_config_panel_height
     }
-
     pub(crate) fn clear_active_config_panel(&mut self) {
         self.active_config_panel_id = None;
         self.active_config_panel_height = 0;
     }
-
     pub(crate) fn clear_active_config_panel_id(&mut self) {
         self.active_config_panel_id = None;
     }
-
     pub(crate) fn active_config_language_panel_id(&self) -> Option<&str> {
         self.active_config_language_panel_id.as_deref()
     }
-
     pub(crate) fn set_active_config_language_panel(&mut self, id: String, height: usize) {
         self.active_config_language_panel_id = Some(id);
         self.active_config_language_panel_height = height;
     }
-
     pub(crate) fn active_config_language_panel_height(&self) -> usize {
         self.active_config_language_panel_height
     }
-
     pub(crate) fn clear_active_config_language_panel(&mut self) {
         self.active_config_language_panel_id = None;
         self.active_config_language_panel_height = 0;
     }
-
     pub(crate) fn clear_active_config_language_panel_id(&mut self) {
         self.active_config_language_panel_id = None;
     }
-
     pub(crate) fn provider_tool(&self) -> &ProviderToolState {
         &self.provider_tool
     }
-
     pub(crate) fn provider_tool_mut(&mut self) -> &mut ProviderToolState {
         &mut self.provider_tool
     }
-
     pub(crate) fn provider_host_executed_shell_result_delivered(
         &self,
         request_id: &str,
@@ -374,52 +310,40 @@ impl ControlState {
         self.provider_tool
             .host_executed_shell_result_delivered(request_id, tool_use_id)
     }
-
     pub(crate) fn claim_provider_shell_transcript_command(&mut self, tool_id: &str) -> bool {
         self.provider_tool.claim_shell_transcript_command(tool_id)
     }
-
     pub(crate) fn mark_provider_shell_transcript_output(&mut self, tool_id: &str) {
         self.provider_tool.mark_shell_transcript_output(tool_id);
     }
-
     pub(crate) fn mark_provider_shell_transcript_seen(&mut self, tool_id: &str) {
         self.provider_tool.mark_shell_transcript_seen(tool_id);
     }
-
     pub(crate) fn provider_shell_transcript_output_seen(&self, tool_id: &str) -> bool {
         self.provider_tool.shell_transcript_output_seen(tool_id)
     }
-
     pub(crate) fn provider_shell_transcript_seen(&self, tool_id: &str) -> bool {
         self.provider_tool.shell_transcript_seen(tool_id)
     }
-
     pub(crate) fn mark_provider_foreground_shell_command(&mut self, command: &str) -> bool {
         self.provider_tool.mark_foreground_shell_command(command)
     }
-
     pub(crate) fn provider_foreground_shell_command_seen(&self, command: &str) -> bool {
         self.provider_tool.foreground_shell_command_seen(command)
     }
-
     pub(crate) fn provider_tool_is_shell(&self, tool_id: &str) -> bool {
         self.provider_tool.is_shell_tool(tool_id)
     }
-
     pub(crate) fn provider_tool_is_control_permission_shell(&self, tool_id: &str) -> bool {
         self.provider_tool.is_control_permission_shell_tool(tool_id)
     }
-
     pub(crate) fn mark_provider_shell_handoff_run(&mut self, run_id: &str) {
         self.provider_shell_handoff_run_ids
             .insert(run_id.to_string());
     }
-
     pub(crate) fn provider_shell_handoff_run_seen(&self, run_id: &str) -> bool {
         self.provider_shell_handoff_run_ids.contains(run_id)
     }
-
     pub(crate) fn record_provider_tool_command_from_input(
         &mut self,
         run_id: &str,
@@ -429,12 +353,10 @@ impl ControlState {
         self.provider_tool
             .record_command_from_input(run_id, tool_id, tool_input)
     }
-
     pub(crate) fn mark_provider_control_permission_shell_tool(&mut self, tool_id: &str) {
         self.provider_tool
             .mark_control_permission_shell_tool(tool_id);
     }
-
     pub(crate) fn record_provider_shell_command_from_tool_call(
         &mut self,
         run_id: &str,
@@ -444,7 +366,6 @@ impl ControlState {
         self.provider_tool
             .record_shell_command_from_tool_call(run_id, tool_id, input)
     }
-
     pub(crate) fn record_pending_provider_shell_command(
         &mut self,
         run_id: &str,
@@ -453,7 +374,6 @@ impl ControlState {
         self.provider_tool
             .record_pending_shell_command(run_id, command)
     }
-
     pub(crate) fn record_provider_tool_output_delta(
         &mut self,
         run_id: &str,
@@ -464,15 +384,12 @@ impl ControlState {
         self.provider_tool
             .record_output_delta(run_id, tool_id, stream, text);
     }
-
     pub(crate) fn shell_handoff(&self) -> &ShellHandoffState {
         &self.shell_handoff
     }
-
     pub(crate) fn shell_handoff_mut(&mut self) -> &mut ShellHandoffState {
         &mut self.shell_handoff
     }
-
     pub(crate) fn find_interactive_shell_handoff(
         &self,
         handoff_id: &str,
@@ -482,7 +399,6 @@ impl ControlState {
             .find(|handoff| handoff.id == handoff_id)
             .cloned()
     }
-
     pub(crate) fn queue_interactive_shell_handoff_for_tool_failure(
         &mut self,
         tool_id: &str,
@@ -510,13 +426,11 @@ impl ControlState {
         self.interactive_shell_handoffs.push(handoff.clone());
         Some(handoff)
     }
-
     pub(crate) fn interactive_shell_handoff_ids(&self) -> impl Iterator<Item = &str> {
         self.interactive_shell_handoffs
             .iter()
             .map(|handoff| handoff.id.as_str())
     }
-
     pub(crate) fn remember_selectable_commands(
         &mut self,
         commands: Vec<String>,
@@ -525,35 +439,27 @@ impl ControlState {
         self.selectable_commands = commands;
         self.selectable_after_event_index = after_event_index;
     }
-
     pub(crate) fn selectable_command(&self, index: usize) -> Option<&str> {
         self.selectable_commands.get(index).map(String::as_str)
     }
-
     pub(crate) fn selectable_command_count(&self) -> usize {
         self.selectable_commands.len()
     }
-
     pub(crate) fn selectable_commands_available_after(&self) -> Option<usize> {
         self.selectable_after_event_index
     }
-
     pub(crate) fn has_selectable_commands(&self) -> bool {
         !self.selectable_commands.is_empty()
     }
-
     pub(crate) fn trust_session_command(&mut self, key: String) {
         self.session_trusted_commands.insert(key);
     }
-
     pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
         &self.session_trusted_commands
     }
-
     pub(crate) fn event_cursor(&self) -> ShellEventCursor {
         self.event_cursor
     }
-
     pub(crate) fn set_event_cursor(&mut self, cursor: ShellEventCursor) {
         self.event_cursor = cursor;
     }
@@ -613,112 +519,6 @@ impl ContinuityFacts {
     }
 }
 
-pub(crate) fn hook_feedback_group_key(
-    topic: &str,
-    entity_key: &str,
-    command_intent: &str,
-) -> String {
-    format!("{topic}:{entity_key}:{command_intent}")
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingConsultation {
-    pub(crate) finding_id: String,
-    pub(crate) card_id: String,
-    pub(crate) block_id: String,
-    pub(crate) command: String,
-    pub(crate) output_ref: Option<String>,
-    pub(crate) state: PendingConsultationState,
-    pub(crate) created_at_ms: u64,
-    pub(crate) expires_at_ms: u64,
-    pub(crate) ended_at_ms: u64,
-    pub(crate) queued_at: std::time::Instant,
-    #[allow(dead_code)]
-    pub(crate) prompt_hint: String,
-    pub(crate) hook_finding: Option<HookFinding>,
-    pub(crate) recommended_skill: Option<String>,
-    pub(crate) context_hints: Vec<String>,
-    pub(crate) suppression_key: String,
-    pub(crate) topic: String,
-    pub(crate) entity_key: String,
-    pub(crate) confidence: String,
-    pub(crate) display_reason: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RuntimeHookDisplayEvent {
-    pub(crate) action: RuntimeHookDisplayAction,
-    pub(crate) finding_id: String,
-    pub(crate) command_block_id: String,
-    pub(crate) hook_id: String,
-    pub(crate) topic: String,
-    pub(crate) entity_key: String,
-    pub(crate) suppression_key: String,
-    pub(crate) display: RuntimeHookDisplay,
-    pub(crate) display_reason: String,
-    pub(crate) confidence: String,
-    pub(crate) ended_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeHookDisplayAction {
-    Shown,
-    Ignored,
-    Analyzed,
-    Muted,
-    Expired,
-    Deferred,
-}
-
-impl RuntimeHookDisplayAction {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Shown => "shown",
-            Self::Ignored => "ignored",
-            Self::Analyzed => "analyzed",
-            Self::Muted => "muted",
-            Self::Expired => "expired",
-            Self::Deferred => "deferred",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PendingConsultationState {
-    Queued,
-    Deferred,
-    Displayed,
-    Ignored,
-    Analyzed,
-    Expired,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct HookSuppressionRecord {
-    pub(crate) severity: FindingSeverity,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct InterruptionBudgetRecord {
-    pub(crate) last_rendered_at_ms: u64,
-    pub(crate) severity: FindingSeverity,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HookFeedback {
-    Noisy,
-    Useful,
-}
-
-impl HookFeedback {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Noisy => "noisy",
-            Self::Useful => "useful",
-        }
-    }
-}
-
 impl InlineState {
     pub(crate) fn with_raw_session_dir(path: &Path) -> Self {
         Self {
@@ -729,9 +529,8 @@ impl InlineState {
             ..Self::default()
         }
     }
-
-    pub(crate) fn i18n(&self) -> cosh_shell::I18n {
-        cosh_shell::I18n::new(self.language)
+    pub(crate) fn i18n(&self) -> I18n {
+        I18n::new(self.language)
     }
 }
 
@@ -741,190 +540,6 @@ pub(crate) enum AnalysisMode {
     Smart,
     Auto,
     Manual,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RuntimeHookFinding {
-    pub(crate) id: String,
-    pub(crate) command_block_id: String,
-    pub(crate) command: String,
-    pub(crate) output_ref: Option<String>,
-    pub(crate) ended_at_ms: u64,
-    pub(crate) prompt_hint: String,
-    pub(crate) finding_markdown: Option<String>,
-    pub(crate) hook_finding: Option<HookFinding>,
-    pub(crate) recommended_skill: Option<String>,
-    pub(crate) display: RuntimeHookDisplay,
-    pub(crate) display_reason: String,
-    pub(crate) related_hook_ids: Vec<String>,
-    pub(crate) topic: String,
-    pub(crate) entity_key: String,
-    pub(crate) effective_severity: FindingSeverity,
-    pub(crate) confidence: String,
-    pub(crate) suppression_key: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeHookDisplay {
-    Silent,
-    Hint,
-    Consultation,
-}
-
-impl RuntimeHookDisplay {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Silent => "silent",
-            Self::Hint => "hint",
-            Self::Consultation => "consultation",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ActivityState, AgentRunState, AnalysisThrottle, ApprovalRequestKind, ApprovalRequestStatus,
-        ApprovalState, ContinuityState, ControlState, HookRuntimeState, PendingAgentRequest,
-        ProviderShellRequestKind, QuestionState, RuntimeApprovalRequest,
-    };
-    use cosh_shell::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
-    use std::collections::HashMap;
-    use std::time::{Duration, Instant};
-
-    fn throttle(cooldown_secs: u64) -> AnalysisThrottle {
-        AnalysisThrottle {
-            recent: HashMap::new(),
-            cooldown_secs,
-        }
-    }
-
-    #[test]
-    fn analysis_throttle_uses_fixed_window_instead_of_sliding_forever() {
-        let start = Instant::now();
-        let mut throttle = throttle(30);
-
-        assert!(!throttle.should_throttle_at("ps -aux", start));
-        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(1)));
-        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(29)));
-        assert!(!throttle.should_throttle_at("ps -aux", start + Duration::from_secs(30)));
-        assert!(throttle.should_throttle_at("ps -aux", start + Duration::from_secs(31)));
-    }
-
-    #[test]
-    fn approval_state_generates_request_ids_from_owned_queue() {
-        let mut state = ApprovalState::default();
-
-        assert_eq!(state.next_request_id(), "req-1");
-        state.requests.push(RuntimeApprovalRequest {
-            id: "req-1".to_string(),
-            run_id: "run-1".to_string(),
-            session_id: "session-1".to_string(),
-            cwd: "/tmp".to_string(),
-            source: "agent",
-            provider_shell_request_kind: ProviderShellRequestKind::StreamedToolCallFallback,
-            kind: ApprovalRequestKind::Tool,
-            subject: "shell".to_string(),
-            preview: "$ pwd".to_string(),
-            risk: "medium",
-            request_id: None,
-            tool_use_id: None,
-            tool_input: None,
-            original_user_request: None,
-            status: ApprovalRequestStatus::Pending,
-            execution_path: None,
-            command_block_id: None,
-            redaction_status: None,
-            assessment: None,
-        });
-
-        assert_eq!(state.next_request_id(), "req-2");
-    }
-
-    #[test]
-    fn agent_run_state_prioritizes_requests_before_held_text() {
-        let mut state = AgentRunState::default();
-
-        state.queue_request(pending_agent_request("normal-1", false));
-        state.queue_request(pending_agent_request("before-held", true));
-        state.queue_request(pending_agent_request("normal-2", false));
-
-        let queued_ids = state
-            .queued_requests
-            .iter()
-            .map(|pending| pending.request.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(queued_ids, vec!["before-held", "normal-1", "normal-2"]);
-    }
-
-    #[test]
-    fn hook_runtime_state_tracks_blocks_followed_by_user_input() {
-        let mut state = HookRuntimeState::default();
-
-        assert!(!state.block_followed_by_user_input("cmd-1"));
-        state.mark_block_followed_by_user_input("cmd-1");
-
-        assert!(state.block_followed_by_user_input("cmd-1"));
-    }
-
-    #[test]
-    fn remaining_runtime_state_owners_keep_their_own_defaults() {
-        let activity = ActivityState::default();
-        assert!(activity.rows.is_empty());
-        assert!(activity.output_dir.is_none());
-
-        let questions = QuestionState::default();
-        assert!(questions.items.is_empty());
-        assert!(questions.pending_id.is_none());
-
-        let mut control = ControlState::default();
-        control.remember_selectable_commands(vec!["echo ok".to_string()], Some(3));
-        assert_eq!(control.selectable_commands, vec!["echo ok"]);
-        assert_eq!(control.selectable_after_event_index, Some(3));
-
-        let continuity = ContinuityState::default();
-        assert!(continuity.facts.items.is_empty());
-    }
-
-    fn pending_agent_request(id: &str, before_held_text: bool) -> PendingAgentRequest {
-        PendingAgentRequest {
-            request: agent_request(id),
-            selectable_after_event_index: None,
-            before_held_text,
-        }
-    }
-
-    fn agent_request(id: &str) -> AgentRequest {
-        AgentRequest {
-            id: id.to_string(),
-            session_id: "test-session".to_string(),
-            command_block: CommandBlock {
-                id: format!("{id}-block"),
-                session_id: "test-session".to_string(),
-                command: "echo test".to_string(),
-                origin: Default::default(),
-                cwd: "/tmp".to_string(),
-                end_cwd: "/tmp".to_string(),
-                started_at_ms: 0,
-                ended_at_ms: 0,
-                duration_ms: 0,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-            },
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("test".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

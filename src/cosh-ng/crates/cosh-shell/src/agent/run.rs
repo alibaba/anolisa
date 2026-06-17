@@ -1,10 +1,5 @@
 use std::time::Instant;
 
-use cosh_shell::{
-    adapter::AgentRunHandle,
-    agent_render::{AgentStatusAnimation, MarkdownStreamBlock},
-};
-
 use crate::agent::continuation::provider_mode_for_agent_run;
 use crate::agent::poll::poll_active_agent_run;
 use crate::evidence::request::ParsedCoshRequest;
@@ -15,7 +10,7 @@ pub(crate) struct ActiveAgentRun {
     pub(crate) request: AgentRequest,
     pub(crate) handle: AgentRunHandle,
     pub(crate) provider_name: &'static str,
-    pub(crate) language: cosh_shell::Language,
+    pub(crate) language: Language,
     pub(crate) renderer: RatatuiInlineRenderer,
     pub(crate) status_animation: AgentStatusAnimation,
     pub(crate) markdown_stream: MarkdownStreamBlock,
@@ -38,13 +33,13 @@ pub(crate) struct ActiveAgentRun {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingAgentRequest {
-    pub(crate) request: cosh_shell::types::AgentRequest,
+    pub(crate) request: AgentRequest,
     pub(crate) selectable_after_event_index: Option<usize>,
     pub(crate) before_held_text: bool,
 }
 
 pub(crate) fn start_agent_run<W: Write>(
-    request: &cosh_shell::types::AgentRequest,
+    request: &AgentRequest,
     adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
@@ -61,7 +56,7 @@ pub(crate) fn start_agent_run<W: Write>(
 }
 
 fn start_agent_run_with_queue_policy<W: Write>(
-    request: &cosh_shell::types::AgentRequest,
+    request: &AgentRequest,
     adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
@@ -84,10 +79,9 @@ fn start_agent_run_with_queue_policy<W: Write>(
     let markdown_stream = renderer.stream_markdown_agent();
     let mut status_animation = renderer.status_animation();
     if status_animation.is_enabled() {
-        status_animation.render(output, state.i18n().t(cosh_shell::MessageId::AgentThinking))?;
+        status_animation.render(output, state.i18n().t(MessageId::AgentThinking))?;
     } else {
-        renderer
-            .write_loading_text(output, state.i18n().t(cosh_shell::MessageId::AgentThinking))?;
+        renderer.write_loading_text(output, state.i18n().t(MessageId::AgentThinking))?;
     }
     output.flush()?;
 
@@ -117,12 +111,8 @@ fn start_agent_run_with_queue_policy<W: Write>(
         started_at: now,
         last_activity_at: now,
         last_heartbeat_at: now,
-        current_phase: i18n
-            .t(cosh_shell::MessageId::AgentStatusStarting)
-            .to_string(),
-        current_message: i18n
-            .t(cosh_shell::MessageId::AgentStatusWaitingBackend)
-            .to_string(),
+        current_phase: i18n.t(MessageId::AgentStatusStarting).to_string(),
+        current_message: i18n.t(MessageId::AgentStatusWaitingBackend).to_string(),
         has_visible_text_delta: false,
         completed: false,
     });

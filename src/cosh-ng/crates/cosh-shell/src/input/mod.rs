@@ -21,10 +21,10 @@ impl InputClassifier {
 impl Default for InputClassifier {
     fn default() -> Self {
         Self {
-            slash_commands: crate::slash_registry::exact_slash_control_commands()
+            slash_commands: crate::slash::registry::exact_slash_control_commands()
                 .map(str::to_string)
                 .collect(),
-            slash_hint_commands: crate::slash_registry::active_slash_hint_commands()
+            slash_hint_commands: crate::slash::registry::active_slash_hint_commands()
                 .map(str::to_string)
                 .collect(),
             conservative: false,

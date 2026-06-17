@@ -75,9 +75,7 @@ pub(crate) fn render_approval_actions<W: Write>(
                                 RatatuiInlineRenderer::for_terminal().write_notice_panel(
                                     output,
                                     NoticePanelModel {
-                                        title: i18n.t(
-                                            cosh_shell::MessageId::RuntimeDetailsUnavailableTitle,
-                                        ),
+                                        title: i18n.t(MessageId::RuntimeDetailsUnavailableTitle),
                                         body: vec![message],
                                         footer: None,
                                     },
@@ -110,9 +108,9 @@ pub(crate) fn render_approval_actions<W: Write>(
             RatatuiInlineRenderer::for_terminal().write_notice_panel(
                 output,
                 NoticePanelModel {
-                    title: i18n.t(cosh_shell::MessageId::ApprovalNotFoundTitle),
+                    title: i18n.t(MessageId::ApprovalNotFoundTitle),
                     body: vec![i18n.format(
-                        cosh_shell::MessageId::ApprovalNotFoundBody,
+                        MessageId::ApprovalNotFoundBody,
                         &[("id", command.id.as_str())],
                     )],
                     footer: None,
@@ -196,7 +194,7 @@ fn respond_active_run_approval(
 pub(crate) fn render_approval_resolution<W: Write>(
     state: &mut InlineState,
     request: &RuntimeApprovalRequest,
-    title: cosh_shell::MessageId,
+    title: MessageId,
     output: &mut W,
 ) -> std::io::Result<()> {
     clear_active_approval_panel(state, output)?;

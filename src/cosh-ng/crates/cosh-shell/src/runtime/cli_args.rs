@@ -1,0 +1,226 @@
+use crate::runtime::prelude::load_config;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RawShellKind {
+    Bash,
+    Zsh,
+    MissingShellValue,
+    Unsupported(String),
+}
+
+pub(crate) fn adapter_name_from_args(args: &[String]) -> Option<&str> {
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell" => idx += 2,
+            arg if arg.starts_with("--shell=") => idx += 1,
+            arg if arg.starts_with("--") => idx += 1,
+            arg => return Some(arg),
+        }
+    }
+
+    None
+}
+
+pub(crate) fn raw_shell_from_args_or_default(args: &[String], default_shell: &str) -> RawShellKind {
+    if let Some(shell) = raw_shell_from_args(args) {
+        return shell;
+    }
+
+    if let Some(shell) = std::env::var("COSH_SHELL_RAW_SHELL")
+        .ok()
+        .as_deref()
+        .map(parse_raw_shell)
+    {
+        return shell;
+    }
+
+    shell_from_default_or_auto(default_shell)
+}
+
+pub(crate) fn raw_shell_from_args(args: &[String]) -> Option<RawShellKind> {
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell" => {
+                return Some(match args.get(idx + 1) {
+                    Some(value) if !value.starts_with("--") => parse_raw_shell(value),
+                    _ => RawShellKind::MissingShellValue,
+                });
+            }
+            arg if arg.starts_with("--shell=") => {
+                return Some(parse_raw_shell(arg.trim_start_matches("--shell=")));
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+pub(crate) fn should_start_default_raw(args: &[String]) -> bool {
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell" => {
+                if !matches!(args.get(idx + 1), Some(value) if !value.starts_with("--")) {
+                    return false;
+                }
+                idx += 2;
+            }
+            "--isolated" | "--login" | "-l" => idx += 1,
+            arg if arg.starts_with("--shell=") => idx += 1,
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+pub(crate) fn parse_raw_shell(value: &str) -> RawShellKind {
+    let name = value.rsplit('/').next().unwrap_or(value);
+    match name {
+        "bash" | "cosh-shell-bash" => RawShellKind::Bash,
+        "zsh" | "cosh-shell-zsh" => RawShellKind::Zsh,
+        other => RawShellKind::Unsupported(other.to_string()),
+    }
+}
+
+pub(crate) fn shell_from_default_or_auto(value: &str) -> RawShellKind {
+    let value = value.trim();
+    if !value.is_empty() && value != "auto" {
+        return parse_raw_shell(value);
+    }
+
+    for candidate in [
+        cosh_shell_default_state_previous_shell(),
+        std::env::var("SHELL").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let shell = parse_raw_shell(&candidate);
+        if matches!(shell, RawShellKind::Bash | RawShellKind::Zsh) {
+            return shell;
+        }
+    }
+
+    RawShellKind::Bash
+}
+
+pub(crate) fn configured_raw_invocation(args: &[String]) -> (String, RawShellKind) {
+    let config = load_config();
+    let adapter_name = adapter_name_from_args(args)
+        .unwrap_or(&config.adapter_default)
+        .to_string();
+    let shell_kind = raw_shell_from_args_or_default(args, &config.shell_default);
+    (adapter_name, shell_kind)
+}
+
+fn cosh_shell_default_state_previous_shell() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home)
+        .join(".config")
+        .join("cosh")
+        .join("cosh-shell-default.state");
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        line.strip_prefix("PREVIOUS_SHELL=")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        adapter_name_from_args, parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto,
+        should_start_default_raw, RawShellKind,
+    };
+
+    #[test]
+    fn raw_shell_selection_uses_explicit_arg_only() {
+        assert_eq!(parse_raw_shell("/bin/zsh"), RawShellKind::Zsh);
+        assert_eq!(parse_raw_shell("bash"), RawShellKind::Bash);
+        assert_eq!(
+            parse_raw_shell("/usr/local/bin/cosh-shell-zsh"),
+            RawShellKind::Zsh
+        );
+        assert_eq!(
+            parse_raw_shell("/usr/local/bin/cosh-shell-bash"),
+            RawShellKind::Bash
+        );
+        assert_eq!(
+            parse_raw_shell("/usr/bin/fish"),
+            RawShellKind::Unsupported("fish".to_string())
+        );
+        assert_eq!(
+            raw_shell_from_args(&["fake".to_string(), "--shell".to_string(), "zsh".to_string()]),
+            Some(RawShellKind::Zsh)
+        );
+        assert_eq!(
+            raw_shell_from_args(&[
+                "fake".to_string(),
+                "--shell=bash".to_string(),
+                "--run".to_string()
+            ]),
+            Some(RawShellKind::Bash)
+        );
+        assert_eq!(
+            raw_shell_from_args(&["fake".to_string(), "--run".to_string()]),
+            None
+        );
+        assert_eq!(
+            raw_shell_from_args(&["fake".to_string(), "--shell".to_string()]),
+            Some(RawShellKind::MissingShellValue)
+        );
+        assert_eq!(
+            raw_shell_from_args(&[
+                "fake".to_string(),
+                "--shell".to_string(),
+                "--run".to_string()
+            ]),
+            Some(RawShellKind::MissingShellValue)
+        );
+        assert_eq!(
+            adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "qwen".to_string()]),
+            Some("qwen")
+        );
+        assert_eq!(
+            adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "co".to_string()]),
+            Some("co")
+        );
+    }
+
+    #[test]
+    fn raw_shell_default_uses_config_before_auto() {
+        assert_eq!(shell_from_default_or_auto("zsh"), RawShellKind::Zsh);
+        assert_eq!(shell_from_default_or_auto("/bin/bash"), RawShellKind::Bash);
+        assert_eq!(
+            shell_from_default_or_auto("/usr/bin/fish"),
+            RawShellKind::Unsupported("fish".to_string())
+        );
+    }
+
+    #[test]
+    fn no_subcommand_interactive_raw_accepts_only_shell_entry_options() {
+        assert!(should_start_default_raw(&[]));
+        assert!(should_start_default_raw(&["--login".to_string()]));
+        assert!(should_start_default_raw(&["-l".to_string()]));
+        assert!(should_start_default_raw(&[
+            "--shell".to_string(),
+            "zsh".to_string(),
+            "--isolated".to_string()
+        ]));
+        assert!(should_start_default_raw(&["--shell=bash".to_string()]));
+
+        assert!(!should_start_default_raw(&["fake".to_string()]));
+        assert!(!should_start_default_raw(&["--shell".to_string()]));
+        assert!(!should_start_default_raw(&[
+            "--shell".to_string(),
+            "--isolated".to_string()
+        ]));
+        assert!(!should_start_default_raw(&["--unknown".to_string()]));
+    }
+}

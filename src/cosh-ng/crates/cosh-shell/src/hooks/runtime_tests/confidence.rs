@@ -90,7 +90,8 @@ fn low_confidence_success_consultation_downgrades_to_hint() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &InlineState::default(),
+        &HookRuntimeState::default(),
+        false,
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Hint);
@@ -111,7 +112,8 @@ fn low_confidence_policy_does_not_downgrade_failed_command_path() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &InlineState::default(),
+        &HookRuntimeState::default(),
+        false,
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Consultation);

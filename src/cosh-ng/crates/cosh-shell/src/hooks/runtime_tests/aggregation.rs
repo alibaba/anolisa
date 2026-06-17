@@ -12,7 +12,7 @@ fn aggregation_combines_memory_pressure_and_process() {
     assert_eq!(aggregated[0].primary.hook_id, "memory-pressure");
     assert_eq!(aggregated[0].related[0].hook_id, "high-memory-process");
     assert_eq!(
-        display_for_aggregate(&block(0), &aggregated[0], AnalysisMode::Smart),
+        display_for_aggregate(&block(0), &aggregated[0], false),
         RuntimeHookDisplay::Consultation
     );
 }

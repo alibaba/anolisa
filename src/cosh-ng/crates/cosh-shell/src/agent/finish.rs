@@ -93,9 +93,9 @@ pub(crate) fn finish_active_agent_run<W: Write>(
             active_run.renderer.write_notice_panel(
                 output,
                 NoticePanelModel {
-                    title: state.i18n().t(cosh_shell::MessageId::AgentStatusTitle),
+                    title: state.i18n().t(MessageId::AgentStatusTitle),
                     body: vec![state.i18n().format(
-                        cosh_shell::MessageId::AgentProviderTimeoutDroppedQueuedBody,
+                        MessageId::AgentProviderTimeoutDroppedQueuedBody,
                         &[("dropped", &dropped.to_string())],
                     )],
                     footer: None,

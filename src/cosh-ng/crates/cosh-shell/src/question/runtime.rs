@@ -1,17 +1,7 @@
-use crate::question_choices::{
+use crate::question::choices::{
     question_choice_count, question_custom_answer_index, toggle_question_option,
 };
 use crate::runtime::prelude::*;
-use cosh_shell::parser::agent_request_from_intercepted_input;
-use cosh_shell::raw_input::RawInputCapture;
-use cosh_shell::{
-    adapter::{ApprovalDecision, ApprovalResponse},
-    agent_render::{QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer},
-    types::{
-        AgentEvent, AgentRequest, GovernedEvent, QuestionSelectionMode, ShellEvent, ShellEventKind,
-    },
-    AdapterInstance,
-};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeUserQuestion {
@@ -86,10 +76,8 @@ pub(crate) fn render_question_answer_actions<W: Write>(
                 .write_notice_panel(
                     output,
                     NoticePanelModel {
-                        title: i18n.t(cosh_shell::MessageId::QuestionNoPendingTitle),
-                        body: vec![i18n
-                            .t(cosh_shell::MessageId::QuestionNoPendingBody)
-                            .to_string()],
+                        title: i18n.t(MessageId::QuestionNoPendingTitle),
+                        body: vec![i18n.t(MessageId::QuestionNoPendingBody).to_string()],
                         footer: None,
                     },
                 )?;

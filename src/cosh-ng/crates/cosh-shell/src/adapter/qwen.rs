@@ -291,17 +291,11 @@ fn qwen_dry_run_events(request: &AgentRequest, prepared: &PreparedInvocation) ->
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
-    use super::{driver::start_cancellable_qwen_process, PreparedInvocation, QwenCliAdapter};
-    use crate::adapter::AgentRunHandle;
+    use super::{qwen_args_with_prompt, PreparedInvocation, QwenCliAdapter};
     use crate::types::{
-        AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode,
-        OutputRefs,
+        AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
     };
 
     fn test_request() -> AgentRequest {
@@ -359,17 +353,6 @@ mod tests {
                 .to_string(),
         );
         request
-    }
-
-    fn mock_provider_script(name: &str, body: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("cosh-qwen-{name}-{}", std::process::id()));
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write mock provider");
-        let mut permissions = fs::metadata(&path)
-            .expect("mock provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).expect("chmod mock provider");
-        path
     }
 
     #[test]
@@ -477,146 +460,23 @@ mod tests {
     }
 
     #[test]
-    fn cancellable_qwen_process_emits_cancelled_event() {
-        let handle: AgentRunHandle = start_cancellable_qwen_process(
-            "run-cancel".to_string(),
-            PreparedInvocation {
-                program: "/bin/sleep".to_string(),
-                args: vec!["10".to_string()],
-                prompt: String::new(),
-            },
-            Arc::new(Mutex::new(None)),
-        );
+    fn qwen_process_args_append_prompt_flag() {
+        let args = qwen_args_with_prompt(&PreparedInvocation {
+            program: "qwen".to_string(),
+            args: vec![
+                "--allowed-tools".to_string(),
+                "Read,Grep,Glob,LS".to_string(),
+            ],
+            prompt: "hello prompt".to_string(),
+        });
 
-        assert!(matches!(
-            handle
-                .next_event_timeout(Duration::from_secs(1))
-                .expect("starting event"),
-            Some(AgentEvent::StatusChanged { phase, .. }) if phase == "starting"
-        ));
-        handle.cancel();
-
-        let mut saw_cancelled = false;
-        for _ in 0..10 {
-            if matches!(
-                handle
-                    .next_event_timeout(Duration::from_millis(300))
-                    .expect("cancel event"),
-                Some(AgentEvent::AgentCancelled { .. })
-            ) {
-                saw_cancelled = true;
-                break;
-            }
-        }
-        assert!(saw_cancelled);
-    }
-
-    #[test]
-    fn commits_session_only_after_successful_completion() {
-        let script = mock_provider_script(
-            "success",
-            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-ok\",\"model\":\"qwen\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"sess-ok\",\"result\":\"done\"}'",
-        );
-        let committed = Arc::new(Mutex::new(None));
-        let handle: AgentRunHandle = start_cancellable_qwen_process(
-            "run-success".to_string(),
-            PreparedInvocation {
-                program: script.display().to_string(),
-                args: Vec::new(),
-                prompt: String::new(),
-            },
-            Arc::clone(&committed),
-        );
-
-        let mut saw_completed = false;
-        for _ in 0..10 {
-            if matches!(
-                handle
-                    .next_event_timeout(Duration::from_secs(1))
-                    .expect("event"),
-                Some(AgentEvent::AgentCompleted { .. })
-            ) {
-                saw_completed = true;
-                break;
-            }
-        }
-        let _ = fs::remove_file(script);
-        assert!(saw_completed);
+        let prompt_at = args
+            .iter()
+            .position(|arg| arg == "--prompt")
+            .expect("prompt flag");
         assert_eq!(
-            committed.lock().expect("committed session").as_deref(),
-            Some("sess-ok")
-        );
-    }
-
-    #[test]
-    fn passes_prompt_with_flag_when_allowed_tools_are_present() {
-        let script = mock_provider_script(
-            "prompt-flag",
-            "saw_prompt=0\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--prompt\" ]; then saw_prompt=1; fi\ndone\nif [ \"$saw_prompt\" -ne 1 ]; then exit 7; fi\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"sess-prompt\",\"result\":\"done\"}'",
-        );
-        let handle: AgentRunHandle = start_cancellable_qwen_process(
-            "run-prompt".to_string(),
-            PreparedInvocation {
-                program: script.display().to_string(),
-                args: vec![
-                    "--allowed-tools".to_string(),
-                    "Read,Grep,Glob,LS".to_string(),
-                ],
-                prompt: "hello prompt".to_string(),
-            },
-            Arc::new(Mutex::new(None)),
-        );
-
-        let mut saw_completed = false;
-        for _ in 0..10 {
-            if matches!(
-                handle
-                    .next_event_timeout(Duration::from_secs(1))
-                    .expect("event"),
-                Some(AgentEvent::AgentCompleted { .. })
-            ) {
-                saw_completed = true;
-                break;
-            }
-        }
-        let _ = fs::remove_file(script);
-        assert!(saw_completed);
-    }
-
-    #[test]
-    fn does_not_commit_session_after_provider_failure() {
-        let script = mock_provider_script(
-            "failure",
-            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-bad\",\"model\":\"qwen\"}'\nexit 2",
-        );
-        let committed = Arc::new(Mutex::new(Some("sess-prev".to_string())));
-        let handle: AgentRunHandle = start_cancellable_qwen_process(
-            "run-failure".to_string(),
-            PreparedInvocation {
-                program: script.display().to_string(),
-                args: Vec::new(),
-                prompt: String::new(),
-            },
-            Arc::clone(&committed),
-        );
-
-        let mut saw_failed = false;
-        for _ in 0..10 {
-            if matches!(
-                handle
-                    .next_event_timeout(Duration::from_secs(1))
-                    .expect("event"),
-                Some(AgentEvent::AgentFailed { .. })
-            ) {
-                saw_failed = true;
-                break;
-            }
-        }
-        let _ = fs::remove_file(script);
-        assert!(saw_failed);
-        assert_eq!(
-            committed.lock().expect("committed session").as_deref(),
-            Some("sess-prev")
+            args.get(prompt_at + 1).map(String::as_str),
+            Some("hello prompt")
         );
     }
 }

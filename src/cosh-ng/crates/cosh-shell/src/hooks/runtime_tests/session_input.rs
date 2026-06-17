@@ -17,7 +17,8 @@ fn continued_user_input_silences_success_consultation() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Silent);
@@ -43,7 +44,8 @@ fn continued_user_input_does_not_downgrade_failed_command_consultation() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Consultation);
@@ -123,7 +125,7 @@ fn manual_mode_records_silently() {
     let aggregated = aggregate_hook_findings(findings);
 
     assert_eq!(
-        display_for_aggregate(&block(0), &aggregated[0], AnalysisMode::Manual),
+        display_for_aggregate(&block(0), &aggregated[0], true),
         RuntimeHookDisplay::Silent
     );
 }

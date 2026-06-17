@@ -1,5 +1,4 @@
 use super::*;
-use cosh_shell::hook_types::{FindingSeverity, HookFinding};
 
 #[path = "runtime_tests/active_agent.rs"]
 mod active_agent;
@@ -119,8 +118,8 @@ fn write_test_output_ref(name: &str, content: &str) -> String {
 #[test]
 fn command_hook_findings_skip_user_interrupted_exit_one() {
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    for hook in cosh_shell::builtin_hooks::default_builtin_hooks() {
+    let mut hook_engine = HookEngine::new();
+    for hook in default_builtin_hooks() {
         hook_engine.register(hook);
     }
     state.hooks.engine = hook_engine;
@@ -152,8 +151,8 @@ fn command_hook_findings_skip_user_interrupted_exit_one() {
 #[test]
 fn command_hook_findings_skip_interactive_cancel_output_without_ctrl_c_event() {
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    for hook in cosh_shell::builtin_hooks::default_builtin_hooks() {
+    let mut hook_engine = HookEngine::new();
+    for hook in default_builtin_hooks() {
         hook_engine.register(hook);
     }
     state.hooks.engine = hook_engine;

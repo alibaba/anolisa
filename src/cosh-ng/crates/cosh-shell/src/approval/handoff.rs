@@ -1,5 +1,4 @@
 use crate::runtime::prelude::*;
-use cosh_shell::types::ShellHandoffRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ApprovedBashExecutionPath {
@@ -99,9 +98,9 @@ pub(crate) fn queue_interactive_shell_handoff<W: Write>(
         RatatuiInlineRenderer::for_terminal().write_notice_panel(
             output,
             NoticePanelModel {
-                title: i18n.t(cosh_shell::MessageId::ApprovalShellHandoffNotFoundTitle),
+                title: i18n.t(MessageId::ApprovalShellHandoffNotFoundTitle),
                 body: vec![i18n.format(
-                    cosh_shell::MessageId::ApprovalShellHandoffNotFoundBody,
+                    MessageId::ApprovalShellHandoffNotFoundBody,
                     &[("id", handoff_id)],
                 )],
                 footer: None,
@@ -127,9 +126,9 @@ pub(crate) fn queue_interactive_shell_handoff<W: Write>(
             RatatuiInlineRenderer::for_terminal().write_notice_panel(
                 output,
                 NoticePanelModel {
-                    title: i18n.t(cosh_shell::MessageId::ApprovalShellHandoffBlockedTitle),
+                    title: i18n.t(MessageId::ApprovalShellHandoffBlockedTitle),
                     body: vec![body],
-                    footer: Some(i18n.t(cosh_shell::MessageId::ApprovalShellHandoffBlockedFooter)),
+                    footer: Some(i18n.t(MessageId::ApprovalShellHandoffBlockedFooter)),
                 },
             )?;
             return Ok(());
@@ -144,10 +143,10 @@ pub(crate) fn queue_interactive_shell_handoff<W: Write>(
     RatatuiInlineRenderer::for_terminal().write_notice_panel(
         output,
         NoticePanelModel {
-            title: i18n.t(cosh_shell::MessageId::ApprovalShellHandoffSendingTitle),
+            title: i18n.t(MessageId::ApprovalShellHandoffSendingTitle),
             body: vec![
                 i18n.format(
-                    cosh_shell::MessageId::ApprovalShellHandoffSendingBody,
+                    MessageId::ApprovalShellHandoffSendingBody,
                     &[("id", handoff.id.as_str())],
                 ),
                 handoff.exact_preview,
@@ -158,28 +157,25 @@ pub(crate) fn queue_interactive_shell_handoff<W: Write>(
     Ok(())
 }
 
-pub(crate) fn approval_shell_handoff_validation_message(
-    i18n: &cosh_shell::I18n,
-    message: &str,
-) -> String {
+pub(crate) fn approval_shell_handoff_validation_message(i18n: &I18n, message: &str) -> String {
     let id = match message {
         "empty shell handoff command" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationEmptyCommand)
+            Some(MessageId::ApprovalShellHandoffValidationEmptyCommand)
         }
         "shell handoff command contains newline; multiline handoff is not enabled" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationMultilineCommand)
+            Some(MessageId::ApprovalShellHandoffValidationMultilineCommand)
         }
         "shell handoff command contains blocked control character" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationControlCharacter)
+            Some(MessageId::ApprovalShellHandoffValidationControlCharacter)
         }
         "shell handoff preview is empty" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationEmptyPreview)
+            Some(MessageId::ApprovalShellHandoffValidationEmptyPreview)
         }
         "shell handoff approval id is empty" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationEmptyApprovalId)
+            Some(MessageId::ApprovalShellHandoffValidationEmptyApprovalId)
         }
         "shell handoff run id is empty" => {
-            Some(cosh_shell::MessageId::ApprovalShellHandoffValidationEmptyRunId)
+            Some(MessageId::ApprovalShellHandoffValidationEmptyRunId)
         }
         _ => None,
     };

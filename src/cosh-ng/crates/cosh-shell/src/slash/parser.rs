@@ -1,4 +1,6 @@
-use crate::runtime::prelude::{ShellEvent, ShellEventKind};
+use crate::runtime::prelude::{
+    visible_slash_commands, ShellEvent, ShellEventKind, SlashCommandSpec,
+};
 
 pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
     if event.kind != ShellEventKind::UserInputIntercepted {
@@ -84,17 +86,15 @@ pub(super) enum RemovedCommand<'a> {
     QuestionAnswer,
 }
 
-pub(super) fn slash_command_hints(
-    prefix: &str,
-) -> Vec<&'static cosh_shell::slash_registry::SlashCommandSpec> {
-    cosh_shell::slash_registry::visible_slash_commands()
+pub(super) fn slash_command_hints(prefix: &str) -> Vec<&'static SlashCommandSpec> {
+    visible_slash_commands()
         .filter(|hint| prefix == "/" || hint.name.starts_with(prefix))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RemovedCommand, SlashCommand};
+    use super::{RemovedCommand, SlashCommand, SlashCommandSpec};
 
     #[test]
     fn removed_decision_commands_parse_as_removed_not_unknown() {
@@ -130,7 +130,7 @@ mod tests {
         }
     }
 
-    fn slash_hints(prefix: &str) -> Vec<&'static cosh_shell::slash_registry::SlashCommandSpec> {
+    fn slash_hints(prefix: &str) -> Vec<&'static SlashCommandSpec> {
         super::slash_command_hints(prefix)
     }
 }

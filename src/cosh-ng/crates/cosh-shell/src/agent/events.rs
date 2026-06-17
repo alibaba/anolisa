@@ -178,8 +178,8 @@ pub(crate) fn flush_cosh_request_filter_into_active_run<W: Write>(
         .write_delta(output, &filtered.visible_text)?;
     active_run.has_visible_text_delta = true;
     active_run.governed_events.push(GovernedEvent {
-        decision: cosh_shell::types::GovernanceDecision::Display,
-        policy_decision: cosh_shell::types::GovernancePolicyDecision::DisplayOnly,
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
         event: AgentEvent::TextDelta {
             run_id: active_run.request.id.clone(),
             text: filtered.visible_text.clone(),
@@ -380,7 +380,7 @@ mod tests {
             request,
             handle,
             provider_name: "fake",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),

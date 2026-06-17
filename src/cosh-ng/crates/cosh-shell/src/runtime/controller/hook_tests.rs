@@ -2,12 +2,13 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{render_inline_guidance, shell_has_active_foreground_command};
+use crate::hooks::state::RuntimeHookDisplay;
+use crate::runtime::prelude::{
+    default_builtin_hooks, AdapterInstance, ExternalHookConfig, ExternalHookSource,
+    FakeAgentAdapter, FindingSeverity, HookEngine, HookMatcher, HookTrigger, ShellEvent,
+    ShellEventKind,
+};
 use crate::runtime::state::InlineState;
-use crate::runtime::state::RuntimeHookDisplay;
-use cosh_shell::adapter::FakeAgentAdapter;
-use cosh_shell::hook_types::FindingSeverity;
-use cosh_shell::types::{ShellEvent, ShellEventKind};
-use cosh_shell::AdapterInstance;
 
 const TOP_MEMORY_PRESSURE_OUTPUT: &str = "\
 top - 04:04:49 up 20:38,  0 user,  load average: 0.31, 0.40, 0.42
@@ -25,8 +26,8 @@ root      1234  3.1 45.2 5120000 2376420 ?     Sl   10:00   1:23 java -jar app.j
 
 fn state_with_builtin_hooks() -> InlineState {
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    for hook in cosh_shell::builtin_hooks::default_builtin_hooks() {
+    let mut hook_engine = HookEngine::new();
+    for hook in default_builtin_hooks() {
         hook_engine.register(hook);
     }
     state.hooks.engine = hook_engine;
@@ -340,20 +341,20 @@ fn smart_mode_external_warning_finding_uses_interruption_policy() {
     let output_ref = write_hook_output("external-warning-output", "ok\n");
     let events = command_events("echo hi", &output_ref, 3);
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    hook_engine.register_external(cosh_shell::hook_engine::ExternalHookConfig {
+    let mut hook_engine = HookEngine::new();
+    hook_engine.register_external(ExternalHookConfig {
         path: hook_path,
-        matcher: cosh_shell::hook_types::HookMatcher {
+        matcher: HookMatcher {
             id: "external-warning".to_string(),
             commands: vec!["echo".to_string()],
             command_patterns: Vec::new(),
             command_regex: None,
             exit_codes: Some(vec![0]),
             min_output_bytes: None,
-            trigger: cosh_shell::hook_types::HookTrigger::OnSuccess,
+            trigger: HookTrigger::OnSuccess,
         },
         timeout_ms: 3000,
-        source: cosh_shell::hook_engine::ExternalHookSource::User,
+        source: ExternalHookSource::User,
         project_root: None,
         trusted: true,
     });
@@ -390,20 +391,20 @@ fn smart_mode_untrusted_project_hook_is_not_executed() {
     let output_ref = write_hook_output("project-untrusted-output", "ok\n");
     let events = command_events("echo hi", &output_ref, 3);
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    hook_engine.register_external(cosh_shell::hook_engine::ExternalHookConfig {
+    let mut hook_engine = HookEngine::new();
+    hook_engine.register_external(ExternalHookConfig {
         path: hook_path,
-        matcher: cosh_shell::hook_types::HookMatcher {
+        matcher: HookMatcher {
             id: "project-warning".to_string(),
             commands: vec!["echo".to_string()],
             command_patterns: Vec::new(),
             command_regex: None,
             exit_codes: Some(vec![0]),
             min_output_bytes: None,
-            trigger: cosh_shell::hook_types::HookTrigger::OnSuccess,
+            trigger: HookTrigger::OnSuccess,
         },
         timeout_ms: 3000,
-        source: cosh_shell::hook_engine::ExternalHookSource::Project,
+        source: ExternalHookSource::Project,
         project_root: Some(dir.clone()),
         trusted: false,
     });
@@ -435,20 +436,20 @@ fn smart_mode_trusted_project_warning_finding_uses_interruption_policy() {
     let output_ref = write_hook_output("project-trusted-output", "ok\n");
     let events = command_events("echo hi", &output_ref, 3);
     let mut state = InlineState::default();
-    let mut hook_engine = cosh_shell::hook_engine::HookEngine::new();
-    hook_engine.register_external(cosh_shell::hook_engine::ExternalHookConfig {
+    let mut hook_engine = HookEngine::new();
+    hook_engine.register_external(ExternalHookConfig {
         path: hook_path,
-        matcher: cosh_shell::hook_types::HookMatcher {
+        matcher: HookMatcher {
             id: "project-warning".to_string(),
             commands: vec!["echo".to_string()],
             command_patterns: Vec::new(),
             command_regex: None,
             exit_codes: Some(vec![0]),
             min_output_bytes: None,
-            trigger: cosh_shell::hook_types::HookTrigger::OnSuccess,
+            trigger: HookTrigger::OnSuccess,
         },
         timeout_ms: 3000,
-        source: cosh_shell::hook_engine::ExternalHookSource::Project,
+        source: ExternalHookSource::Project,
         project_root: Some(dir.clone()),
         trusted: true,
     });

@@ -1,0 +1,177 @@
+use super::*;
+
+#[test]
+fn raw_cli_cosh_request_history_auto_sends_history_index() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"echo before-history\n".to_vec(), Duration::ZERO),
+            (
+                b"?? request shell history evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"/details cosh-request-1\n".to_vec(),
+                Duration::from_millis(600),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(600)),
+        ],
+    );
+
+    assert!(output.contains("before-history"), "{output}");
+    assert!(!output.contains("Agent Requested Evidence"), "{output}");
+    assert!(
+        output.contains("Evidence history index received by fake adapter."),
+        "{output}"
+    );
+    assert!(output.contains("cosh-request details"), "{output}");
+    assert!(output.contains("request_id: cosh-request-1"), "{output}");
+    assert!(output.contains("outcome: parsed"), "{output}");
+    assert!(output.contains("reason: parsed"), "{output}");
+    assert!(output.contains("raw_block:"), "{output}");
+    assert!(
+        compact_terminal_words(&output).contains("```cosh-requesthistory```"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("bash: request shell history evidence"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"echo token=super-secret\n".to_vec(), Duration::ZERO),
+            (
+                b"?? request shell history evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(800)),
+            (b"exit\n".to_vec(), Duration::from_millis(600)),
+        ],
+    );
+
+    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(
+        output.contains("Agent wants to inspect the recent shell command index."),
+        "{output}"
+    );
+    assert!(
+        output.contains("Redacted history index received by fake adapter."),
+        "{output}"
+    );
+    assert!(output.contains("token=super-secret"), "{output}");
+    assert!(!output.contains("bounded_output_excerpt:"), "{output}");
+    assert!(!output.contains("/output-refs/"), "{output}");
+}
+
+#[test]
+fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                b"printf 'alpha\\nbeta\\ngamma\\n'\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (
+                b"?? request captured output evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(800)),
+            (b"exit\n".to_vec(), Duration::from_millis(600)),
+        ],
+    );
+
+    assert!(output.contains("alpha"), "{output}");
+    assert!(output.contains("beta"), "{output}");
+    assert!(output.contains("gamma"), "{output}");
+    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(
+        output.contains(
+            "Agent wants to inspect captured output: terminal-output://raw-session/cmd-1 tail"
+        ),
+        "{output}"
+    );
+    assert!(output.contains("Max lines: 2"), "{output}");
+    assert!(
+        output.contains("Evidence excerpt received by fake adapter: beta gamma"),
+        "{output}"
+    );
+    assert!(!output.contains("```cosh-request"), "{output}");
+    assert!(!output.contains("/output-refs/"), "{output}");
+    assert!(!output.contains("cosh-osc$ cosh-osc$"), "{output}");
+}
+
+#[test]
+fn raw_cli_cosh_request_card_ignore_keeps_shell_usable() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                b"printf 'alpha\\nbeta\\ngamma\\n'\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (
+                b"?? request captured output evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"i\n".to_vec(), Duration::from_millis(1_500)),
+            (
+                b"echo after-evidence-ignore\nexit\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+        ],
+    );
+
+    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(
+        output.contains("Ignored this evidence request."),
+        "{output}"
+    );
+    assert!(output.contains("after-evidence-ignore"), "{output}");
+    assert!(
+        !output.contains("Evidence excerpt received by fake adapter:"),
+        "{output}"
+    );
+    assert!(!output.contains("bash: i"), "{output}");
+    assert!(!output.contains("cosh-osc$ cosh-osc$"), "{output}");
+}
+
+#[test]
+fn raw_cli_cosh_request_card_ctrl_c_cancels_only_evidence_request() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                b"printf 'alpha\\nbeta\\ngamma\\n'\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (
+                b"?? request captured output evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (vec![0x03], Duration::from_millis(1_500)),
+            (
+                b"echo after-evidence-cancel\nexit\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+        ],
+    );
+
+    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(output.contains("after-evidence-cancel"), "{output}");
+    assert!(
+        !output.contains("Evidence excerpt received by fake adapter:"),
+        "{output}"
+    );
+    assert!(!output.contains("Agent cancellation requested"), "{output}");
+    assert!(
+        !output.contains("Reason: user requested cancellation"),
+        "{output}"
+    );
+    assert!(!output.contains("cosh-osc$ cosh-osc$"), "{output}");
+}

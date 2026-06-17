@@ -1,4 +1,4 @@
-use cosh_shell::adapter::{ApprovalDecision, ApprovalResponse};
+use crate::runtime::prelude::{ApprovalDecision, ApprovalResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalOutcome {

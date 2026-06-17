@@ -1,5 +1,4 @@
 use crate::runtime::prelude::*;
-use cosh_shell::agent_render::approval_action_at;
 
 pub(crate) fn render_approval_requests<W: Write>(
     state: &mut InlineState,
@@ -52,8 +51,8 @@ pub(crate) fn render_current_approval_request<W: Write>(
         .find(|request| request.status == ApprovalRequestStatus::Pending);
     let i18n = state.i18n();
     let preview_label = match request.kind {
-        ApprovalRequestKind::Tool => i18n.t(cosh_shell::MessageId::ApprovalToolInputLabel),
-        ApprovalRequestKind::ShellCommand => i18n.t(cosh_shell::MessageId::ApprovalCommandLabel),
+        ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalToolInputLabel),
+        ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
     };
     let next_label = next_pending.map(|next| format!("{} {}", next.id, next.subject));
     let selected_action = state

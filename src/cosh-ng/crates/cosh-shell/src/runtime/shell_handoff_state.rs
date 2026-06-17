@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use cosh_shell::types::ShellHandoffRequest;
+use crate::runtime::prelude::ShellHandoffRequest;
 
 #[derive(Debug, Default)]
 pub(crate) struct ShellHandoffState {

@@ -13,7 +13,7 @@ use crate::runtime::prelude::*;
 
 pub(crate) struct AppliedApprovalDecision {
     pub(crate) request: RuntimeApprovalRequest,
-    pub(crate) title: cosh_shell::MessageId,
+    pub(crate) title: MessageId,
     pub(crate) run_approved_tool: bool,
 }
 
@@ -34,18 +34,15 @@ pub(crate) fn apply_approval_decision(
             {
                 state.control.trust_session_command(key);
             }
-            (
-                status,
-                cosh_shell::MessageId::ApprovalResolutionTrustedTitle,
-            )
+            (status, MessageId::ApprovalResolutionTrustedTitle)
         }
         ApprovalCommandKind::Deny => (
             ApprovalRequestStatus::Denied,
-            cosh_shell::MessageId::ApprovalResolutionDeniedTitle,
+            MessageId::ApprovalResolutionDeniedTitle,
         ),
         ApprovalCommandKind::Cancel => (
             ApprovalRequestStatus::Cancelled,
-            cosh_shell::MessageId::ApprovalResolutionCancelledTitle,
+            MessageId::ApprovalResolutionCancelledTitle,
         ),
         ApprovalCommandKind::Details => return None,
         ApprovalCommandKind::SendToShell => return None,
@@ -84,28 +81,28 @@ fn apply_approval_execution_metadata(
 
 fn approval_status_for_allowed_request(
     request: &RuntimeApprovalRequest,
-) -> (ApprovalRequestStatus, cosh_shell::MessageId) {
+) -> (ApprovalRequestStatus, MessageId) {
     if request_is_executable_bash_tool(request) {
         let command = match shell_handoff_command_from_request(request) {
             Ok(command) => command,
             Err(_) => {
                 return (
                     ApprovalRequestStatus::Blocked,
-                    cosh_shell::MessageId::ApprovalResolutionBlockedTitle,
+                    MessageId::ApprovalResolutionBlockedTitle,
                 )
             }
         };
         if fallback_bash_execution_path(&command) == ApprovedBashExecutionPath::Blocked {
             return (
                 ApprovalRequestStatus::Blocked,
-                cosh_shell::MessageId::ApprovalResolutionBlockedTitle,
+                MessageId::ApprovalResolutionBlockedTitle,
             );
         }
     }
 
     (
         ApprovalRequestStatus::Approved,
-        cosh_shell::MessageId::ApprovalResolutionApprovedTitle,
+        MessageId::ApprovalResolutionApprovedTitle,
     )
 }
 

@@ -7,7 +7,6 @@ use crate::approval::broker::{
 };
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::prelude::*;
-use cosh_shell::tools::{AssessmentSource, AutoExecutionPolicy, AutoExecutionRoute};
 
 pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
@@ -62,7 +61,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
         if apply_auto_approved_request_outcome(
             state,
             &mut request,
-            cosh_shell::MessageId::ApprovalResolutionAutoApprovedTitle,
+            MessageId::ApprovalResolutionAutoApprovedTitle,
             output,
         )? == AutoApprovalFlow::Handled
         {
@@ -120,7 +119,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             if apply_auto_approved_request_outcome(
                 state,
                 &mut request,
-                cosh_shell::MessageId::ApprovalResolutionAutoApprovedTitle,
+                MessageId::ApprovalResolutionAutoApprovedTitle,
                 output,
             )? == AutoApprovalFlow::Handled
             {
@@ -147,7 +146,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             if apply_auto_approved_request_outcome(
                 state,
                 &mut request,
-                cosh_shell::MessageId::ApprovalResolutionTrustedTitle,
+                MessageId::ApprovalResolutionTrustedTitle,
                 output,
             )? == AutoApprovalFlow::Handled
             {
@@ -185,7 +184,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         if apply_auto_approved_request_outcome(
             state,
             &mut request,
-            cosh_shell::MessageId::ApprovalResolutionAutoApprovedTitle,
+            MessageId::ApprovalResolutionAutoApprovedTitle,
             output,
         )? == AutoApprovalFlow::Handled
         {
@@ -244,7 +243,7 @@ fn render_completed_provider_native_shell_request<W: Write>(
     render_approval_resolution(
         state,
         &request,
-        cosh_shell::MessageId::ApprovalResolutionAutoApprovedTitle,
+        MessageId::ApprovalResolutionAutoApprovedTitle,
         output,
     )
 }
@@ -345,7 +344,7 @@ fn run_already_approved_shell_tool(state: &InlineState, run_id: &str) -> bool {
 fn apply_auto_approved_request_outcome<W: Write>(
     state: &mut InlineState,
     request: &mut RuntimeApprovalRequest,
-    title: cosh_shell::MessageId,
+    title: MessageId,
     output: &mut W,
 ) -> std::io::Result<AutoApprovalFlow> {
     let outcome = approval_outcome_for_auto_request(request);
@@ -447,7 +446,7 @@ fn defer_fallback_bash_tool<W: Write>(
     render_approval_resolution(
         state,
         &request,
-        cosh_shell::MessageId::ApprovalResolutionDeferredTitle,
+        MessageId::ApprovalResolutionDeferredTitle,
         output,
     )?;
     stop_active_agent_run_without_rendering(state, output)?;
@@ -570,14 +569,14 @@ mod tests {
 
     #[test]
     fn analysis_only_continuation_blocks_streamed_shell_tool_fallback() {
-        let adapter = AdapterInstance::QwenCli(cosh_shell::adapter::QwenCliAdapter::default());
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
         let mut state = InlineState {
             approval_mode: CoshApprovalMode::Auto,
             ..InlineState::default()
         };
         let governed = GovernedEvent {
-            decision: cosh_shell::types::GovernanceDecision::Display,
-            policy_decision: cosh_shell::types::GovernancePolicyDecision::NeedsUserApproval,
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
             event: AgentEvent::ToolCall {
                 run_id: "run-1".to_string(),
                 tool_id: None,

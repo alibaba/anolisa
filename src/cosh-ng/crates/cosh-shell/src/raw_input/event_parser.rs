@@ -178,7 +178,7 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
         }
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
         "/aut" => Some("/auth".to_string()),
-        _ => crate::slash_registry::visible_slash_commands()
+        _ => crate::slash::registry::visible_slash_commands()
             .find(|spec| spec.name.starts_with(token) && spec.name != token)
             .map(|spec| spec.usage.to_string()),
     }

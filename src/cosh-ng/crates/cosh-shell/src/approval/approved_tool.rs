@@ -1,5 +1,4 @@
 use crate::runtime::prelude::*;
-use cosh_shell::tools::{is_readonly_builtin_tool_name, is_shell_tool_name};
 
 pub(crate) fn request_is_executable_bash_tool(request: &RuntimeApprovalRequest) -> bool {
     request.kind == ApprovalRequestKind::Tool && is_shell_tool_name(&request.subject)

@@ -1,6 +1,3 @@
-use cosh_shell::agent_render::{RecommendationActionPanelModel, RecommendationPanelModel};
-use cosh_shell::parser::{recommendation_action_from_event, RecommendationActionKind};
-
 use crate::runtime::prelude::*;
 
 pub(crate) fn render_selection_actions<W: Write>(
@@ -30,9 +27,9 @@ pub(crate) fn render_selection_actions<W: Write>(
             let i18n = state.i18n();
             render_recommendation_unavailable(
                 state.language,
-                i18n.t(cosh_shell::MessageId::RecommendationNoSelectableTitle),
+                i18n.t(MessageId::RecommendationNoSelectableTitle),
                 vec![i18n
-                    .t(cosh_shell::MessageId::RecommendationNoSelectableBody)
+                    .t(MessageId::RecommendationNoSelectableBody)
                     .to_string()],
                 output,
             )?;
@@ -46,9 +43,9 @@ pub(crate) fn render_selection_actions<W: Write>(
             let total = state.control.selectable_command_count().to_string();
             render_recommendation_unavailable(
                 state.language,
-                i18n.t(cosh_shell::MessageId::RecommendationUnavailableTitle),
+                i18n.t(MessageId::RecommendationUnavailableTitle),
                 vec![i18n.format(
-                    cosh_shell::MessageId::RecommendationUnavailableBody,
+                    MessageId::RecommendationUnavailableBody,
                     &[("index", index.as_str()), ("total", total.as_str())],
                 )],
                 output,
@@ -65,35 +62,35 @@ pub(crate) fn render_selection_actions<W: Write>(
 }
 
 fn render_recommendation_action<W: Write>(
-    language: cosh_shell::Language,
+    language: Language,
     kind: RecommendationActionKind,
     index: usize,
     command: &str,
     output: &mut W,
 ) -> std::io::Result<()> {
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(language);
-    let i18n = cosh_shell::I18n::new(language);
+    let i18n = I18n::new(language);
     let index = index.to_string();
     let (title, primary_id, message_id) = match kind {
         RecommendationActionKind::Select => (
-            cosh_shell::MessageId::RecommendationSelectedTitle,
-            cosh_shell::MessageId::RecommendationSelectedBody,
-            cosh_shell::MessageId::RecommendationDisplayOnlyBody,
+            MessageId::RecommendationSelectedTitle,
+            MessageId::RecommendationSelectedBody,
+            MessageId::RecommendationDisplayOnlyBody,
         ),
         RecommendationActionKind::Copy => (
-            cosh_shell::MessageId::RecommendationCopiedTitle,
-            cosh_shell::MessageId::RecommendationCopiedBody,
-            cosh_shell::MessageId::RecommendationCopyOnlyBody,
+            MessageId::RecommendationCopiedTitle,
+            MessageId::RecommendationCopiedBody,
+            MessageId::RecommendationCopyOnlyBody,
         ),
         RecommendationActionKind::Insert => (
-            cosh_shell::MessageId::RecommendationInsertTitle,
-            cosh_shell::MessageId::RecommendationInsertBody,
-            cosh_shell::MessageId::RecommendationInsertOnlyBody,
+            MessageId::RecommendationInsertTitle,
+            MessageId::RecommendationInsertBody,
+            MessageId::RecommendationInsertOnlyBody,
         ),
         RecommendationActionKind::Details => (
-            cosh_shell::MessageId::RecommendationDetailsTitle,
-            cosh_shell::MessageId::RecommendationDetailsBody,
-            cosh_shell::MessageId::RecommendationDetailsOnlyBody,
+            MessageId::RecommendationDetailsTitle,
+            MessageId::RecommendationDetailsBody,
+            MessageId::RecommendationDetailsOnlyBody,
         ),
     };
     renderer.write_recommendation_action_panel(
@@ -109,7 +106,7 @@ fn render_recommendation_action<W: Write>(
 }
 
 fn render_recommendation_unavailable<W: Write>(
-    language: cosh_shell::Language,
+    language: Language,
     title: &str,
     body: Vec<String>,
     output: &mut W,
@@ -143,7 +140,7 @@ pub(crate) fn record_selectable_recommendations(
 
 pub(crate) fn render_selectable_recommendations<W: Write>(
     governed_events: &[GovernedEvent],
-    language: cosh_shell::Language,
+    language: Language,
     output: &mut W,
 ) -> std::io::Result<()> {
     let commands = selectable_commands_from_events(governed_events);

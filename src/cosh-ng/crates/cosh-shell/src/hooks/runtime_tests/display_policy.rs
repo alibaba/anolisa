@@ -6,7 +6,7 @@ fn warning_process_without_pressure_is_hint_not_card() {
     let aggregated = aggregate_hook_findings(findings);
 
     assert_eq!(
-        display_for_aggregate(&block(0), &aggregated[0], AnalysisMode::Smart),
+        display_for_aggregate(&block(0), &aggregated[0], false),
         RuntimeHookDisplay::Hint
     );
 }
@@ -200,11 +200,7 @@ fn swap_only_memory_pressure_info_is_silent() {
     let aggregated = aggregate_hook_findings(findings);
 
     assert_eq!(
-        display_for_aggregate(
-            &block_with_command("free -m"),
-            &aggregated[0],
-            AnalysisMode::Smart
-        ),
+        display_for_aggregate(&block_with_command("free -m"), &aggregated[0], false),
         RuntimeHookDisplay::Silent
     );
 }

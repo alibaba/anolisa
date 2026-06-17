@@ -207,7 +207,7 @@ fn hook_hint_analyze_injects_target_excerpt_without_history_output_body() {
     .expect("analyze hook hint with target excerpt");
 
     let request = &state.agent_run.active.as_ref().expect("active run").request;
-    let prompt = cosh_shell::adapter::prompt_from_request(request);
+    let prompt = prompt_from_request(request);
     assert!(prompt.contains("ShellEvidenceExcerpt"), "{prompt}");
     assert!(
         prompt.contains("output_id: terminal-output://session/target"),

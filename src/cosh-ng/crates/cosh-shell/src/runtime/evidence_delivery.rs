@@ -1,11 +1,8 @@
-use cosh_shell::adapter::{
-    ApprovalDecision, ApprovalResponse, HostExecutedShellMetadata, HostExecutedShellResult,
+use crate::runtime::prelude::{
+    redact_provider_command_text, AgentMode, AgentRequest, ApprovalDecision, ApprovalResponse,
+    CommandBlock, CommandStatus, HostExecutedShellMetadata, HostExecutedShellResult, OutputRefs,
+    ShellHandoffRequest,
 };
-use cosh_shell::context_window::redact_provider_command_text;
-use cosh_shell::types::{
-    AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs, ShellHandoffRequest,
-};
-
 use crate::runtime::state::{InlineState, RuntimeApprovalRequest};
 
 use super::evidence_state::{EvidenceState, RuntimeShellCommandCompleted, ShellEvidenceDelivery};
@@ -271,9 +268,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cosh_shell::adapter::{AgentRunPoll, CoshTuiAdapter};
-    use cosh_shell::agent_render::RatatuiInlineRenderer;
-    use cosh_shell::types::{AgentEvent, CoshApprovalMode, OutputRefs};
+    use crate::runtime::prelude::{
+        AgentEvent, AgentRunHandle, AgentRunPoll, CoshApprovalMode, CoshTuiAdapter, Language,
+        OutputRefs, RatatuiInlineRenderer,
+    };
 
     use crate::agent::run::ActiveAgentRun;
 
@@ -511,9 +509,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn open_cosh_tui_control_handle(
-        request: &AgentRequest,
-    ) -> (PathBuf, cosh_shell::adapter::AgentRunHandle) {
+    fn open_cosh_tui_control_handle(request: &AgentRequest) -> (PathBuf, AgentRunHandle) {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
@@ -581,13 +577,14 @@ exit 1
         (dir, handle)
     }
 
-    fn closed_cosh_tui_control_handle(
-        request: &AgentRequest,
-    ) -> cosh_shell::adapter::AgentRunHandle {
+    fn closed_cosh_tui_control_handle(request: &AgentRequest) -> AgentRunHandle {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let adapter = CoshTuiAdapter {
             program: manifest_dir
                 .join("tests")
+                .join("fixtures")
+                .join("provider")
+                .join("qwen")
                 .join("mock_qwen_control_capabilities.sh")
                 .to_string_lossy()
                 .to_string(),
@@ -609,16 +606,13 @@ exit 1
         handle
     }
 
-    fn test_active_run(
-        request: AgentRequest,
-        handle: cosh_shell::adapter::AgentRunHandle,
-    ) -> ActiveAgentRun {
+    fn test_active_run(request: AgentRequest, handle: AgentRunHandle) -> ActiveAgentRun {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
             handle,
             provider_name: "cosh-tui",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),

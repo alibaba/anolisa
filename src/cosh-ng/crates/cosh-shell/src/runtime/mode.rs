@@ -14,34 +14,31 @@ pub(crate) fn render_mode_command<W: Write>(
         Some("analysis") => render_analysis_mode_command(sub, state, output),
         Some("recommend" | "auto" | "trust") => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::ModeRemovedTitle),
-            vec![state.i18n().format(
-                cosh_shell::MessageId::ModeRemovedBody,
-                &[("mode", arg.unwrap())],
-            )],
-            Some(&state.i18n().format(
-                cosh_shell::MessageId::ModeRemovedFooter,
-                &[("mode", arg.unwrap())],
-            )),
+            state.i18n().t(MessageId::ModeRemovedTitle),
+            vec![state
+                .i18n()
+                .format(MessageId::ModeRemovedBody, &[("mode", arg.unwrap())])],
+            Some(
+                &state
+                    .i18n()
+                    .format(MessageId::ModeRemovedFooter, &[("mode", arg.unwrap())]),
+            ),
         )
         .map(|_| true),
         Some("language") => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::ModeTitle),
-            vec![state
-                .i18n()
-                .t(cosh_shell::MessageId::ModeLanguageBody)
-                .to_string()],
-            Some(state.i18n().t(cosh_shell::MessageId::ModeLanguageFooter)),
+            state.i18n().t(MessageId::ModeTitle),
+            vec![state.i18n().t(MessageId::ModeLanguageBody).to_string()],
+            Some(state.i18n().t(MessageId::ModeLanguageFooter)),
         )
         .map(|_| true),
         Some(other) => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::ModeTitle),
+            state.i18n().t(MessageId::ModeTitle),
             vec![state
                 .i18n()
-                .format(cosh_shell::MessageId::ModeUnknownBody, &[("mode", other)])],
-            Some(state.i18n().t(cosh_shell::MessageId::ModeUnknownFooter)),
+                .format(MessageId::ModeUnknownBody, &[("mode", other)])],
+            Some(state.i18n().t(MessageId::ModeUnknownFooter)),
         )
         .map(|_| true),
     }
@@ -50,18 +47,18 @@ pub(crate) fn render_mode_command<W: Write>(
 fn render_mode_summary<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result<bool> {
     render_notice_panel(
         output,
-        state.i18n().t(cosh_shell::MessageId::ModesTitle),
+        state.i18n().t(MessageId::ModesTitle),
         vec![
             state.i18n().format(
-                cosh_shell::MessageId::ModeApprovalLine,
+                MessageId::ModeApprovalLine,
                 &[("mode", state.approval_mode.label())],
             ),
             state.i18n().format(
-                cosh_shell::MessageId::ModeAnalysisLine,
+                MessageId::ModeAnalysisLine,
                 &[("mode", state.analysis_mode.label())],
             ),
         ],
-        Some(state.i18n().t(cosh_shell::MessageId::ModeSummaryFooter)),
+        Some(state.i18n().t(MessageId::ModeSummaryFooter)),
     )?;
     Ok(true)
 }
@@ -88,11 +85,10 @@ fn render_approval_mode_command<W: Write>(
             state.approval_mode = CoshApprovalMode::Recommend;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::ApprovalModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::ApprovalModeSetBody,
-                    &[("mode", "recommend")],
-                )],
+                state.i18n().t(MessageId::ApprovalModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::ApprovalModeSetBody, &[("mode", "recommend")])],
                 Some(mode_footer(state.i18n(), CoshApprovalMode::Recommend)),
             )?;
             Ok(true)
@@ -101,11 +97,10 @@ fn render_approval_mode_command<W: Write>(
             state.approval_mode = CoshApprovalMode::Auto;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::ApprovalModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::ApprovalModeSetBody,
-                    &[("mode", "auto")],
-                )],
+                state.i18n().t(MessageId::ApprovalModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::ApprovalModeSetBody, &[("mode", "auto")])],
                 Some(mode_footer(state.i18n(), CoshApprovalMode::Auto)),
             )?;
             Ok(true)
@@ -117,46 +112,40 @@ fn render_approval_mode_command<W: Write>(
             state.approval_mode = CoshApprovalMode::Trust;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::ApprovalModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::ApprovalModeSetBody,
-                    &[("mode", "trust")],
-                )],
+                state.i18n().t(MessageId::ApprovalModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::ApprovalModeSetBody, &[("mode", "trust")])],
                 Some(mode_footer(state.i18n(), CoshApprovalMode::Trust)),
             )?;
             Ok(true)
         }
         Some(other) => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::ApprovalModeTitle),
-            vec![state.i18n().format(
-                cosh_shell::MessageId::ApprovalModeUnknownBody,
-                &[("mode", other)],
-            )],
-            Some(
-                state
-                    .i18n()
-                    .t(cosh_shell::MessageId::ApprovalModeUsageFooter),
-            ),
+            state.i18n().t(MessageId::ApprovalModeTitle),
+            vec![state
+                .i18n()
+                .format(MessageId::ApprovalModeUnknownBody, &[("mode", other)])],
+            Some(state.i18n().t(MessageId::ApprovalModeUsageFooter)),
         )
         .map(|_| true),
     }
 }
 
 fn render_trust_confirmation_required<W: Write>(
-    i18n: cosh_shell::I18n,
+    i18n: I18n,
     output: &mut W,
 ) -> std::io::Result<bool> {
     render_notice_panel(
         output,
-        i18n.t(cosh_shell::MessageId::ApprovalModeTrustConfirmationTitle),
+        i18n.t(MessageId::ApprovalModeTrustConfirmationTitle),
         vec![
-            i18n.t(cosh_shell::MessageId::ApprovalModeTrustConfirmationBody)
+            i18n.t(MessageId::ApprovalModeTrustConfirmationBody)
                 .to_string(),
-            i18n.t(cosh_shell::MessageId::ApprovalModeTrustConfirmationCommandBody)
+            i18n.t(MessageId::ApprovalModeTrustConfirmationCommandBody)
                 .to_string(),
         ],
-        Some(i18n.t(cosh_shell::MessageId::ApprovalModeTrustConfirmationFooter)),
+        Some(i18n.t(MessageId::ApprovalModeTrustConfirmationFooter)),
     )?;
     Ok(true)
 }
@@ -170,16 +159,12 @@ fn render_analysis_mode_command<W: Write>(
         None => {
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::AnalysisModeTitle),
+                state.i18n().t(MessageId::AnalysisModeTitle),
                 vec![state.i18n().format(
-                    cosh_shell::MessageId::AnalysisModeCurrentBody,
+                    MessageId::AnalysisModeCurrentBody,
                     &[("mode", state.analysis_mode.label())],
                 )],
-                Some(
-                    state
-                        .i18n()
-                        .t(cosh_shell::MessageId::AnalysisModeUsageFooter),
-                ),
+                Some(state.i18n().t(MessageId::AnalysisModeUsageFooter)),
             )?;
             Ok(true)
         }
@@ -187,16 +172,11 @@ fn render_analysis_mode_command<W: Write>(
             state.analysis_mode = AnalysisMode::Smart;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::AnalysisModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::AnalysisModeSetBody,
-                    &[("mode", "smart")],
-                )],
-                Some(
-                    state
-                        .i18n()
-                        .t(cosh_shell::MessageId::AnalysisModeSmartFooter),
-                ),
+                state.i18n().t(MessageId::AnalysisModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::AnalysisModeSetBody, &[("mode", "smart")])],
+                Some(state.i18n().t(MessageId::AnalysisModeSmartFooter)),
             )?;
             Ok(true)
         }
@@ -204,16 +184,11 @@ fn render_analysis_mode_command<W: Write>(
             state.analysis_mode = AnalysisMode::Auto;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::AnalysisModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::AnalysisModeSetBody,
-                    &[("mode", "auto")],
-                )],
-                Some(
-                    state
-                        .i18n()
-                        .t(cosh_shell::MessageId::AnalysisModeAutoFooter),
-                ),
+                state.i18n().t(MessageId::AnalysisModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::AnalysisModeSetBody, &[("mode", "auto")])],
+                Some(state.i18n().t(MessageId::AnalysisModeAutoFooter)),
             )?;
             Ok(true)
         }
@@ -221,31 +196,21 @@ fn render_analysis_mode_command<W: Write>(
             state.analysis_mode = AnalysisMode::Manual;
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::AnalysisModeTitle),
-                vec![state.i18n().format(
-                    cosh_shell::MessageId::AnalysisModeSetBody,
-                    &[("mode", "manual")],
-                )],
-                Some(
-                    state
-                        .i18n()
-                        .t(cosh_shell::MessageId::AnalysisModeManualFooter),
-                ),
+                state.i18n().t(MessageId::AnalysisModeTitle),
+                vec![state
+                    .i18n()
+                    .format(MessageId::AnalysisModeSetBody, &[("mode", "manual")])],
+                Some(state.i18n().t(MessageId::AnalysisModeManualFooter)),
             )?;
             Ok(true)
         }
         Some(other) => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::AnalysisModeTitle),
-            vec![state.i18n().format(
-                cosh_shell::MessageId::AnalysisModeUnknownBody,
-                &[("mode", other)],
-            )],
-            Some(
-                state
-                    .i18n()
-                    .t(cosh_shell::MessageId::AnalysisModeUsageFooter),
-            ),
+            state.i18n().t(MessageId::AnalysisModeTitle),
+            vec![state
+                .i18n()
+                .format(MessageId::AnalysisModeUnknownBody, &[("mode", other)])],
+            Some(state.i18n().t(MessageId::AnalysisModeUsageFooter)),
         )
         .map(|_| true),
     }
@@ -309,19 +274,17 @@ pub(crate) fn render_mode_card_actions<W: Write>(
                 clear_active_mode_panel(state, output)?;
                 state.control.clear_pending_mode_panel();
                 let body = if unchanged {
-                    vec![state.i18n().format(
-                        cosh_shell::MessageId::ApprovalModeRemainsBody,
-                        &[("mode", label)],
-                    )]
+                    vec![state
+                        .i18n()
+                        .format(MessageId::ApprovalModeRemainsBody, &[("mode", label)])]
                 } else {
-                    vec![state.i18n().format(
-                        cosh_shell::MessageId::ApprovalModeSetBody,
-                        &[("mode", label)],
-                    )]
+                    vec![state
+                        .i18n()
+                        .format(MessageId::ApprovalModeSetBody, &[("mode", label)])]
                 };
                 render_notice_panel(
                     output,
-                    state.i18n().t(cosh_shell::MessageId::ApprovalModeCardTitle),
+                    state.i18n().t(MessageId::ApprovalModeCardTitle),
                     body,
                     Some(mode_footer(state.i18n(), state.approval_mode)),
                 )?;
@@ -340,16 +303,11 @@ pub(crate) fn render_mode_card_actions<W: Write>(
                 state.control.clear_pending_mode_panel();
                 render_notice_panel(
                     output,
-                    state.i18n().t(cosh_shell::MessageId::ApprovalModeCardTitle),
-                    vec![state.i18n().format(
-                        cosh_shell::MessageId::ApprovalModeCancelBody,
-                        &[("mode", label)],
-                    )],
-                    Some(
-                        state
-                            .i18n()
-                            .t(cosh_shell::MessageId::ApprovalModeCancelFooter),
-                    ),
+                    state.i18n().t(MessageId::ApprovalModeCardTitle),
+                    vec![state
+                        .i18n()
+                        .format(MessageId::ApprovalModeCancelBody, &[("mode", label)])],
+                    Some(state.i18n().t(MessageId::ApprovalModeCancelFooter)),
                 )?;
                 write_shell_prompt(state, output)?;
             }
@@ -379,28 +337,26 @@ fn render_current_mode_panel<W: Write>(
     };
     let body = vec![
         state.i18n().format(
-            cosh_shell::MessageId::ApprovalModeCardCurrentLine,
+            MessageId::ApprovalModeCardCurrentLine,
             &[("mode", state.approval_mode.label())],
         ),
         state.i18n().format(
-            cosh_shell::MessageId::ApprovalModeCardRecommendLine,
+            MessageId::ApprovalModeCardRecommendLine,
             &[("marker", marker(0))],
         ),
         state.i18n().format(
-            cosh_shell::MessageId::ApprovalModeCardAutoLine,
+            MessageId::ApprovalModeCardAutoLine,
             &[("marker", marker(1))],
         ),
         state.i18n().format(
-            cosh_shell::MessageId::ApprovalModeCardTrustLine,
+            MessageId::ApprovalModeCardTrustLine,
             &[("marker", marker(2))],
         ),
     ];
-    let footer = state
-        .i18n()
-        .t(cosh_shell::MessageId::ApprovalModeCardFooter);
+    let footer = state.i18n().t(MessageId::ApprovalModeCardFooter);
     render_notice_panel(
         output,
-        state.i18n().t(cosh_shell::MessageId::ApprovalModeCardTitle),
+        state.i18n().t(MessageId::ApprovalModeCardTitle),
         body.clone(),
         Some(footer),
     )?;
@@ -486,11 +442,11 @@ fn mode_from_index(index: usize) -> CoshApprovalMode {
     }
 }
 
-fn mode_footer(i18n: cosh_shell::I18n, mode: CoshApprovalMode) -> &'static str {
+fn mode_footer(i18n: I18n, mode: CoshApprovalMode) -> &'static str {
     match mode {
-        CoshApprovalMode::Recommend => i18n.t(cosh_shell::MessageId::ApprovalModeRecommendFooter),
-        CoshApprovalMode::Auto => i18n.t(cosh_shell::MessageId::ApprovalModeAutoFooter),
-        CoshApprovalMode::Trust => i18n.t(cosh_shell::MessageId::ApprovalModeTrustFooter),
+        CoshApprovalMode::Recommend => i18n.t(MessageId::ApprovalModeRecommendFooter),
+        CoshApprovalMode::Auto => i18n.t(MessageId::ApprovalModeAutoFooter),
+        CoshApprovalMode::Trust => i18n.t(MessageId::ApprovalModeTrustFooter),
     }
 }
 

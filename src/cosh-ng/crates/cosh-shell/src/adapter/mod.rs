@@ -7,13 +7,21 @@ use crate::types::{AgentEvent, AgentRequest};
 
 mod claude;
 mod claude_stream;
+mod claude_stream_extract;
 #[cfg(test)]
 mod claude_stream_tests;
 mod control_protocol;
+#[cfg(test)]
+mod control_protocol_tests;
 mod cosh_tui;
+mod cosh_tui_process;
+#[cfg(test)]
+mod cosh_tui_tests;
 mod fake;
 mod process;
 mod prompt;
+#[cfg(test)]
+mod prompt_tests;
 mod qwen;
 mod qwen_stream;
 
@@ -70,8 +78,7 @@ pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
     pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
-    pub(crate) auth_sender:
-        Option<std::sync::mpsc::Sender<crate::adapter::control_protocol::AuthResponse>>,
+    pub(crate) auth_sender: Option<std::sync::mpsc::Sender<AuthResponse>>,
     control_capabilities: Arc<Mutex<ControlProtocolCapabilities>>,
     pending_provider_session: Option<Arc<Mutex<Option<String>>>>,
     cancellation_artifacts: ProviderCancellationArtifactStore,
@@ -153,10 +160,7 @@ impl AgentRunHandle {
             })
     }
 
-    pub fn respond_auth(
-        &self,
-        response: crate::adapter::control_protocol::AuthResponse,
-    ) -> Result<(), String> {
+    pub fn respond_auth(&self, response: AuthResponse) -> Result<(), String> {
         self.auth_sender
             .as_ref()
             .ok_or_else(|| "no auth channel available".to_string())?

@@ -1,6 +1,5 @@
-use crate::runtime::command_interrupt::command_should_skip_failure_analysis;
+use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
-use cosh_shell::exit_classify::{classify_exit, first_program_token, ExitCodeCategory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailedCommandAnalysisTrigger {
@@ -37,22 +36,16 @@ pub(crate) fn render_failed_command_cards<W: Write>(
         RatatuiInlineRenderer::for_terminal().write_notice_panel(
             output,
             NoticePanelModel {
-                title: state
-                    .i18n()
-                    .t(cosh_shell::MessageId::FailedCommandCardTitle),
+                title: state.i18n().t(MessageId::FailedCommandCardTitle),
                 body: vec![state.i18n().format(
-                    cosh_shell::MessageId::FailedCommandCardBody,
+                    MessageId::FailedCommandCardBody,
                     &[
                         ("command", block.command.as_str()),
                         ("exit_code", &block.exit_code.to_string()),
                         ("id", block.id.as_str()),
                     ],
                 )],
-                footer: Some(
-                    state
-                        .i18n()
-                        .t(cosh_shell::MessageId::FailedCommandCardFooter),
-                ),
+                footer: Some(state.i18n().t(MessageId::FailedCommandCardFooter)),
             },
         )?;
         output.flush()?;
@@ -85,18 +78,12 @@ pub(crate) fn render_post_failure_actions<W: Write>(
             RatatuiInlineRenderer::for_terminal().write_notice_panel(
                 output,
                 NoticePanelModel {
-                    title: state
-                        .i18n()
-                        .t(cosh_shell::MessageId::FailedAnalysisCancelledTitle),
+                    title: state.i18n().t(MessageId::FailedAnalysisCancelledTitle),
                     body: vec![state.i18n().format(
-                        cosh_shell::MessageId::FailedAnalysisCancelledBody,
+                        MessageId::FailedAnalysisCancelledBody,
                         &[("command", block.command.as_str())],
                     )],
-                    footer: Some(
-                        state
-                            .i18n()
-                            .t(cosh_shell::MessageId::FailedAnalysisCancelledFooter),
-                    ),
+                    footer: Some(state.i18n().t(MessageId::FailedAnalysisCancelledFooter)),
                 },
             )?;
             output.flush()?;
@@ -289,12 +276,12 @@ pub(crate) fn start_agent_for_block<W: Write>(
             RatatuiInlineRenderer::for_terminal().write_notice_panel(
                 output,
                 NoticePanelModel {
-                    title: state.i18n().t(cosh_shell::MessageId::AnalysisSkippedTitle),
+                    title: state.i18n().t(MessageId::AnalysisSkippedTitle),
                     body: vec![state.i18n().format(
-                        cosh_shell::MessageId::AnalysisSkippedBody,
+                        MessageId::AnalysisSkippedBody,
                         &[("command", block.command.as_str())],
                     )],
-                    footer: Some(state.i18n().t(cosh_shell::MessageId::AnalysisSkippedFooter)),
+                    footer: Some(state.i18n().t(MessageId::AnalysisSkippedFooter)),
                 },
             )?;
             output.flush()?;
@@ -304,11 +291,9 @@ pub(crate) fn start_agent_for_block<W: Write>(
 
     match agent_request_after_confirmation(&block.session_id, block, findings, true) {
         Some(mut request) => {
-            let ctx_config = cosh_shell::context_window::RelatedHistoryConfig::default();
-            let ctx_entries =
-                cosh_shell::context_window::build_related_history_index(blocks, block, &ctx_config);
-            request.context_blocks =
-                cosh_shell::context_window::context_blocks_from_entries(&ctx_entries);
+            let ctx_config = RelatedHistoryConfig::default();
+            let ctx_entries = build_related_history_index(blocks, block, &ctx_config);
+            request.context_blocks = context_blocks_from_entries(&ctx_entries);
             request.context_hints = hook_routing_hints_for_block(state, block);
             if options.trigger == FailedCommandAnalysisTrigger::Auto
                 && !request.context_hints.is_empty()
@@ -317,19 +302,15 @@ pub(crate) fn start_agent_for_block<W: Write>(
                 RatatuiInlineRenderer::for_terminal().write_notice_panel(
                     output,
                     NoticePanelModel {
-                        title: state.i18n().t(cosh_shell::MessageId::HookAutoAnalyzedTitle),
+                        title: state.i18n().t(MessageId::HookAutoAnalyzedTitle),
                         body: vec![state.i18n().format(
-                            cosh_shell::MessageId::HookAutoAnalyzedBody,
+                            MessageId::HookAutoAnalyzedBody,
                             &[
                                 ("command", block.command.as_str()),
                                 ("exit_code", &block.exit_code.to_string()),
                             ],
                         )],
-                        footer: Some(
-                            state
-                                .i18n()
-                                .t(cosh_shell::MessageId::HookAutoAnalyzedFooter),
-                        ),
+                        footer: Some(state.i18n().t(MessageId::HookAutoAnalyzedFooter)),
                     },
                 )?;
             }
@@ -339,18 +320,15 @@ pub(crate) fn start_agent_for_block<W: Write>(
                 RatatuiInlineRenderer::for_terminal().write_notice_panel(
                     output,
                     NoticePanelModel {
-                        title: state.i18n().t(cosh_shell::MessageId::AgentQueuedTitle),
+                        title: state.i18n().t(MessageId::AgentQueuedTitle),
                         body: vec![
                             state.i18n().format(
-                                cosh_shell::MessageId::AgentQueuedBodyCommand,
+                                MessageId::AgentQueuedBodyCommand,
                                 &[("command", block.command.as_str())],
                             ),
-                            state
-                                .i18n()
-                                .t(cosh_shell::MessageId::AgentQueuedBodyActive)
-                                .to_string(),
+                            state.i18n().t(MessageId::AgentQueuedBodyActive).to_string(),
                         ],
-                        footer: Some(state.i18n().t(cosh_shell::MessageId::AgentQueuedFooter)),
+                        footer: Some(state.i18n().t(MessageId::AgentQueuedFooter)),
                     },
                 )?;
             }
@@ -408,7 +386,7 @@ mod tests {
             input: input.map(str::to_string),
             component: Some("card".to_string()),
             message: Some(message.to_string()),
-            command_origin: Some(cosh_shell::types::CommandOrigin::UserInteractive),
+            command_origin: Some(CommandOrigin::UserInteractive),
         }
     }
 
@@ -451,7 +429,7 @@ mod tests {
         target.ended_at_ms = 30;
         target.output.terminal_output_ref = Some("/tmp/target-output.txt".to_string());
         let blocks = vec![setup.clone(), previous_failed.clone(), target.clone()];
-        let findings = cosh_shell::parser::findings_from_blocks(&blocks);
+        let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();
         let mut output = Vec::new();
@@ -531,7 +509,7 @@ mod tests {
         let mut target = failed_block(2, "ls --bad-flag");
         target.id = "target".to_string();
         let blocks = vec![target];
-        let findings = cosh_shell::parser::findings_from_blocks(&blocks);
+        let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState {
             analysis_mode: AnalysisMode::Manual,
@@ -560,7 +538,7 @@ mod tests {
         let mut target = failed_block(2, "ls --bad-flag");
         target.id = "target".to_string();
         let blocks = vec![target];
-        let findings = cosh_shell::parser::findings_from_blocks(&blocks);
+        let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState {
             analysis_mode: AnalysisMode::Manual,
@@ -589,7 +567,7 @@ mod tests {
         let mut target = failed_block(2, "ls --bad-flag");
         target.id = "target".to_string();
         let blocks = vec![target];
-        let findings = cosh_shell::parser::findings_from_blocks(&blocks);
+        let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState {
             analysis_mode: AnalysisMode::Manual,
@@ -619,7 +597,7 @@ mod tests {
         let mut target = failed_block(2, "ls --bad-flag");
         target.id = "target".to_string();
         let blocks = vec![target];
-        let findings = cosh_shell::parser::findings_from_blocks(&blocks);
+        let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState {
             analysis_mode: AnalysisMode::Manual,

@@ -30,9 +30,9 @@ pub(super) fn provider_approval_status(status: ApprovalRequestStatus) -> Provide
 pub(super) fn mark_provider_approval_resolved(state: &mut InlineState) {
     let i18n = state.i18n();
     if let Some(active_run) = state.agent_run.active.as_mut() {
-        active_run.current_phase = i18n.t(cosh_shell::MessageId::AgentStatusTool).to_string();
+        active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
         active_run.current_message = i18n
-            .t(cosh_shell::MessageId::AgentStatusRunningApprovedProviderTool)
+            .t(MessageId::AgentStatusRunningApprovedProviderTool)
             .to_string();
         active_run.last_activity_at = std::time::Instant::now();
     }

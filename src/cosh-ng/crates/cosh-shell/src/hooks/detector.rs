@@ -1,13 +1,11 @@
-use cosh_shell::hook_types::HookFinding;
-use cosh_shell::types::CommandBlock;
-
-use super::runtime::{
+use super::aggregate::{
     computed_entity_key, computed_finding_confidence, computed_suppression_key,
     finding_topic_from_findings, is_memory_hook, memory_hook_preference,
     recommended_skill_from_findings, severity_rank, AggregatedHookFinding,
 };
+use super::prelude::{CommandBlock, HookFinding};
 
-pub(super) fn aggregate_hook_findings(findings: Vec<HookFinding>) -> Vec<AggregatedHookFinding> {
+pub(crate) fn aggregate_hook_findings(findings: Vec<HookFinding>) -> Vec<AggregatedHookFinding> {
     let mut memory_findings = Vec::new();
     let mut aggregated = Vec::new();
 
@@ -84,7 +82,7 @@ fn new_aggregated_hook_finding(
     }
 }
 
-pub(super) fn refresh_aggregate_metadata(
+pub(crate) fn refresh_aggregate_metadata(
     block: &CommandBlock,
     aggregate: &mut AggregatedHookFinding,
 ) {

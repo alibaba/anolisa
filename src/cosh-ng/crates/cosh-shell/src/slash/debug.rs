@@ -12,52 +12,49 @@ pub(super) fn render_debug_command<W: Write>(
             let i18n = state.i18n();
             let debug_line = |id, value: String| i18n.format(id, &[("value", value.as_str())]);
             let mut body = vec![
+                debug_line(MessageId::DebugAdapterLine, adapter.name().to_string()),
                 debug_line(
-                    cosh_shell::MessageId::DebugAdapterLine,
-                    adapter.name().to_string(),
-                ),
-                debug_line(
-                    cosh_shell::MessageId::DebugProviderInvocationLine,
+                    MessageId::DebugProviderInvocationLine,
                     adapter
                         .provider_invocation()
                         .unwrap_or_else(|| "<none>".to_string()),
                 ),
                 debug_line(
-                    cosh_shell::MessageId::DebugProviderCommittedSessionLine,
+                    MessageId::DebugProviderCommittedSessionLine,
                     adapter
                         .committed_session_id()
                         .unwrap_or_else(|| "<none>".to_string()),
                 ),
                 debug_line(
-                    cosh_shell::MessageId::DebugActiveRunLine,
+                    MessageId::DebugActiveRunLine,
                     state.agent_run.active.is_some().to_string(),
                 ),
                 debug_line(
-                    cosh_shell::MessageId::DebugQueuedRunsLine,
+                    MessageId::DebugQueuedRunsLine,
                     state.agent_run.queued_requests.len().to_string(),
                 ),
             ];
             if let Some(active_run) = state.agent_run.active.as_ref() {
                 let capabilities = active_run.handle.control_capabilities();
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugProviderPendingSessionLine,
+                    MessageId::DebugProviderPendingSessionLine,
                     active_run
                         .handle
                         .pending_provider_session_id()
                         .unwrap_or_else(|| "<none>".to_string()),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugProviderInitializeSeenLine,
+                    MessageId::DebugProviderInitializeSeenLine,
                     capabilities.provider_initialize_seen.to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugHostExecutedShellResultLine,
+                    MessageId::DebugHostExecutedShellResultLine,
                     capabilities
                         .can_handle_host_executed_shell_tool_result
                         .to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugSelectedShellExecutionPathLine,
+                    MessageId::DebugSelectedShellExecutionPathLine,
                     if capabilities.can_handle_host_executed_shell_tool_result {
                         "control_protocol_host_executed_shell_result"
                     } else if adapter.capabilities().control_protocol {
@@ -70,21 +67,21 @@ pub(super) fn render_debug_command<W: Write>(
             } else {
                 let latest_shell = state.evidence.latest_shell_command_completed();
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugProviderPendingSessionLine,
+                    MessageId::DebugProviderPendingSessionLine,
                     "<none>".to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugProviderInitializeSeenLine,
+                    MessageId::DebugProviderInitializeSeenLine,
                     "<none>".to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugHostExecutedShellResultLine,
+                    MessageId::DebugHostExecutedShellResultLine,
                     latest_shell
                         .map(|evidence| evidence.provider_result_delivery_status.to_string())
                         .unwrap_or_else(|| "<none>".to_string()),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugSelectedShellExecutionPathLine,
+                    MessageId::DebugSelectedShellExecutionPathLine,
                     latest_shell
                         .map(|evidence| evidence.selected_execution_path().to_string())
                         .unwrap_or_else(|| "<none>".to_string()),
@@ -92,14 +89,14 @@ pub(super) fn render_debug_command<W: Write>(
             }
             let latest_shell = state.evidence.latest_shell_command_completed();
             body.push(debug_line(
-                cosh_shell::MessageId::DebugLatestProviderRequestLine,
+                MessageId::DebugLatestProviderRequestLine,
                 latest_shell
                     .and_then(|evidence| evidence.provider_request_id.as_deref())
                     .unwrap_or("<none>")
                     .to_string(),
             ));
             body.push(debug_line(
-                cosh_shell::MessageId::DebugLatestToolUseLine,
+                MessageId::DebugLatestToolUseLine,
                 latest_shell
                     .and_then(|evidence| evidence.tool_use_id.as_deref())
                     .unwrap_or("<none>")
@@ -107,41 +104,33 @@ pub(super) fn render_debug_command<W: Write>(
             ));
             if let Some(evidence) = state.evidence.latest_recovery() {
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugLatestRecoveryStatusLine,
+                    MessageId::DebugLatestRecoveryStatusLine,
                     evidence.provider_result_delivery_status.to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugLatestRecoveryReasonLine,
+                    MessageId::DebugLatestRecoveryReasonLine,
                     evidence.recovery_reason.unwrap_or("<none>").to_string(),
                 ));
             } else {
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugLatestRecoveryStatusLine,
+                    MessageId::DebugLatestRecoveryStatusLine,
                     "<none>".to_string(),
                 ));
                 body.push(debug_line(
-                    cosh_shell::MessageId::DebugLatestRecoveryReasonLine,
+                    MessageId::DebugLatestRecoveryReasonLine,
                     "<none>".to_string(),
                 ));
             }
             body.extend(continuity_debug_lines(state));
-            render_notice_panel(
-                output,
-                i18n.t(cosh_shell::MessageId::DebugSessionTitle),
-                body,
-                None,
-            )
+            render_notice_panel(output, i18n.t(MessageId::DebugSessionTitle), body, None)
         }
         Some(other) => {
             let i18n = state.i18n();
             render_notice_panel(
                 output,
-                i18n.t(cosh_shell::MessageId::DebugSessionTitle),
-                vec![i18n.format(
-                    cosh_shell::MessageId::DebugUnknownTargetBody,
-                    &[("target", other)],
-                )],
-                Some(i18n.t(cosh_shell::MessageId::DebugUnknownTargetFooter)),
+                i18n.t(MessageId::DebugSessionTitle),
+                vec![i18n.format(MessageId::DebugUnknownTargetBody, &[("target", other)])],
+                Some(i18n.t(MessageId::DebugUnknownTargetFooter)),
             )
         }
     }
@@ -153,7 +142,7 @@ mod tests {
 
     fn zh_state() -> InlineState {
         InlineState {
-            language: cosh_shell::Language::ZhCn,
+            language: Language::ZhCn,
             ..InlineState::default()
         }
     }

@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use cosh_shell::{
-    agent_render::{NoticePanelModel, QuestionPanelModel, RatatuiInlineRenderer},
-    raw_input::RawInputCapture,
-    types::{AgentEvent, GovernedEvent, QuestionSelectionMode, ShellEvent, ShellEventKind},
-    AuthProviderInfo, AuthResponse,
+use crate::auth::providers::{
+    builtin_auth_providers, builtin_base_url_for_provider, default_model_for_provider,
 };
-
-use crate::auth::providers::{builtin_auth_providers, builtin_base_url_for_provider, default_model_for_provider};
 use crate::runtime::dispatcher::stable_event_key;
+use crate::runtime::prelude::{
+    AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
+    QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer, RawInputCapture, ShellEvent,
+    ShellEventKind,
+};
 use crate::runtime::state::InlineState;
 
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ impl RuntimeAuthState {
         &self.providers[self.selected_provider]
     }
 
-    fn current_field_info(&self) -> Option<&cosh_shell::AuthFieldInfo> {
+    fn current_field_info(&self) -> Option<&AuthFieldInfo> {
         self.current_provider().fields.get(self.current_field)
     }
 
@@ -274,7 +274,10 @@ fn send_auth_response<W: std::io::Write>(
         output,
         NoticePanelModel {
             title: "Auth configured",
-            body: vec![format!("Provider: {} \u{2014} credentials saved.", provider.label)],
+            body: vec![format!(
+                "Provider: {} \u{2014} credentials saved.",
+                provider.label
+            )],
             footer: None,
         },
     )?;
@@ -320,8 +323,7 @@ fn persist_auth_credentials(response: &AuthResponse) {
         .map(|m| m.as_str())
         .or_else(|| default_model_for_provider(&response.provider_id))
         .unwrap_or(default_model);
-    let builtin_base_url = builtin_base_url_for_provider(&response.provider_id)
-        .map(str::to_string);
+    let builtin_base_url = builtin_base_url_for_provider(&response.provider_id).map(str::to_string);
     let final_base_url = base_url.or(builtin_base_url).unwrap_or_default();
 
     let mut content = String::new();
@@ -345,13 +347,16 @@ fn persist_auth_credentials(response: &AuthResponse) {
         "active_provider = \"{}\"\n",
         escape_toml(response.provider_id.as_str())
     ));
-    content.push_str(&format!("active_model = \"{}\"\n\n", escape_toml(final_model)));
     content.push_str(&format!(
-        "[ai.providers.{}]\n",
-        response.provider_id
+        "active_model = \"{}\"\n\n",
+        escape_toml(final_model)
     ));
+    content.push_str(&format!("[ai.providers.{}]\n", response.provider_id));
     content.push_str(&format!("type = \"{}\"\n", escape_toml(provider_type)));
-    content.push_str(&format!("base_url = \"{}\"\n", escape_toml(&final_base_url)));
+    content.push_str(&format!(
+        "base_url = \"{}\"\n",
+        escape_toml(&final_base_url)
+    ));
     content.push_str(&format!("api_key = \"{}\"\n", escape_toml(&api_key)));
     content.push_str(&format!("model = \"{}\"\n", escape_toml(final_model)));
 
@@ -403,10 +408,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             let is_secret = field.map(|f| f.secret).unwrap_or(false);
             let hint_text = field.and_then(|f| f.hint.as_deref()).unwrap_or("");
             let provider = auth.current_provider();
-            let mut question = format!(
-                "\u{1f511} {} \u{2014} Enter {}:",
-                provider.label, label
-            );
+            let mut question = format!("\u{1f511} {} \u{2014} Enter {}:", provider.label, label);
             if !hint_text.is_empty() {
                 question.push_str(&format!("\n  hint: {}", hint_text));
             }
@@ -560,5 +562,7 @@ fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
 }
 
 fn escape_toml(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }

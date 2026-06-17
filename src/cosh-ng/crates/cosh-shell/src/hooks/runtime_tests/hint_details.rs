@@ -42,7 +42,7 @@ fn hook_hint_ignore_uses_zh_notice() {
     let block = block_with_command("free -m");
     let blocks = vec![block.clone()];
     let mut state = InlineState {
-        language: cosh_shell::Language::ZhCn,
+        language: Language::ZhCn,
         ..InlineState::default()
     };
     record_aggregated_hook_finding(&block, aggregate, &mut state);
@@ -166,7 +166,7 @@ fn hook_hint_details_uses_zh_labels() {
     let block = block_with_command("free -m");
     let blocks = vec![block.clone()];
     let mut state = InlineState {
-        language: cosh_shell::Language::ZhCn,
+        language: Language::ZhCn,
         ..InlineState::default()
     };
     record_aggregated_hook_finding(&block, aggregate, &mut state);
@@ -221,7 +221,7 @@ fn recorded_hook_finding_uses_zh_notice_labels() {
     let block = block_with_command("free -m");
     let blocks = vec![block.clone()];
     let mut state = InlineState {
-        language: cosh_shell::Language::ZhCn,
+        language: Language::ZhCn,
         ..InlineState::default()
     };
     record_aggregated_hook_finding(&block, aggregate, &mut state);

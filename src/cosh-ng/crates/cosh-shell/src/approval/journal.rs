@@ -1,6 +1,5 @@
 use crate::approval::handoff::raw_bash_command;
 use crate::runtime::prelude::*;
-use cosh_shell::types::ShellHandoffRequest;
 
 pub(super) fn approval_journal_entry(
     request: &RuntimeApprovalRequest,

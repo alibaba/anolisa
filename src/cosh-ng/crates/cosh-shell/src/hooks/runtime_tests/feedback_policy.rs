@@ -44,7 +44,8 @@ fn muted_hook_id_downgrades_consultation_to_silent() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Silent);
@@ -68,7 +69,8 @@ fn noisy_feedback_downgrades_same_policy_key() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Hint);
@@ -92,7 +94,8 @@ fn noisy_feedback_group_downgrades_same_topic_entity_intent() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Hint);
@@ -120,7 +123,8 @@ fn useful_feedback_key_bypasses_noisy_feedback_group() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Consultation);
@@ -151,7 +155,8 @@ fn useful_feedback_does_not_bypass_interruption_budget() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Hint);

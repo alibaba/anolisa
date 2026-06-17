@@ -1,4 +1,4 @@
-use cosh_shell::{AuthFieldInfo, AuthProviderInfo};
+use crate::runtime::prelude::{AuthFieldInfo, AuthProviderInfo};
 
 /// Builtin provider templates (mirroring cosh-tui's auth.rs).
 pub(crate) fn builtin_auth_providers() -> Vec<AuthProviderInfo> {

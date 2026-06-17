@@ -26,8 +26,11 @@ cosh-shell 的 PTY 集成测试较慢（每个 spawn 子进程）。开发时使
 # 开发时：只跑单元测试（0.1s）
 cargo test --package cosh-shell --lib
 
-# 验证逻辑：跑 mvp_loop（0.4s）
-cargo test --package cosh-shell --test mvp_loop
+# 验证逻辑：跑 logic target
+cargo test --package cosh-shell --test logic
+
+# 验证协议：跑 protocol target
+cargo test --package cosh-shell --test protocol
 
 # 验证单个集成测试（0.5-2s）
 cargo test --package cosh-shell --test raw_cli <test_name> -- --exact
@@ -38,6 +41,25 @@ cargo test --package cosh-shell --test shell_host -- --test-threads=4
 # 阶段验收才跑全量（并行）
 cargo test --package cosh-shell -- --test-threads=4
 ```
+
+cosh-shell 测试布局必须遵循 `../../../specs/shell-test-organization/standard.md`：
+
+- `src/` 只放 private 纯逻辑或轻量 component tests。
+- public API 多模块逻辑测试进入 logic layer，目标 target 是 `logic`。
+- adapter/control protocol 测试进入 protocol layer，目标 target 是 `protocol`。
+- spawn `cosh-shell` binary、scripted raw shell、approval/question card、provider handoff 进入 `raw_cli` layer。
+- PTY shell host、OSC、termios、foreground/native shell 行为进入 `shell_host` layer。
+- 真实 provider、manual TTY、视觉/体验验证归入 `specs/shell-e2e-validation`，不混入默认 cargo test gate。
+
+联合布局审计入口：
+
+```bash
+crates/cosh-shell/scripts/check-layout.sh
+```
+
+该脚本必须保持通过；新增或迁移代码不能增加新的 violation group。脚本中的 registered debt 只表示迁移债务被 inventory 追踪，不代表最终验收已完成。
+
+测试改动 review 必须同时参考 `../../../specs/shell-test-organization/review.md`；代码组织改动 review 必须同时参考 `../../../specs/cosh-ng-code-organization/review.md`。AI reviewer 发现测试落位、命名、fixture/helper、heavy gate、root facade、public API、self-crate path 或 dependency direction 问题时，应按对应 review 文档给出纠错意见。
 
 Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc commands need root/sudo. Checkpoint commands need a running ws-ckpt daemon.
 
@@ -50,6 +72,29 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc c
 - **cosh-cli**: CLI entry point (binary: `cosh`). 4 command domains: `pkg`, `svc`, `checkpoint`, `audit`. All output is JSON via `CoshResponse<T>`. Uses clap derive for argument parsing.
 - **cosh-tui**: Interactive TUI (binary: `cosh-tui`). Uses ratatui + crossterm. Has slash commands, optional LLM chat, theme system.
 - **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering, tool approval control protocol. See [`docs/cosh-shell-architecture.md`](docs/cosh-shell-architecture.md) for detailed architecture.
+
+### cosh-shell Code Organization
+
+cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/standard.md` 和 `../../../specs/cosh-shell-joint-execution-plan.md`。本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-tui`、lockfile、`.env` 或 workspace 外代码。
+
+长期 owner 约定：
+
+- UI owner 使用 `ui/`；`agent_render/` 只允许作为短期兼容 facade。
+- Hook owner 使用 `hooks/`；`hook_engine/` 合并入 `hooks/`。
+- Linux memory hook 收敛到 `hooks/linux_memory/`。
+- `context_window` -> `evidence/context_window.rs`。
+- `exit_classify` -> `command/exit_classify.rs`。
+- `governance` -> `agent/governance.rs`。
+- `interactive` -> `shell_host/line_interactive.rs`。
+- `hook_types` 拆分到 `types/hooks.rs` 和 `hooks/model.rs`。
+
+新增 cosh-shell 代码时：
+
+- 不新增 root `crates/cosh-shell/src/*.rs` implementation 文件。
+- 不新增未登记的 `lib.rs pub mod` 或 root re-export。
+- `src/` production code 不新增 `cosh_shell::...` self-crate public path；使用 `crate::...` 或 owner module path。
+- 不向超过 1000 行的 production 文件追加新功能；超过 700 行的 production 文件需要 owner note、拆分计划或 waiver。
+- `hooks` 不直接拥有 agent 启动或 runtime state mutation；通过 runtime command/event 边界交接。
 
 ## Key Design Constraints
 

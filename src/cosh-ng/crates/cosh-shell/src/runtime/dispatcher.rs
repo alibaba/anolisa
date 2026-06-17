@@ -11,20 +11,24 @@ use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
 use crate::agent::run::{start_agent_run, stop_active_agent_run_without_rendering};
 use crate::approval::runtime::render_approval_actions;
-use crate::hooks::runtime::{
-    handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
-    render_queued_hook_consultation, render_recorded_hook_findings,
-};
+use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::question::runtime::{
     render_question_answer_actions, render_question_cancel_actions, render_question_focus_actions,
     render_question_input_actions, render_question_toggle_actions,
 };
 use crate::recommendation::runtime::render_selection_actions;
 use crate::runtime::cancel::render_agent_cancel_actions;
-use crate::runtime::command_interrupt::command_should_skip_failure_analysis;
 use crate::runtime::details::render_runtime_details_card_actions;
 use crate::runtime::evidence_delivery::shell_handoff_continuation_requests;
 use crate::runtime::evidence_requests::render_evidence_request_actions;
+use crate::runtime::hooks::{
+    handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
+    render_queued_hook_consultation, render_recorded_hook_findings,
+};
+use crate::runtime::prelude::{
+    build_command_blocks, findings_from_blocks, AdapterInstance, CommandBlock, ShellEvent,
+    ShellEventKind,
+};
 use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
 
@@ -36,11 +40,7 @@ pub(crate) enum RuntimeAction {
     AdvanceEventCursor(ShellEventCursor),
 }
 
-pub(crate) fn stable_event_key(
-    prefix: &str,
-    idx: usize,
-    event: &cosh_shell::types::ShellEvent,
-) -> String {
+pub(crate) fn stable_event_key(prefix: &str, idx: usize, event: &ShellEvent) -> String {
     match event.started_at_ms {
         Some(started_at_ms) => format!(
             "{prefix}:{}:{}:{}",
@@ -62,7 +62,7 @@ pub(crate) struct EvidenceRequestConsumer;
 impl RuntimeDispatcher {
     pub(crate) fn dispatch_inline_batch<W: Write>(
         snapshot: &ShellEventSnapshot,
-        adapter: &cosh_shell::AdapterInstance,
+        adapter: &AdapterInstance,
         shell_label: &str,
         state: &mut InlineState,
         output: &mut W,
@@ -86,7 +86,7 @@ impl RuntimeDispatcher {
 fn render_inline_guidance_from_batch<W: Write>(
     snapshot: &ShellEventSnapshot,
     batch: &ShellEventBatch,
-    adapter: &cosh_shell::AdapterInstance,
+    adapter: &AdapterInstance,
     shell_label: &str,
     state: &mut InlineState,
     output: &mut W,
@@ -96,8 +96,8 @@ fn render_inline_guidance_from_batch<W: Write>(
     let event_index_base = batch.global_index(0);
     state.shell_exited = events
         .iter()
-        .any(|event| event.kind == cosh_shell::types::ShellEventKind::ShellExited);
-    let ledger = cosh_shell::ledger::build_command_blocks(events);
+        .any(|event| event.kind == ShellEventKind::ShellExited);
+    let ledger = build_command_blocks(events);
     state.session_blocks = ledger.blocks.clone();
     if state.shell_exited {
         stop_active_agent_run_without_rendering(state, output)?;
@@ -159,7 +159,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     let activity_actions =
         ActivityConsumer::consume(&ledger.blocks, adapter, state, output, card_capture_pending)?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
-    let findings = cosh_shell::parser::findings_from_blocks(&ledger.blocks);
+    let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
     handle_consultation_events(action_events, &ledger.blocks, adapter, state, output)?;
     render_queued_hook_consultation(state, output)?;
@@ -267,8 +267,8 @@ fn render_owned_shell_prompt<W: Write>(
 
 impl QuestionConsumer {
     pub(crate) fn consume<W: Write>(
-        events: &[cosh_shell::types::ShellEvent],
-        adapter: &cosh_shell::AdapterInstance,
+        events: &[ShellEvent],
+        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         event_index_base: usize,
@@ -284,9 +284,9 @@ impl QuestionConsumer {
 
 impl SlashConsumer {
     pub(crate) fn consume<W: Write>(
-        events: &[cosh_shell::types::ShellEvent],
-        blocks: &[cosh_shell::types::CommandBlock],
-        adapter: &cosh_shell::AdapterInstance,
+        events: &[ShellEvent],
+        blocks: &[CommandBlock],
+        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         event_index_base: usize,
@@ -298,9 +298,9 @@ impl SlashConsumer {
 
 impl ApprovalConsumer {
     pub(crate) fn consume<W: Write>(
-        events: &[cosh_shell::types::ShellEvent],
-        blocks: &[cosh_shell::types::CommandBlock],
-        adapter: &cosh_shell::AdapterInstance,
+        events: &[ShellEvent],
+        blocks: &[CommandBlock],
+        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         event_index_base: usize,
@@ -312,9 +312,9 @@ impl ApprovalConsumer {
 
 impl EvidenceRequestConsumer {
     pub(crate) fn consume<W: Write>(
-        events: &[cosh_shell::types::ShellEvent],
-        blocks: &[cosh_shell::types::CommandBlock],
-        adapter: &cosh_shell::AdapterInstance,
+        events: &[ShellEvent],
+        blocks: &[CommandBlock],
+        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         event_index_base: usize,
@@ -326,8 +326,8 @@ impl EvidenceRequestConsumer {
 
 impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
-        blocks: &[cosh_shell::types::CommandBlock],
-        adapter: &cosh_shell::AdapterInstance,
+        blocks: &[CommandBlock],
+        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         card_capture_pending: bool,
@@ -346,11 +346,11 @@ impl ActivityConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosh_shell::types::ShellEvent;
+    use crate::runtime::prelude::FakeAgentAdapter;
 
     #[test]
     fn dispatcher_advances_cursor_to_snapshot_end() {
-        let adapter = cosh_shell::AdapterInstance::Fake(cosh_shell::adapter::FakeAgentAdapter);
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();
         let mut output = Vec::new();
         let snapshot = ShellEventSnapshot::new(&[

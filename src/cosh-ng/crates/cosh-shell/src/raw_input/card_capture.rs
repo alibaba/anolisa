@@ -1,8 +1,8 @@
 use super::{RawInputCapture, RawInputEvent, CTRL_C};
-use crate::agent_render::{approval_action_at, ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
-use crate::question_choices::{
+use crate::question::choices::{
     question_choice_count as shared_question_choice_count, toggle_question_option,
 };
+use crate::ui::{approval_action_at, ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {

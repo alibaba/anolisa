@@ -1,6 +1,11 @@
 pub(crate) mod broker;
 pub(crate) mod classification;
 pub(crate) mod command_risk;
+mod command_risk_build;
+mod command_risk_model;
+mod command_risk_parser;
+#[cfg(test)]
+mod command_risk_tests;
 pub mod display;
 pub(crate) mod guarded_diagnostic;
 pub(crate) mod readonly_pipeline;

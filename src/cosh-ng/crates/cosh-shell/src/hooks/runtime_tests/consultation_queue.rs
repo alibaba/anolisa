@@ -11,7 +11,13 @@ fn consultation_queue_records_state_ttl_and_output_ref() {
     let hint = state.hooks.findings[0].clone();
 
     state.hooks.pending_consultation = Some(consultation_from_hint(&hint).unwrap());
-    render_or_queue_consultation(&hint, &mut state, &mut output).expect("queue consultation");
+    render_or_queue_consultation(
+        &hint,
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        &mut output,
+    )
+    .expect("queue consultation");
 
     let queued = state
         .hooks
@@ -37,17 +43,35 @@ fn consultation_card_queues_then_records_shown_event() {
     let hint = state.hooks.findings[0].clone();
     let mut output = Vec::new();
 
-    render_or_queue_consultation(&hint, &mut state, &mut output).expect("queue card");
+    render_or_queue_consultation(
+        &hint,
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        &mut output,
+    )
+    .expect("queue card");
 
     assert!(state.hooks.pending_consultation.is_none());
     assert_eq!(state.hooks.pending_consultation_queue.len(), 1);
 
-    render_next_queued_consultation(&mut state, &mut output).expect("keep queued card");
+    render_next_queued_consultation(
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        state.language,
+        &mut output,
+    )
+    .expect("keep queued card");
     assert!(state.hooks.pending_consultation.is_none());
     assert_eq!(state.hooks.pending_consultation_queue.len(), 1);
 
     mark_front_consultation_idle(&mut state);
-    render_next_queued_consultation(&mut state, &mut output).expect("render queued card");
+    render_next_queued_consultation(
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        state.language,
+        &mut output,
+    )
+    .expect("render queued card");
 
     assert!(state.hooks.pending_consultation.is_some());
     let rendered = String::from_utf8(output).expect("utf8");
@@ -78,7 +102,13 @@ fn queued_consultation_rechecks_ignore_before_rendering() {
         .insert(hint.suppression_key.clone());
     let mut output = Vec::new();
 
-    render_next_queued_consultation(&mut state, &mut output).expect("recheck queued consultation");
+    render_next_queued_consultation(
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        state.language,
+        &mut output,
+    )
+    .expect("recheck queued consultation");
 
     assert!(state.hooks.pending_consultation.is_none());
     assert!(state.hooks.pending_consultation_queue.is_empty());
@@ -109,7 +139,13 @@ fn queued_consultation_rechecks_user_continued_input_before_rendering() {
         .insert(block.id.clone());
     let mut output = Vec::new();
 
-    render_next_queued_consultation(&mut state, &mut output).expect("recheck queued consultation");
+    render_next_queued_consultation(
+        &mut state.hooks,
+        state.agent_run.active.is_some(),
+        state.language,
+        &mut output,
+    )
+    .expect("recheck queued consultation");
 
     assert!(state.hooks.pending_consultation.is_none());
     assert!(state.hooks.pending_consultation_queue.is_empty());
@@ -134,7 +170,12 @@ fn queued_consultation_expiry_records_expired_event() {
     let now_ms = consultation.expires_at_ms + 1;
 
     assert_eq!(
-        queued_consultation_decision(&mut consultation, &mut state, now_ms),
+        queued_consultation_decision(
+            &mut consultation,
+            &mut state.hooks,
+            state.agent_run.active.is_some(),
+            now_ms
+        ),
         QueuedConsultationDecision::Drop
     );
 
@@ -161,7 +202,12 @@ fn queued_consultation_noisy_feedback_records_deferred_event() {
         .insert(hint.suppression_key.clone(), HookFeedback::Noisy);
 
     assert_eq!(
-        queued_consultation_decision(&mut consultation, &mut state, block.ended_at_ms),
+        queued_consultation_decision(
+            &mut consultation,
+            &mut state.hooks,
+            state.agent_run.active.is_some(),
+            block.ended_at_ms
+        ),
         QueuedConsultationDecision::Drop
     );
 

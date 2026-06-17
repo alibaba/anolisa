@@ -43,14 +43,15 @@ pub(crate) fn render_slash_actions<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::evidence_state::RuntimeShellCommandCompleted;
-    use crate::runtime::state::{
-        ContinuityFactKind, HookFeedback, RuntimeHookDisplay, RuntimeHookDisplayAction,
-        RuntimeHookDisplayEvent, RuntimeHookFinding,
+    use crate::hooks::state::{
+        HookFeedback, RuntimeHookDisplay, RuntimeHookDisplayAction, RuntimeHookDisplayEvent,
+        RuntimeHookFinding,
     };
+    use crate::runtime::evidence_state::RuntimeShellCommandCompleted;
+    use crate::runtime::state::ContinuityFactKind;
     use crate::slash::debug::render_debug_command;
     use crate::slash::hooks::render_hooks_command;
-    use cosh_shell::hook_types::{FindingSeverity, HookFinding};
+    use crate::types::{FindingSeverity, HookFinding};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -132,7 +133,7 @@ mod tests {
 
     #[test]
     fn debug_session_renders_provider_session_and_local_facts() {
-        let adapter = AdapterInstance::QwenCli(cosh_shell::adapter::QwenCliAdapter {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter {
             program: "co".to_string(),
             allow_model_call: false,
             session_id: Arc::new(Mutex::new(Some("sess-123".to_string()))),
@@ -325,44 +326,38 @@ mod tests {
     fn hooks_root_renders_status_without_source_paths() {
         let mut state = InlineState::default();
         state.hooks.disabled.insert("project-hook".to_string());
-        state
-            .hooks
-            .engine
-            .register_external(cosh_shell::hook_engine::ExternalHookConfig {
-                path: std::path::PathBuf::from("/tmp/user-hook.sh"),
-                matcher: cosh_shell::hook_types::HookMatcher {
-                    id: "user-hook".to_string(),
-                    commands: vec!["echo".to_string()],
-                    command_patterns: Vec::new(),
-                    command_regex: None,
-                    min_output_bytes: None,
-                    exit_codes: None,
-                    trigger: cosh_shell::hook_types::HookTrigger::OnComplete,
-                },
-                timeout_ms: 1000,
-                source: cosh_shell::hook_engine::ExternalHookSource::User,
-                project_root: None,
-                trusted: true,
-            });
-        state
-            .hooks
-            .engine
-            .register_external(cosh_shell::hook_engine::ExternalHookConfig {
-                path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
-                matcher: cosh_shell::hook_types::HookMatcher {
-                    id: "project-hook".to_string(),
-                    commands: vec!["echo".to_string()],
-                    command_patterns: Vec::new(),
-                    command_regex: None,
-                    min_output_bytes: None,
-                    exit_codes: None,
-                    trigger: cosh_shell::hook_types::HookTrigger::OnComplete,
-                },
-                timeout_ms: 1000,
-                source: cosh_shell::hook_engine::ExternalHookSource::Project,
-                project_root: Some(std::path::PathBuf::from("/tmp/project")),
-                trusted: false,
-            });
+        state.hooks.engine.register_external(ExternalHookConfig {
+            path: std::path::PathBuf::from("/tmp/user-hook.sh"),
+            matcher: HookMatcher {
+                id: "user-hook".to_string(),
+                commands: vec!["echo".to_string()],
+                command_patterns: Vec::new(),
+                command_regex: None,
+                min_output_bytes: None,
+                exit_codes: None,
+                trigger: HookTrigger::OnComplete,
+            },
+            timeout_ms: 1000,
+            source: ExternalHookSource::User,
+            project_root: None,
+            trusted: true,
+        });
+        state.hooks.engine.register_external(ExternalHookConfig {
+            path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
+            matcher: HookMatcher {
+                id: "project-hook".to_string(),
+                commands: vec!["echo".to_string()],
+                command_patterns: Vec::new(),
+                command_regex: None,
+                min_output_bytes: None,
+                exit_codes: None,
+                trigger: HookTrigger::OnComplete,
+            },
+            timeout_ms: 1000,
+            source: ExternalHookSource::Project,
+            project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            trusted: false,
+        });
         let mut output = Vec::new();
 
         render_hooks_test_command(None, None, None, &[], &mut state, &mut output)
@@ -400,25 +395,22 @@ mod tests {
         let _ = std::fs::remove_file(&store);
         std::env::set_var("COSH_SHELL_PROJECT_TRUST_STORE", &store);
         let mut state = InlineState::default();
-        state
-            .hooks
-            .engine
-            .register_external(cosh_shell::hook_engine::ExternalHookConfig {
-                path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
-                matcher: cosh_shell::hook_types::HookMatcher {
-                    id: "project-hook".to_string(),
-                    commands: vec!["echo".to_string()],
-                    command_patterns: Vec::new(),
-                    command_regex: None,
-                    min_output_bytes: None,
-                    exit_codes: None,
-                    trigger: cosh_shell::hook_types::HookTrigger::OnComplete,
-                },
-                timeout_ms: 1000,
-                source: cosh_shell::hook_engine::ExternalHookSource::Project,
-                project_root: Some(std::path::PathBuf::from("/tmp/project")),
-                trusted: false,
-            });
+        state.hooks.engine.register_external(ExternalHookConfig {
+            path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
+            matcher: HookMatcher {
+                id: "project-hook".to_string(),
+                commands: vec!["echo".to_string()],
+                command_patterns: Vec::new(),
+                command_regex: None,
+                min_output_bytes: None,
+                exit_codes: None,
+                trigger: HookTrigger::OnComplete,
+            },
+            timeout_ms: 1000,
+            source: ExternalHookSource::Project,
+            project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            trusted: false,
+        });
         let mut output = Vec::new();
 
         render_hooks_test_command(

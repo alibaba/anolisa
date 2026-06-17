@@ -1,4 +1,4 @@
-use crate::exit_classify::first_program_token;
+use crate::command::first_program_token;
 use crate::types::{
     AgentMode, AgentRequest, CommandBlock, CommandStatus, Finding, FindingKind, Intervention,
     InterventionDecision, OutputRefs, ShellEvent, ShellEventKind,

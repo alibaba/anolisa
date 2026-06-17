@@ -8,6 +8,8 @@ use crate::evidence::output_policy::{
 use crate::evidence::stream::CoshRequestAuditOutcome;
 use crate::runtime::evidence_requests::{cosh_request_audit_by_id, RuntimeCoshRequestAudit};
 use crate::runtime::prelude::*;
+#[cfg(test)]
+use crate::types::HookFinding;
 
 const DETAILS_AGENT_DEFAULT_LINES: usize = 120;
 const DETAILS_AGENT_MAX_LINES: usize = 300;
@@ -49,9 +51,14 @@ pub(crate) fn render_runtime_details<W: Write>(
         .findings
         .iter()
         .find(|finding| finding.id == id)
-        .and_then(crate::hooks::runtime::consultation_from_hint)
+        .and_then(crate::hooks::queue::consultation_from_hint)
     {
-        return crate::hooks::render_consultation_details(&consultation, state, output);
+        return crate::hooks::render_consultation_details(
+            &consultation,
+            state.i18n(),
+            state.debug,
+            output,
+        );
     }
 
     if let Some(block) = command_block_by_details_id(blocks, id) {
@@ -62,11 +69,8 @@ pub(crate) fn render_runtime_details<W: Write>(
     RatatuiInlineRenderer::for_terminal().write_notice_panel(
         output,
         NoticePanelModel {
-            title: i18n.t(cosh_shell::MessageId::RuntimeDetailsUnavailableTitle),
-            body: vec![i18n.format(
-                cosh_shell::MessageId::RuntimeDetailsUnavailableBody,
-                &[("id", id)],
-            )],
+            title: i18n.t(MessageId::RuntimeDetailsUnavailableTitle),
+            body: vec![i18n.format(MessageId::RuntimeDetailsUnavailableBody, &[("id", id)])],
             footer: None,
         },
     )
@@ -120,8 +124,8 @@ fn render_provider_cancellation_artifact_details<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let title = match state.language {
-        cosh_shell::Language::ZhCn => "Provider cancel 详情",
-        cosh_shell::Language::EnUs => "Provider cancel details",
+        Language::ZhCn => "Provider cancel 详情",
+        Language::EnUs => "Provider cancel details",
     };
     RatatuiInlineRenderer::for_terminal().write_notice_panel(
         output,
@@ -139,8 +143,8 @@ fn render_cosh_request_audit_details<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let title = match state.language {
-        cosh_shell::Language::ZhCn => "cosh-request 详情",
-        cosh_shell::Language::EnUs => "cosh-request details",
+        Language::ZhCn => "cosh-request 详情",
+        Language::EnUs => "cosh-request details",
     };
     let outcome = match record.outcome {
         CoshRequestAuditOutcome::Parsed => "parsed",
@@ -322,8 +326,8 @@ fn render_command_details<W: Write>(
         .unwrap_or_else(|| "<none>".to_string());
     let output_excerpt_status = output_excerpt_status_for_block(block);
     let title = match state.language {
-        cosh_shell::Language::ZhCn => "命令详情",
-        cosh_shell::Language::EnUs => "Command details",
+        Language::ZhCn => "命令详情",
+        Language::EnUs => "Command details",
     };
     let status = match block.status {
         CommandStatus::Completed => "completed",
@@ -412,8 +416,7 @@ mod tests {
     fn details_marks_capture_truncated_without_internal_path() {
         let state = InlineState::default();
         let mut block = command_block("session-1", "cmd-1", Some("/tmp/internal-output-ref.txt"));
-        block.output.terminal_output_bytes =
-            cosh_shell::types::COMMAND_OUTPUT_REF_MAX_BYTES as u64 + 1;
+        block.output.terminal_output_bytes = COMMAND_OUTPUT_REF_MAX_BYTES as u64 + 1;
         let mut output = Vec::new();
 
         render_runtime_details(&state, &[block], "cmd-1", &mut output).expect("render details");
@@ -499,7 +502,7 @@ mod tests {
         state
             .hooks
             .findings
-            .push(crate::runtime::state::RuntimeHookFinding {
+            .push(crate::hooks::state::RuntimeHookFinding {
                 id: "hook-cmd-1-memory-pressure".to_string(),
                 command_block_id: "cmd-1".to_string(),
                 command: "free -m".to_string(),
@@ -509,9 +512,9 @@ mod tests {
                     "hook_finding=memory-pressure output_id=terminal-output://session-1/cmd-1"
                         .to_string(),
                 finding_markdown: None,
-                hook_finding: Some(cosh_shell::hook_types::HookFinding {
+                hook_finding: Some(HookFinding {
                     hook_id: "memory-pressure".to_string(),
-                    severity: cosh_shell::hook_types::FindingSeverity::Critical,
+                    severity: FindingSeverity::Critical,
                     title: "Available memory is low".to_string(),
                     description: "description".to_string(),
                     suggestion: "suggestion".to_string(),
@@ -520,12 +523,12 @@ mod tests {
                     context_refs: Vec::new(),
                 }),
                 recommended_skill: Some("memory-analysis".to_string()),
-                display: crate::runtime::state::RuntimeHookDisplay::Consultation,
+                display: crate::hooks::state::RuntimeHookDisplay::Consultation,
                 display_reason: "allowed".to_string(),
                 related_hook_ids: Vec::new(),
                 topic: "memory".to_string(),
                 entity_key: "system-memory".to_string(),
-                effective_severity: cosh_shell::hook_types::FindingSeverity::Critical,
+                effective_severity: FindingSeverity::Critical,
                 confidence: "high".to_string(),
                 suppression_key: "memory:memory-pressure:free".to_string(),
             });

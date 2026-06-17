@@ -21,7 +21,8 @@ fn interruption_policy_combines_downgrade_inputs_without_escalating() {
         &aggregated[0],
         RuntimeHookDisplay::Consultation,
         &suppression_key,
-        &state,
+        &state.hooks,
+        state.agent_run.active.is_some(),
     );
 
     assert_eq!(decision.display, RuntimeHookDisplay::Hint);
@@ -48,7 +49,8 @@ fn repeated_same_card_downgrades_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Hint
     );
@@ -103,7 +105,8 @@ fn ignored_same_hook_card_downgrades_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Hint
     );
@@ -130,7 +133,8 @@ fn interruption_budget_downgrades_recent_topic_card_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Hint
     );
@@ -157,7 +161,8 @@ fn interruption_budget_allows_severity_upgrade() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Consultation
     );
@@ -184,7 +189,8 @@ fn interruption_budget_expires_after_window() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Consultation
     );
@@ -213,7 +219,8 @@ fn interruption_budget_does_not_downgrade_failed_command_path() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &state
+            &state.hooks,
+            state.agent_run.active.is_some()
         ),
         RuntimeHookDisplay::Consultation
     );

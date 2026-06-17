@@ -11,9 +11,10 @@ fn lookup_intent_downgrades_critical_process_to_hint() {
         apply_session_interruption_policy(
             &block,
             &aggregated[0],
-            display_for_aggregate(&block, &aggregated[0], AnalysisMode::Smart),
+            display_for_aggregate(&block, &aggregated[0], false),
             &suppression_key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Hint
     );
@@ -30,9 +31,10 @@ fn env_prefixed_ps_pid_lookup_downgrades_critical_process_to_hint() {
         apply_session_interruption_policy(
             &block,
             &aggregated[0],
-            display_for_aggregate(&block, &aggregated[0], AnalysisMode::Smart),
+            display_for_aggregate(&block, &aggregated[0], false),
             &suppression_key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Hint
     );
@@ -349,7 +351,7 @@ fn diagnostic_top_head_keeps_consultation_card() {
     let findings = vec![finding("memory-pressure", FindingSeverity::Critical)];
     let aggregated = aggregate_hook_findings(findings);
     let block = block_with_command("top -b -n1 | head -20");
-    let display = display_for_aggregate(&block, &aggregated[0], AnalysisMode::Smart);
+    let display = display_for_aggregate(&block, &aggregated[0], false);
     let suppression_key = suppression_key(&block, &aggregated[0]);
 
     assert_eq!(display, RuntimeHookDisplay::Consultation);
@@ -359,7 +361,8 @@ fn diagnostic_top_head_keeps_consultation_card() {
             &aggregated[0],
             display,
             &suppression_key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Consultation
     );
@@ -378,7 +381,8 @@ fn wrapper_intent_downgrades_consultation_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Hint
     );
@@ -391,7 +395,8 @@ fn wrapper_intent_downgrades_consultation_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &env_sudo_suppression_key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Hint
     );
@@ -410,7 +415,8 @@ fn non_diagnostic_pipeline_downgrades_consultation_to_hint() {
             &aggregated[0],
             RuntimeHookDisplay::Consultation,
             &suppression_key,
-            &InlineState::default()
+            &HookRuntimeState::default(),
+            false
         ),
         RuntimeHookDisplay::Hint
     );

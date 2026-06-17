@@ -1,5 +1,8 @@
-use crate::hook_types::HookFinding;
 use serde::{Deserialize, Serialize};
+
+pub mod hooks;
+
+pub use hooks::{FindingSeverity, HookFinding};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;

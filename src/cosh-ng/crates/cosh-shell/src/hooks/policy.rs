@@ -1,7 +1,7 @@
-use cosh_shell::exit_classify::first_program_token;
+use super::prelude::first_program_token;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CommandIntent {
+pub(crate) enum CommandIntent {
     Diagnostic,
     Lookup,
     Pipeline,
@@ -35,7 +35,7 @@ pub(super) fn should_downgrade_success_finding(command: &str) -> bool {
     )
 }
 
-pub(super) fn classify_command_intent(command: &str) -> CommandIntent {
+pub(crate) fn classify_command_intent(command: &str) -> CommandIntent {
     let trimmed = command.trim_start();
     if trimmed.is_empty() {
         return CommandIntent::Other;

@@ -49,15 +49,15 @@ pub(crate) fn render_fresh_turn_recovery_notice<W: Write>(
         .write_notice_panel(
             output,
             NoticePanelModel {
-                title: state.i18n().t(cosh_shell::MessageId::AgentRecoveryTitle),
+                title: state.i18n().t(MessageId::AgentRecoveryTitle),
                 body: vec![
                     state
                         .i18n()
-                        .t(cosh_shell::MessageId::AgentRecoveryFreshTurnBody)
+                        .t(MessageId::AgentRecoveryFreshTurnBody)
                         .to_string(),
                     state
                         .i18n()
-                        .t(cosh_shell::MessageId::AgentRecoveryContinuityBody)
+                        .t(MessageId::AgentRecoveryContinuityBody)
                         .to_string(),
                 ],
                 footer: None,
@@ -151,8 +151,8 @@ mod tests {
         ];
         let mut active_run = test_active_run(request);
         active_run.governed_events.push(GovernedEvent {
-            decision: cosh_shell::types::GovernanceDecision::Display,
-            policy_decision: cosh_shell::types::GovernancePolicyDecision::AuditOnly,
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::AuditOnly,
             event: AgentEvent::AgentFailed {
                 run_id: "run-1".to_string(),
                 error: "Agent timed out: resume failed".to_string(),
@@ -173,8 +173,8 @@ mod tests {
 
         let mut retry = test_active_run(fallback);
         retry.governed_events.push(GovernedEvent {
-            decision: cosh_shell::types::GovernanceDecision::Display,
-            policy_decision: cosh_shell::types::GovernancePolicyDecision::AuditOnly,
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::AuditOnly,
             event: AgentEvent::AgentFailed {
                 run_id: "run-2".to_string(),
                 error: "Agent timed out again".to_string(),
@@ -265,7 +265,7 @@ mod tests {
             request,
             handle,
             provider_name: "fake",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),

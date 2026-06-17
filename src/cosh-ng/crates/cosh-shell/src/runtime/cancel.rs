@@ -1,7 +1,7 @@
 use crate::agent::failed_command::latest_pending_failed_block_before_event;
 use crate::runtime::evidence_requests::clear_pending_evidence_requests;
+use crate::runtime::prelude::*;
 use crate::runtime::state::{ContinuityFactKind, InlineState};
-use cosh_shell::types::{ShellEvent, ShellEventKind};
 use std::io::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub(crate) fn cancel_ownership_for_event(
     if is_evidence_card_cancel_event(event) {
         return CancelOwnership::ActiveEvidenceRequestCard;
     }
-    if cosh_shell::parser::event_requests_agent_cancel(event) {
+    if event_requests_agent_cancel(event) {
         if state.agent_run.active.is_some() {
             return CancelOwnership::ActiveAgentTurn;
         }
@@ -46,7 +46,7 @@ pub(crate) fn cancel_ownership_for_event(
 
 pub(crate) fn render_agent_cancel_actions<W: Write>(
     events: &[ShellEvent],
-    blocks: &[cosh_shell::types::CommandBlock],
+    blocks: &[CommandBlock],
     state: &mut InlineState,
     output: &mut W,
     event_index_base: usize,
@@ -81,20 +81,20 @@ pub(crate) fn render_agent_cancel_actions<W: Write>(
             mark_pending_failed_block_cancelled(blocks, state, event, event_index)
         {
             vec![i18n.format(
-                cosh_shell::MessageId::FailedAnalysisCancelledBody,
+                MessageId::FailedAnalysisCancelledBody,
                 &[("command", &block.command)],
             )]
         } else {
             vec![i18n
-                .t(cosh_shell::MessageId::FailedAnalysisCancelNoActiveBody)
+                .t(MessageId::FailedAnalysisCancelNoActiveBody)
                 .to_string()]
         };
-        cosh_shell::agent_render::RatatuiInlineRenderer::for_terminal().write_notice_panel(
+        RatatuiInlineRenderer::for_terminal().write_notice_panel(
             output,
-            cosh_shell::agent_render::NoticePanelModel {
-                title: i18n.t(cosh_shell::MessageId::FailedAnalysisCancelledTitle),
+            NoticePanelModel {
+                title: i18n.t(MessageId::FailedAnalysisCancelledTitle),
                 body,
-                footer: Some(i18n.t(cosh_shell::MessageId::FailedAnalysisCancelledFooter)),
+                footer: Some(i18n.t(MessageId::FailedAnalysisCancelledFooter)),
             },
         )?;
         output.flush()?;
@@ -128,29 +128,25 @@ fn cancel_active_agent_run<W: Write>(
     state.agent_run.needs_prompt_after_run = true;
 
     let i18n = state.i18n();
-    cosh_shell::agent_render::RatatuiInlineRenderer::for_terminal().write_notice_panel(
+    RatatuiInlineRenderer::for_terminal().write_notice_panel(
         output,
-        cosh_shell::agent_render::NoticePanelModel {
-            title: i18n.t(cosh_shell::MessageId::AgentCancellationRequestedTitle),
+        NoticePanelModel {
+            title: i18n.t(MessageId::AgentCancellationRequestedTitle),
             body: vec![
-                i18n.t(cosh_shell::MessageId::AgentCancellationRequestedBody)
+                i18n.t(MessageId::AgentCancellationRequestedBody)
                     .to_string(),
                 format!("Details: {cancellation_details_id}"),
             ],
-            footer: Some(i18n.t(cosh_shell::MessageId::FailedAnalysisCancelledFooter)),
+            footer: Some(i18n.t(MessageId::FailedAnalysisCancelledFooter)),
         },
     )?;
 
-    let event = cosh_shell::types::AgentEvent::AgentCancelled {
+    let event = AgentEvent::AgentCancelled {
         run_id: active_run.request.id.clone(),
         reason: "user requested cancellation".to_string(),
     };
-    let governed = cosh_shell::governance::govern_agent_events_with_language(
-        &[event],
-        &cosh_shell::types::Policy::default(),
-        active_run.language,
-    )
-    .events;
+    let governed =
+        govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
     active_run
         .renderer
         .write_governed_events(output, &governed)?;
@@ -179,11 +175,11 @@ fn suppress_pending_work_after_agent_cancel(state: &mut InlineState) {
 }
 
 fn mark_pending_failed_block_cancelled(
-    blocks: &[cosh_shell::types::CommandBlock],
+    blocks: &[CommandBlock],
     state: &mut InlineState,
-    event: &cosh_shell::types::ShellEvent,
+    event: &ShellEvent,
     event_index: usize,
-) -> Option<cosh_shell::types::CommandBlock> {
+) -> Option<CommandBlock> {
     let block = latest_pending_failed_block_before_event(blocks, state, event)?;
     let block = block.clone();
     state.canceled_blocks.insert(block.id.clone());
@@ -224,13 +220,7 @@ mod tests {
     use crate::agent::run::ActiveAgentRun;
     use crate::agent::run::PendingAgentRequest;
     use crate::evidence::request::{CoshRequest, ParsedCoshRequest};
-    use crate::runtime::state::{PendingConsultation, PendingConsultationState};
-    use cosh_shell::adapter::{AdapterInstance, FakeAgentAdapter};
-    use cosh_shell::agent_render::RatatuiInlineRenderer;
-    use cosh_shell::types::{
-        AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
-        ShellEvent,
-    };
+    use crate::hooks::state::{PendingConsultation, PendingConsultationState};
     use std::time::Instant;
 
     #[test]
@@ -425,7 +415,7 @@ mod tests {
             request,
             handle,
             provider_name: "fake",
-            language: cosh_shell::Language::EnUs,
+            language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),
             markdown_stream: renderer.stream_markdown_agent(),

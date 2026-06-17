@@ -6,16 +6,16 @@ use std::time::Duration;
 
 use crate::types::AgentEvent;
 
-use super::{
-    is_terminal_agent_event, line_progress, send_agent_event, terminate_process,
-    update_completion_flags,
-};
-use crate::adapter::{
+use super::super::{
     agent_event_is_provider_progress, commit_provider_session_if_completed, control_protocol,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
     AdapterError, AgentRunHandle, ApprovalDecision, ApprovalResponse, ClaudeStreamParser,
     PreparedInvocation, ProviderCancellationArtifactStore, ProviderLineProgress,
     ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
+};
+use super::{
+    is_terminal_agent_event, line_progress, send_agent_event, terminate_process,
+    update_completion_flags,
 };
 
 pub(super) fn start_cancellable_claude_process(

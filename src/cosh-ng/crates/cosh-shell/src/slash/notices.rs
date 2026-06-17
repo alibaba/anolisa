@@ -14,49 +14,41 @@ pub(super) fn render_removed_command<W: Write>(
                 .map(|value| {
                     state
                         .i18n()
-                        .format(cosh_shell::MessageId::ModeRemovedFooter, &[("mode", value)])
+                        .format(MessageId::ModeRemovedFooter, &[("mode", value)])
                 })
                 .unwrap_or_else(|| {
                     state
                         .i18n()
-                        .t(cosh_shell::MessageId::ApprovalModeRemovedFooter)
+                        .t(MessageId::ApprovalModeRemovedFooter)
                         .to_string()
                 });
             render_notice_panel(
                 output,
-                state.i18n().t(cosh_shell::MessageId::CommandRemovedTitle),
+                state.i18n().t(MessageId::CommandRemovedTitle),
                 vec![state
                     .i18n()
-                    .t(cosh_shell::MessageId::ApprovalModeRemovedBody)
+                    .t(MessageId::ApprovalModeRemovedBody)
                     .to_string()],
                 Some(&replacement),
             )
         }
         RemovedCommand::ApprovalDecision(command) => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::CommandRemovedTitle),
+            state.i18n().t(MessageId::CommandRemovedTitle),
             vec![state.i18n().format(
-                cosh_shell::MessageId::RemovedDecisionCommandBody,
+                MessageId::RemovedDecisionCommandBody,
                 &[("command", command)],
             )],
-            Some(
-                state
-                    .i18n()
-                    .t(cosh_shell::MessageId::RemovedApprovalDecisionFooter),
-            ),
+            Some(state.i18n().t(MessageId::RemovedApprovalDecisionFooter)),
         ),
         RemovedCommand::QuestionAnswer => render_notice_panel(
             output,
-            state.i18n().t(cosh_shell::MessageId::CommandRemovedTitle),
+            state.i18n().t(MessageId::CommandRemovedTitle),
             vec![state.i18n().format(
-                cosh_shell::MessageId::RemovedDecisionCommandBody,
+                MessageId::RemovedDecisionCommandBody,
                 &[("command", "/answer")],
             )],
-            Some(
-                state
-                    .i18n()
-                    .t(cosh_shell::MessageId::RemovedQuestionAnswerFooter),
-            ),
+            Some(state.i18n().t(MessageId::RemovedQuestionAnswerFooter)),
         ),
     }
 }
@@ -64,13 +56,13 @@ pub(super) fn render_removed_command<W: Write>(
 pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result<()> {
     let mut body = Vec::new();
     for (group, label_id) in [
-        ("Config", cosh_shell::MessageId::HelpGroupConfig),
-        ("Modes", cosh_shell::MessageId::HelpGroupModes),
-        ("Hooks", cosh_shell::MessageId::HelpGroupHooks),
+        ("Config", MessageId::HelpGroupConfig),
+        ("Modes", MessageId::HelpGroupModes),
+        ("Hooks", MessageId::HelpGroupHooks),
     ] {
         body.push(state.i18n().t(label_id).to_string());
         body.extend(
-            cosh_shell::slash_registry::visible_slash_commands()
+            visible_slash_commands()
                 .filter(|hint| hint.group == Some(group))
                 .map(|hint| {
                     format!(
@@ -85,10 +77,10 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
 
     render_notice_panel(
         output,
-        state.i18n().t(cosh_shell::MessageId::HelpTitle),
+        state.i18n().t(MessageId::HelpTitle),
         body,
         Some(&state.i18n().format(
-            cosh_shell::MessageId::HelpFooter,
+            MessageId::HelpFooter,
             &[
                 ("mode", state.approval_mode.label()),
                 ("strategy", state.analysis_mode.label()),
@@ -103,12 +95,11 @@ pub(super) fn render_hint<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let mut body = vec![
+        state
+            .i18n()
+            .format(MessageId::SlashHintPrefix, &[("prefix", prefix)]),
         state.i18n().format(
-            cosh_shell::MessageId::SlashHintPrefix,
-            &[("prefix", prefix)],
-        ),
-        state.i18n().format(
-            cosh_shell::MessageId::SlashHintCurrentMode,
+            MessageId::SlashHintCurrentMode,
             &[("mode", state.approval_mode.label())],
         ),
     ];
@@ -120,9 +111,9 @@ pub(super) fn render_hint<W: Write>(
 
     render_notice_panel(
         output,
-        state.i18n().t(cosh_shell::MessageId::SlashHintTitle),
+        state.i18n().t(MessageId::SlashHintTitle),
         body,
-        Some(state.i18n().t(cosh_shell::MessageId::SlashHintFooter)),
+        Some(state.i18n().t(MessageId::SlashHintFooter)),
     )
 }
 
@@ -134,35 +125,25 @@ pub(super) fn render_info<W: Write>(
     let i18n = state.i18n();
     let (title, body, footer) = match command {
         SlashInfoCommand::Audit => (
-            i18n.t(cosh_shell::MessageId::SlashInfoAuditTitle)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoAuditTitle).to_string(),
             vec![
-                i18n.t(cosh_shell::MessageId::SlashInfoAuditApprovalsBody)
-                    .to_string(),
-                i18n.t(cosh_shell::MessageId::SlashInfoAuditActivityBody)
-                    .to_string(),
+                i18n.t(MessageId::SlashInfoAuditApprovalsBody).to_string(),
+                i18n.t(MessageId::SlashInfoAuditActivityBody).to_string(),
             ],
-            i18n.t(cosh_shell::MessageId::SlashInfoAuditFooter)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoAuditFooter).to_string(),
         ),
         SlashInfoCommand::Config => (
-            i18n.t(cosh_shell::MessageId::SlashInfoConfigTitle)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoConfigTitle).to_string(),
             render_config_body(state),
-            i18n.t(cosh_shell::MessageId::SlashInfoConfigFooter)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoConfigFooter).to_string(),
         ),
         SlashInfoCommand::Skill => (
-            i18n.t(cosh_shell::MessageId::SlashInfoSkillTitle)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoSkillTitle).to_string(),
             vec![
-                i18n.t(cosh_shell::MessageId::SlashInfoSkillHookRoutingBody)
-                    .to_string(),
-                i18n.t(cosh_shell::MessageId::SlashInfoSkillRegistryBody)
-                    .to_string(),
+                i18n.t(MessageId::SlashInfoSkillHookRoutingBody).to_string(),
+                i18n.t(MessageId::SlashInfoSkillRegistryBody).to_string(),
             ],
-            i18n.t(cosh_shell::MessageId::SlashInfoSkillFooter)
-                .to_string(),
+            i18n.t(MessageId::SlashInfoSkillFooter).to_string(),
         ),
     };
 
@@ -171,17 +152,17 @@ pub(super) fn render_info<W: Write>(
 
 fn render_config_body(state: &InlineState) -> Vec<String> {
     let i18n = state.i18n();
-    let language = cosh_shell::language_config_status();
+    let language = language_config_status();
     let effective = language.effective.as_config_value();
     let mut body = Vec::new();
     if language.setting == effective {
         body.push(i18n.format(
-            cosh_shell::MessageId::SlashInfoConfigLanguageLine,
+            MessageId::SlashInfoConfigLanguageLine,
             &[("effective", effective), ("source", language.source)],
         ));
     } else {
         body.push(i18n.format(
-            cosh_shell::MessageId::SlashInfoConfigLanguageEffectiveLine,
+            MessageId::SlashInfoConfigLanguageEffectiveLine,
             &[
                 ("effective", effective),
                 ("setting", &language.setting),
@@ -191,20 +172,20 @@ fn render_config_body(state: &InlineState) -> Vec<String> {
     }
     if let Some(path) = language.config_path {
         body.push(i18n.format(
-            cosh_shell::MessageId::SlashInfoConfigPathLine,
+            MessageId::SlashInfoConfigPathLine,
             &[("path", &path.display().to_string())],
         ));
     }
     body.push(i18n.format(
-        cosh_shell::MessageId::SlashInfoConfigDebugActivityLine,
+        MessageId::SlashInfoConfigDebugActivityLine,
         &[("state", if state.debug { "on" } else { "off" })],
     ));
     body.push(
-        i18n.t(cosh_shell::MessageId::SlashInfoConfigAnalysisStrategyLine)
+        i18n.t(MessageId::SlashInfoConfigAnalysisStrategyLine)
             .to_string(),
     );
     body.push(
-        i18n.t(cosh_shell::MessageId::SlashInfoConfigRenderFallbackLine)
+        i18n.t(MessageId::SlashInfoConfigRenderFallbackLine)
             .to_string(),
     );
     body
@@ -216,26 +197,23 @@ pub(super) fn render_unknown<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let i18n = state.i18n();
-    let mut body = vec![i18n.format(
-        cosh_shell::MessageId::SlashUnknownBody,
-        &[("command", command)],
-    )];
+    let mut body = vec![i18n.format(MessageId::SlashUnknownBody, &[("command", command)])];
     if let Some(suggestion) = nearest_canonical_slash_command(command) {
         body.push(i18n.format(
-            cosh_shell::MessageId::SlashUnknownSuggestionBody,
+            MessageId::SlashUnknownSuggestionBody,
             &[("command", suggestion)],
         ));
     }
     render_notice_panel(
         output,
-        i18n.t(cosh_shell::MessageId::SlashUnknownTitle),
+        i18n.t(MessageId::SlashUnknownTitle),
         body,
-        Some(i18n.t(cosh_shell::MessageId::SlashUnknownFooter)),
+        Some(i18n.t(MessageId::SlashUnknownFooter)),
     )
 }
 
 fn nearest_canonical_slash_command(command: &str) -> Option<&'static str> {
-    cosh_shell::slash_registry::active_slash_commands()
+    active_slash_commands()
         .filter(|candidate| edit_distance_at_most(command, candidate, 2))
         .min_by_key(|candidate| edit_distance(command, candidate))
 }
@@ -269,7 +247,7 @@ mod tests {
 
     fn zh_state() -> InlineState {
         InlineState {
-            language: cosh_shell::Language::ZhCn,
+            language: Language::ZhCn,
             ..InlineState::default()
         }
     }
