@@ -454,6 +454,11 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
                 failed_names.join(", "),
                 skipped,
             );
+            for item in items.iter().filter(|i| i.status == "failed") {
+                if let Some(reason) = &item.reason {
+                    eprintln!("{} {}: {reason}", color.err("failed:"), item.component);
+                }
+            }
         }
     }
 
