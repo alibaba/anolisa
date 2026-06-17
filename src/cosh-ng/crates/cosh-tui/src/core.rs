@@ -167,6 +167,7 @@ impl CoshCore {
         }
 
         let tool_decls = self.tools.declarations();
+        let skill_summaries = self.tools.skill_summaries().await;
         let generate_config = GenerateConfig {
             model: self.model.clone(),
             max_tokens: 4096,
@@ -178,6 +179,7 @@ impl CoshCore {
         let system_prompt = ContextBuilder::build_system_prompt(
             &self.cwd(),
             &self.tool_names(),
+            &skill_summaries,
             &self.config.agent.approval_mode,
             self.config.ai.output_language.as_deref(),
         );

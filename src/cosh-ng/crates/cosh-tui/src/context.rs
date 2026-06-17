@@ -6,6 +6,7 @@ impl ContextBuilder {
     pub fn build_system_prompt(
         cwd: &Path,
         tool_names: &[String],
+        skill_summaries: &[(String, String)],
         approval_mode: &str,
         output_language: Option<&str>,
     ) -> String {
@@ -33,6 +34,18 @@ impl ContextBuilder {
             ));
         }
 
+        if !skill_summaries.is_empty() {
+            let list: Vec<String> = skill_summaries
+                .iter()
+                .map(|(name, desc)| format!("- **{}**: {}", name, desc))
+                .collect();
+            parts.push(format!(
+                "# Available Skills\nThe following skills are available. \
+                 To use a skill, call the `skill` tool with action `invoke` and the skill name.\n{}",
+                list.join("\n")
+            ));
+        }
+
         if let Some(lang) = output_language {
             parts.push(format!(
                 "# Output Language\nRespond in {lang}."
@@ -57,7 +70,7 @@ mod tests {
     fn basic_system_prompt() {
         let cwd = PathBuf::from("/tmp/test-project");
         let tools = vec!["shell".to_string(), "read_file".to_string()];
-        let prompt = ContextBuilder::build_system_prompt(&cwd, &tools, "balanced", None);
+        let prompt = ContextBuilder::build_system_prompt(&cwd, &tools, &[], "balanced", None);
 
         assert!(prompt.contains("/tmp/test-project"));
         assert!(prompt.contains("shell, read_file"));
@@ -68,7 +81,7 @@ mod tests {
     fn prompt_with_language() {
         let cwd = PathBuf::from("/tmp");
         let prompt =
-            ContextBuilder::build_system_prompt(&cwd, &[], "trust", Some("Chinese"));
+            ContextBuilder::build_system_prompt(&cwd, &[], &[], "trust", Some("Chinese"));
 
         assert!(prompt.contains("Respond in Chinese"));
     }
@@ -76,8 +89,31 @@ mod tests {
     #[test]
     fn prompt_without_project_context() {
         let cwd = PathBuf::from("/nonexistent/path");
-        let prompt = ContextBuilder::build_system_prompt(&cwd, &[], "auto", None);
+        let prompt = ContextBuilder::build_system_prompt(&cwd, &[], &[], "auto", None);
 
         assert!(!prompt.contains("Project Context"));
+    }
+
+    #[test]
+    fn prompt_with_skills() {
+        let cwd = PathBuf::from("/tmp");
+        let skills = vec![
+            ("code-review".to_string(), "Review code changes".to_string()),
+            ("deploy".to_string(), "Deploy to production".to_string()),
+        ];
+        let prompt = ContextBuilder::build_system_prompt(&cwd, &[], &skills, "auto", None);
+
+        assert!(prompt.contains("# Available Skills"));
+        assert!(prompt.contains("**code-review**: Review code changes"));
+        assert!(prompt.contains("**deploy**: Deploy to production"));
+        assert!(prompt.contains("call the `skill` tool"));
+    }
+
+    #[test]
+    fn prompt_without_skills() {
+        let cwd = PathBuf::from("/tmp");
+        let prompt = ContextBuilder::build_system_prompt(&cwd, &[], &[], "auto", None);
+
+        assert!(!prompt.contains("Available Skills"));
     }
 }

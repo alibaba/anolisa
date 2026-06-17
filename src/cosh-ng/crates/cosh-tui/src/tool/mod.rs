@@ -65,12 +65,14 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
+    skill_manager: Option<Arc<SkillManager>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            skill_manager: None,
         }
     }
 
@@ -96,7 +98,8 @@ impl ToolRegistry {
         registry.register(Box::new(edit::EditTool));
         registry.register(Box::new(grep::GrepTool));
         registry.register(Box::new(todo::TodoTool::new()));
-        registry.register(Box::new(skill::SkillTool::new(skill_manager)));
+        registry.register(Box::new(skill::SkillTool::new(Arc::clone(&skill_manager))));
+        registry.skill_manager = Some(skill_manager);
         registry
     }
 
@@ -105,6 +108,20 @@ impl ToolRegistry {
     pub fn with_defaults_for_test() -> Self {
         let mgr = SkillManager::new(PathBuf::from("/tmp"), vec![]);
         Self::with_defaults(mgr)
+    }
+
+    /// Return `(name, description)` pairs for all currently loaded skills.
+    /// Used to inject an `# Available Skills` section into the system prompt
+    /// so the LLM can proactively discover and invoke skills.
+    pub async fn skill_summaries(&self) -> Vec<(String, String)> {
+        let Some(mgr) = &self.skill_manager else {
+            return Vec::new();
+        };
+        mgr.list()
+            .await
+            .into_iter()
+            .map(|s| (s.name, s.description))
+            .collect()
     }
 
     pub fn declarations(&self) -> Vec<ToolDeclaration> {
