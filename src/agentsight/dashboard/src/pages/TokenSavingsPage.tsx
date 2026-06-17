@@ -91,28 +91,96 @@ const SAVED_PIE_COLORS = ['#f59e0b', '#8b5cf6']; // 工具橙, MCP紫
 // ─── Diff view (split / unified toggle) ──────────────────────────────────────
 
 const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
+  const diffLines = item.diff_lines ?? [];
+  const addedCount = diffLines.filter(l => l.type === 'add').length;
+  const removedCount = diffLines.filter(l => l.type === 'remove').length;
+
+  const diffLineClass = (type: string): string => {
+    switch (type) {
+      case 'add': return 'bg-green-50 text-green-800';
+      case 'remove': return 'bg-red-50 text-red-800 line-through';
+      case 'separator': return 'bg-gray-100 text-gray-400 text-center';
+      default: return 'text-gray-700';
+    }
+  };
+
+  const diffLineMarker = (type: string): string => {
+    switch (type) {
+      case 'add': return '+';
+      case 'remove': return '-';
+      case 'separator': return ' ';
+      default: return ' ';
+    }
+  };
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
-        <div className="grid grid-cols-2 divide-x divide-gray-200">
-          <div>
-            <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">
-              原始内容
-            </div>
-            <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-red-50 text-red-700">
-              {item.before_text ?? (item.diff_lines.filter(l => l.type === 'remove').map(l => l.content).join('\n') || '无变更')}
-            </pre>
-          </div>
-          <div>
-            <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">
-              优化后
-            </div>
-            <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-green-50 text-green-700">
-              {item.after_text ?? (item.diff_lines.filter(l => l.type === 'add').map(l => l.content).join('\n') || '无变更')}
-            </pre>
+      {/* Optimization explanation panel */}
+      {item.optimization_reason && (
+        <div className="px-4 py-3 bg-blue-50 border-b border-blue-100">
+          <p className="text-sm text-blue-800">
+            <span className="font-medium">优化说明：</span>{item.optimization_reason}
+          </p>
+          {item.compounding_turns > 1 && (
+            <p className="text-xs text-blue-600 mt-1">
+              累计效果：此优化在后续 {item.compounding_turns} 轮对话中持续生效，
+              总计节省 {item.compounded_saved.toLocaleString()} tokens
+            </p>
+          )}
+          <div className="mt-2 h-1.5 rounded bg-blue-100 overflow-hidden">
+            <div
+              className="h-full bg-blue-500 rounded"
+              style={{ width: `${Math.min((item.saved_tokens / Math.max(item.before_tokens, 1)) * 100, 100)}%` }}
+            />
           </div>
         </div>
+      )}
+
+      {/* Line-level diff body */}
+      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+        {diffLines.length > 0 ? (
+          <table className="w-full font-mono text-xs border-collapse">
+            <tbody>
+              {diffLines.map((line, idx) => (
+                <tr key={idx} className={diffLineClass(line.type)}>
+                  <td className="px-2 py-0.5 select-none w-6 text-right opacity-50">
+                    {line.type !== 'separator' ? idx + 1 : ''}
+                  </td>
+                  <td className="px-1 py-0.5 select-none w-4 font-bold">
+                    {diffLineMarker(line.type)}
+                  </td>
+                  <td className="px-2 py-0.5 whitespace-pre-wrap break-all">
+                    {line.content}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="grid grid-cols-2 divide-x divide-gray-200">
+            <div>
+              <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">原始内容</div>
+              <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-red-50 text-red-700">
+                {item.before_text || '无变更'}
+              </pre>
+            </div>
+            <div>
+              <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">优化后</div>
+              <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-green-50 text-green-700">
+                {item.after_text || '无变更'}
+              </pre>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Stats footer */}
+      {diffLines.length > 0 && (
+        <div className="px-4 py-2 bg-gray-50 border-t border-gray-200 flex gap-4 text-xs text-gray-500">
+          <span className="text-red-600">-{removedCount} 行移除</span>
+          <span className="text-green-600">+{addedCount} 行新增</span>
+        </div>
+      )}
     </div>
   );
 };
@@ -127,6 +195,9 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
     color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af',
     tooltip: '',
   };
+  const savingsPercent = item.before_tokens > 0
+    ? ((item.before_tokens - item.after_tokens) / item.before_tokens * 100).toFixed(0)
+    : '0';
 
   return (
     <>
@@ -135,6 +206,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color}`}>
             {cfg.label}
           </span>
+          <span className="ml-2 text-xs text-gray-500">{item.title}</span>
         </td>
         <td className="px-4 py-3">
           <span className={`relative group px-2 py-0.5 rounded text-xs font-medium ${stratCfg.bg} ${stratCfg.color} cursor-default`}>
@@ -155,6 +227,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
         </td>
         <td className="px-4 py-3 text-sm font-semibold text-green-600 text-right">
           {fmtTokens(item.compounded_saved)}
+          <span className="text-xs text-gray-400 ml-1">(单轮 {savingsPercent}%)</span>
         </td>
         <td className="px-4 py-3 text-center">
           <button

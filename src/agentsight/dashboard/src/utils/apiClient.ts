@@ -196,7 +196,7 @@ import type { AtifDocument, AgentHealthResponse } from '../types';
 // ─── Token Savings types ─────────────────────────────────────────────────────
 
 export interface DiffLine {
-  type: 'add' | 'remove' | 'context';
+  type: 'add' | 'remove' | 'context' | 'separator';
   content: string;
 }
 
@@ -213,6 +213,7 @@ export interface OptimizationItem {
   compounding_turns: number;
   before_summary: string;
   after_summary: string;
+  optimization_reason: string;
   before_text: string | null;
   after_text: string | null;
   diff_lines: DiffLine[];

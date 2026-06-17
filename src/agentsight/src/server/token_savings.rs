@@ -63,6 +63,7 @@ pub struct OptimizationItemDto {
     pub compounding_turns: i64,
     pub before_summary: String,
     pub after_summary: String,
+    pub optimization_reason: String,
     pub before_text: Option<String>,
     pub after_text: Option<String>,
     pub diff_lines: Vec<DiffLineDto>,
@@ -156,6 +157,156 @@ fn map_operation_to_strategy_label(operation: &str) -> &str {
         "compress-toon" => "TOON 编码",
         _ => "其他优化",
     }
+}
+
+/// Generate a human-readable optimization reason for a given operation.
+fn generate_optimization_reason(operation: &str, before_tokens: i64, after_tokens: i64) -> String {
+    let saved = before_tokens - after_tokens;
+    let pct = if before_tokens > 0 {
+        (saved as f64 / before_tokens as f64 * 100.0).round() as i64
+    } else {
+        0
+    };
+    match operation {
+        "compress-response" => format!(
+            "MCP 服务器返回的响应内容经过压缩处理，移除冗余字段和重复信息，节省 {}%（{} tokens）",
+            pct, saved
+        ),
+        "rewrite-command" => format!(
+            "工具调用的输出内容经过精简重写，保留关键语义同时降低 token 开销，节省 {}%（{} tokens）",
+            pct, saved
+        ),
+        "compress-schema" => format!(
+            "工具的 JSON Schema 定义经过压缩，移除描述性文本和可选字段，节省 {}%（{} tokens）",
+            pct, saved
+        ),
+        "compress-toon" => format!(
+            "使用 TOON 结构化编码替代原始 JSON，大幅缩减 token 占用，节省 {}%（{} tokens）",
+            pct, saved
+        ),
+        _ => format!("内容经过优化处理，节省 {}%（{} tokens）", pct, saved),
+    }
+}
+
+/// Compute line-level diff between before/after text.
+///
+/// Uses LCS (longest common subsequence) to identify unchanged, added, and
+/// removed lines. Only a window of CONTEXT_LINES around each change is shown;
+/// hidden regions are represented by a separator line ("...").
+/// For very large inputs (n+m > 2000), falls back to a simple before/after listing.
+fn compute_diff_lines(before: Option<&str>, after: Option<&str>) -> Vec<DiffLineDto> {
+    const CONTEXT_LINES: usize = 3;
+    const MAX_DIFF_LINES: usize = 200;
+
+    let before_text = before.unwrap_or("");
+    let after_text = after.unwrap_or("");
+
+    if before_text.is_empty() && after_text.is_empty() {
+        return Vec::new();
+    }
+
+    let before_lines: Vec<&str> = before_text.lines().collect();
+    let after_lines: Vec<&str> = after_text.lines().collect();
+    let n = before_lines.len();
+    let m = after_lines.len();
+
+    // Fallback for very large inputs to avoid O(n*m) memory/time
+    if n + m > 2000 {
+        let mut result = Vec::new();
+        for line in before_lines.iter().take(MAX_DIFF_LINES / 2) {
+            result.push(DiffLineDto {
+                line_type: "remove".to_string(),
+                content: line.to_string(),
+            });
+        }
+        for line in after_lines.iter().take(MAX_DIFF_LINES / 2) {
+            result.push(DiffLineDto {
+                line_type: "add".to_string(),
+                content: line.to_string(),
+            });
+        }
+        return result;
+    }
+
+    // LCS DP
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i][j] = if before_lines[i - 1] == after_lines[j - 1] {
+                dp[i - 1][j - 1] + 1
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+
+    // Backtrack to produce diff entries
+    let mut diff: Vec<(char, &str)> = Vec::new();
+    let (mut i, mut j) = (n, m);
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && before_lines[i - 1] == after_lines[j - 1] {
+            diff.push((' ', before_lines[i - 1]));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            diff.push(('+', after_lines[j - 1]));
+            j -= 1;
+        } else {
+            diff.push(('-', before_lines[i - 1]));
+            i -= 1;
+        }
+    }
+    diff.reverse();
+
+    // Determine which lines are visible (within CONTEXT_LINES of a change)
+    let change_indices: Vec<usize> = diff
+        .iter()
+        .enumerate()
+        .filter(|(_, (t, _))| *t != ' ')
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if change_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let total = diff.len();
+    let mut visible = vec![false; total];
+    for &ci in &change_indices {
+        let start = ci.saturating_sub(CONTEXT_LINES);
+        let end = (ci + CONTEXT_LINES + 1).min(total);
+        for v in visible[start..end].iter_mut() {
+            *v = true;
+        }
+    }
+
+    // Build output with separator for hidden regions
+    let mut result: Vec<DiffLineDto> = Vec::new();
+    let mut last_visible = false;
+    for (idx, &vis) in visible.iter().enumerate() {
+        if vis {
+            let (t, content) = &diff[idx];
+            let line_type = match t {
+                '+' => "add",
+                '-' => "remove",
+                _ => "context",
+            };
+            result.push(DiffLineDto {
+                line_type: line_type.to_string(),
+                content: content.to_string(),
+            });
+            last_visible = true;
+        } else if last_visible && visible[idx + 1..].iter().any(|v| *v) {
+            result.push(DiffLineDto {
+                line_type: "separator".to_string(),
+                content: "...".to_string(),
+            });
+            last_visible = false;
+        }
+    }
+
+    result.truncate(MAX_DIFF_LINES);
+    result
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -288,7 +439,13 @@ pub async fn get_token_savings(
                 session_saved += saved;
                 session_compounded_saved += compounded;
 
-                let diff_lines: Vec<DiffLineDto> = Vec::new();
+                let diff_lines =
+                    compute_diff_lines(row.before_text.as_deref(), row.after_text.as_deref());
+                let optimization_reason = generate_optimization_reason(
+                    &row.operation,
+                    row.before_tokens,
+                    row.after_tokens,
+                );
 
                 let strategy = row.operation.clone();
                 let strategy_label = map_operation_to_strategy_label(&row.operation).to_string();
@@ -322,6 +479,7 @@ pub async fn get_token_savings(
                     compounding_turns,
                     before_summary: format!("原始内容 {} tokens", row.before_tokens),
                     after_summary: format!("优化后 {} tokens", row.after_tokens),
+                    optimization_reason,
                     before_text: row.before_text.clone(),
                     after_text: row.after_text.clone(),
                     diff_lines,
@@ -515,9 +673,17 @@ pub async fn get_session_savings(
                 compounding_turns,
                 before_summary: format!("原始内容 {} tokens", row.before_tokens),
                 after_summary: format!("优化后 {} tokens", row.after_tokens),
+                optimization_reason: generate_optimization_reason(
+                    &row.operation,
+                    row.before_tokens,
+                    row.after_tokens,
+                ),
                 before_text: row.before_text.clone(),
                 after_text: row.after_text.clone(),
-                diff_lines: Vec::new(),
+                diff_lines: compute_diff_lines(
+                    row.before_text.as_deref(),
+                    row.after_text.as_deref(),
+                ),
             });
         }
     }
@@ -834,5 +1000,173 @@ mod tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── Unit tests for generate_optimization_reason ────────────────────
+
+    #[test]
+    fn test_generate_optimization_reason_compress_response() {
+        let reason = generate_optimization_reason("compress-response", 1000, 400);
+        assert!(reason.contains("MCP"));
+        assert!(reason.contains("60%"));
+        assert!(reason.contains("600 tokens"));
+    }
+
+    #[test]
+    fn test_generate_optimization_reason_rewrite_command() {
+        let reason = generate_optimization_reason("rewrite-command", 500, 200);
+        assert!(reason.contains("工具调用"));
+        assert!(reason.contains("60%"));
+    }
+
+    #[test]
+    fn test_generate_optimization_reason_compress_schema() {
+        let reason = generate_optimization_reason("compress-schema", 800, 300);
+        assert!(reason.contains("Schema"));
+        assert!(reason.contains("63%"));
+    }
+
+    #[test]
+    fn test_generate_optimization_reason_compress_toon() {
+        let reason = generate_optimization_reason("compress-toon", 2000, 500);
+        assert!(reason.contains("TOON"));
+        assert!(reason.contains("75%"));
+    }
+
+    #[test]
+    fn test_generate_optimization_reason_unknown() {
+        let reason = generate_optimization_reason("unknown-op", 100, 50);
+        assert!(reason.contains("优化处理"));
+        assert!(reason.contains("50%"));
+    }
+
+    #[test]
+    fn test_generate_optimization_reason_zero_before() {
+        let reason = generate_optimization_reason("compress-response", 0, 0);
+        assert!(reason.contains("0%"));
+    }
+
+    // ─── Unit tests for compute_diff_lines ────────────────────────────
+
+    #[test]
+    fn test_diff_empty_inputs() {
+        let result = compute_diff_lines(None, None);
+        assert!(result.is_empty());
+        let result2 = compute_diff_lines(Some(""), Some(""));
+        assert!(result2.is_empty());
+    }
+
+    #[test]
+    fn test_diff_add_only() {
+        let result = compute_diff_lines(Some(""), Some("new line"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line_type, "add");
+        assert_eq!(result[0].content, "new line");
+    }
+
+    #[test]
+    fn test_diff_remove_only() {
+        let result = compute_diff_lines(Some("old line"), Some(""));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line_type, "remove");
+        assert_eq!(result[0].content, "old line");
+    }
+
+    #[test]
+    fn test_diff_mixed_changes() {
+        let before = "line1\nline2\nline3";
+        let after = "line1\nmodified\nline3";
+        let result = compute_diff_lines(Some(before), Some(after));
+        let types: Vec<&str> = result.iter().map(|l| l.line_type.as_str()).collect();
+        assert!(types.contains(&"remove"));
+        assert!(types.contains(&"add"));
+        assert!(types.contains(&"context"));
+    }
+
+    #[test]
+    fn test_diff_identical_texts() {
+        let text = "line1\nline2\nline3";
+        let result = compute_diff_lines(Some(text), Some(text));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_diff_context_lines_limited() {
+        // Two changes far apart should produce a separator in between
+        let mut before_lines = vec!["common"; 20];
+        before_lines[2] = "old_a";
+        before_lines[17] = "old_b";
+        let mut after_lines = vec!["common"; 20];
+        after_lines[2] = "new_a";
+        after_lines[17] = "new_b";
+        let before = before_lines.join("\n");
+        let after = after_lines.join("\n");
+        let result = compute_diff_lines(Some(&before), Some(&after));
+        let has_sep = result.iter().any(|l| l.line_type == "separator");
+        assert!(has_sep, "should have separator between distant changes");
+    }
+
+    #[test]
+    fn test_diff_no_dangling_separator_at_start_end() {
+        let before = "changed_first\nA\nB\nC\nD\nE\nF\nG\nH\nchanged_last";
+        let after = "NEW_first\nA\nB\nC\nD\nE\nF\nG\nH\nNEW_last";
+        let result = compute_diff_lines(Some(before), Some(after));
+        if let Some(first) = result.first() {
+            assert_ne!(first.line_type, "separator");
+        }
+        if let Some(last) = result.last() {
+            assert_ne!(last.line_type, "separator");
+        }
+    }
+
+    #[test]
+    fn test_diff_replace_remove_before_add() {
+        let before = "old_line";
+        let after = "new_line";
+        let result = compute_diff_lines(Some(before), Some(after));
+        let first_remove = result.iter().position(|l| l.line_type == "remove");
+        let first_add = result.iter().position(|l| l.line_type == "add");
+        assert!(
+            first_remove < first_add || first_add.is_none(),
+            "removes should come before adds"
+        );
+    }
+
+    #[test]
+    fn test_diff_large_input_fallback() {
+        let big_before = (0..1200)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let big_after = (0..1000)
+            .map(|i| format!("new{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = compute_diff_lines(Some(&big_before), Some(&big_after));
+        // Should use fallback (all remove then all add), not LCS
+        assert!(!result.is_empty());
+        assert!(result.len() <= 200);
+        // All entries should be remove or add (no context in fallback)
+        for line in &result {
+            assert!(
+                line.line_type == "remove" || line.line_type == "add",
+                "fallback should only have remove/add"
+            );
+        }
+    }
+
+    #[test]
+    fn test_diff_max_lines_cap() {
+        // Create input that would generate many diff lines
+        let before = (0..150)
+            .map(|i| format!("old_{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after = (0..150)
+            .map(|i| format!("new_{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = compute_diff_lines(Some(&before), Some(&after));
+        assert!(result.len() <= 200);
     }
 }
