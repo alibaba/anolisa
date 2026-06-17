@@ -92,6 +92,34 @@ coverage: ## Generate HTML coverage report (opens browser)
 	cd $(CURDIR) && cargo llvm-cov --html --output-dir coverage-html --open \
 		--ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
 
+# =============================================================================
+# GIT HOOKS (opt-in, agent-agnostic)
+# =============================================================================
+
+.PHONY: install-hooks
+install-hooks: ## Install opt-in pre-push hook mirroring CI gates (any human/agent)
+	@existing=$$(git config --get core.hooksPath || true); \
+	if [ -n "$$existing" ] && [ "$$existing" != "src/agentsight/scripts/hooks" ]; then \
+		echo "core.hooksPath already set to '$$existing' (e.g. copilot-shell husky)."; \
+		echo "It is single-valued; not overriding. Unset it first to use the agentsight hook:"; \
+		echo "  git config --unset core.hooksPath"; \
+		exit 1; \
+	fi; \
+	chmod +x scripts/hooks/pre-push; \
+	git config core.hooksPath src/agentsight/scripts/hooks; \
+	echo "Installed pre-push hook (core.hooksPath -> src/agentsight/scripts/hooks)."; \
+	echo "Runs CI-mirror checks on pushes touching src/agentsight/. Uninstall: make uninstall-hooks"
+
+.PHONY: uninstall-hooks
+uninstall-hooks: ## Remove the agentsight pre-push hook (unset core.hooksPath)
+	@current=$$(git config --get core.hooksPath || true); \
+	if [ "$$current" = "src/agentsight/scripts/hooks" ]; then \
+		git config --unset core.hooksPath; \
+		echo "Removed pre-push hook (core.hooksPath unset)."; \
+	else \
+		echo "agentsight hook not active (core.hooksPath='$$current'); nothing to do."; \
+	fi
+
 .PHONY: help
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

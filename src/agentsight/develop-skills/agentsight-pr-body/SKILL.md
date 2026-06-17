@@ -34,21 +34,53 @@ gh pr list --head $(git branch --show-current) --repo alibaba/anolisa --state op
 
 在生成 PR 描述前，先执行 `agentsight-code-review` skill 对当前变更进行自检。如果存在 findings，先修复再继续。
 
-### 步骤 1.6：Preflight 检查
+### 步骤 1.6：Preflight 检查（与 CI 门禁逐项对齐）
 
-在分析变更前，运行以下检查并记录结果（后续自动填入 Checklist）：
+在分析变更前，运行以下检查并记录结果（后续自动填入 Checklist）。这些检查
+镜像 `test-agentsight` CI job，目的是在 push 前本地拦截会导致 CI 失败的问题
+（一次 push + CI ≈ 4 分钟，本地检查 ≈ 30 秒）。
 
 ```bash
-# 在 agentsight 目录下执行
-cargo fmt --check          # 格式检查
-cargo clippy --all-targets -- -D warnings  # lint 检查
-cargo test                 # 单元测试 + 集成测试
+# 在 agentsight 目录下执行（CI 锁定 toolchain 1.89.0；缺则先
+# `rustup toolchain install 1.89.0 --component rustfmt --component clippy --component llvm-tools-preview`）
+cargo +1.89.0 fmt --all --check                     # 1. 格式
+cargo +1.89.0 clippy --all-targets -- -D warnings   # 2. lint
+python3 scripts/check-arch-boundaries.py            # 3. 架构边界
+
+# 4. 测试 + 覆盖率（CI 用 llvm-cov 跑测试，不是 cargo test；用默认 toolchain 即可——
+#    覆盖率行映射与工具链版本无关，且 +1.89.0 需该工具链装 llvm-tools-preview，
+#    dev 机常装在 stable 上。fmt/clippy 上面 pin +1.89.0 是因为 lint 规则版本敏感）
+cargo llvm-cov --cobertura --output-path coverage.xml \
+  --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+
+# 5. 增量覆盖率门禁（与 CI 一致：对比 origin/main，阈值 80%）
+git fetch origin main
+diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
 ```
 
-- 三项全部通过才继续后续步骤
-- 如果 `cargo fmt --check` 失败，自动运行 `cargo fmt` 修复后重新检查
-- 如果 `cargo clippy` 失败，列出告警并尝试修复，修复后重新检查
-- 如果 `cargo test` 失败，停止流程，报告失败的测试用例
+- 五项全部通过才继续；任一失败按下面处理后重跑。
+- `cargo fmt --check` 失败 → 跑 `cargo +1.89.0 fmt` 修复后重新检查。
+- `cargo clippy` 失败 → 列出告警、修复、重新检查。
+- 架构边界失败 → 按 `check-arch-boundaries.py` 的提示修正跨层依赖。
+- **覆盖率门禁失败（增量 < 80%）→ 停止**，为新增/修改但未覆盖的行补测试
+  （diff-cover 输出会列出每个文件的 Missing lines）；不要靠降阈值绕过。
+- `diff-cover` / `cargo-llvm-cov` 未安装 → 安装后再验（`pip install diff-cover`；
+  `rustup component add llvm-tools-preview`），**不要跳过本步却标记"已通过"**。
+
+**6. Commit message 规范检查**：对 `git log origin/main..HEAD` 的每个 commit
+逐条核对是否符合 conventional commit（commitlint 是独立的硬门禁，其中 **scope 必填**
+是最容易漏的硬失败；fmt/clippy/覆盖率同样是硬门禁）：
+
+- `type(scope): subject` 格式，**scope 必填**（缺 scope = CI 硬失败）。
+- type ∈ {feat, fix, refactor, perf, docs, chore, test, ci, build, style, revert}。
+- scope 建议用 {cosh, sec-core, skill, sight, tokenless, ckpt, memory, anolisa,
+  deps, ci, docs, chore}（不在列内 CI 仅告警、不阻断）。
+- header（首行）≤ 120 字符；**body/footer 每行 ≤ 100 字符**；subject 不用 Sentence/Start/Pascal/UPPER case。
+- 不符合 → 用 `git rebase` / `git commit --amend` 修正后再继续。
+
+> 可选：把以上检查装成 git **pre-push hook**，对所有人/所有 agent 通用（git 原生
+> 机制，谁 push 都触发）。在 agentsight 目录跑 `make install-hooks` 即启用；
+> 详见下文「步骤 7：pre-push hook（可选）」。
 
 ### 步骤 2：分析变更
 
@@ -117,7 +149,7 @@ closes #<issue-number>
 - [x] I have read the [Contributing Guide](../CONTRIBUTING.md)
 - [x/空] `cargo fmt --check` pass（基于 preflight 结果勾选）
 - [x/空] `cargo clippy --all-targets -- -D warnings` pass（基于 preflight 结果勾选）
-- [x/空] `cargo test` pass（基于 preflight 结果勾选）
+- [x/空] `cargo llvm-cov` 测试 + 增量覆盖率 `diff-cover --fail-under=80` pass（基于 preflight 结果勾选）
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] I have updated the documentation accordingly
 - [x] Lock files are up to date (`Cargo.lock`)
@@ -195,6 +227,31 @@ EOF
 **选择「仅输出，不提交」**：
 
 不执行任何 GitHub 操作，流程结束。
+
+### 步骤 7：pre-push hook（可选，对所有人/所有 agent 通用）
+
+步骤 1.6 的检查也可装成 git **pre-push hook**——git 原生机制，无论人还是任何
+AI agent `git push` 都会触发，比 skill 多一层兜底（防止漏跑 skill 直接 push）。
+
+**启用**（opt-in，不影响他人；卸载用 `make uninstall-hooks`）：
+
+```bash
+cd src/agentsight
+make install-hooks
+```
+
+**行为**：
+
+- 仅当本次 push 的 commit 改动了 `src/agentsight/` 时才检查，否则直接放行
+  （monorepo 好公民，不干扰其他组件）。
+- 默认跑快检查：`cargo +1.89.0 fmt --check`、`cargo +1.89.0 clippy`、架构边界检查、
+  以及 commit message 规范（conventional commit，scope 必填，跳过 Merge/Revert/fixup! 等）。
+- 覆盖率门禁（`llvm-cov` + `diff-cover`）较慢（约 1 分钟），**默认跳过**；需要时用
+  `PREPUSH_COVERAGE=1 git push` 启用。
+
+**注意（monorepo 限制）**：`core.hooksPath` 是单值的。若你也在用 copilot-shell 的
+husky（它把 hooksPath 指向 `.husky/`），两者只能启用其一；`make install-hooks`
+检测到已有 hooksPath 会**警告而不强行覆盖**。统一的多组件 hook 调度不在本 skill 范围。
 
 ## 内容质量规则
 
